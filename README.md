@@ -1,13 +1,16 @@
-# MemBridge
+# MemBridge — shared memory for AI coding tools
 
 [![CI](https://github.com/mmelika/membridge/actions/workflows/ci.yml/badge.svg)](https://github.com/mmelika/membridge/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 
-**Shared memory across your AI coding tools.**
+**Sync context between Claude Code, Codex, and any other AI coding agent — automatically.**
 
-You ask Claude Code to build a feature. An hour later you open Codex in the same
-project — and it has no idea what just happened. Every AI coding tool keeps its
-own siloed history. MemBridge fixes that with a tiny background daemon that
-watches all of them and keeps every tool briefed on what the others did.
+MemBridge is a tiny background daemon that gives your AI coding tools a shared,
+always-current memory of every project. Ask Claude Code to build a feature, and
+the next time you open Codex (or Gemini CLI, Cursor, or any agent) in that
+project, it already knows what happened. No cloud, no accounts, no API keys —
+everything stays on your machine.
 
 ```
 Claude Code sessions ─┐                       ┌─> CLAUDE.md   (read by Claude Code)
@@ -15,19 +18,19 @@ Codex sessions ───────┼─> brief per-project ──┼─> AGEN
 any other tool ───────┘    "shared memory"    └─> GEMINI.md…  (configurable)
 ```
 
-No accounts, no cloud, no API keys. Everything stays on your machine.
+## Why your AI tools forget each other's work
 
-## How it works
+Every AI coding assistant keeps its own siloed session history. Claude Code
+doesn't know what Codex did this morning; Codex has no idea what Claude Code
+shipped an hour ago. So you re-explain the same context, tool after tool,
+project after project.
 
-Every major AI coding tool already does two convenient things:
-
-1. **Writes session transcripts** to a known folder (`~/.claude/projects`, `~/.codex/sessions`, …)
-2. **Reads a per-project context file** at startup (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, …)
-
-MemBridge connects the two. Every 60 seconds it incrementally reads whatever
-was appended to the transcripts, distills a brief per-project memory (recent
-asks + files the AIs touched), and injects it into each context file inside a
-clearly-delimited block:
+But every major tool already reads a per-project context file at startup —
+`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex and most agents,
+`GEMINI.md` for Gemini CLI — and writes its session transcripts to a known
+folder on disk. MemBridge connects the two: it watches the transcripts,
+distills a brief per-project memory, and injects it into every context file
+inside a clearly-delimited block:
 
 ```markdown
 <!-- membridge:begin -->
@@ -51,14 +54,23 @@ Requires Node.js 18+.
 ```bash
 npm install -g membridge
 
-membridge scan       # read-only: see what it found on your machine
+membridge scan       # read-only: see which AI tools and projects it found
 membridge start      # run the background daemon
 membridge dashboard  # open the local web dashboard
 ```
 
-Optional: `membridge enable-autostart` makes it launch at login
+Optional: `membridge enable-autostart` launches MemBridge at login
 (Startup folder on Windows, launchd on macOS, systemd user unit on Linux —
 no admin rights needed).
+
+## Supported AI coding tools
+
+| Tool | Support | How |
+| --- | --- | --- |
+| Claude Code | Built in | Reads `~/.claude/projects` transcripts, writes `CLAUDE.md` |
+| Codex (OpenAI) | Built in | Reads `~/.codex/sessions` rollouts, writes `AGENTS.md` |
+| Gemini CLI | Custom adapter | Point a config-driven adapter at its logs, add `GEMINI.md` to targets |
+| Cursor, opencode, Copilot CLI, … | Custom adapter | Any tool that logs sessions as JSONL works — no code required |
 
 ## Commands
 
@@ -92,13 +104,13 @@ no admin rights needed).
 }
 ```
 
-To pause a single project you can also just drop an empty `.membridge-off`
-file in its root, or click Pause in the dashboard.
+To pause a single project, drop an empty `.membridge-off` file in its root, or
+click Pause in the dashboard.
 
-### Adding any other tool (custom adapters)
+### Connect any other AI tool (custom adapters)
 
-If a tool logs its sessions as JSONL anywhere on disk, you can wire it up in
-config — no code required:
+If a tool logs its sessions as JSONL anywhere on disk, wire it up in config —
+no code required:
 
 ```jsonc
 "custom": [{
@@ -119,20 +131,45 @@ Dot-paths work for nested fields (`payload.cwd`). If the project path appears
 only once per file (like Codex's `session_meta`), MemBridge carries it forward
 automatically.
 
-## Privacy and safety
+## Privacy and security
 
-- 100% local. The daemon binds to `127.0.0.1` only; nothing ever leaves your machine.
-- Common secret shapes (`sk-…`, `AKIA…`, `ghp_…`, `key=value`) are redacted
-  before anything is written into a context file; add your own patterns in config.
-- Transcripts are only ever **read** (incrementally, by byte offset). The only
-  files MemBridge writes are the configured context files, inside its own
-  markers, plus its own state in `~/.membridge`.
+- **100% local.** The daemon binds to `127.0.0.1` only; nothing ever leaves
+  your machine. No telemetry, no accounts.
+- **Secrets are redacted** before anything is written into a context file:
+  common API-key shapes (`sk-…`, `AKIA…`, `ghp_…`, `key=value`) are scrubbed
+  by default, and you can add your own patterns.
+- **Transcripts are read-only** (incrementally, by byte offset). The only files
+  MemBridge writes are the configured context files — inside its own markers —
+  plus its own state in `~/.membridge`.
+
+## FAQ
+
+**How do I make Codex aware of what Claude Code did?**
+Install MemBridge and run `membridge start`. It summarizes recent Claude Code
+activity into `AGENTS.md`, which Codex reads automatically — and vice versa
+into `CLAUDE.md`.
+
+**Does it work with more than two tools?**
+Yes. Adapters are pluggable: Claude Code and Codex are built in, and the
+config-driven custom adapter connects anything that logs JSONL. All tools share
+the same memory.
+
+**Will it mess up my existing CLAUDE.md / AGENTS.md?**
+No. MemBridge only ever rewrites the content between its `<!-- membridge -->`
+markers. Your own notes are preserved byte-for-byte, and `membridge remove`
+restores files exactly.
+
+**How much overhead does it add?**
+Near zero: it reads only the bytes appended since the last pass, sleeps between
+syncs (60s default), and has zero runtime dependencies.
 
 ## Development
 
 ```bash
 node test/run-tests.js   # zero-dependency end-to-end suite (temp dirs only)
 ```
+
+CI runs the suite on Linux, Windows, and macOS across Node 18/20/22.
 
 ## Roadmap
 
