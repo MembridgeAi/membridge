@@ -1,6 +1,12 @@
 # Publishes to npm when a GitHub release is published.
-# Requires an npm automation token saved as the NPM_TOKEN repo secret
-# (npmjs.com -> Access Tokens -> Generate New Token -> Automation).
+# Requires a Granular Access Token saved as the NPM_TOKEN repo secret:
+#   npmjs.com -> Access Tokens -> Generate New Token -> Granular Access Token
+#   Packages and scopes: Read and write; enable "Bypass two-factor authentication".
+# Classic "Automation" tokens no longer work: npm rejects them with
+# "403 Two-factor authentication or granular access token with bypass 2fa
+# enabled is required to publish packages."
+# Once the package exists on npm, consider switching to Trusted Publishing
+# (OIDC) in the package settings and dropping the token entirely.
 name: Release
 
 on:
