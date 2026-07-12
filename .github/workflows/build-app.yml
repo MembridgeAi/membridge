@@ -1,9 +1,12 @@
 # Builds the MemBridge tray app for macOS (menu bar) on Apple's runners.
-# Runs on manual dispatch and on every published release; release builds are
-# attached to the release as downloadable artifacts.
+# Runs on every push to master (fresh installer artifact per push), on manual
+# dispatch, and on every published release; release builds are attached to the
+# release as downloadable artifacts.
 name: Build app
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
   release:
     types: [published]
