@@ -1280,6 +1280,186 @@ async function main() {
     await new Promise(r => mock2.server.close(r));
   }
 
+  // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
+  const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
+  const runHook = payload => spawnSync(process.execPath, [BIN, 'hook', 'stop'], {
+    input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env },
+  });
+  const stopPayload = (session, extra) => ({
+    session_id: session, cwd: projR, hook_event_name: 'Stop',
+    transcript_path: path.join(rDir, `${session}.jsonl`), stop_hook_active: false, ...extra,
+  });
+
+  check('distill: pickSummary prefers Distilled over a newer harvested summary', () => {
+    const distilledOlder = { ts: '2026-07-12T09:00:00.000Z', source: 'Distilled', kind: 'summary', session: 's', text: 'D' };
+    const harvestedNewer = { ts: '2026-07-12T09:59:00.000Z', source: 'Claude Code', kind: 'summary', session: 's', text: 'H' };
+    assert.strictEqual(digest.pickSummary([distilledOlder, harvestedNewer]), distilledOlder);
+    // same tier: the later event wins; session filter narrows
+    const h2 = { ...harvestedNewer, ts: '2026-07-12T10:30:00.000Z', text: 'H2' };
+    assert.strictEqual(digest.pickSummary([harvestedNewer, h2]), h2);
+    assert.strictEqual(digest.pickSummary([distilledOlder, harvestedNewer], 'nope'), null);
+  });
+
+  const blockOut = runHook(stopPayload('sessR'));
+  check('distill: hook stop blocks with exact decision/reason JSON when no summary exists', () => {
+    assert.strictEqual(blockOut.status, 0, blockOut.stderr);
+    assert.strictEqual(blockOut.stderr, '', 'hook wrote to stderr');
+    const parsed = JSON.parse(blockOut.stdout);
+    assert.deepStrictEqual(Object.keys(parsed).sort(), ['decision', 'reason']);
+    assert.strictEqual(parsed.decision, 'block');
+    assert.ok(parsed.reason.includes(summariesFile), 'reason lacks the absolute summaries.jsonl path');
+    assert.ok(parsed.reason.includes('"session":"sessR"'), 'reason lacks the session id in the schema');
+    assert.ok(parsed.reason.includes('"did"') && parsed.reason.includes('"decisions"') && parsed.reason.includes('"gotchas"'), 'reason lacks the line schema');
+  });
+  check('distill: loop guard — stop_hook_active true never blocks twice', () => {
+    const out = runHook(stopPayload('sessR', { stop_hook_active: true }));
+    assert.strictEqual(out.status, 0);
+    assert.strictEqual(out.stdout, '');
+  });
+  check('distill: worthiness gate — a session with no edits is not blocked', () => {
+    const out = runHook(stopPayload('sessShort'));
+    assert.strictEqual(out.status, 0);
+    assert.strictEqual(out.stdout, '');
+  });
+  {
+    const rawCfg = util.loadUserConfig();
+    rawCfg.distill = { enabled: false };
+    util.saveUserConfig(rawCfg);
+    const out = runHook(stopPayload('sessR'));
+    delete rawCfg.distill;
+    util.saveUserConfig(rawCfg);
+    check('distill: hook exits immediately when distill.enabled is false', () => {
+      assert.strictEqual(out.status, 0);
+      assert.strictEqual(out.stdout, '');
+    });
+  }
+  fs.writeFileSync(summariesFile,
+    'this is {not json\n' +
+    JSON.stringify({ session: 'sessOther', ts: '2026-07-12T09:44:00.000Z', did: 'Tuned the CI cache keys so cold builds stopped thrashing the runner disks entirely.', decisions: '', gotchas: '' }) + '\n');
+  check('distill: malformed summaries.jsonl lines count as absent, no crash', () => {
+    const out = runHook(stopPayload('sessR'));
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.strictEqual(JSON.parse(out.stdout).decision, 'block', 'malformed line was treated as a summary');
+  });
+  fs.appendFileSync(summariesFile,
+    JSON.stringify({ session: 'sessR', ts: '2026-07-12T09:45:00.000Z', did: 'Rebuilt the retry queue end to end; the flaky legacy path is gone.', decisions: 'Kept the queue schema; only consumers changed.', gotchas: '' }) + '\n');
+  check('distill: hook allows the stop once a valid summary line exists', () => {
+    const out = runHook(stopPayload('sessR'));
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.strictEqual(out.stdout, '');
+  });
+
+  // A fresh session with BOTH a harvested and a distilled summary, recent
+  // enough to clear the team-push cursor left by the section-9 sync.
+  fs.writeFileSync(path.join(rDir, 'sessD.jsonl'), jsonl([
+    { type: 'user', message: { role: 'user', content: 'Harden the webhook auth' }, cwd: projR, timestamp: '2026-07-12T09:50:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(projR, 'src', 'webhook.js') } }] }, cwd: projR, timestamp: '2026-07-12T09:51:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Harvested note: webhook auth hardened with HMAC verification and replay-window checks everywhere.' }] }, cwd: projR, timestamp: '2026-07-12T09:52:00.000Z' },
+  ]));
+  fs.appendFileSync(summariesFile,
+    JSON.stringify({ session: 'sessD', ts: '2026-07-12T09:53:00.000Z', did: 'Hardened the webhook auth with HMAC and a replay window; rotated api_key=sk-distilled-secret-123.', decisions: '', gotchas: 'Clock skew over 30s breaks verification.' }) + '\n');
+  syncOnce();
+
+  check('distill: summaries.jsonl is merged as Distilled events with offsets tracked', () => {
+    const evs = richEvents();
+    const d = evs.filter(e => e.kind === 'summary' && e.source === 'Distilled');
+    assert.ok(d.some(e => e.session === 'sessR') && d.some(e => e.session === 'sessD') && d.some(e => e.session === 'sessOther'),
+      `distilled sessions were: ${JSON.stringify(d.map(e => e.session))}`);
+    assert.ok(d.find(e => e.session === 'sessD').text.includes('Gotchas: Clock skew'), 'gotchas not folded into the text');
+    const rec = util.loadState().files[summariesFile];
+    assert.ok(rec && rec.adapter === 'distill' && rec.offset > 0, `summaries offset record was ${JSON.stringify(rec)}`);
+  });
+  check('distill: the block prefers Distilled over harvested in every session', () => {
+    const md = richMd();
+    assert.ok(md.includes('Rebuilt the retry queue end to end'), 'sessR distilled summary missing');
+    assert.ok(md.includes('Decisions: Kept the queue schema'), 'decisions not folded in');
+    assert.ok(!md.includes('all pass in CI'), 'sessR harvested summary still shown');
+    assert.ok(md.includes('Hardened the webhook auth'), 'sessD distilled summary missing');
+    assert.ok(!md.includes('Harvested note'), 'sessD harvested summary still shown');
+    assert.ok(!md.includes('sk-distilled-secret-123'), 'distilled secret leaked into the block');
+  });
+  check('distill: memory.md and the copy digest show the Distilled text', () => {
+    const mem = read(path.join(projR, '.membridge', 'memory.md'));
+    assert.ok(mem.includes('Rebuilt the retry queue end to end'), 'memory.md lacks the distilled result');
+    assert.ok(mem.includes('Hardened the webhook auth') && !mem.includes('Harvested note'), 'memory.md picked the harvested summary');
+    const state = util.loadState();
+    const key = Object.keys(state.projects).find(k => k.toLowerCase() === projR.toLowerCase());
+    const copy = memorydb.renderCopyText(projR, state.projects[key], util.getConfig());
+    assert.ok(copy.includes('Hardened the webhook auth') && !copy.includes('Harvested note'), 'copy digest picked the harvested summary');
+    assert.ok(!(mem + copy).includes('sk-distilled-secret-123'), 'distilled secret leaked');
+  });
+  check('distill: AGENTS.md carries the Codex self-report fallback, CLAUDE.md does not', () => {
+    const agents = read(path.join(projR, 'AGENTS.md'));
+    assert.ok(agents.includes('summaries.jsonl'), 'AGENTS.md fallback instruction missing');
+    assert.ok(agents.includes('"did"'), 'fallback instruction lacks the line schema');
+    const claude = richMd();
+    assert.ok(!claude.includes('append ONE line'), 'CLAUDE.md got the Codex fallback instruction');
+  });
+
+  // setup-hooks / remove-hooks: surgical merge into a user's settings.json.
+  const claudeSettings = path.join(ROOT, 'claude-settings.json');
+  const seedSettings = {
+    model: 'opus',
+    hooks: {
+      Stop: [{ hooks: [{ type: 'command', command: 'echo user-stop' }] }],
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo pre' }] }],
+    },
+    feedbackSurveyState: { lastShown: 123 },
+  };
+  fs.writeFileSync(claudeSettings, JSON.stringify(seedSettings, null, 2));
+  const envHook = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: claudeSettings };
+  const setup1 = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env: envHook, encoding: 'utf8' });
+  const afterSetup = JSON.parse(read(claudeSettings));
+  const setup2 = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env: envHook, encoding: 'utf8' });
+  const afterSetup2 = JSON.parse(read(claudeSettings));
+  check('distill: setup-hooks appends once and preserves user hooks byte-for-byte', () => {
+    assert.strictEqual(setup1.status, 0, setup1.stderr);
+    assert.strictEqual(afterSetup.hooks.Stop.length, 2, 'membridge entry not appended');
+    assert.strictEqual(JSON.stringify(afterSetup.hooks.Stop[0]), JSON.stringify(seedSettings.hooks.Stop[0]), 'user Stop hook changed');
+    assert.ok(JSON.stringify(afterSetup.hooks.Stop[1]).includes('membridge hook stop'), 'membridge command missing');
+    assert.deepStrictEqual(afterSetup.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
+    assert.strictEqual(afterSetup.model, 'opus');
+    assert.deepStrictEqual(afterSetup.feedbackSurveyState, seedSettings.feedbackSurveyState, 'unknown keys lost');
+    assert.ok(/already installed/.test(setup2.stdout), `second run said: ${setup2.stdout}`);
+    assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the entry');
+  });
+  check('distill: status reports the Distill line with hook install state', () => {
+    const out = spawnSync(process.execPath, [BIN, 'status'], { env: envHook, encoding: 'utf8' });
+    assert.ok(/Distill:\s+enabled — Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
+  });
+  const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
+  const afterRemove = JSON.parse(read(claudeSettings));
+  check('distill: remove-hooks strips only membridge entries', () => {
+    assert.ok(/Removed the MemBridge Stop hook/.test(removeOut.stdout), removeOut.stdout);
+    assert.deepStrictEqual(afterRemove.hooks.Stop, seedSettings.hooks.Stop, 'user Stop hooks not intact');
+    assert.deepStrictEqual(afterRemove.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
+    assert.strictEqual(afterRemove.model, 'opus');
+  });
+
+  // Team push: the pushed summary field is the Distilled text, redacted.
+  const mock3 = createMockSupabase();
+  await new Promise(r => mock3.server.listen(17947, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17947';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    await teamsync.signup(util.getConfig(), 'distill@test.dev', 'pw-x', 'Distill');
+    const teamX = await teamsync.createTeam(util.getConfig(), 'DistillTeam');
+    await teamsync.linkProject(util.getConfig(), projR, teamX.team_id, 'DistillTeam');
+    await teamsync.syncTeams({ project: projR });
+    check('distill: pushed summary is the Distilled text, redacted', () => {
+      const row = mock3.entries.find(e => e.ask.includes('Harden the webhook auth'));
+      assert.ok(row, `sessD entry not pushed (${mock3.entries.length} rows)`);
+      assert.ok(row.summary && row.summary.includes('Hardened the webhook auth'), `summary was: ${row.summary}`);
+      assert.ok(!row.summary.includes('Harvested note'), 'push chose the harvested summary');
+      assert.ok(row.summary.includes('[redacted]'), 'pushed distilled summary not redacted');
+      assert.ok(!JSON.stringify(mock3.entries).includes('sk-distilled-secret-123'), 'distilled secret reached the server');
+    });
+  } finally {
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mock3.server.close(r));
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
