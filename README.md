@@ -65,6 +65,48 @@ than the brief summary can follow the reference. Add `.membridge/` to your
 project's `.gitignore` if you don't want the memory committed — or commit it
 to share AI context with your whole team.
 
+## Session distillation (Claude Code hook)
+
+Harvested summaries (the agent's last chat message) are decent; a summary the
+agent writes *on purpose* is better. With one opt-in command, the agent that
+did the work distills its own session before it ends:
+
+```bash
+membridge setup-hooks
+```
+
+This registers a [Stop hook](https://docs.claude.com/en/docs/claude-code/hooks)
+in `~/.claude/settings.json`. When a Claude Code session that edited files
+tries to stop without having written a summary, the hook blocks the stop once
+and asks the agent to append one JSON line to
+`<project>/.membridge/summaries.jsonl`:
+
+```json
+{"session":"<id>","ts":"<ISO time>","did":"What was accomplished.","decisions":"Key choices.","gotchas":"Surprises."}
+```
+
+MemBridge merges these as high-quality `Distilled` summaries that take
+precedence over harvested ones everywhere — the context block, `memory.md`,
+the Copy-for-AI digest, and team sync (redacted like everything else before
+it leaves the machine).
+
+**Consent model.** Nothing is installed automatically: the daemon never
+touches `~/.claude/settings.json`; only the explicit `membridge setup-hooks`
+does, it appends without disturbing your existing hooks, and
+`membridge remove-hooks` strips exactly what it added. The hook itself is
+strictly fail-open — any error, a paused/untracked project, a session with
+fewer than `distill.minEdits` edits (default 1), or `distill.enabled: false`
+in config means Claude Code stops normally, uninterrupted. It never blocks
+the same stop twice. `membridge status` shows whether distillation is on and
+the hook installed.
+
+**Codex fallback (tiering).** Claude Code is the *enforced* tier — the Stop
+hook guarantees the ask. Tools reading `AGENTS.md` (Codex and friends) have
+no hook, so they get the *requested* tier: the injected block carries a
+standing instruction to append the same summary line on task completion.
+Well-behaved agents comply; nothing breaks when they don't — MemBridge just
+falls back to the harvested summary.
+
 ## The dashboard
 
 `membridge dashboard` opens a local web UI (the menu-bar app shows the same
@@ -215,6 +257,7 @@ no admin rights needed). The tray app has its own "Start at login" toggle.
 | `membridge scan` | Read-only report of discovered tools and projects |
 | `membridge remove [--project <path>]` | Strip injected memory blocks |
 | `membridge enable-autostart` / `disable-autostart` | Run at login |
+| `membridge setup-hooks` / `remove-hooks` | Session distillation via the Claude Code Stop hook (see above) |
 | `membridge team <setup\|create\|join\|link\|unlink\|list>` | Team sync (see above) |
 | `membridge signup` / `login` / `logout` | Team sync account |
 
@@ -231,6 +274,7 @@ no admin rights needed). The tray app has its own "Start at login" toggle.
   "redact": ["sk-[A-Za-z0-9_-]{8,}", "..."],  // scrubbed before injection
   "maxPrompts": 8,
   "maxFiles": 10,
+  "distill": { "enabled": true, "minEdits": 1 }, // Stop-hook session summaries
   "adapters": {
     "claude-code": { "enabled": true },
     "codex": { "enabled": true },
