@@ -408,9 +408,13 @@ async function main() {
       assert.ok(embeddedScript, 'embedded dashboard script missing');
       assert.strictEqual(scriptCheck.status, 0, scriptCheck.stderr || scriptCheck.stdout);
     });
-    check('dashboard page has Overview and Neural map tabs', () => {
-      assert.ok(pageHtml.includes('Overview'), 'Overview tab missing');
-      assert.ok(pageHtml.includes('Neural map'), 'Neural map tab missing');
+    check('dashboard page has the simplified three-route shell', () => {
+      assert.ok(pageHtml.includes('id="view-home"'), 'home feed view missing');
+      assert.ok(pageHtml.includes('id="goHome"'), 'home logo button missing');
+      assert.ok(pageHtml.includes('id="openInvite"'), 'invite button missing');
+      assert.ok(pageHtml.includes("return 'home'"), 'home default route missing');
+      assert.ok(!pageHtml.includes('id="tab-overview"'), 'obsolete overview tab still present');
+      assert.ok(!pageHtml.includes('id="tab-neural"'), 'obsolete neural map tab still present');
     });
     check('dashboard page has the full Team workspace', () => {
       assert.ok(pageHtml.includes('view-auth'), 'account gate missing');
