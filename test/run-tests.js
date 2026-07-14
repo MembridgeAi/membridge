@@ -429,6 +429,12 @@ async function main() {
       assert.ok(pageHtml.includes('/api/team/feed'), 'activity feed wiring missing');
       assert.ok(pageHtml.includes('/api/team/members'), 'members wiring missing');
     });
+    check('dashboard page has a persisted three-way theme', () => {
+      assert.ok(pageHtml.includes('color-scheme: light dark'), 'color-scheme missing');
+      assert.ok(pageHtml.includes('light-dark('), 'light-dark() colors missing');
+      assert.ok(pageHtml.includes("localStorage.getItem('mb-theme')"), 'theme boot script missing');
+      assert.ok(pageHtml.includes('name="stTheme"'), 'appearance control missing');
+    });
     check('dashboard page has the Copy for AI button', () => {
       assert.ok(pageHtml.includes('Copy for AI'), 'Copy for AI button missing');
     });
