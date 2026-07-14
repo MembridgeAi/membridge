@@ -28,6 +28,7 @@ const memorydb = require('../lib/memorydb');
 const claudeAdapter = require('../lib/adapters/claude-code');
 const codexAdapter = require('../lib/adapters/codex');
 const hooks = require('../lib/hooks');
+const redactLib = require('../lib/redact');
 
 const BIN = path.join(__dirname, '..', 'bin', 'membridge.js');
 const proj1 = path.join(ROOT, 'projects', 'shop-app');
@@ -1653,6 +1654,161 @@ async function main() {
     delete process.env.MEMBRIDGE_TEAM_URL;
     delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
     await new Promise(r => mock4.server.close(r));
+  }
+
+  // --- 12. built-in secret redaction (lib/redact.js) ---
+  // Per-pattern unit coverage: the secret is gone and the named marker present.
+  const GH_TOKEN = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const SLACK_TOKEN = 'xox' + 'b-9999999999-ABCDEFGHIJKLMNOP';
+  const ANTHROPIC_KEY = 'sk-ant-api03-ABCDEFGHIJKLMNOP1234567890';
+  const GOOGLE_KEY = 'AIza' + 'B1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2'; // AIza + 35
+  const AWS_KEY = 'AKIA1234567890ABCDEF';
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N';
+  const PG_URI = 'postgres://app:hunter2secret@db.internal:5432/prod';
+  const ENTROPY_TOKEN = 'aB3dE5gH7jK9mN1pQ3rS5tU7wX9zA1cE'; // 32-char base64, entropy > 4.5
+  const cases = [
+    ['aws-access-key', `creds ${AWS_KEY} here`, AWS_KEY],
+    ['github-token', `rotate ${GH_TOKEN} now`, GH_TOKEN],
+    ['google-api-key', `key ${GOOGLE_KEY} end`, GOOGLE_KEY],
+    ['slack-token', `slack ${SLACK_TOKEN} end`, SLACK_TOKEN],
+    ['anthropic-key', `key ${ANTHROPIC_KEY} tail`, ANTHROPIC_KEY],
+    ['jwt', `token ${JWT} done`, JWT],
+    ['private-key', '-----BEGIN RSA PRIVATE KEY-----\nMIIBhaha+notreal/xyz==\n-----END RSA PRIVATE KEY-----', 'MIIBhaha'],
+    ['credentials', `DB ${PG_URI} yo`, 'hunter2secret'],
+    ['secret-assignment', "config password=hunter2xyz done", 'hunter2xyz'],
+    ['high-entropy', `blob ${ENTROPY_TOKEN} done`, ENTROPY_TOKEN],
+  ];
+  check('redact: every default pattern removes the secret and emits a named marker', () => {
+    for (const [name, input, secret] of cases) {
+      const out = redactLib.redactDefault(input);
+      assert.ok(!out.includes(secret), `${name}: secret survived -> ${out}`);
+      assert.ok(out.includes(`[redacted:${name}]`), `${name}: marker missing -> ${out}`);
+    }
+    // Bearer/authorization consume the whole value, no leak.
+    const auth = redactLib.redactDefault('Authorization: Bearer abcDEF123456ghijKLmn');
+    assert.ok(!auth.includes('abcDEF123456ghijKLmn') && auth.includes('[redacted:authorization]'), `auth -> ${auth}`);
+  });
+
+  // Negatives — as important as positives. None of these may be touched.
+  check('redact: normal text, versions, paths, SHAs, UUIDs, identifiers survive untouched', () => {
+    const survivors = [
+      'The quick brown fox jumps over the lazy dog again and again.',
+      'Upgrade express@4.18.2 and lodash@4.17.21 in package.json.',
+      'See lib/adapters/claude-code.js and lib/redact.js for the wiring.',
+      'Commit 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c reverted it cleanly.',
+      'session 1f0e5d5d-1603-4ea6-8b41-832bf6d27195 kept running',
+      'getUserAuthenticationTokenFromLocalCache is called on every request',
+      'the config keys checkpointEvery and summaries.jsonl are documented',
+      'a b c d camelCaseWord PascalCaseWord snake_case_word kebab-case-word',
+    ];
+    for (const s of survivors) {
+      assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s}`);
+    }
+  });
+  check('redact: session-id UUIDs are never redacted (load-bearing for the hook)', () => {
+    const uuid = '1f0e5d5d-1603-4ea6-8b41-832bf6d27195';
+    assert.strictEqual(redactLib.redactDefault(uuid), uuid);
+    assert.strictEqual(redactLib.redactDefault(`Resumed session ${uuid} after a crash`).includes(uuid), true);
+  });
+  check('redact: entropy catches a standalone token but not the same token in a URL path', () => {
+    assert.ok(redactLib.redactDefault(`x ${ENTROPY_TOKEN} y`).includes('[redacted:high-entropy]'), 'standalone token not caught');
+    // Pinned behavior: a high-entropy segment inside a plain URL path (no
+    // embedded credentials) is treated as a path, not a secret, and survives.
+    const url = `https://cdn.example.com/assets/${ENTROPY_TOKEN}/main.js`;
+    assert.strictEqual(redactLib.redactDefault(url), url, `URL path token was redacted -> ${redactLib.redactDefault(url)}`);
+    assert.ok(redactLib.entropy(ENTROPY_TOKEN) > 4.5, 'test token is not actually high-entropy');
+  });
+  check('redact: redactDefaults:false opts out; redactExtra is additive', () => {
+    const off = digest.redactText(`key ${AWS_KEY}`, digest.compileRedactions({ redactDefaults: false }));
+    assert.ok(off.includes(AWS_KEY), 'defaults not disabled by redactDefaults:false');
+    const extra = digest.redactText('internal CODENAME-BLUEJAY ships', digest.compileRedactions({ redactDefaults: false, redactExtra: ['CODENAME-\\w+'] }));
+    assert.ok(!extra.includes('CODENAME-BLUEJAY') && extra.includes('[redacted]'), `redactExtra not applied -> ${extra}`);
+    // defaults + user patterns compose: both a built-in and an extra match.
+    const both = digest.redactText(`${AWS_KEY} and CODENAME-BLUEJAY`, digest.compileRedactions({ redactExtra: ['CODENAME-\\w+'] }));
+    assert.ok(!both.includes(AWS_KEY) && !both.includes('CODENAME-BLUEJAY'), `compose failed -> ${both}`);
+  });
+
+  // Performance: default regexes compile once per pass, not per event.
+  check('redact: a 200-event render stays well under 200ms', () => {
+    const events = [];
+    for (let i = 0; i < 200; i++) {
+      const ts = `2026-07-15T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.000Z`;
+      if (i % 3 === 0) events.push({ ts, source: 'Claude Code', kind: 'prompt', text: `Do step ${i} with some ${AWS_KEY} and ${ENTROPY_TOKEN} inline`, session: `s${i % 7}` });
+      else if (i % 3 === 1) events.push({ ts, source: 'Claude Code', kind: 'edit', file: path.join(ROOT, 'projects', 'perf', `f${i}.js`), session: `s${i % 7}` });
+      else events.push({ ts, source: 'Distilled', kind: 'summary', text: `Finished step ${i}; rotated ${ANTHROPIC_KEY} along the way.`, session: `s${i % 7}` });
+    }
+    const proj = { events };
+    const cfg = util.getConfig();
+    const t0 = Date.now();
+    const block = digest.renderBlock(path.join(ROOT, 'projects', 'perf'), proj, cfg, 'CLAUDE.md');
+    memorydb.buildEntries(path.join(ROOT, 'projects', 'perf'), proj, cfg);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 200, `200-event render took ${ms}ms`);
+    assert.ok(!block.includes(AWS_KEY) && !block.includes(ANTHROPIC_KEY), 'secret leaked into the perf render');
+  });
+
+  // End to end: secrets planted in a prompt, a distilled checkpoint, and a todo
+  // item must be redacted in the block, memory.md, the copy digest, and a push.
+  const projRed = path.join(ROOT, 'projects', 'redact-app');
+  fs.mkdirSync(path.join(projRed, '.membridge'), { recursive: true });
+  const redCDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-redact-app');
+  fs.mkdirSync(redCDir, { recursive: true });
+  fs.writeFileSync(path.join(redCDir, 'red1.jsonl'), jsonl([
+    { type: 'user', message: { role: 'user', content: `Rotate the leaked GitHub token ${GH_TOKEN} immediately` }, cwd: projRed, timestamp: '2026-07-15T01:00:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [
+      { content: `Revoke Slack token ${SLACK_TOKEN} in the admin panel`, status: 'in_progress', activeForm: 'Revoking Slack token' },
+      { content: 'Ship the rotation script', status: 'pending', activeForm: 'Shipping' },
+    ] } }] }, cwd: projRed, timestamp: '2026-07-15T01:01:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(projRed, 'rotate.js') } }] }, cwd: projRed, timestamp: '2026-07-15T01:02:00.000Z' },
+  ]));
+  fs.writeFileSync(path.join(projRed, '.membridge', 'summaries.jsonl'),
+    JSON.stringify({ session: 'red1', ts: '2026-07-15T01:05:00.000Z', did: `Rotated everything: new key ${ANTHROPIC_KEY} and moved the DB to ${PG_URI}.` }) + '\n');
+  syncOnce();
+
+  const redBlock = () => read(path.join(projRed, 'CLAUDE.md'));
+  const secretsGone = s => !s.includes(GH_TOKEN) && !s.includes(SLACK_TOKEN) && !s.includes(ANTHROPIC_KEY) && !s.includes('hunter2secret');
+  check('redact: block redacts secrets from prompt and distilled checkpoint', () => {
+    const b = redBlock();
+    assert.ok(secretsGone(b), 'a secret survived into the block');
+    assert.ok(b.includes('[redacted:github-token]'), 'github marker missing from Ask line');
+    assert.ok(b.includes('[redacted:anthropic-key]'), 'anthropic marker missing from Result line');
+    assert.ok(b.includes('[redacted:credentials]'), 'connection marker missing from Result line');
+  });
+  check('redact: memory.md and memory.json redact prompt, checkpoint, and todo item', () => {
+    const mem = read(path.join(projRed, '.membridge', 'memory.md'));
+    const db = read(path.join(projRed, '.membridge', 'memory.json'));
+    assert.ok(secretsGone(mem) && secretsGone(db), 'a secret survived into the memory DB');
+    assert.ok(mem.includes('[redacted:github-token]') && mem.includes('[redacted:anthropic-key]'), 'markers missing from memory.md');
+    assert.ok(db.includes('[redacted:slack-token]'), 'todo item Slack token not redacted in memory.json');
+  });
+  check('redact: copy-for-AI digest redacts every planted secret', () => {
+    const state = util.loadState();
+    const key = Object.keys(state.projects).find(k => k.toLowerCase() === projRed.toLowerCase());
+    const copy = memorydb.renderCopyText(projRed, state.projects[key], util.getConfig());
+    assert.ok(secretsGone(copy), 'a secret survived into the copy digest');
+    assert.ok(copy.includes('[redacted:github-token]') && copy.includes('[redacted:anthropic-key]'), 'markers missing from copy digest');
+  });
+
+  const mock5 = createMockSupabase();
+  await new Promise(r => mock5.server.listen(17949, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    await teamsync.signup(util.getConfig(), 'red@test.dev', 'pw-r', 'Red');
+    const teamRed = await teamsync.createTeam(util.getConfig(), 'RedTeam');
+    await teamsync.linkProject(util.getConfig(), projRed, teamRed.team_id, 'RedTeam');
+    await teamsync.syncTeams({ project: projRed });
+    check('redact: pushed entries carry only redacted markers, never a secret', () => {
+      const body = JSON.stringify(mock5.entries);
+      assert.ok(!body.includes(GH_TOKEN) && !body.includes(ANTHROPIC_KEY) && !body.includes('hunter2secret'), 'a secret reached the server');
+      const row = mock5.entries.find(e => e.ask.includes('[redacted:github-token]'));
+      assert.ok(row, 'pushed ask not redacted with a named marker');
+      assert.ok(row.summary.includes('[redacted:anthropic-key]'), `pushed summary not redacted -> ${row.summary}`);
+    });
+  } finally {
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mock5.server.close(r));
   }
 
   // --- summary ---
