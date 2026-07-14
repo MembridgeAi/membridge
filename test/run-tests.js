@@ -2299,6 +2299,28 @@ async function main() {
     assert.strictEqual(n.distilled, false);
     assert.strictEqual(n.projectId, null);
   });
+  check('feed.normalizeTeam maps a team_feed row and detects self by author id', () => {
+    const row = { id: 42, project_id: 'uuid-9', project_name: 'shared', author_id: 'me',
+      author_name: 'Marco', ts: '2026-07-14T05:00:00Z', source: 'Claude Code',
+      ask: 'ship it', summary: 'Shipped', files: ['x.js'], created_at: '2026-07-14T05:00:01Z' };
+    const mine = feed.normalizeTeam(row, { selfUserId: 'me' });
+    assert.strictEqual(mine.origin, 'team');
+    assert.strictEqual(mine.self, true);
+    assert.strictEqual(mine.author, 'You');
+    assert.strictEqual(mine.summary, 'Shipped');
+    assert.strictEqual(mine.projectId, 'uuid-9');
+    assert.strictEqual(mine.projectPath, null);
+    assert.deepStrictEqual(mine.cursor, { createdAt: '2026-07-14T05:00:01Z', id: 42 });
+    const theirs = feed.normalizeTeam(row, { selfUserId: 'someone-else' });
+    assert.strictEqual(theirs.self, false);
+    assert.strictEqual(theirs.author, 'Marco');
+  });
+  check('feed.normalizeTeam tolerates a summary-less row (pre-migration backend)', () => {
+    const n = feed.normalizeTeam({ id: 1, project_id: 'p', project_name: 'p', author_id: 'a',
+      author_name: 'A', ts: '2026-07-14T05:00:00Z', source: 'Codex', ask: 'q', files: [],
+      created_at: '2026-07-14T05:00:00Z' }, { selfUserId: 'me' });
+    assert.strictEqual(n.summary, null);
+  });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);
