@@ -376,10 +376,15 @@ async function main() {
   await new Promise(r => mockApi.listen(17944, '127.0.0.1', r));
 
   const PORT = 17941;
+  const apiClaudeSettings = path.join(ROOT, 'claude-settings-api.json');
   const child = spawn(process.execPath, [BIN, 'daemon'], {
-    env: { ...process.env, MEMBRIDGE_PORT: String(PORT), MEMBRIDGE_API_BASE: 'http://127.0.0.1:17944' },
+    env: {
+      ...process.env, MEMBRIDGE_PORT: String(PORT), MEMBRIDGE_API_BASE: 'http://127.0.0.1:17944',
+      MEMBRIDGE_CLAUDE_SETTINGS: apiClaudeSettings,
+    },
     stdio: 'ignore',
   });
+  process.env.MEMBRIDGE_CLAUDE_SETTINGS = apiClaudeSettings; // same file, so hooks.isHookInstalled() here agrees
   const base = `http://127.0.0.1:${PORT}`;
   try {
     await waitForHttp(`${base}/api/status`);
@@ -549,6 +554,43 @@ async function main() {
       assert.strictEqual(viaEnv.apiKey, 'sk-env-fallback');
       assert.strictEqual(advisorLib.getAdvisorConfig({}).source, null, 'no key should mean null source');
     });
+
+    // Session summaries card: /api/settings exposes hookInstalled + distill,
+    // and toggling distill.enabled installs/removes the Claude Code Stop hook.
+    const stFresh = await (await fetch(`${base}/api/settings`)).json();
+    check('settings: hookInstalled + distill fields are reported', () => {
+      assert.strictEqual(stFresh.hookInstalled, false, 'hook should not be installed yet');
+      assert.deepStrictEqual(stFresh.distill, { enabled: true, minEdits: 1, checkpointEvery: 4 });
+    });
+    const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
+    check('settings: enabling summaries installs the Claude Code Stop hook', () => {
+      assert.strictEqual(stDistillOn.distill.enabled, true);
+      assert.strictEqual(stDistillOn.hookInstalled, true, 'hookInstalled not reflected after enabling');
+      assert.strictEqual(hooks.isHookInstalled(), true, 'hook file was not actually written');
+    });
+    const stDistillOff = await (await post(`${base}/api/settings`, { distill: { enabled: false } })).json();
+    check('settings: disabling summaries removes the Claude Code Stop hook', () => {
+      assert.strictEqual(stDistillOff.distill.enabled, false);
+      assert.strictEqual(stDistillOff.hookInstalled, false, 'hookInstalled not reflected after disabling');
+      assert.strictEqual(hooks.isHookInstalled(), false, 'hook file was not actually removed');
+    });
+    const stDistillFields = await (await post(`${base}/api/settings`, {
+      distill: { enabled: false, minEdits: 3, checkpointEvery: 7 },
+    })).json();
+    check('settings: minEdits/checkpointEvery are saved when valid', () => {
+      assert.strictEqual(stDistillFields.distill.minEdits, 3);
+      assert.strictEqual(stDistillFields.distill.checkpointEvery, 7);
+    });
+    const stDistillInvalid = await (await post(`${base}/api/settings`, {
+      distill: { minEdits: 0, checkpointEvery: 'nope' },
+    })).json();
+    check('settings: invalid minEdits/checkpointEvery are rejected, previous values kept', () => {
+      assert.strictEqual(stDistillInvalid.distill.minEdits, 3, 'invalid minEdits (0) was accepted');
+      assert.strictEqual(stDistillInvalid.distill.checkpointEvery, 7, 'invalid checkpointEvery (non-numeric) was accepted');
+    });
+    // Leave distill in its default post-first-run-consent-tests-friendly state
+    // for any later checks in this file that rely on the default config shape.
+    await post(`${base}/api/settings`, { distill: { enabled: true, minEdits: 1, checkpointEvery: 4 } });
 
     // M3: roadmap generation (the mock returns a canned plan and captures the request)
     const planNoKey = await post(`${base}/api/plan/generate`, { path: proj1, goal: 'Ship checkout' });
