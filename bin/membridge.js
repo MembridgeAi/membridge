@@ -349,9 +349,24 @@ async function cmdTeam() {
       die('Usage: membridge team setup --url https://<ref>.supabase.co --anon-key <anon key>\n(Advanced — self-hosting your own backend. On a normal build team sync already works; just run `membridge signup`.)');
     }
     const raw = util.loadUserConfig();
-    raw.team = { url, anonKey };
+    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), url, anonKey };
     util.saveUserConfig(raw);
     console.log('Custom team backend saved (overrides the built-in one).');
+    return;
+  }
+
+  // Privacy gate: verbatim prompts upload with team sync only when this is on
+  // (summaries and file lists always sync). Local config only, so it works
+  // before login and on unconfigured builds.
+  if (sub === 'share-prompts') {
+    const v = args[2];
+    if (!['on', 'off'].includes(v)) die('Usage: membridge team share-prompts <on|off>');
+    const raw = util.loadUserConfig();
+    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: v === 'on' };
+    util.saveUserConfig(raw);
+    console.log(v === 'on'
+      ? 'Prompt sharing ON: future pushes include your (redacted) asks.'
+      : 'Prompt sharing OFF: future pushes upload summaries and file lists only.');
     return;
   }
 
@@ -453,7 +468,7 @@ async function cmdTeam() {
     return;
   }
 
-  die(`Unknown team subcommand: ${sub}\nUsage: membridge team <setup|create|invite|revoke-invite|join|link|unlink|list>`);
+  die(`Unknown team subcommand: ${sub}\nUsage: membridge team <setup|create|invite|revoke-invite|join|link|unlink|list|share-prompts>`);
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +519,7 @@ Team sync (share project memory with your team — see README):
   team link [--project <path>] [--team <id>]   sync this project with the team
   team unlink [--project <path>]               stop syncing this project
   team list                your login, teams and linked projects
+  team share-prompts <on|off>  also upload your (redacted) prompts; off = summaries/files only
   team setup ...           advanced: point at your own self-hosted backend
 
 Config: ${util.configPath()}

@@ -96,6 +96,10 @@ function setupFixtures() {
   util.ensureConfig();
   const cfg = util.loadUserConfig();
   cfg.exclude = [proj2];
+  // The legacy team-sync tests assert prompt text crossing the wire, so the
+  // main test home opts into prompt sharing. The prompt-gate section removes
+  // and restores this flag to pin the shipped (ask=null) default explicitly.
+  cfg.team = { ...(cfg.team || {}), sharePrompts: true };
   cfg.adapters = cfg.adapters || {};
   cfg.adapters.custom = [{
     id: 'mytool',
@@ -986,6 +990,12 @@ async function main() {
     fs.writeFileSync(path.join(projB, 'CLAUDE.md'), '# B clone\n\nAndrew notes.\n');
     process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-b');
     util.ensureConfig();
+    {
+      // Marco's pull asserts Andrew's verbatim ask, so this home opts in too.
+      const cfgB = util.loadUserConfig();
+      cfgB.team = { ...(cfgB.team || {}), sharePrompts: true };
+      util.saveUserConfig(cfgB);
+    }
     const stateB = util.loadState();
     stateB.projects = {
       [projB]: {
@@ -1346,6 +1356,12 @@ async function main() {
 
     // Dana's clone (ssh remote, same repo): suggested, NOT auto-linked.
     process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-d');
+    {
+      // The accepted-suggestion check asserts Dana's ask reached the server.
+      const cfgD = util.loadUserConfig();
+      cfgD.team = { ...(cfgD.team || {}), sharePrompts: true };
+      util.saveUserConfig(cfgD);
+    }
     const danaApi = path.join(ROOT, 'projects-d', 'api-server');
     gitRepo(danaApi, 'git@github.com:acme/api-server.git');
     const stateD = util.loadState();
@@ -2085,6 +2101,131 @@ async function main() {
     assert.ok(!claude.includes('Checkpoint alpha'), 'block leaked an earlier checkpoint');
     assert.strictEqual(count(claude, 'Checkpoint beta'), 1, 'block repeated the checkpoint');
   });
+
+  // --- prompt-sharing gate: verbatim asks stay local unless opted in ---
+  // Every assertion inspects the rows the mock server actually received: the
+  // gate is about what crosses the wire, not what the client believes it sent.
+  const mockPg = createMockSupabase();
+  await new Promise(r => mockPg.server.listen(17950, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17950';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  const pgTs = sec => new Date(Date.now() - sec * 1000).toISOString();
+  const projPg = path.join(ROOT, 'projects', 'prompt-gate-app');
+  fs.mkdirSync(projPg, { recursive: true });
+  try {
+    // setupFixtures opted this home in for the legacy team tests; the gate's
+    // shipped DEFAULT (no sharePrompts key at all) is what (a) must pin.
+    {
+      const rc = util.loadUserConfig();
+      if (rc.team) delete rc.team.sharePrompts;
+      util.saveUserConfig(rc);
+    }
+    {
+      const st = util.loadState();
+      st.projects[projPg] = { events: [
+        { ts: pgTs(600), source: 'Claude Code', kind: 'prompt', text: 'Wire the payment gateway timeout retries', session: 'pg1' },
+        { ts: pgTs(550), source: 'Distilled', kind: 'summary', text: 'Gate summary: retries wired with capped backoff and a dead-letter path.', session: 'pg1' },
+      ] };
+      util.saveState(st);
+    }
+    await teamsync.signup(util.getConfig(), 'gina@test.dev', 'pw-g', 'Gina');
+    const teamPg = await teamsync.createTeam(util.getConfig(), 'GateTeam');
+    await teamsync.linkProject(util.getConfig(), projPg, teamPg.team_id, 'GateTeam');
+
+    await teamsync.syncTeams({ project: projPg });
+    check('privacy: default push uploads ask=null; summary and files still upload', () => {
+      const rows = mockPg.entries;
+      assert.ok(rows.length >= 1, `no rows pushed (${rows.length})`);
+      assert.ok(rows.every(r => r.ask === null), `an ask left the machine: ${JSON.stringify(rows.map(r => r.ask))}`);
+      assert.ok(rows.some(r => r.summary && r.summary.includes('capped backoff')), 'summary stopped uploading');
+      assert.ok(rows.every(r => Array.isArray(r.files)), 'files field missing from pushed rows');
+      assert.ok(!JSON.stringify(rows).includes('payment gateway'), 'verbatim prompt text reached the server');
+    });
+
+    // Opt in, then push a later entry (past the push cursor) from a second
+    // session, with a planted secret to prove redaction still runs on the ask.
+    {
+      const st = util.loadState();
+      st.projects[projPg].events.push(
+        { ts: pgTs(120), source: 'Codex', kind: 'prompt', text: 'Ship the billing exporter, api_key=sk-gate-secret-99', session: 'pg2' },
+        { ts: pgTs(60), source: 'Distilled', kind: 'summary', text: 'Exporter shipped behind the nightly cron with checksum verification.', session: 'pg2' },
+      );
+      util.saveState(st);
+    }
+    {
+      const rc = util.loadUserConfig();
+      rc.team = { ...(rc.team || {}), sharePrompts: true };
+      util.saveUserConfig(rc);
+    }
+    await teamsync.syncTeams({ project: projPg });
+    check('privacy: sharePrompts=true uploads the ask, still redacted', () => {
+      const row = mockPg.entries.find(e => e.ask && e.ask.includes('Ship the billing exporter'));
+      assert.ok(row, `opted-in ask not uploaded: ${JSON.stringify(mockPg.entries.map(e => e.ask))}`);
+      assert.ok(row.ask.includes('[redacted'), `shared ask skipped redaction: ${row.ask}`);
+      assert.ok(!JSON.stringify(mockPg.entries).includes('sk-gate-secret-99'), 'secret reached the server');
+      assert.ok(mockPg.entries.some(r => r.ask === null), 'earlier gated rows should stay ask=null');
+    });
+
+    // Pull side: a teammate must see the gated row render cleanly — a
+    // placeholder, never a crash or a literal "null"/"undefined".
+    const projPgB = path.join(ROOT, 'projects-pg', 'prompt-gate-app');
+    fs.mkdirSync(projPgB, { recursive: true });
+    fs.writeFileSync(path.join(projPgB, 'CLAUDE.md'), '# PG clone\n\nHank notes.\n');
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-pg');
+    util.ensureConfig();
+    {
+      const st = util.loadState();
+      st.projects = { [projPgB]: { events: [
+        { ts: pgTs(30), source: 'Claude Code', kind: 'prompt', text: 'Hank reviewing the exporter rollout', session: 'h1' },
+      ] } };
+      util.saveState(st);
+    }
+    await teamsync.signup(util.getConfig(), 'hank@test.dev', 'pw-h', 'Hank');
+    const joinedPg = await teamsync.joinTeam(util.getConfig(), teamPg.invite_code);
+    await teamsync.linkProject(util.getConfig(), projPgB, joinedPg.team_id, joinedPg.team_name);
+    const rPg = await teamsync.syncTeams();
+    for (const k of rPg.changed) syncOnce({ project: k });
+    check('privacy: a pulled null-ask row renders a placeholder, no crash, no null/undefined', () => {
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => k.toLowerCase() === projPgB.toLowerCase());
+      const pulled = st.projects[key].teamEntries || [];
+      assert.ok(pulled.some(e => e.ask === null), `no null-ask row pulled: ${JSON.stringify(pulled.map(e => e.ask))}`);
+      const md = read(path.join(projPgB, 'CLAUDE.md'));
+      assert.ok(md.startsWith('# PG clone'), 'local notes lost');
+      assert.ok(md.includes("Teammates' AI activity"), 'team section missing');
+      const gatedLine = md.split('\n').find(l => l.includes('· Gina · Claude Code'));
+      assert.ok(gatedLine, 'gated teammate entry not injected');
+      assert.ok(gatedLine.includes('(prompt not shared)'), `placeholder missing: ${gatedLine}`);
+      assert.ok(!gatedLine.includes('undefined') && !/\bnull\b/.test(gatedLine), `null leaked into the line: ${gatedLine}`);
+      assert.ok(md.includes('capped backoff'), 'summary Result line missing for the gated entry');
+      assert.ok(md.includes('Ship the billing exporter'), 'opted-in ask missing from the pull');
+    });
+
+    check('privacy: CLI team share-prompts toggles the config flag', () => {
+      const homeCli = path.join(ROOT, 'home-pg-cli');
+      const env = { ...process.env, MEMBRIDGE_HOME: homeCli };
+      const on = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'on'], { env, encoding: 'utf8' });
+      assert.strictEqual(on.status, 0, on.stderr);
+      assert.ok(/Prompt sharing ON/.test(on.stdout), `on said: ${on.stdout}`);
+      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, true, 'flag not saved');
+      const off = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'off'], { env, encoding: 'utf8' });
+      assert.strictEqual(off.status, 0, off.stderr);
+      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, false, 'flag not cleared');
+      const bad = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'maybe'], { env, encoding: 'utf8' });
+      assert.strictEqual(bad.status, 1, 'invalid value was accepted');
+    });
+  } finally {
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    {
+      // Restore the suite-wide opt-in for the sections that follow.
+      const rc = util.loadUserConfig();
+      rc.team = { ...(rc.team || {}), sharePrompts: true };
+      util.saveUserConfig(rc);
+    }
+    await new Promise(r => mockPg.server.close(r));
+  }
 
   // --- 12. built-in secret redaction (lib/redact.js) ---
   // Per-pattern unit coverage: the secret is gone and the named marker present.

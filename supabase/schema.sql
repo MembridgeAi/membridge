@@ -55,6 +55,13 @@ create table if not exists public.memory_entries (
 alter table public.memory_entries
   add column if not exists summary text check (char_length(summary) <= 400);
 
+-- Privacy gate (config.team.sharePrompts): verbatim prompts stay on the
+-- author's machine unless they opt in, so clients push ask = null by default.
+-- Applied via `alter` so it is backwards-compatible with live backends whose
+-- column predates the gate.
+alter table public.memory_entries
+  alter column ask drop not null;
+
 create index if not exists memory_entries_pull_idx
   on public.memory_entries (project_id, created_at);
 
