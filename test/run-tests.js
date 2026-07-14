@@ -963,6 +963,24 @@ async function main() {
       assert.strictEqual(mock.entries.length, pushedCount, 'duplicate entries pushed');
     });
 
+    // A hosted backend whose schema predates the summary column must not kill
+    // the push — the client drops the field and retries.
+    fs.appendFileSync(
+      path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-shop-app', 'sess1.jsonl'),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'Tighten the refund policy checks' }, cwd: proj1, timestamp: '2026-07-12T08:30:00.000Z' }) + '\n',
+    );
+    syncOnce();
+    mock.flags.rejectSummary = true;
+    const rLegacy = await teamsync.syncTeams();
+    mock.flags.rejectSummary = false;
+    check('team: push falls back to summary-less rows on a pre-summary backend', () => {
+      assert.strictEqual((rLegacy.errors || []).length, 0, `push errored: ${JSON.stringify(rLegacy.errors)}`);
+      assert.ok(rLegacy.synced.some(k => sameKey(k, proj1)), `synced said: ${JSON.stringify(rLegacy)}`);
+      const row = mock.entries.find(e => (e.ask || '').includes('Tighten the refund policy checks'));
+      assert.ok(row, 'new entry never reached the server');
+      assert.ok(!('summary' in row), 'summary field still sent to a backend without the column');
+    });
+
     // Andrew: second machine (own MemBridge home), same repo basename, joins
     // by invite code — link_project maps his clone to the same project row.
     const projB = path.join(ROOT, 'projects-b', 'shop-app');
