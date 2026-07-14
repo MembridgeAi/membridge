@@ -1739,12 +1739,73 @@ async function main() {
     assert.strictEqual(setup1.status, 0, setup1.stderr);
     assert.strictEqual(afterSetup.hooks.Stop.length, 2, 'membridge entry not appended');
     assert.strictEqual(JSON.stringify(afterSetup.hooks.Stop[0]), JSON.stringify(seedSettings.hooks.Stop[0]), 'user Stop hook changed');
-    assert.ok(JSON.stringify(afterSetup.hooks.Stop[1]).includes('membridge hook stop'), 'membridge command missing');
+    assert.strictEqual(afterSetup.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved absolute form');
     assert.deepStrictEqual(afterSetup.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
     assert.strictEqual(afterSetup.model, 'opus');
     assert.deepStrictEqual(afterSetup.feedbackSurveyState, seedSettings.feedbackSurveyState, 'unknown keys lost');
     assert.ok(/already installed/.test(setup2.stdout), `second run said: ${setup2.stdout}`);
     assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the entry');
+  });
+  check('distill: hook command is absolute and needs no PATH', () => {
+    const cmd = hooks.hookCommand();
+    assert.ok(cmd.includes(`"${process.execPath}"`), `command lacks the quoted runtime binary: ${cmd}`);
+    const script = cmd.match(/"([^"]*membridge-hook\.js)"/);
+    assert.ok(script, `command lacks a quoted membridge-hook.js path: ${cmd}`);
+    assert.ok(path.isAbsolute(script[1]), 'hook script path is not absolute');
+    assert.ok(fs.existsSync(script[1]), 'hook script does not exist on disk');
+  });
+  check('distill: membridge-hook.js entry behaves like `membridge hook stop`', () => {
+    const entry = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+    const out = spawnSync(process.execPath, [entry], {
+      input: JSON.stringify(stopPayload('sessNoSummaryYet')), encoding: 'utf8', env: { ...process.env },
+    });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.strictEqual(out.stdout, '', 'no-edit session should not block'); // worthiness gate
+    const blocked = spawnSync(process.execPath, [entry], {
+      input: 'garbage', encoding: 'utf8', env: { ...process.env },
+    });
+    assert.strictEqual(blocked.status, 0, 'entry must fail open on garbage stdin');
+  });
+  check('distill: setup-hooks upgrades a stale PATH-based command in place', () => {
+    const staleFile = path.join(ROOT, 'claude-settings-stale.json');
+    fs.writeFileSync(staleFile, JSON.stringify({
+      hooks: { Stop: [
+        { hooks: [{ type: 'command', command: 'echo user-stop' }] },
+        { hooks: [{ type: 'command', command: 'membridge hook stop', timeout: 10 }] },
+      ] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: staleFile };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.ok(/Updated the MemBridge Stop hook command/.test(out.stdout), `said: ${out.stdout}`);
+    const after = JSON.parse(read(staleFile));
+    assert.strictEqual(after.hooks.Stop.length, 2, 'entry count changed');
+    assert.strictEqual(after.hooks.Stop[0].hooks[0].command, 'echo user-stop', 'user hook touched');
+    assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'stale command not upgraded');
+    assert.strictEqual(after.hooks.Stop[1].hooks[0].timeout, 10, 'sibling fields lost in upgrade');
+    const again = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.ok(/already installed/.test(again.stdout), `upgrade not idempotent: ${again.stdout}`);
+  });
+  check('distill: isHookInstalled is false when the hook executable does not resolve', () => {
+    const deadFile = path.join(ROOT, 'claude-settings-dead.json');
+    fs.writeFileSync(deadFile, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: '/nonexistent/bin/membridge hook stop', timeout: 10 }] }] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = deadFile;
+    try {
+      assert.strictEqual(hooks.isHookInstalled(), false, 'dead absolute path reported as installed');
+      fs.writeFileSync(deadFile, JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: 'membridge-no-such-cli hook stop', timeout: 10 }] }] },
+      }, null, 2));
+      assert.strictEqual(hooks.isHookInstalled(), false, 'unresolvable PATH command reported as installed');
+      fs.writeFileSync(deadFile, JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] }] },
+      }, null, 2));
+      assert.strictEqual(hooks.isHookInstalled(), true, 'resolvable absolute command reported as missing');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
   });
   check('distill: status reports the Distill line with hook install state', () => {
     const out = spawnSync(process.execPath, [BIN, 'status'], { env: envHook, encoding: 'utf8' });
