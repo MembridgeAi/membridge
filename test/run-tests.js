@@ -2321,6 +2321,40 @@ async function main() {
       created_at: '2026-07-14T05:00:00Z' }, { selfUserId: 'me' });
     assert.strictEqual(n.summary, null);
   });
+  check('feed.buildFeed merges newest-first and drops the team dup of local self work', () => {
+    const local = [feed.normalizeLocal(
+      { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'same ask', summary: 'local rich', files: [] },
+      { projectPath: '/p', projectName: 'p', projectId: 'uuid-1' })];
+    const team = [
+      feed.normalizeTeam({ id: 5, project_id: 'uuid-1', project_name: 'p', author_id: 'me', author_name: 'Marco',
+        ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'same ask', summary: 'team copy',
+        files: [], created_at: '2026-07-14T06:00:02Z' }, { selfUserId: 'me' }),
+      feed.normalizeTeam({ id: 6, project_id: 'uuid-2', project_name: 'other', author_id: 'you', author_name: 'Andrew',
+        ts: '2026-07-14T07:00:00Z', source: 'Codex', ask: 'their ask', summary: 'their work',
+        files: [], created_at: '2026-07-14T07:00:01Z' }, { selfUserId: 'me' }),
+    ];
+    const res = feed.buildFeed({ local, team, teamUnavailable: false, limit: 50 });
+    assert.strictEqual(res.entries.length, 2, 'the duplicated self team row is dropped');
+    assert.strictEqual(res.entries[0].ask, 'their ask', 'newest first');
+    assert.strictEqual(res.entries[1].summary, 'local rich', 'local copy kept over team dup');
+    assert.strictEqual(res.teamUnavailable, false);
+  });
+  check('feed.buildFeed honors limit and returns a nextBefore cursor', () => {
+    const team = [1, 2, 3].map(i => feed.normalizeTeam(
+      { id: i, project_id: 'p', project_name: 'p', author_id: 'x', author_name: 'X',
+        ts: '2026-07-14T0' + i + ':00:00Z', source: 'Codex', ask: 'a' + i, summary: 's' + i,
+        files: [], created_at: '2026-07-14T0' + i + ':00:00Z' }, { selfUserId: 'me' }));
+    const res = feed.buildFeed({ local: [], team, teamUnavailable: false, limit: 2 });
+    assert.strictEqual(res.entries.length, 2);
+    assert.strictEqual(res.entries[0].ask, 'a3');
+    assert.strictEqual(res.nextBefore, res.entries[1].ts, 'cursor is the ts of the last returned entry');
+  });
+  check('feed.buildFeed passes through the teamUnavailable degradation flag', () => {
+    const res = feed.buildFeed({ local: [], team: [], teamUnavailable: true, limit: 50 });
+    assert.strictEqual(res.teamUnavailable, true);
+    assert.deepStrictEqual(res.entries, []);
+    assert.strictEqual(res.nextBefore, null);
+  });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);
