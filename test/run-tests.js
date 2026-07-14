@@ -556,23 +556,32 @@ async function main() {
     });
 
     // Session summaries card: /api/settings exposes hookInstalled + distill,
-    // and toggling distill.enabled installs/removes the Claude Code Stop hook.
+    // and toggling distill.enabled installs/removes the Claude Code Stop hook
+    // AND records consent — otherwise the first-run popup (needsConsentPrompt)
+    // would keep nagging even after the Settings toggle already acted.
+    const consentLib = require('../lib/consent');
     const stFresh = await (await fetch(`${base}/api/settings`)).json();
     check('settings: hookInstalled + distill fields are reported', () => {
       assert.strictEqual(stFresh.hookInstalled, false, 'hook should not be installed yet');
-      assert.deepStrictEqual(stFresh.distill, { enabled: true, minEdits: 1, checkpointEvery: 4 });
+      assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 4 });
     });
     const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
-    check('settings: enabling summaries installs the Claude Code Stop hook', () => {
+    check('settings: enabling summaries installs the Claude Code Stop hook and grants consent', () => {
       assert.strictEqual(stDistillOn.distill.enabled, true);
+      assert.strictEqual(stDistillOn.distill.consent, 'granted', 'consent not recorded on enable');
       assert.strictEqual(stDistillOn.hookInstalled, true, 'hookInstalled not reflected after enabling');
       assert.strictEqual(hooks.isHookInstalled(), true, 'hook file was not actually written');
+      assert.strictEqual(consentLib.needsConsentPrompt(util.getConfig()), false,
+        'first-run popup would still nag after the Settings toggle enabled summaries');
     });
     const stDistillOff = await (await post(`${base}/api/settings`, { distill: { enabled: false } })).json();
-    check('settings: disabling summaries removes the Claude Code Stop hook', () => {
+    check('settings: disabling summaries removes the Claude Code Stop hook and declines consent', () => {
       assert.strictEqual(stDistillOff.distill.enabled, false);
+      assert.strictEqual(stDistillOff.distill.consent, 'declined', 'consent not recorded on disable');
       assert.strictEqual(stDistillOff.hookInstalled, false, 'hookInstalled not reflected after disabling');
       assert.strictEqual(hooks.isHookInstalled(), false, 'hook file was not actually removed');
+      assert.strictEqual(consentLib.needsConsentPrompt(util.getConfig()), false,
+        'first-run popup would still nag after the Settings toggle disabled summaries');
     });
     const stDistillFields = await (await post(`${base}/api/settings`, {
       distill: { enabled: false, minEdits: 3, checkpointEvery: 7 },
