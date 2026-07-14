@@ -941,10 +941,16 @@ async function main() {
 
     // proj1 was deleted+revived earlier, so its live history is the single
     // "Ship the checkout flow" ask — enough to prove the push path end to end.
+    // Now-relative timestamps: the injected team slice drops entries older
+    // than teamMaxAgeHours, so rendered fixtures must stay fresh at any run
+    // date. The final assistant text (>=80 chars) becomes the session summary.
+    const tsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    const MARCO_SUMMARY = 'Receipt PDF wiring is done end to end: template, storage upload and the email attachment all pass the smoke test.';
     fs.appendFileSync(
       path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-shop-app', 'sess1.jsonl'),
-      JSON.stringify({ type: 'user', message: { role: 'user', content: 'Add the order confirmation email' }, cwd: proj1, timestamp: '2026-07-12T08:00:00.000Z' }) + '\n' +
-      JSON.stringify({ type: 'user', message: { role: 'user', content: 'Wire the receipt PDF, api_key=sk-test1234567890abcdef' }, cwd: proj1, timestamp: '2026-07-12T08:01:00.000Z' }) + '\n',
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'Add the order confirmation email' }, cwd: proj1, timestamp: tsAgo(90) }) + '\n' +
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'Wire the receipt PDF, api_key=sk-test1234567890abcdef' }, cwd: proj1, timestamp: tsAgo(60) }) + '\n' +
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: MARCO_SUMMARY }] }, cwd: proj1, timestamp: tsAgo(30) }) + '\n',
     );
     syncOnce(); // fold the new asks into proj1's history before the first push
     const rA = await teamsync.syncTeams();
@@ -963,6 +969,16 @@ async function main() {
       assert.strictEqual(mock.entries.length, pushedCount, 'duplicate entries pushed');
     });
 
+    // A row the client never scrubbed (tampered server, hostile backend),
+    // planted straight into the mock: render-side redaction must catch it.
+    mock.entries.push({
+      project_id: linkA.projectId, author_id: credsA.userId, author_name: 'Marco',
+      ts: tsAgo(10), source: 'Codex',
+      ask: 'rotate the deploy key api_key=sk-tamper111122223333',
+      files: [], summary: 'stored the new key api_key=sk-tamper444455556666 in the vault note',
+      id: mock.entries.length + 1, created_at: new Date().toISOString(),
+    });
+
     // Andrew: second machine (own MemBridge home), same repo basename, joins
     // by invite code — link_project maps his clone to the same project row.
     const projB = path.join(ROOT, 'projects-b', 'shop-app');
@@ -973,7 +989,7 @@ async function main() {
     const stateB = util.loadState();
     stateB.projects = {
       [projB]: {
-        events: [{ ts: '2026-07-12T09:00:00.000Z', source: 'Codex', kind: 'prompt', text: 'Refactor checkout validation', session: 'b1' }],
+        events: [{ ts: tsAgo(45), source: 'Codex', kind: 'prompt', text: 'Refactor checkout validation', session: 'b1' }],
       },
     };
     util.saveState(stateB);
@@ -988,14 +1004,97 @@ async function main() {
 
     const rB = await teamsync.syncTeams();
     for (const k of rB.changed) syncOnce({ project: k });
-    check("team: Andrew pulls Marco's asks into his context block", () => {
+    check("team: Andrew pulls Marco's latest ask into his context block", () => {
       assert.ok(rB.changed.some(k => sameKey(k, projB)), `changed said: ${JSON.stringify(rB)}`);
       const md = read(path.join(projB, 'CLAUDE.md'));
       assert.ok(md.startsWith('# B clone'), 'his own notes were lost');
       assert.ok(md.includes("Teammates' AI activity"), 'team section missing');
       assert.ok(md.includes('Marco'), 'author name missing');
-      assert.ok(md.includes('Ship the checkout flow'), "Marco's ask missing");
+      assert.ok(md.includes('Wire the receipt PDF'), "Marco's latest ask missing");
       assert.ok(!md.includes('sk-test1234567890abcdef'), 'secret leaked into teammate file');
+    });
+
+    check('team: a pushed summary is pulled intact and renders as a Result line', () => {
+      assert.ok(mock.entries.some(e => e.summary && e.summary.includes('smoke test')),
+        'summary missing from the pushed rows');
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => sameKey(k, projB));
+      const pulled = (st.projects[key].teamEntries || []).find(e => e.summary);
+      assert.ok(pulled, 'no pulled entry carries a summary');
+      assert.ok(pulled.summary.includes('smoke test'), `summary was: ${pulled.summary}`);
+      const md = read(path.join(projB, 'CLAUDE.md'));
+      assert.ok(md.includes('Result: '), 'Result line missing from the team section');
+      assert.ok(md.includes('smoke test'), 'summary text missing from the team section');
+    });
+
+    check('team: injection collapses each teammate session to its newest entry; state keeps all', () => {
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => sameKey(k, projB));
+      assert.ok(st.projects[key].teamEntries.length >= 3, 'full pulled history not kept in state');
+      const md = read(path.join(projB, 'CLAUDE.md'));
+      assert.ok(!md.includes('Ship the checkout flow'), 'older entry of the same session still injected');
+      assert.ok(!md.includes('order confirmation email'), 'superseded ask still injected');
+    });
+
+    // Render-side defense in depth against the tampered row planted above.
+    check('team: a pulled ask and summary are re-redacted at render time', () => {
+      const md = read(path.join(projB, 'CLAUDE.md'));
+      assert.ok(md.includes('rotate the deploy key'), 'tampered entry not rendered');
+      assert.ok(md.includes('stored the new key'), 'tampered summary not rendered');
+      assert.ok(!md.includes('sk-tamper111122223333') && !md.includes('sk-tamper444455556666'),
+        'raw secret reached the rendered block');
+      assert.ok(count(md, '[redacted') >= 3, 'redaction markers missing');
+    });
+
+    // Injection trimming knobs, against renderBlock directly: the cap, the age
+    // window, their fallbacks, and that the state array is never trimmed.
+    const trimProj = path.join(ROOT, 'projects', 'trim-app');
+    fs.mkdirSync(trimProj, { recursive: true });
+    const mkEntry = (i, over) => ({
+      author: `Dev${i}`, ts: tsAgo(600 - i), source: 'Claude Code',
+      ask: `team ask ${i}`, files: [], summary: null, ...over,
+    });
+    const trimState = { events: [], teamEntries: Array.from({ length: 12 }, (_, i) => mkEntry(i)) };
+    trimState.teamEntries[11].files = ['lib/pay.js'];
+    const cfgBase = util.getConfig();
+    const mdOf = over => digest.renderBlock(trimProj, trimState, { ...cfgBase, ...over }, 'CLAUDE.md');
+    check('team: teamInjectMax caps the injected slice, newest entries win', () => {
+      const md = mdOf({});
+      assert.strictEqual(count(md, 'team ask '), 8, 'default cap is not 8');
+      assert.ok(md.includes('team ask 4') && !md.includes('team ask 3'), 'not the newest entries');
+      assert.ok(md.includes('— files: lib/pay.js'), 'files line missing');
+      assert.ok(!md.includes('Result:'), 'summary-less entries rendered a Result line');
+      const md3 = mdOf({ teamInjectMax: 3 });
+      assert.strictEqual(count(md3, 'team ask '), 3, 'explicit cap not honored');
+      assert.ok(md3.includes('team ask 9') && !md3.includes('team ask 8'), 'cap did not keep the newest');
+      assert.strictEqual(trimState.teamEntries.length, 12, 'state array was truncated by the injection trim');
+    });
+    check('team: teamMaxAgeHours drops stale entries from the injected slice only', () => {
+      const stale = { events: [], teamEntries: [
+        mkEntry(0, { ts: new Date(Date.now() - 100 * 3600000).toISOString(), ask: 'stale ask' }),
+        mkEntry(1, { ask: 'fresh ask' }),
+      ] };
+      const md = digest.renderBlock(trimProj, stale, cfgBase, 'CLAUDE.md');
+      assert.ok(md.includes('fresh ask') && !md.includes('stale ask'), 'default 72h window wrong');
+      const mdWide = digest.renderBlock(trimProj, stale, { ...cfgBase, teamMaxAgeHours: 200 }, 'CLAUDE.md');
+      assert.ok(mdWide.includes('stale ask'), 'a wider window did not keep the older entry');
+      assert.strictEqual(stale.teamEntries.length, 2, 'state array was truncated');
+    });
+    check('team: non-finite or sub-1 trim knobs fall back to the defaults', () => {
+      const md = mdOf({ teamInjectMax: 0, teamMaxAgeHours: 'soon' });
+      assert.strictEqual(count(md, 'team ask '), 8, 'fallback cap is not 8');
+    });
+    check('team: checkpoints from one teammate session inject only the newest', () => {
+      const sess = { events: [], teamEntries: [
+        mkEntry(0, { author: 'Pat', session: 's9', ts: tsAgo(300), ask: 'checkpoint one', summary: 'first third done' }),
+        mkEntry(1, { author: 'Pat', session: 's9', ts: tsAgo(200), ask: 'checkpoint two', summary: 'two thirds done' }),
+        mkEntry(2, { author: 'Pat', session: 's9', ts: tsAgo(100), ask: 'checkpoint three', summary: 'session complete, all tests green' }),
+      ] };
+      const md = digest.renderBlock(trimProj, sess, cfgBase, 'CLAUDE.md');
+      assert.strictEqual(count(md, 'checkpoint '), 1, 'session not collapsed to one entry');
+      assert.ok(md.includes('checkpoint three') && md.includes('session complete'), 'newest checkpoint missing');
+      assert.strictEqual(count(md, 'Result: '), 1, 'expected exactly one Result line');
+      assert.strictEqual(sess.teamEntries.length, 3, 'state array was truncated');
     });
 
     // Back to Marco: his next pass pulls Andrew's Codex ask.
