@@ -2355,6 +2355,33 @@ async function main() {
     assert.deepStrictEqual(res.entries, []);
     assert.strictEqual(res.nextBefore, null);
   });
+  check('feed.buildFeed does not mutate its input arrays or their entries', () => {
+    const local = [feed.normalizeLocal(
+      { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'local ask', summary: 'l', files: ['a.js', 'b.js'] },
+      { projectPath: '/p', projectName: 'p', projectId: 'uuid-1' })];
+    const team = [feed.normalizeTeam(
+      { id: 9, project_id: 'uuid-2', project_name: 'other', author_id: 'you', author_name: 'Andrew',
+        ts: '2026-07-14T07:00:00Z', source: 'Codex', ask: 'team ask', summary: 't',
+        files: ['x.js', 'y.js'], created_at: '2026-07-14T07:00:01Z' }, { selfUserId: 'me' })];
+    const localCopy = local.slice();
+    const teamCopy = team.slice();
+    const localFilesCopy = local[0].files.slice();
+    const teamFilesCopy = team[0].files.slice();
+    feed.buildFeed({ local, team, teamUnavailable: false, limit: 50 });
+    assert.deepStrictEqual(local, localCopy, 'local array was mutated');
+    assert.deepStrictEqual(team, teamCopy, 'team array was mutated');
+    assert.deepStrictEqual(local[0].files, localFilesCopy, 'a local entry files array was reordered/emptied');
+    assert.deepStrictEqual(team[0].files, teamFilesCopy, 'a team entry files array was reordered/emptied');
+  });
+  check('feed.buildFeed returns nextBefore=null when merged length equals limit exactly', () => {
+    const team = [1, 2].map(i => feed.normalizeTeam(
+      { id: i, project_id: 'p', project_name: 'p', author_id: 'x', author_name: 'X',
+        ts: '2026-07-14T0' + i + ':00:00Z', source: 'Codex', ask: 'a' + i, summary: 's' + i,
+        files: [], created_at: '2026-07-14T0' + i + ':00:00Z' }, { selfUserId: 'me' }));
+    const res = feed.buildFeed({ local: [], team, teamUnavailable: false, limit: 2 });
+    assert.strictEqual(res.entries.length, 2);
+    assert.strictEqual(res.nextBefore, null, 'no cursor when exactly limit entries remain');
+  });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);
