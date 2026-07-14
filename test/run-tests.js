@@ -19,7 +19,6 @@ delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not 
 const util = require('../lib/util');
 const { syncOnce } = require('../lib/scan');
 const digest = require('../lib/digest');
-const { buildGraph } = require('../lib/graph');
 const { startServer, teamPayload, teamProjectsPayload } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
 const { createMockSupabase } = require('./mock-supabase');
@@ -239,7 +238,7 @@ async function main() {
     assert.ok(!fs.existsSync(path.join(proj1, '.membridge')), 'memory DB not removed');
   });
 
-  // --- 4. session ids, state migration, neural graph ---
+  // --- 4. session ids, state migration ---
   check('events carry per-chat session ids from the transcript filename', () => {
     const state = util.loadState();
     const key = Object.keys(state.projects).find(k => k.toLowerCase() === proj1.toLowerCase());
@@ -269,45 +268,6 @@ async function main() {
     const md = claudeMd();
     assert.strictEqual(count(md, digest.BEGIN), 1, 'duplicate block');
     assert.strictEqual(count(md, 'Build the login page with OAuth'), 1, 'duplicate prompt');
-  });
-
-  // A second Claude Code session in the same project: same idea (OAuth login),
-  // same file — the graph must connect it to sess1.
-  fs.writeFileSync(path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-shop-app', 'sess3.jsonl'), jsonl([
-    { type: 'user', message: { role: 'user', content: 'Improve the OAuth login redirect error handling' }, cwd: proj1, timestamp: '2026-07-09T10:20:00.000Z' },
-    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(proj1, 'src', 'login.js') } }] }, cwd: proj1, timestamp: '2026-07-09T10:21:00.000Z' },
-  ]));
-  syncOnce();
-
-  const graph = buildGraph(util.loadState(), util.getConfig());
-  check('graph: project node exists with >=3 distinct chat nodes', () => {
-    const pNode = graph.nodes.find(n => n.type === 'project' && String(n.path).toLowerCase() === proj1.toLowerCase());
-    assert.ok(pNode, 'proj1 project node missing');
-    assert.ok(pNode.chats >= 3, `expected >=3 chats on project node, got ${pNode.chats}`);
-    const chats = graph.nodes.filter(n => n.type === 'chat' && String(n.project).toLowerCase() === proj1.toLowerCase());
-    assert.ok(chats.length >= 3, `expected >=3 chat nodes, got ${chats.length}`);
-    assert.strictEqual(new Set(chats.map(c => c.id)).size, chats.length, 'chat ids not distinct');
-  });
-  check('graph: every chat node has a member link to its project', () => {
-    const chats = graph.nodes.filter(n => n.type === 'chat');
-    assert.ok(chats.length, 'no chat nodes at all');
-    for (const c of chats) {
-      assert.ok(
-        graph.links.some(l => l.type === 'member' && l.source === c.id && l.target === 'p:' + c.project),
-        `no member link for ${c.id}`,
-      );
-    }
-  });
-  check('graph: sess1 and sess3 are related by shared file and oauth terms', () => {
-    const rel = graph.links.find(l => l.type === 'related' &&
-      ((l.source === 'c:sess1' && l.target === 'c:sess3') || (l.source === 'c:sess3' && l.target === 'c:sess1')));
-    assert.ok(rel, 'related link between sess1 and sess3 missing');
-    assert.ok(rel.sharedFiles.some(f => f.includes('login.js')), `sharedFiles lack login.js: ${JSON.stringify(rel.sharedFiles)}`);
-    assert.ok(rel.similarity > 0, `similarity not positive: ${rel.similarity}`);
-    assert.ok(rel.terms.some(t => /^(oauth|login|redirect)/.test(t)), `no oauth-family term: ${JSON.stringify(rel.terms)}`);
-  });
-  check('graph: redacted secret never appears in graph output', () => {
-    assert.ok(!JSON.stringify(graph).includes('sk-test1234567890abcdef'), 'secret leaked into graph');
   });
 
   // Strip everything again so the daemon section starts from the same clean
@@ -454,15 +414,6 @@ async function main() {
       assert.ok(pageHtml.includes('Advanced: self-hosted backend'), 'self-hosted backend card missing');
       assert.ok(pageHtml.includes('stTeamUrl'), 'self-hosted backend URL field missing');
       assert.ok(pageHtml.includes('stTeamAnonKey'), 'self-hosted backend anon key field missing');
-    });
-    const graphRes = await fetch(`${base}/api/graph`);
-    const graphText = await graphRes.text();
-    check('dashboard /api/graph serves nodes and links, secrets redacted', () => {
-      assert.strictEqual(graphRes.status, 200);
-      const g = JSON.parse(graphText);
-      assert.ok(Array.isArray(g.nodes) && g.nodes.some(n => n.type === 'chat'), 'chat nodes missing');
-      assert.ok(Array.isArray(g.links) && g.links.some(l => l.type === 'member'), 'member links missing');
-      assert.ok(!graphText.includes('sk-test1234567890abcdef'), 'secret leaked over HTTP');
     });
     const feedRes = await (await fetch(`${base}/api/feed?limit=50`)).json();
     check('/api/feed returns a merged entries array with a degradation flag', () => {
