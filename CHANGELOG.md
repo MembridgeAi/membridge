@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.0 — 2026-07-14
+
+- **Simplified dashboard — three surfaces, one feed.** The desktop dashboard
+  drops from five surfaces to three: **Home**, a single unified,
+  summary-first activity feed (you and your teammates, across all projects,
+  newest first) where each entry leads with *what got done* and keeps the raw
+  prompt as a muted `Asked:` line, with a running session shown as
+  `Working on:` instead; quiet person/project/tool filter chips replace the
+  select-box filter bar. **Project pages** become one merged local + team
+  stream in the same summary-first format, day-grouped, with Copy-for-AI and a
+  `⋯` menu (memory log, context targets, pause/resume, share/unlink, remove
+  block, delete) and the roadmap generator collapsed at the bottom.
+  **Settings** now also holds all team management (switch/rename team, members
+  and roles, invite links, create/join/leave, account + log out) and project
+  management (add a project, detected-tools scan, watched-projects list).
+- **Removed**: the Neural map (force-directed graph view, its canvas
+  simulation, `/api/graph`, and `lib/graph.js`), the Overview marketing hero
+  and project-card grid, the separate Team hub tab, member drill-down pages
+  (`#team-member=`), and the team-project sub-route (`#team-project=`, folded
+  into `#project=`). The header is now just logo · running/sync pill · Invite
+  · settings gear.
+- **New `GET /api/feed`** in the local daemon merges local `.membridge` memory
+  with each team's `team_feed` into one sorted, deduped list, degrading to
+  local-only (with a notice) when the team backend is unreachable. Merge logic
+  lives in a new, unit-tested `lib/feed.js`.
+- **Migration `004_feed_summary.sql`**: `team_feed` now returns each entry's
+  `summary`, so teammates' distilled summaries reach the feed. Function-only —
+  old clients ignore the added column. **Apply it to the live Supabase
+  backend.** (`supabase/schema.sql` updated to match.)
+
 ## 0.6.0 — 2026-07-13
 
 - **Invite links (team schema v2)**: `membridge team invite` mints a short

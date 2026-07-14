@@ -8,63 +8,76 @@
 doing — and where the tools themselves stay on the same page.**
 
 MemBridge is a team collaboration app for AI-assisted development. It lives
-in your menu bar, and its dashboard is the product: a **Team hub** with a
-live feed of every ask your teammates gave their AI tools, member and
-project pages, invites and roles — plus, underneath it all, a memory engine
-that keeps Claude Code, Codex, Gemini CLI, and any other agent aware of each
-other's work, across tools *and* across teammates.
+in your menu bar, and its dashboard is the product: one **unified,
+summary-first feed** of everything your team's AI tools got done — you and
+your teammates, across every project, newest first — plus, underneath it all,
+a memory engine that keeps Claude Code, Codex, Gemini CLI, and any other
+agent aware of each other's work, across tools *and* across teammates.
 
 So when Andrew's Codex refactors checkout validation, you see it in the
-feed — and your Claude Code already knows about it the next time you open
-the project.
+feed — leading with *what got done*, not just the prompt — and your Claude
+Code already knows about it the next time you open the project.
+
+The whole dashboard is three surfaces: **Home** (the feed), **project
+pages**, and **Settings**. Nothing else to learn.
 
 Everything starts local: no cloud, no accounts, no API keys until you decide
 to connect a team. (Prefer a terminal? Everything the app does is also a
 [CLI](#the-cli).)
 
-## The Team hub
+## The dashboard — three surfaces
 
-Open the **Team** tab and you get a real collaboration hub:
+The header is just: logo · a running/sync status pill (click it to sync
+now) · **Invite** · a settings gear. Everything else is one of three
+surfaces.
 
-- **Activity feed** — everything your team's AI tools did, grouped by day:
-  who asked, which tool, which project, what the ask was, and the files it
-  touched. Filter by member, project, or tool; page back through history.
-- **Members** — who's on the team, their role, when they were last active.
-  Click a member for their page: their projects and their recent work as a
-  timeline. Owners and admins manage roles or remove members; anyone can
-  leave.
-- **Team projects** — every project the team shares, with contributor counts
-  and last activity. Click one for its page: contributors and the project's
-  full feed. Projects you also have locally link back to their local page.
-- **Invites** — mint invite links from the hub header, with optional expiry
-  and max-use caps; copy, revoke, done.
-- **Team settings** — rename the team, rotate the legacy invite code, leave.
-- **Multi-team** — a switcher in the hub header if you're on more than one.
+### Home — the unified feed
+
+The default view is a single centered column: every ask your team's AI
+tools completed, you and your teammates, across all projects, newest first.
+Each entry is **summary-first** — it leads with *what got done*, with the
+original prompt tucked underneath as a muted `Asked:` line — and carries a
+per-person avatar, the tool that did it, a project pill, the files it
+touched, and a relative time. A session that's still running (or a tool that
+doesn't distill) shows a `Working on:` line instead, so unfinished work
+never looks finished.
+
+Three quiet filter chips sit above the feed — **person**, **project**,
+**tool** — populated from the feed itself. Click a person anywhere to filter
+the feed to them; click a project pill to open its page. If the team backend
+is briefly unreachable, the feed still renders your local work with a
+one-line notice and recovers on the next poll.
+
+### Project pages
+
+Open any project and you get one merged stream — your local work and your
+teammates' interleaved, same summary-first format, grouped by day. The
+header carries **Copy for AI** (a trimmed, redacted digest on your clipboard
+for pasting into ChatGPT, claude.ai, or any web AI that can't see your disk)
+and a `⋯` menu for everything else: open the memory log, see the
+context-file targets, pause/resume, share with the team or unlink, remove
+the injected memory block, or delete the project. The roadmap generator
+lives in a collapsed section at the bottom.
+
+### Settings
+
+One place for app settings *and* all management. **Team**: switch or rename
+a team, manage members and roles, mint and revoke invite links, create/join
+another team or leave, and your account with log out. **Projects**: add a
+project, run the detected-tools scan, and manage the watched-projects list
+(pause or delete) — the way to reach a project with no recent feed activity.
+Plus the usual settings: session summaries (distillation toggle and
+checkpoint knobs), bring-your-own-key and planner model, sync interval and
+target files, and a self-hosted-backend card for operators. No config-file
+editing required.
 
 Signing up, creating a team, inviting people, joining, and linking projects
 all happen right in the app — no terminal required.
 
 **Teammates who haven't installed anything** can still follow along: the
 hosted **web workspace** ([`web/`](web/README.md), Next.js + Supabase) opens
-invite links at `/join/<token>`, shows the same day-grouped feed with
-filters, project stats, and member/role/invite management from any browser.
-
-## The rest of the dashboard
-
-- **Overview** — every local project with AI activity: tool badges, last
-  activity, paused state. A **Scan** view shows exactly what MemBridge
-  detected — which tools, which session folders, which projects — read-only.
-- **Project pages** — the full ask-by-ask history with the files each ask
-  touched; a Memory tab showing exactly what gets injected where, with
-  pause/resume, delete, and **Remove block**; and **Copy for AI**, which
-  puts a trimmed, redacted digest on your clipboard for pasting into
-  ChatGPT, claude.ai, or any web AI that can't see your disk.
-- **Neural map** — a force-directed map of every chat across every project,
-  linked by shared files and shared ideas.
-- **Settings** — session summaries (the distillation toggle and checkpoint
-  knobs), bring-your-own-key and planner model, sync interval and target
-  files, and a self-hosted-backend card for operators. No config-file
-  editing required.
+invite links at `/join/<token>`, shows a day-grouped feed with filters,
+project stats, and member/role/invite management from any browser.
 
 ## How it works — the memory engine
 
@@ -127,18 +140,20 @@ memory committed — or commit it to share AI context with your whole team.
    status, dashboard, pause, and start-at-login. (Builds are unsigned for
    now: right-click → Open on first launch.) On Windows/Linux, or on a
    server, use [the CLI](#the-cli) instead.
-2. **Watch your own tools sync.** That's the zero-setup core: the Overview
-   fills with your projects, and Claude Code and Codex start seeing each
+2. **Watch your own tools sync.** That's the zero-setup core: the Home feed
+   fills with your work, and Claude Code and Codex start seeing each
    other's work. No account needed for any of this.
-3. **Create your team** in the Team tab: sign up, create the team, hit
-   **+ Invite**, and share the link (add an expiry or use cap if you like).
+3. **Create your team** from the header **Invite** button (or Settings →
+   Team): sign up, create the team, mint an invite, and share the link (add
+   an expiry or use cap if you like).
    The backend ships with the app — nothing to install or configure.
 4. **Teammates join** by opening the invite link in the web workspace (one
    click, works before they've installed anything) — then install the app
    so their own AI activity flows into the feed. Terminal folks:
    `membridge join <link>` does signup and join in one command.
-5. **Share a project** from the Team hub ("Share a local project…") — and
-   commit the resulting `.membridge/team.json` so teammates' clones connect
+5. **Share a project** from **Settings → Projects** (or a project page's
+   `⋯` menu) — and commit the resulting `.membridge/team.json` so teammates'
+   clones connect
    too. When MemBridge spots a clone of a repo a teammate already shares
    (same normalized git remote), it **suggests** the link in the dashboard —
    nothing is shared until you confirm (or opt into
@@ -222,7 +237,8 @@ falls back to the harvested summary.
 ## Roadmaps — the bring-your-own-key upgrade
 
 The free core never talks to any API. Add your own Anthropic API key in
-Settings and each project's **Plan tab** becomes a roadmap generator:
+Settings and each project page's **roadmap section** (collapsed at the
+bottom) becomes a generator:
 
 - Describe what you want to build next; the estimated cost sits on the
   button before you click (about 1¢ per roadmap with the default model).
@@ -384,8 +400,8 @@ zero accounts, zero keys, and zero network.
 
 **Do I need an API key?**
 No. An Anthropic API key (added in Settings) unlocks exactly one optional
-feature: per-project roadmaps on the Plan tab, billed to your key at roughly
-a cent per roadmap.
+feature: per-project roadmaps (the roadmap section on each project page),
+billed to your key at roughly a cent per roadmap.
 
 **Does my whole team need the app installed?**
 Everyone whose AI activity should sync runs MemBridge. Teammates who just
@@ -436,7 +452,7 @@ Code map: [`lib/scan.js`](lib/scan.js) (adapters → events → sync),
 [`lib/redact.js`](lib/redact.js) (the redaction pipeline),
 [`lib/hooks.js`](lib/hooks.js) + [`lib/consent.js`](lib/consent.js)
 (distillation hook + consent),
-[`lib/graph.js`](lib/graph.js) (neural-map data),
+[`lib/feed.js`](lib/feed.js) (merge local + team activity into the unified feed),
 [`lib/advisor.js`](lib/advisor.js) (BYOK roadmaps, raw fetch, zero deps),
 [`lib/teamsync.js`](lib/teamsync.js) (team sync, raw fetch against Supabase),
 [`lib/server.js`](lib/server.js) (local HTTP API),
@@ -451,9 +467,8 @@ plan is [PLAN.md](PLAN.md); recent changes are in [CHANGELOG.md](CHANGELOG.md).
 The working plan lives in [PLAN.md](PLAN.md). Next up:
 
 - Presence ("Andrew's Claude Code is working in src/checkout right now")
-- Web workspace parity with the desktop Team hub
+- Web workspace parity with the desktop dashboard's team features
 - LLM-powered summaries (optional API key): richer memory in fewer lines
-- Neural map v2: calmer 2D layout by default, 3D behind a toggle
 - Import ChatGPT / claude.ai data exports, and a `membridge mcp` server so
   MCP-capable clients can query project memory live
 - First-class adapters for Gemini CLI, Cursor, opencode, Copilot CLI
