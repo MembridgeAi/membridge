@@ -19,7 +19,7 @@ delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not 
 const util = require('../lib/util');
 const { syncOnce } = require('../lib/scan');
 const digest = require('../lib/digest');
-const { startServer, teamPayload, teamProjectsPayload, statusPayload } = require('../lib/server');
+const { startServer, teamPayload, teamProjectsPayload, statusPayload, feedPayload } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
 const { createMockSupabase } = require('./mock-supabase');
 const advisorLib = require('../lib/advisor');
@@ -1109,6 +1109,27 @@ async function main() {
       const md = claudeMd();
       assert.ok(md.includes("Teammates' AI activity"), 'team section missing');
       assert.ok(md.includes('Andrew · Codex: Refactor checkout validation'), "Andrew's ask missing");
+    });
+
+    // check() is synchronous (fn() is called and awaited via try/catch only
+    // for synchronous throws) — an async fn would resolve after check() has
+    // already recorded a pass, making the assertions vacuous. So the async
+    // work is awaited here first, and a plain synchronous check() verifies
+    // the already-settled result, mirroring how every other awaited team
+    // assertion in this block is structured (await ...; check(() => {...})).
+    const savedTeamUrl = process.env.MEMBRIDGE_TEAM_URL;
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:1'; // unreachable -> teamUnavailable
+    let offlineFeedRes;
+    try {
+      offlineFeedRes = await feedPayload({ limit: 50 });
+    } finally {
+      process.env.MEMBRIDGE_TEAM_URL = savedTeamUrl;
+    }
+    check('feed: offline (degraded) branch still names teammates from cached teamEntries', () => {
+      assert.strictEqual(offlineFeedRes.teamUnavailable, true, 'expected degraded feed');
+      assert.ok(Array.isArray(offlineFeedRes.offlineTeammates), 'offlineTeammates should be an array');
+      assert.ok(offlineFeedRes.offlineTeammates.length >= 1, 'no teammate names derived from cached teamEntries');
+      assert.ok(!offlineFeedRes.offlineTeammates.includes('You'), 'self should not appear as a teammate');
     });
 
     // ----- team v2 (002_team_v2.sql): invite links, roles, feed, auto-link -----
