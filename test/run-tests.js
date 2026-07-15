@@ -1325,6 +1325,50 @@ async function main() {
       const teamRow = feedByPath.entries.find(e => e.origin === 'team');
       assert.ok(teamRow, 'no team-origin row for the linked project — path was not resolved to its uuid');
     });
+
+    // Catch-up briefing over the local API: teammate rows only, self excluded,
+    // grouped by author, and a no-key degrade. A throwaway Anthropic mock
+    // stands in for the (already-closed) roadmap mock; the in-process server
+    // reads MEMBRIDGE_API_BASE per call, so setting it now is enough.
+    let lastTeamBriefReq = null;
+    const briefMock = http.createServer((rq, rs) => {
+      const cs = [];
+      rq.on('data', c => cs.push(c));
+      rq.on('end', () => {
+        lastTeamBriefReq = JSON.parse(Buffer.concat(cs).toString('utf8'));
+        rs.writeHead(200, { 'Content-Type': 'application/json' });
+        rs.end(JSON.stringify({
+          model: lastTeamBriefReq.model,
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'Andrew wired the receipt PDF; Dana added refund guardrails.' }],
+          usage: { input_tokens: 500, output_tokens: 60 },
+        }));
+      });
+    });
+    await new Promise(r => briefMock.listen(17948, '127.0.0.1', r));
+    process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17948';
+
+    await post(`${hubBase}/api/settings`, { apiKey: '' });
+    const briefDegraded = await (await post(`${hubBase}/api/briefing/generate`, {})).json();
+    await post(`${hubBase}/api/settings`, { apiKey: GOOD_KEY });
+    const briefRes = await (await post(`${hubBase}/api/briefing/generate`, { since: '2026-07-01T00:00:00.000Z' })).json();
+    check('briefing route: degrades without a key; briefs teammate activity with one', () => {
+      assert.strictEqual(briefDegraded.degraded, true, 'no-key path must degrade');
+      assert.ok(!briefDegraded.text, 'degraded path must not carry a briefing');
+      assert.strictEqual(briefRes.degraded, false);
+      assert.ok(briefRes.text && /receipt PDF/.test(briefRes.text), `briefing text missing: ${JSON.stringify(briefRes)}`);
+      assert.ok(briefRes.generatedAt, 'generatedAt missing');
+      assert.ok(lastTeamBriefReq, 'briefing mock never saw a request');
+      const userMsg = lastTeamBriefReq.messages[0].content;
+      assert.ok(userMsg.includes('Andrew'), 'teammate Andrew missing from the digest');
+      assert.ok(!/^##\s*You\b/m.test(userMsg), 'self rows leaked into the teammate digest');
+      const st = util.loadState();
+      assert.ok(st.catchup && st.catchup.briefing && /receipt PDF/.test(st.catchup.briefing.text),
+        'briefing not cached to state.catchup.briefing');
+      assert.strictEqual(st.catchup.briefing.since, '2026-07-01T00:00:00.000Z', 'cached since window wrong');
+    });
+    await post(`${hubBase}/api/settings`, { apiKey: '' });
+    await new Promise(r => briefMock.close(r));
     await new Promise(r => hubSrv.close(r));
 
     // Management runs on a fresh team so rotate/remove cannot disturb the
