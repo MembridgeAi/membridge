@@ -1511,6 +1511,50 @@ async function main() {
       assert.ok(projsAfterRestore.some(r => r.project_id === archLink.projectId), 'restored project missing from payload');
     });
 
+    // The dashboard route. A plain member (Dana) can only unlink their own
+    // machine — never archive for the team.
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-d');
+    const danaClone = path.join(ROOT, 'projects-d', 'archive-app');
+    fs.mkdirSync(danaClone, { recursive: true });
+    const stDana = util.loadState();
+    stDana.projects = { ...(stDana.projects || {}), [danaClone]: { events: [] } };
+    util.saveState(stDana);
+    await teamsync.linkProject(util.getConfig(), danaClone, team.team_id, 'Acme'); // same project row
+    const MEMBER_PORT = 17948;
+    const memberSrv = startServer(MEMBER_PORT, { retries: 0 });
+    await waitForHttp(`http://127.0.0.1:${MEMBER_PORT}/api/status`);
+    const memberDel = await (await fetch(`http://127.0.0.1:${MEMBER_PORT}/api/team/archive-project`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: danaClone }),
+    })).json();
+    await new Promise(r => memberSrv.close(r));
+    check('archive route: a plain member only unlinks locally, never archives for the team', () => {
+      assert.strictEqual(memberDel.scope, 'local');
+      assert.strictEqual(memberDel.archived, false);
+      assert.ok(memberDel.unlinked, 'member path did not unlink');
+      assert.ok(!fs.existsSync(path.join(danaClone, '.membridge', 'team.json')), 'member team.json survived');
+      assert.ok(!mock.projects.find(p => p.id === archLink.projectId).archivedAt, 'member call archived for the whole team');
+    });
+
+    // The owner deletes the shared project over the route: archived for the
+    // team AND fully cleaned up locally (team.json gone, project out of state).
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    const OWNER_PORT = 17949;
+    const ownerSrv = startServer(OWNER_PORT, { retries: 0 });
+    await waitForHttp(`http://127.0.0.1:${OWNER_PORT}/api/status`);
+    const ownerDel = await (await fetch(`http://127.0.0.1:${OWNER_PORT}/api/team/archive-project`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: projArch }),
+    })).json();
+    await new Promise(r => ownerSrv.close(r));
+    check('archive route: owner delete archives for the team and cleans up locally', () => {
+      assert.strictEqual(ownerDel.scope, 'team');
+      assert.strictEqual(ownerDel.archived, true);
+      assert.ok(mock.projects.find(p => p.id === archLink.projectId).archivedAt, 'backend project not archived via the route');
+      assert.ok(!fs.existsSync(path.join(projArch, '.membridge', 'team.json')), 'team.json survived the archive');
+      assert.ok(!util.loadState().projects[projArch], 'project still in local state after delete');
+    });
+
     // Privacy: entries never carry a foreign path — not even its basename.
     check('privacy: files outside the project are dropped from entries', () => {
       const ents = memorydb.buildEntries(proj1, {
