@@ -5,8 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
-// 16x16 MemBridge "M-bridge" mark (matches docs/brand/svg/membridge-mark-*.svg:
-// an M whose strokes stand as bridge towers over the crossbar deck).
+// 16x16 MemBridge "M-bridge" mark (matches the vendored brand mark at
+// app/assets/brand/membridge-mark-*.svg — an M whose strokes stand as
+// bridge towers over the crossbar deck).
 const GLYPH = [
   '................',
   '..#..........#..',
