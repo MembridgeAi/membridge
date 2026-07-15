@@ -284,6 +284,70 @@ async function main() {
     assert.ok(!fs.existsSync(path.join(proj1, '.membridge')), 'memory DB not removed');
   });
 
+  // --- 4b. extra targets: opt-in injection into Gemini/Cursor/Windsurf/Copilot ---
+  const projX = path.join(ROOT, 'projects', 'multi-tool-app');
+  fs.mkdirSync(projX, { recursive: true });
+  const xtDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-multi-tool-app');
+  fs.mkdirSync(xtDir, { recursive: true });
+  fs.writeFileSync(path.join(xtDir, 'sessX.jsonl'), jsonl([
+    { type: 'user', message: { role: 'user', content: 'Wire up the search index' }, cwd: projX, timestamp: '2026-07-13T09:00:00.000Z' },
+  ]));
+  syncOnce();
+  const geminiMd = () => read(path.join(projX, 'GEMINI.md'));
+  const cursorMdc = () => read(path.join(projX, '.cursor', 'rules', 'membridge.mdc'));
+  const windsurfRules = () => read(path.join(projX, '.windsurfrules'));
+  const copilotMd = () => read(path.join(projX, '.github', 'copilot-instructions.md'));
+
+  check('extra targets: defaults (opt-out) leave Gemini/Cursor/Windsurf/Copilot files uncreated', () => {
+    assert.ok(fs.existsSync(path.join(projX, 'CLAUDE.md')), 'default CLAUDE.md missing');
+    assert.ok(fs.existsSync(path.join(projX, 'AGENTS.md')), 'default AGENTS.md missing');
+    assert.ok(!fs.existsSync(path.join(projX, 'GEMINI.md')), 'GEMINI.md created while opted out');
+    assert.ok(!fs.existsSync(path.join(projX, '.cursor')), '.cursor dir created while opted out');
+    assert.ok(!fs.existsSync(path.join(projX, '.windsurfrules')), '.windsurfrules created while opted out');
+    assert.ok(!fs.existsSync(path.join(projX, '.github')), '.github dir created while opted out');
+  });
+
+  { const rc = util.loadUserConfig(); rc.extraTargets = { gemini: true, cursor: true, windsurf: true, copilot: true }; util.saveUserConfig(rc); }
+  syncOnce({ project: projX });
+
+  check('extra targets: enabling writes the marked block into each new target, creating parent dirs', () => {
+    assert.ok(geminiMd().includes(digest.BEGIN) && geminiMd().includes(digest.END), 'GEMINI.md missing markers');
+    assert.ok(geminiMd().includes('Wire up the search index'), 'GEMINI.md missing prompt');
+    assert.ok(windsurfRules().includes(digest.BEGIN) && windsurfRules().includes(digest.END), '.windsurfrules missing markers');
+    assert.ok(copilotMd().includes(digest.BEGIN) && copilotMd().includes(digest.END), 'copilot-instructions.md missing markers');
+    assert.ok(fs.existsSync(path.join(projX, '.github')), '.github dir not created');
+    const cursor = cursorMdc();
+    assert.ok(cursor.startsWith('---\ndescription:'), 'cursor .mdc missing frontmatter as the literal first bytes');
+    assert.ok(cursor.includes('alwaysApply: true'), 'cursor frontmatter missing alwaysApply');
+    assert.ok(cursor.includes(digest.BEGIN) && cursor.includes(digest.END), 'cursor .mdc missing markers');
+    assert.ok(fs.existsSync(path.join(projX, '.cursor', 'rules')), '.cursor/rules dir not created');
+  });
+
+  check('extra targets: re-sync is idempotent — one block, one frontmatter, no duplicates', () => {
+    syncOnce({ project: projX });
+    assert.strictEqual(count(geminiMd(), digest.BEGIN), 1, 'GEMINI.md block duplicated');
+    assert.strictEqual(count(windsurfRules(), digest.BEGIN), 1, '.windsurfrules block duplicated');
+    assert.strictEqual(count(copilotMd(), digest.BEGIN), 1, 'copilot-instructions.md block duplicated');
+    const cursor = cursorMdc();
+    assert.strictEqual(count(cursor, digest.BEGIN), 1, 'cursor .mdc block duplicated');
+    assert.strictEqual(count(cursor, '---\ndescription:'), 1, 'cursor frontmatter duplicated');
+  });
+
+  check('extra targets: remove strips every target and cleans up dirs it created', () => {
+    const out = spawnSync(process.execPath, [BIN, 'remove', '--project', projX], { encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.ok(!fs.existsSync(path.join(projX, 'CLAUDE.md')), 'block-only CLAUDE.md should be deleted');
+    assert.ok(!fs.existsSync(path.join(projX, 'AGENTS.md')), 'block-only AGENTS.md should be deleted');
+    assert.ok(!fs.existsSync(path.join(projX, 'GEMINI.md')), 'GEMINI.md not deleted');
+    assert.ok(!fs.existsSync(path.join(projX, '.windsurfrules')), '.windsurfrules not deleted');
+    assert.ok(!fs.existsSync(path.join(projX, '.github')), '.github dir not cleaned up');
+    assert.ok(!fs.existsSync(path.join(projX, '.cursor')), '.cursor dir not cleaned up (frontmatter-only mdc should count as MemBridge-owned)');
+  });
+
+  // Reset extraTargets to the shipped defaults so the rest of the suite
+  // (which shares this same MEMBRIDGE_HOME config) behaves exactly as before.
+  { const rc = util.loadUserConfig(); rc.extraTargets = { gemini: false, cursor: false, windsurf: false, copilot: false }; util.saveUserConfig(rc); }
+
   // --- 5. daemon + dashboard ---
   // Mock Anthropic API so key tests and roadmap generation stay offline
   // (advisor honors MEMBRIDGE_API_BASE).
@@ -575,6 +639,17 @@ async function main() {
       const mode = fs.statSync(util.configPath()).mode & 0o777;
       assert.strictEqual(mode, 0o600, `mode was ${mode.toString(8)}`);
     });
+    const stExtra = await (await post(`${base}/api/settings`, {
+      extraTargets: { cursor: true, gemini: true },
+    })).json();
+    check('settings: extraTargets are opt-in booleans, off by default and independently toggleable', () => {
+      assert.deepStrictEqual(st0.extraTargets, { gemini: false, cursor: false, windsurf: false, copilot: false }, 'extraTargets not off by default');
+      assert.deepStrictEqual(stExtra.extraTargets, { gemini: true, cursor: true, windsurf: false, copilot: false }, 'extraTargets toggle did not merge correctly');
+      const rawCfg = JSON.parse(read(util.configPath()));
+      assert.deepStrictEqual(rawCfg.extraTargets, { gemini: true, cursor: true, windsurf: false, copilot: false }, 'extraTargets not persisted');
+    });
+    // Restore defaults — this config is shared by the rest of the suite.
+    await post(`${base}/api/settings`, { extraTargets: { gemini: false, cursor: false, windsurf: false, copilot: false } });
     const tGood = await (await post(`${base}/api/settings/test`, {})).json();
     const tBad = await (await post(`${base}/api/settings/test`, { apiKey: 'sk-ant-wrong' })).json();
     check('settings: key test — stored key passes, bad key is rejected', () => {

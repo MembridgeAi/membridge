@@ -206,7 +206,7 @@ function cmdStatus() {
   console.log(`Daemon:    ${running ? `running (pid ${pid})` : 'not running'}`);
   console.log(`Dashboard: http://127.0.0.1:${config.dashboardPort}${running ? '' : ' (offline)'}`);
   console.log(`Home:      ${util.homeDir()}`);
-  console.log(`Interval:  ${config.intervalSec}s   Targets: ${config.targets.join(', ')}`);
+  console.log(`Interval:  ${config.intervalSec}s   Targets: ${util.effectiveTargets(config).join(', ')}`);
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
   console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'} — Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
@@ -229,9 +229,9 @@ function cmdRemove() {
   }
   let n = 0;
   for (const key of keys) {
-    for (const target of config.targets) {
+    for (const target of util.effectiveTargets(config)) {
       const file = path.join(key, target);
-      const res = digest.removeBlock(file);
+      const res = digest.removeBlock(file, { preamble: digest.preambleFor(target), projectRoot: key });
       if (res) {
         console.log(`  ${res === 'deleted' ? 'deleted (was only the memory block)' : 'block removed'}: ${file}`);
         n++;
