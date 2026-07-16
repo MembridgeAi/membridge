@@ -29,6 +29,10 @@ const codexAdapter = require('../lib/adapters/codex');
 const hooks = require('../lib/hooks');
 const redactLib = require('../lib/redact');
 const feed = require('../lib/feed');
+const mcpMod = require('../lib/mcp');
+const { Client: McpClient } = require('@modelcontextprotocol/sdk/client/index.js');
+const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
+const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
 
 const BIN = path.join(__dirname, '..', 'bin', 'membridge.js');
 const proj1 = path.join(ROOT, 'projects', 'shop-app');
@@ -3219,6 +3223,166 @@ async function main() {
     assert.strictEqual(res.entries.length, 2);
     assert.strictEqual(res.nextBefore, null, 'no cursor when exactly limit entries remain');
   });
+
+  // --- 14. MCP server (lib/mcp.js): read-only, no side effects ---
+  {
+    const mcpTsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    const projMcp = path.join(ROOT, 'projects', 'mcp-app');
+    fs.mkdirSync(projMcp, { recursive: true });
+    const mcpTxDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-mcp-app');
+    fs.mkdirSync(mcpTxDir, { recursive: true });
+    fs.writeFileSync(path.join(mcpTxDir, 'sessM.jsonl'), jsonl([
+      { type: 'user', message: { role: 'user', content: 'Rotate the webhook secret api_key=sk-test1234567890abcdef' }, cwd: projMcp, timestamp: mcpTsAgo(120) },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Rotated the webhook secret end to end and confirmed the deploy is green across every environment.' }] }, cwd: projMcp, timestamp: mcpTsAgo(60) },
+    ]));
+    syncOnce();
+
+    // A paused project must never surface through any MCP tool.
+    const projPaused = path.join(ROOT, 'projects', 'mcp-paused-app');
+    fs.mkdirSync(projPaused, { recursive: true });
+    fs.writeFileSync(path.join(projPaused, '.membridge-off'), '');
+
+    // A planted teammate entry with its own secret: proj.teamEntries is never
+    // pre-redacted at rest (only the push side scrubs before upload), so this
+    // specifically exercises the MCP layer's own redaction pass rather than
+    // something buildEntries/pull already guaranteed.
+    {
+      const state = util.loadState();
+      const mcpKey = Object.keys(state.projects).find(k => path.resolve(k) === path.resolve(projMcp));
+      state.projects[mcpKey].teamEntries = [{
+        author: 'Priya', ts: mcpTsAgo(30), source: 'Codex', session: 'p1',
+        ask: 'rotate creds token=sk-tamper-mcp-999',
+        summary: 'stored the new token api_key=sk-tamper-mcp-888 in the vault',
+        files: ['infra/vault.tf'],
+      }];
+      state.projects[projPaused] = { events: [{ ts: mcpTsAgo(10), source: 'Claude Code', kind: 'prompt', text: 'paused project work', session: 'x1' }] };
+      util.saveState(state);
+    }
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = mcpMod.createServer();
+    const client = new McpClient({ name: 'mcp-test-client', version: '1.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const callJson = async (name, args) => {
+      const res = await client.callTool({ name, arguments: args || {} });
+      return { res, data: JSON.parse(res.content[0].text) };
+    };
+
+    const toolsList = await client.listTools();
+    check('mcp: exposes exactly the four read-only tools, all marked readOnlyHint', () => {
+      const names = toolsList.tools.map(t => t.name).sort();
+      assert.deepStrictEqual(names, ['get_project_memory', 'get_recent_activity', 'list_projects', 'search_memory']);
+      assert.ok(toolsList.tools.every(t => t.annotations && t.annotations.readOnlyHint === true), 'a tool is missing readOnlyHint');
+      assert.ok(toolsList.tools.every(t => t.annotations.destructiveHint === false), 'a tool is missing destructiveHint:false');
+    });
+
+    const { data: lp } = await callJson('list_projects', {});
+    check('mcp: list_projects returns tracked projects with basic metadata, excludes paused', () => {
+      assert.ok(Array.isArray(lp.projects), 'projects is not an array');
+      const mine = lp.projects.find(p => path.resolve(p.path) === path.resolve(projMcp));
+      assert.ok(mine, 'mcp-app project missing');
+      assert.strictEqual(mine.name, 'mcp-app');
+      assert.ok(mine.lastActivity, 'lastActivity missing');
+      assert.ok(mine.tools.includes('Claude Code'), 'tools list missing Claude Code');
+      assert.ok(!lp.projects.some(p => path.resolve(p.path) === path.resolve(projPaused)), 'paused project leaked into list_projects');
+    });
+
+    const { data: gpm } = await callJson('get_project_memory', { project: projMcp });
+    check('mcp: get_project_memory mirrors the CLAUDE.md sections and redacts local + teammate secrets', () => {
+      assert.strictEqual(gpm.project, path.resolve(projMcp));
+      assert.ok(Array.isArray(gpm.recentAsks) && gpm.recentAsks.length >= 1, 'recentAsks missing');
+      assert.ok(Array.isArray(gpm.teammates) && gpm.teammates.length === 1, 'teammates missing');
+      assert.strictEqual(gpm.teammates[0].author, 'Priya');
+      const blob = JSON.stringify(gpm);
+      assert.ok(!blob.includes('sk-test1234567890abcdef'), 'local secret leaked');
+      assert.ok(!blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-888'), 'teammate secret leaked');
+      assert.ok(count(blob, '[redacted') >= 2, 'expected redaction markers for both the local and teammate secret');
+    });
+
+    const { res: unknownRes, data: unknownData } = await callJson('get_project_memory', { project: path.join(ROOT, 'projects', 'does-not-exist') });
+    check('mcp: get_project_memory handles an unknown project gracefully (no throw, isError)', () => {
+      assert.strictEqual(unknownRes.isError, true);
+      assert.ok(/unknown project/.test(unknownData.error), `error said: ${unknownData.error}`);
+    });
+
+    const { data: pausedData } = await callJson('get_project_memory', { project: projPaused });
+    check('mcp: get_project_memory refuses a paused project', () => {
+      assert.ok(/paused|excluded/.test(pausedData.error), `error said: ${pausedData.error}`);
+    });
+
+    const { data: recent } = await callJson('get_recent_activity', { limit: 20 });
+    check('mcp: get_recent_activity merges local + teammate entries newest-first and redacts secrets', () => {
+      assert.ok(Array.isArray(recent.entries) && recent.entries.length >= 2, 'entries missing');
+      const tsList = recent.entries.map(e => e.ts);
+      assert.deepStrictEqual(tsList, [...tsList].sort().reverse(), 'entries not sorted newest-first');
+      assert.ok(recent.entries.some(e => e.author === 'Priya'), 'teammate entry missing');
+      const blob = JSON.stringify(recent);
+      assert.ok(!blob.includes('sk-test1234567890abcdef') && !blob.includes('sk-tamper-mcp-999'), 'secret leaked into recent activity');
+    });
+
+    const { data: search } = await callJson('search_memory', { query: 'webhook' });
+    check('mcp: search_memory finds a keyword match across ask/summary and redacts it', () => {
+      assert.ok(search.results.length >= 1, 'expected at least one match');
+      assert.ok(search.results.some(r => /webhook/i.test(r.ask || '') || /webhook/i.test(r.summary || '')), 'expected match missing');
+      assert.ok(!JSON.stringify(search).includes('sk-test1234567890abcdef'), 'secret leaked into search results');
+    });
+
+    const { data: searchNone } = await callJson('search_memory', { query: 'zzz-no-such-keyword-zzz' });
+    check('mcp: search_memory returns no results for a non-matching query', () => {
+      assert.deepStrictEqual(searchNone.results, []);
+    });
+
+    await client.close();
+  }
+
+  // Smoke test: the real CLI command over real stdio, spawned as a
+  // subprocess — proves `membridge mcp`'s wiring (bin/membridge.js ->
+  // lib/mcp.js) actually starts a working server, not just that lib/mcp.js's
+  // exports work when called in-process.
+  {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [BIN, 'mcp'],
+      env: process.env,
+    });
+    const client = new McpClient({ name: 'mcp-smoke-client', version: '1.0.0' });
+    await client.connect(transport);
+    const tools = await client.listTools();
+    check('mcp: `membridge mcp` starts a real stdio server and lists its tools', () => {
+      assert.strictEqual(tools.tools.length, 4);
+      assert.ok(tools.tools.some(t => t.name === 'list_projects'));
+    });
+    await client.close();
+  }
+
+  // Missing-dependency path: MODULE_NOT_FOUND must produce one clear,
+  // actionable line on stderr and a non-zero exit — never a raw stack trace.
+  // Spawned as a subprocess because loadSdkDeps() calls process.exit(1) on
+  // this path, which must not kill the real test runner. The injectable
+  // requireFn simulates the SDK/zod genuinely being absent without actually
+  // uninstalling them from this test environment (they're needed by every
+  // other mcp test above).
+  {
+    const mcpPath = path.join(__dirname, '..', 'lib', 'mcp.js');
+    const script = `
+      const { loadSdkDeps } = require(${JSON.stringify(mcpPath)});
+      const fakeRequire = () => {
+        const err = new Error("Cannot find module '@modelcontextprotocol/sdk/server/mcp.js'");
+        err.code = 'MODULE_NOT_FOUND';
+        throw err;
+      };
+      loadSdkDeps(fakeRequire);
+      console.log('UNREACHABLE');
+    `;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    check('mcp: a missing @modelcontextprotocol/sdk or zod produces exactly the friendly message on stderr and a non-zero exit', () => {
+      assert.notStrictEqual(out.status, 0, `expected non-zero exit, got ${out.status}`);
+      assert.strictEqual(out.stderr.trim(), mcpMod.MISSING_DEPS_MESSAGE.trim(), `stderr was: ${out.stderr}`);
+      assert.ok(out.stderr.includes('npm install @modelcontextprotocol/sdk zod'), 'missing the actionable install command');
+      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past process.exit');
+    });
+  }
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);

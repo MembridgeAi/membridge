@@ -264,6 +264,13 @@ function cmdDashboard() {
   console.log(`Dashboard: ${url}`);
 }
 
+// lib/mcp.js (and its @modelcontextprotocol/sdk + zod dependencies) is
+// required lazily, here only, so every other command stays on the
+// dependency-light main path — `membridge status` etc. never load the SDK.
+async function cmdMcp() {
+  await require('../lib/mcp').startMcpServer();
+}
+
 // ---------------------------------------------------------------------------
 // Team sync commands (Supabase backend, see supabase/schema.sql + README)
 // ---------------------------------------------------------------------------
@@ -508,6 +515,15 @@ Distillation (agent-written session summaries — see README):
   remove-hooks        remove the MemBridge Stop hook (your other hooks are kept)
   hook stop           the hook itself (invoked by Claude Code, not by you)
 
+MCP (expose project memory, read-only, to MCP-capable clients — Claude
+Desktop, Cursor, Cowork, ...; see README):
+  mcp                 start a read-only MCP server over stdio
+                      One-time setup — MemBridge's core stays dependency-free,
+                      so this needs its own packages installed once:
+                        npm install @modelcontextprotocol/sdk zod
+                      Then point your MCP client's config at:
+                        { "command": "membridge", "args": ["mcp"] }
+
 Team sync (share project memory with your team — see README):
   join <link-or-code> [--email <e> --password <p>]   one command from invite to member
   signup / login --email <e> --password <p> [--name "You"]
@@ -535,6 +551,7 @@ const commands = {
   status: cmdStatus,
   remove: cmdRemove,
   dashboard: cmdDashboard,
+  mcp: cmdMcp,
   signup: cmdSignup,
   login: cmdLogin,
   logout: cmdLogout,

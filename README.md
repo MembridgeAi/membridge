@@ -284,6 +284,37 @@ membridge dashboard  # open the same dashboard in your browser
 | `membridge team create` / `invite` / `revoke-invite` | Create a team, mint and revoke invite links |
 | `membridge team link` / `unlink` / `list` | Share (or stop sharing) a project with your team |
 | `membridge team setup` | Advanced: point at a self-hosted backend |
+| `membridge mcp` | Start a read-only MCP server over stdio (see below) |
+
+### MCP server (read-only)
+
+`membridge mcp` exposes the same shared memory as a set of read-only MCP
+tools — `list_projects`, `get_project_memory`, `get_recent_activity`,
+`search_memory` — so MCP-capable clients (Claude Desktop, Cursor, Cowork, ...)
+can query it live, over stdio. No trigger/side-effect tools: nothing it
+exposes can push/pull team sync, write a context file, or mutate state, and
+every text field is redacted the same way CLAUDE.md/AGENTS.md injection is.
+
+It's opt-in: `@modelcontextprotocol/sdk` and `zod` are not part of MemBridge's
+core install (`npm install membridge` stays zero-dependency), so a one-time
+install is needed the first time you use it:
+
+```bash
+npm install @modelcontextprotocol/sdk zod
+```
+
+Then point your MCP client's config at:
+
+```json
+{
+  "mcpServers": {
+    "membridge": {
+      "command": "membridge",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
 ## Supported AI coding tools
 
@@ -469,8 +500,7 @@ The working plan lives in [PLAN.md](PLAN.md). Next up:
 - Presence ("Andrew's Claude Code is working in src/checkout right now")
 - Web workspace parity with the desktop dashboard's team features
 - LLM-powered summaries (optional API key): richer memory in fewer lines
-- Import ChatGPT / claude.ai data exports, and a `membridge mcp` server so
-  MCP-capable clients can query project memory live
+- Import ChatGPT / claude.ai data exports
 - First-class adapters for Gemini CLI, Cursor, opencode, Copilot CLI
 - Signed + notarized macOS builds
 
