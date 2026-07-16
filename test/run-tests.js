@@ -3991,6 +3991,39 @@ async function main() {
     assert.strictEqual(by('summary')[0].project, A);
   });
 
+  check('project-resolve: rehomeEvents breaks dominant ties toward the first-touched root', () => {
+    const A = '/tie/repoA', B = '/tie/repoB';
+    const tracked = new Set([require('../lib/util').normPath(A), require('../lib/util').normPath(B)]);
+    const resolveRoot = f => (f.startsWith(A) ? A : f.startsWith(B) ? B : null);
+    const events = [
+      { kind: 'prompt', project: '/home', session: 's1', text: 'go' },
+      { kind: 'edit', project: '/home', session: 's1', file: B + '/1.js' }, // B touched first
+      { kind: 'edit', project: '/home', session: 's1', file: A + '/1.js' }, // A second — 1-1 tie
+    ];
+    projectResolve.rehomeEvents(events, tracked, { resolveRoot });
+    assert.strictEqual(events[0].project, B, 'tie resolves to first-touched root (B)');
+  });
+
+  check('project-resolve: resolveRoot matches when the file sits directly in the tracked root', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-zerohop-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const tracked = new Set([require('../lib/util').normPath(repo)]);
+    assert.strictEqual(projectResolve.resolveRoot(path.join(repo, 'top.js'), tracked), repo);
+  });
+
+  check('project-resolve: rehomeEvents resolves a relative edit path against the event project', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-relpath-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+    const events = [
+      { kind: 'edit', project: repo, session: 's1', file: 'src/rel.js' }, // relative to repo
+    ];
+    projectResolve.rehomeEvents(events, new Set());
+    assert.strictEqual(events[0].project, repo, 'relative edit resolves under its project');
+  });
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
