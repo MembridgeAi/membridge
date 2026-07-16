@@ -4083,6 +4083,19 @@ async function main() {
     assert.strictEqual(projectResolve.resolveRoot(path.join(child, 'src', 'a.js'), trackedChild), child);
   });
 
+  check('project-resolve: sessionDominantRoot resolves relative edits against their project', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-sdr-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    const events = [
+      { kind: 'edit', session: 's1', project: repo, file: 'src/rel.js' },  // relative
+      { kind: 'edit', session: 's1', project: repo, file: path.join(repo, 'src', 'abs.js') },
+      { kind: 'edit', session: 's2', project: '/nope', file: '/untracked/x.js' },
+    ];
+    assert.strictEqual(projectResolve.sessionDominantRoot(events, 's1', new Set()), repo);
+    assert.strictEqual(projectResolve.sessionDominantRoot(events, 's2', new Set()), null);
+  });
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
