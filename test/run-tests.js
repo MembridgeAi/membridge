@@ -1477,6 +1477,19 @@ async function main() {
       assert.ok(!offlineFeedRes.offlineTeammates.includes('You'), 'self should not appear as a teammate');
     });
 
+    const goalChangesFeed = await feedPayload({ limit: 10 });
+    check('feedPayload: entries expose goal + changes', () => {
+      const e = (goalChangesFeed.entries || [])[0];
+      if (e) { assert.ok('goal' in e, 'goal key present'); assert.ok('changes' in e, 'changes key present'); }
+    });
+
+    check('dashboard: card render includes Intent + changesHtml wiring', () => {
+      const dashboard = require('../lib/dashboard');
+      const html = dashboard.dashboardPage();
+      assert.ok(/changesHtml/.test(html), 'changesHtml helper present');
+      assert.ok(/Intent/.test(html), 'Intent label present');
+    });
+
     // ----- team v2 (002_team_v2.sql): invite links, roles, feed, auto-link -----
     const MOCK_URL = 'http://127.0.0.1:17945';
     // Direct RPC helper for endpoints teamsync has no wrapper for (web-only).
