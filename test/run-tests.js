@@ -2789,6 +2789,31 @@ async function main() {
         'secret from a change note reached the server');
     });
 
+    // A backend missing BOTH the goal and changes columns must still recover:
+    // the push loop drops each missing column, one round-trip at a time, until
+    // the insert lands. Exercises the multi-drop path end to end.
+    setGoalEntry(15, 'gsess4', 'Wire up goal tracking take 4', 'the fourth goal field plumbing');
+    mockG.flags.rejectColumns = new Set(['goal', 'changes']);
+    let multiDropThrew = null;
+    try {
+      await teamsync.syncTeams({ project: projG });
+    } catch (err) {
+      multiDropThrew = err;
+    }
+    mockG.flags.rejectColumns = new Set();
+    check('teamsync: push recovers when both goal and changes columns are missing', () => {
+      assert.strictEqual(multiDropThrew, null, `push threw instead of recovering: ${multiDropThrew && multiDropThrew.message}`);
+      const row4 = mockG.entries.find(e => e.session === 'gsess4');
+      assert.ok(row4, 'entry never landed despite the drop-and-retry loop');
+      // the two rejected columns were dropped from the accepted row ...
+      assert.ok(!('goal' in row4), 'goal column was not dropped');
+      assert.ok(!('changes' in row4), 'changes column was not dropped');
+      // ... while every column the backend DOES have still shipped.
+      assert.ok('summary' in row4 && row4.summary, 'summary was dropped too');
+      assert.ok('files' in row4 && Array.isArray(row4.files), 'files was dropped too');
+      assert.ok('ask' in row4 && row4.ask, 'ask was dropped too');
+    });
+
     // Pull: a second identity joins the team and pulls Goalie's rows back —
     // goal and the change-model files must survive the round trip.
     const projGB = path.join(ROOT, 'projects-gb', 'goal-app');
@@ -3622,6 +3647,7 @@ async function main() {
         ask: 'rotate creds token=sk-tamper-mcp-999',
         summary: 'stored the new token api_key=sk-tamper-mcp-888 in the vault',
         files: ['infra/vault.tf'],
+        changes: [{ file: 'infra/vault.tf', status: 'edited', add: 3, del: 1, note: 'rotated token=sk-tamper-mcp-777', dep: false }],
       }];
       state.projects[projPaused] = { events: [{ ts: mcpTsAgo(10), source: 'Claude Code', kind: 'prompt', text: 'paused project work', session: 'x1' }] };
       util.saveState(state);
@@ -3664,8 +3690,12 @@ async function main() {
       assert.strictEqual(gpm.teammates[0].author, 'Priya');
       const blob = JSON.stringify(gpm);
       assert.ok(!blob.includes('sk-test1234567890abcdef'), 'local secret leaked');
-      assert.ok(!blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-888'), 'teammate secret leaked');
+      assert.ok(!blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-888') && !blob.includes('sk-tamper-mcp-777'),
+        'teammate secret leaked');
       assert.ok(count(blob, '[redacted') >= 2, 'expected redaction markers for both the local and teammate secret');
+      // the teammate change model is surfaced (with its note re-redacted)
+      assert.ok(Array.isArray(gpm.teammates[0].changes) && gpm.teammates[0].changes.some(c => c.file === 'infra/vault.tf'),
+        'teammate change model not surfaced');
     });
 
     const { res: unknownRes, data: unknownData } = await callJson('get_project_memory', { project: path.join(ROOT, 'projects', 'does-not-exist') });
@@ -3684,9 +3714,13 @@ async function main() {
       assert.ok(Array.isArray(recent.entries) && recent.entries.length >= 2, 'entries missing');
       const tsList = recent.entries.map(e => e.ts);
       assert.deepStrictEqual(tsList, [...tsList].sort().reverse(), 'entries not sorted newest-first');
-      assert.ok(recent.entries.some(e => e.author === 'Priya'), 'teammate entry missing');
+      const priya = recent.entries.find(e => e.author === 'Priya');
+      assert.ok(priya, 'teammate entry missing');
+      assert.ok(Array.isArray(priya.changes) && priya.changes.some(c => c.file === 'infra/vault.tf'),
+        'teammate change model missing from get_recent_activity');
       const blob = JSON.stringify(recent);
-      assert.ok(!blob.includes('sk-test1234567890abcdef') && !blob.includes('sk-tamper-mcp-999'), 'secret leaked into recent activity');
+      assert.ok(!blob.includes('sk-test1234567890abcdef') && !blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-777'),
+        'secret leaked into recent activity');
     });
 
     const { data: search } = await callJson('search_memory', { query: 'webhook' });

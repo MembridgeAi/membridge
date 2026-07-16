@@ -16,7 +16,11 @@ function createMockSupabase() {
   const entries = [];               // memory_entries rows
   const invites = new Map();        // token -> { token, teamId, expiresAt, maxUses, useCount, revokedAt }
   const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0 };
-  const flags = { rejectSummary: false }; // test knobs for backend quirks
+  // Test knobs for backend quirks. rejectSummary is kept for back-compat;
+  // rejectColumns is the general form — any column name added here provokes the
+  // PostgREST "schema cache" error until the POST body no longer carries it, so
+  // the client's drop-and-retry loop can be exercised across multiple columns.
+  const flags = { rejectSummary: false, rejectColumns: new Set() };
 
   const uuid = () => crypto.randomUUID();
   const shortToken = () => crypto.randomBytes(8).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x').slice(0, 10);
@@ -200,10 +204,16 @@ function createMockSupabase() {
     if (!userId) return json(res, 401, { message: 'not authenticated' });
     if (method === 'POST') {
       const rows = Array.isArray(body) ? body : [body];
-      // Simulates a backend whose schema predates the summary column
-      // (PostgREST rejects the whole insert with PGRST204).
-      if (flags.rejectSummary && rows.some(r => Object.prototype.hasOwnProperty.call(r, 'summary'))) {
-        return json(res, 400, { message: "Could not find the 'summary' column of 'memory_entries' in the schema cache" });
+      // Simulates a backend whose schema predates one or more columns
+      // (PostgREST rejects the whole insert with PGRST204). Reports the first
+      // still-present rejected column; the client drops it and retries, so a
+      // batch missing several columns recovers one round-trip at a time.
+      const rejected = new Set(flags.rejectColumns);
+      if (flags.rejectSummary) rejected.add('summary');
+      for (const col of rejected) {
+        if (rows.some(r => Object.prototype.hasOwnProperty.call(r, col))) {
+          return json(res, 400, { message: `Could not find the '${col}' column of 'memory_entries' in the schema cache` });
+        }
       }
       for (const r of rows) {
         if (r.author_id !== userId || !isMember(projectTeam(r.project_id), userId)) {
