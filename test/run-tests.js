@@ -2697,6 +2697,107 @@ async function main() {
     await new Promise(r => mock3.server.close(r));
   }
 
+  // Task 6: goal is gated by sharePrompts (same convention as ask), and the
+  // change model (buildEntries' e.changes) ships inside the `files` column
+  // instead of a plain filename list, when present.
+  const mockG = createMockSupabase();
+  await new Promise(r => mockG.server.listen(17949, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    const projG = path.join(ROOT, 'projects', 'goal-app');
+    fs.mkdirSync(projG, { recursive: true });
+    await teamsync.signup(util.getConfig(), 'goal@test.dev', 'pw-g', 'Goalie');
+    const teamG = await teamsync.createTeam(util.getConfig(), 'GoalTeam');
+    await teamsync.linkProject(util.getConfig(), projG, teamG.team_id, 'GoalTeam');
+
+    const gTsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    // Builds one prompt+edit+Distilled-summary entry directly in state (same
+    // shorthand as the trim-app/stateB fixtures above) so buildEntries yields
+    // an entry with both e.goal and e.changes (the highlight matches the
+    // edited file, so deriveChanges produces a non-empty change model).
+    const setGoalEntry = (sec, session, ask, note) => {
+      const st = util.loadState();
+      st.projects[projG] = {
+        events: [
+          { ts: gTsAgo(sec + 20), source: 'Claude Code', kind: 'prompt', session, text: ask },
+          { ts: gTsAgo(sec + 10), source: 'Claude Code', kind: 'edit', session, file: path.join(projG, 'src', 'goal.js') },
+          {
+            ts: gTsAgo(sec), source: 'Distilled', kind: 'summary', session,
+            text: 'Shipped goal tracking end to end.',
+            goal: 'Add persistent goal field to team push',
+            decisions: '', gotchas: '',
+            highlights: [{ file: 'src/goal.js', note }],
+          },
+        ],
+      };
+      util.saveState(st);
+    };
+
+    // setupFixtures opted the main test home into sharePrompts for the legacy
+    // team tests (see the comment near the top of the file) — clear it here
+    // so this first push exercises the gated-off path, like the prompt-gate
+    // section below does for `ask`.
+    {
+      const rc = util.loadUserConfig();
+      if (rc.team) delete rc.team.sharePrompts;
+      util.saveUserConfig(rc);
+    }
+    setGoalEntry(90, 'gsess1', 'Wire up goal tracking', 'the goal field plumbing');
+    await teamsync.syncTeams({ project: projG });
+    check('teamsync: goal gated by sharePrompts; change model ships in files', () => {
+      const row = mockG.entries.find(e => e.session === 'gsess1');
+      assert.ok(row, 'entry not pushed');
+      assert.strictEqual(row.goal, null, 'goal leaked with sharePrompts off');
+      assert.ok(Array.isArray(row.files) && row.files.length, 'files missing');
+      assert.ok(row.files.every(f => f && typeof f === 'object' && 'file' in f),
+        `files should be the change model (objects), got: ${JSON.stringify(row.files)}`);
+      assert.ok(row.files.some(f => f.file === 'src/goal.js'), 'expected file missing from change model');
+      assert.ok(row.files.some(f => f.note && f.note.includes('goal field plumbing')), 'change note missing');
+    });
+
+    // Flip sharePrompts on: a fresh entry's goal must ship, scrubbed.
+    const cfgG = util.loadUserConfig();
+    cfgG.team = { ...(cfgG.team || {}), sharePrompts: true };
+    util.saveUserConfig(cfgG);
+    setGoalEntry(30, 'gsess2', 'Wire up goal tracking take 2', 'the second goal field plumbing');
+    await teamsync.syncTeams({ project: projG });
+    check('teamsync: goal ships (scrubbed) once sharePrompts is on', () => {
+      const row2 = mockG.entries.find(e => e.session === 'gsess2');
+      assert.ok(row2, 'second entry not pushed');
+      assert.ok(row2.goal && row2.goal.includes('Add persistent goal field'), `goal was: ${row2.goal}`);
+    });
+
+    // Pull: a second identity joins the team and pulls Goalie's rows back —
+    // goal and the change-model files must survive the round trip.
+    const projGB = path.join(ROOT, 'projects-gb', 'goal-app');
+    fs.mkdirSync(projGB, { recursive: true });
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-goalpull');
+    util.ensureConfig();
+    const stGB = util.loadState();
+    stGB.projects = { ...(stGB.projects || {}), [projGB]: { events: [] } };
+    util.saveState(stGB);
+    await teamsync.signup(util.getConfig(), 'goalpull@test.dev', 'pw-gb', 'Puller');
+    const joinedG = await teamsync.joinTeam(util.getConfig(), teamG.invite_code);
+    await teamsync.linkProject(util.getConfig(), projGB, joinedG.team_id, joinedG.team_name);
+    await teamsync.syncTeams({ project: projGB });
+    check('teamsync: goal and change-model files are pulled back intact', () => {
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => path.resolve(k) === path.resolve(projGB));
+      assert.ok(key, 'pulled project missing from state');
+      const pulled = (st.projects[key].teamEntries || []).find(e => e.session === 'gsess2');
+      assert.ok(pulled, 'pulled entry missing');
+      assert.ok(pulled.goal && pulled.goal.includes('Add persistent goal field'), `pulled goal was: ${pulled.goal}`);
+      assert.ok(Array.isArray(pulled.files) && pulled.files.some(f => f.file === 'src/goal.js'),
+        `pulled files should carry the change model, got: ${JSON.stringify(pulled.files)}`);
+    });
+  } finally {
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mockG.server.close(r));
+  }
+
   // Incremental second read: a summary appended AFTER the first scan must be
   // merged on the next sync. Pins the offset to the byte past the last
   // newline, so an over-advance that silently drops every later summary
