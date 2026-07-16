@@ -3372,6 +3372,25 @@ async function main() {
     assert.ok(noted, 'a change carries the highlight note');
     assert.ok(!/SECRET123/.test(noted.note), 'secret is redacted from the note');
   });
+  check('feed: normalizeTeam carries goal + change-model from files, redacted', () => {
+    const redact = t => t.replace(/SECRET123/g, '[redacted]');
+    const row = {
+      author_name: 'Andrew', ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code',
+      goal: 'Ship SECRET123 feature', summary: 'did it',
+      files: [{ file: 'lib/mcp.js', status: 'new', add: 10, del: 0, note: 'uses SECRET123', dep: false }],
+    };
+    const out = require('../lib/feed').normalizeTeam(row, { redact });
+    assert.ok(!/SECRET123/.test(out.goal), 'goal redacted');
+    assert.strictEqual(out.changes.length, 1, 'change-model derived from files');
+    assert.strictEqual(out.changes[0].file, 'lib/mcp.js');
+    assert.ok(!/SECRET123/.test(out.changes[0].note), 'note redacted');
+  });
+  check('feed: normalizeTeam legacy string files yields no change-model', () => {
+    const out = require('../lib/feed').normalizeTeam(
+      { author_name: 'A', ts: '2026-07-16T00:00:00.000Z', source: 'x', files: ['lib/a.js', 'lib/b.js'] }, {});
+    assert.deepStrictEqual(out.changes, []);
+    assert.deepStrictEqual(out.files, ['lib/a.js', 'lib/b.js']);
+  });
   check('feed.buildFeed merges newest-first and drops the team dup of local self work', () => {
     const local = [feed.normalizeLocal(
       { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'same ask', summary: 'local rich', files: [] },
