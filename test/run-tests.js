@@ -399,6 +399,29 @@ async function main() {
     assert.strictEqual(count(md, 'Build the login page with OAuth'), 1, 'duplicate prompt');
   });
 
+  // --- 4a. scan: re-home events launched from a parent dir into the tracked
+  // child project. proj1 is already tracked at this point (backfill above
+  // recreated its .membridge), and the "remove" step right below wipes the
+  // on-disk artifacts again without touching state history, so this leaves
+  // the clean slate the daemon section (5.) expects intact.
+  check('scan: session edits re-home to the tracked project, not the launch cwd', () => {
+    const parent = path.dirname(proj1);
+    const sessDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-rehome');
+    fs.mkdirSync(sessDir, { recursive: true });
+    fs.writeFileSync(path.join(sessDir, 'rehome1.jsonl'), jsonl([
+      { type: 'user', message: { role: 'user', content: 'edit the login file' }, cwd: parent, timestamp: '2026-07-16T12:00:00.000Z' },
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Edit', input: { file_path: path.join(proj1, 'src', 'login.js') } }] }, cwd: parent, timestamp: '2026-07-16T12:00:01.000Z' },
+    ]));
+    fs.mkdirSync(path.join(proj1, '.membridge'), { recursive: true });
+    syncOnce();
+    const state = util.loadState();
+    const proj1Events = (state.projects[proj1] || { events: [] }).events;
+    assert.ok(proj1Events.some(e => e.kind === 'edit' && e.session === 'rehome1'), 'edit filed under proj1');
+    const parentEvents = (state.projects[parent] || { events: [] }).events;
+    assert.ok(!parentEvents.some(e => e.session === 'rehome1'), 'nothing filed under the parent cwd');
+  });
+
   // Strip everything again so the daemon section starts from the same clean
   // slate it always did (no blocks, no AGENTS.md, no memory DB).
   check('remove still cleans up after the backfill', () => {
