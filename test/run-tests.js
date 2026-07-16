@@ -2375,6 +2375,25 @@ async function main() {
     await new Promise(r => mock2.server.close(r));
   }
 
+  check('scan: distilled summary keeps goal/decisions/gotchas/highlights separate', () => {
+    const line = JSON.stringify({
+      session: 's1', ts: '2026-07-16T00:00:00.000Z',
+      goal: 'Expose memory to MCP clients', did: 'Built a read-only MCP server',
+      decisions: 'read-only by design', gotchas: '', highlights: [{ file: 'lib/mcp.js', note: 'the server' }],
+    }) + '\n';
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-scan-'));
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.membridge', 'summaries.jsonl'), line);
+    const st = { projects: { [repo]: { events: [] } }, files: {} };
+    const evs = require('../lib/scan').scanSummaries(st, { distill: { enabled: true } });
+    const ev = evs.find(e => e.session === 's1');
+    assert.ok(ev, 'summary event produced');
+    assert.strictEqual(ev.text, 'Built a read-only MCP server'); // text = did only
+    assert.strictEqual(ev.goal, 'Expose memory to MCP clients');
+    assert.strictEqual(ev.decisions, 'read-only by design');
+    assert.deepStrictEqual(ev.highlights, [{ file: 'lib/mcp.js', note: 'the server' }]);
+  });
+
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
   const runHook = payload => spawnSync(process.execPath, [BIN, 'hook', 'stop'], {
@@ -2483,14 +2502,16 @@ async function main() {
     const d = evs.filter(e => e.kind === 'summary' && e.source === 'Distilled');
     assert.ok(d.some(e => e.session === 'sessR') && d.some(e => e.session === 'sessD') && d.some(e => e.session === 'sessOther'),
       `distilled sessions were: ${JSON.stringify(d.map(e => e.session))}`);
-    assert.ok(d.find(e => e.session === 'sessD').text.includes('Gotchas: Clock skew'), 'gotchas not folded into the text');
+    assert.strictEqual(d.find(e => e.session === 'sessD').text, 'Hardened the webhook auth with HMAC and a replay window; rotated api_key=sk-distilled-secret-123.', 'text should be the did field only');
+    assert.strictEqual(d.find(e => e.session === 'sessD').gotchas, 'Clock skew over 30s breaks verification.', 'gotchas should be kept as a separate structured field');
     const rec = util.loadState().files[summariesFile];
     assert.ok(rec && rec.adapter === 'distill' && rec.offset > 0, `summaries offset record was ${JSON.stringify(rec)}`);
   });
   check('distill: the block prefers Distilled over harvested in every session', () => {
     const md = richMd();
     assert.ok(md.includes('Rebuilt the retry queue end to end'), 'sessR distilled summary missing');
-    assert.ok(md.includes('Decisions: Kept the queue schema'), 'decisions not folded in');
+    const evR = richEvents().find(e => e.kind === 'summary' && e.source === 'Distilled' && e.session === 'sessR');
+    assert.strictEqual(evR.decisions, 'Kept the queue schema; only consumers changed.', 'decisions should be a separate structured field, not folded into the rendered block');
     assert.ok(!md.includes('all pass in CI'), 'sessR harvested summary still shown');
     assert.ok(md.includes('Hardened the webhook auth'), 'sessD distilled summary missing');
     assert.ok(!md.includes('Harvested note'), 'sessD harvested summary still shown');
