@@ -2726,6 +2726,12 @@ async function main() {
     assert.ok(later.includes('2 already written'), 'later checkpoint should state the count');
     assert.ok(later.includes('do not repeat or modify earlier lines'), 'later checkpoint must forbid editing earlier lines');
   });
+  check('hooks: blockReason asks for goal and highlights', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'sess-x', 0);
+    assert.ok(/"goal"/.test(r), 'mentions goal field');
+    assert.ok(/"highlights"/.test(r), 'mentions highlights field');
+    assert.ok(/"did"/.test(r), 'still asks for did');
+  });
   check('checkpoint: countSummaryLines ignores malformed lines, empty did, and other sessions', () => {
     fs.writeFileSync(ckSummaries,
       'not json {\n' +
