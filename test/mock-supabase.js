@@ -16,7 +16,11 @@ function createMockSupabase() {
   const entries = [];               // memory_entries rows
   const invites = new Map();        // token -> { token, teamId, expiresAt, maxUses, useCount, revokedAt }
   const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0 };
-  const flags = { rejectSummary: false }; // test knobs for backend quirks
+  // Test knobs for backend quirks. rejectSummary is kept for back-compat;
+  // rejectColumns is the general form — any column name added here provokes the
+  // PostgREST "schema cache" error until the POST body no longer carries it, so
+  // the client's drop-and-retry loop can be exercised across multiple columns.
+  const flags = { rejectSummary: false, rejectColumns: new Set() };
 
   const uuid = () => crypto.randomUUID();
   const shortToken = () => crypto.randomBytes(8).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x').slice(0, 10);
@@ -200,10 +204,16 @@ function createMockSupabase() {
     if (!userId) return json(res, 401, { message: 'not authenticated' });
     if (method === 'POST') {
       const rows = Array.isArray(body) ? body : [body];
-      // Simulates a backend whose schema predates the summary column
-      // (PostgREST rejects the whole insert with PGRST204).
-      if (flags.rejectSummary && rows.some(r => Object.prototype.hasOwnProperty.call(r, 'summary'))) {
-        return json(res, 400, { message: "Could not find the 'summary' column of 'memory_entries' in the schema cache" });
+      // Simulates a backend whose schema predates one or more columns
+      // (PostgREST rejects the whole insert with PGRST204). Reports the first
+      // still-present rejected column; the client drops it and retries, so a
+      // batch missing several columns recovers one round-trip at a time.
+      const rejected = new Set(flags.rejectColumns);
+      if (flags.rejectSummary) rejected.add('summary');
+      for (const col of rejected) {
+        if (rows.some(r => Object.prototype.hasOwnProperty.call(r, col))) {
+          return json(res, 400, { message: `Could not find the '${col}' column of 'memory_entries' in the schema cache` });
+        }
       }
       for (const r of rows) {
         if (r.author_id !== userId || !isMember(projectTeam(r.project_id), userId)) {
@@ -221,6 +231,17 @@ function createMockSupabase() {
     }
     // GET with the exact filter shapes teamsync emits
     const p = url.searchParams;
+    // Simulates a backend whose schema predates one or more columns being
+    // requested in `select=` — real PostgREST returns a 400 with a
+    // "column ... does not exist" message (distinct shape from the POST
+    // PGRST204 case above), and the client's select-trimming loop should
+    // drop the column and retry rather than losing the whole pull.
+    const selectCols = (p.get('select') || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const col of flags.rejectColumns) {
+      if (selectCols.includes(col)) {
+        return json(res, 400, { message: `column memory_entries.${col} does not exist` });
+      }
+    }
     const eq = (p.get('project_id') || '').replace(/^eq\./, '');
     const neq = (p.get('author_id') || '').replace(/^neq\./, '');
     const gt = decodeURIComponent((p.get('created_at') || '').replace(/^gt\./, ''));
@@ -229,7 +250,15 @@ function createMockSupabase() {
       .filter(e => e.project_id === eq && e.author_id !== neq && e.created_at > gt)
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
       .slice(0, parseInt(p.get('limit') || '200', 10));
-    json(res, 200, rows);
+    // Real PostgREST only returns the requested columns — project to
+    // selectCols (when the caller sent one) so a dropped-and-retried select
+    // (the goal/decisions/gotchas/changes fallback loop) actually exercises
+    // the client's "missing column" degradation instead of leaking a value
+    // the client didn't ask for.
+    const projected = selectCols.length
+      ? rows.map(r => Object.fromEntries(selectCols.filter(c => c in r).map(c => [c, r[c]])))
+      : rows;
+    json(res, 200, projected);
   }
 
   const server = http.createServer((req, res) => {

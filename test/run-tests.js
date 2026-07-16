@@ -30,6 +30,8 @@ const hooks = require('../lib/hooks');
 const redactLib = require('../lib/redact');
 const feed = require('../lib/feed');
 const mcpMod = require('../lib/mcp');
+const changesLib = require('../lib/changes');
+const projectResolve = require('../lib/project-resolve');
 const { Client: McpClient } = require('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
@@ -215,6 +217,57 @@ async function main() {
     assert.strictEqual(digest.relativeLabel(iso(3), now), '3 days ago');
     assert.strictEqual(digest.relativeLabel(null, now), 'no activity yet');
   });
+  check('changes: git status + numstat → grouped model', () => {
+    const runGit = args => {
+      if (args[0] === 'status') return '?? lib/mcp.js\n M bin/membridge.js\n D old.js\n';
+      if (args[0] === 'diff') return '312\t0\tlib/mcp.js\n28\t4\tbin/membridge.js\n0\t9\told.js\n';
+      return '';
+    };
+    const out = changesLib.deriveChanges('/repo',
+      ['bin/membridge.js', 'lib/mcp.js', 'old.js', 'package.json'],
+      [{ file: 'lib/mcp.js', note: 'the MCP server' }],
+      { runGit });
+    // order: new, edited, deleted, then deps last
+    assert.deepStrictEqual(out.map(c => c.file), ['lib/mcp.js', 'bin/membridge.js', 'old.js', 'package.json']);
+    assert.strictEqual(out[0].status, 'new');
+    assert.strictEqual(out[0].add, 312);
+    assert.strictEqual(out[0].note, 'the MCP server');
+    assert.strictEqual(out[1].status, 'edited');
+    assert.strictEqual(out[2].status, 'deleted');
+    assert.strictEqual(out[3].dep, true);
+    assert.strictEqual(out[3].add, null); // deps: counts suppressed
+  });
+  check('changes: git failure degrades to filename-only', () => {
+    const runGit = () => { throw new Error('not a git repo'); };
+    const out = changesLib.deriveChanges('/repo', ['lib/a.js', 'package.json'], [], { runGit });
+    assert.strictEqual(out.length, 2);
+    assert.strictEqual(out[0].status, 'edited');
+    assert.strictEqual(out[0].add, null);
+    assert.strictEqual(out[1].dep, true);
+  });
+  check('changes: quoted spaced paths classify correctly', () => {
+    const runGit = args => {
+      if (args[0] === 'status') return '?? "new doc.md"\n D "sub/old file.txt"\n';
+      return ''; // no numstat rows
+    };
+    const out = changesLib.deriveChanges('/repo', ['new doc.md', 'sub/old file.txt'], [], { runGit });
+    const byFile = Object.fromEntries(out.map(c => [c.file, c.status]));
+    assert.strictEqual(byFile['new doc.md'], 'new');
+    assert.strictEqual(byFile['sub/old file.txt'], 'deleted');
+  });
+  check('changes: rename attributes destination status', () => {
+    const runGit = args => {
+      if (args[0] === 'status') return 'R  old.js -> src/new.js\n';
+      if (args[0] === 'diff') return '5\t2\t{old.js => src/new.js}\n';
+      return '';
+    };
+    const out = changesLib.deriveChanges('/repo', ['src/new.js'], [], { runGit });
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].file, 'src/new.js');
+    // rename dest present in status map (not the compound "old.js -> src/new.js" key)
+    assert.strictEqual(out[0].status, 'edited');
+    assert.strictEqual(out[0].add, null); // rename counts are best-effort null
+  });
   check('projectDetail: a teammate touch drives team-aware lastTouched + activeLabel + stats', () => {
     const state = util.loadState();
     const key = Object.keys(state.projects).find(k => path.basename(k) === 'shop-app');
@@ -344,6 +397,29 @@ async function main() {
     const md = claudeMd();
     assert.strictEqual(count(md, digest.BEGIN), 1, 'duplicate block');
     assert.strictEqual(count(md, 'Build the login page with OAuth'), 1, 'duplicate prompt');
+  });
+
+  // --- 4a. scan: re-home events launched from a parent dir into the tracked
+  // child project. proj1 is already tracked at this point (backfill above
+  // recreated its .membridge), and the "remove" step right below wipes the
+  // on-disk artifacts again without touching state history, so this leaves
+  // the clean slate the daemon section (5.) expects intact.
+  check('scan: session edits re-home to the tracked project, not the launch cwd', () => {
+    const parent = path.dirname(proj1);
+    const sessDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-rehome');
+    fs.mkdirSync(sessDir, { recursive: true });
+    fs.writeFileSync(path.join(sessDir, 'rehome1.jsonl'), jsonl([
+      { type: 'user', message: { role: 'user', content: 'edit the login file' }, cwd: parent, timestamp: '2026-07-16T12:00:00.000Z' },
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Edit', input: { file_path: path.join(proj1, 'src', 'login.js') } }] }, cwd: parent, timestamp: '2026-07-16T12:00:01.000Z' },
+    ]));
+    fs.mkdirSync(path.join(proj1, '.membridge'), { recursive: true });
+    syncOnce();
+    const state = util.loadState();
+    const proj1Events = (state.projects[proj1] || { events: [] }).events;
+    assert.ok(proj1Events.some(e => e.kind === 'edit' && e.session === 'rehome1'), 'edit filed under proj1');
+    const parentEvents = (state.projects[parent] || { events: [] }).events;
+    assert.ok(!parentEvents.some(e => e.session === 'rehome1'), 'nothing filed under the parent cwd');
   });
 
   // Strip everything again so the daemon section starts from the same clean
@@ -1254,7 +1330,7 @@ async function main() {
       assert.ok(!md.includes('sk-test1234567890abcdef'), 'secret leaked into teammate file');
     });
 
-    check('team: a pushed summary is pulled intact and renders as a Result line', () => {
+    check('team: a pushed summary is pulled intact and renders as a Did line', () => {
       assert.ok(mock.entries.some(e => e.summary && e.summary.includes('smoke test')),
         'summary missing from the pushed rows');
       const st = util.loadState();
@@ -1263,7 +1339,7 @@ async function main() {
       assert.ok(pulled, 'no pulled entry carries a summary');
       assert.ok(pulled.summary.includes('smoke test'), `summary was: ${pulled.summary}`);
       const md = read(path.join(projB, 'CLAUDE.md'));
-      assert.ok(md.includes('Result: '), 'Result line missing from the team section');
+      assert.ok(md.includes('Did: '), 'Did line missing from the team section');
       assert.ok(md.includes('smoke test'), 'summary text missing from the team section');
     });
 
@@ -1326,8 +1402,8 @@ async function main() {
       const md = mdOf({});
       assert.strictEqual(count(md, 'team ask '), 8, 'default cap is not 8');
       assert.ok(md.includes('team ask 4') && !md.includes('team ask 3'), 'not the newest entries');
-      assert.ok(md.includes('— files: lib/pay.js'), 'files line missing');
-      assert.ok(!md.includes('Result:'), 'summary-less entries rendered a Result line');
+      assert.ok(md.includes('Files: lib/pay.js'), 'files line missing');
+      assert.ok(!md.includes('Did:'), 'summary-less entries rendered a Did line');
       const md3 = mdOf({ teamInjectMax: 3 });
       assert.strictEqual(count(md3, 'team ask '), 3, 'explicit cap not honored');
       assert.ok(md3.includes('team ask 9') && !md3.includes('team ask 8'), 'cap did not keep the newest');
@@ -1357,7 +1433,7 @@ async function main() {
       const md = digest.renderBlock(trimProj, sess, cfgBase, 'CLAUDE.md');
       assert.strictEqual(count(md, 'checkpoint '), 1, 'session not collapsed to one entry');
       assert.ok(md.includes('checkpoint three') && md.includes('session complete'), 'newest checkpoint missing');
-      assert.strictEqual(count(md, 'Result: '), 1, 'expected exactly one Result line');
+      assert.strictEqual(count(md, 'Did: '), 1, 'expected exactly one Did line');
       assert.strictEqual(sess.teamEntries.length, 3, 'state array was truncated');
     });
 
@@ -1423,6 +1499,24 @@ async function main() {
       assert.ok(Array.isArray(offlineFeedRes.offlineTeammates), 'offlineTeammates should be an array');
       assert.ok(offlineFeedRes.offlineTeammates.length >= 1, 'no teammate names derived from cached teamEntries');
       assert.ok(!offlineFeedRes.offlineTeammates.includes('You'), 'self should not appear as a teammate');
+    });
+
+    const goalChangesFeed = await feedPayload({ limit: 10 });
+    check('feedPayload: entries expose goal + changes', () => {
+      const e = (goalChangesFeed.entries || [])[0];
+      if (e) { assert.ok('goal' in e, 'goal key present'); assert.ok('changes' in e, 'changes key present'); }
+    });
+
+    check('dashboard: card render includes Intent + changesHtml wiring', () => {
+      const dashboard = require('../lib/dashboard');
+      const html = dashboard.dashboardPage();
+      assert.ok(/changesHtml/.test(html), 'changesHtml helper present');
+      assert.ok(/Intent/.test(html), 'Intent label present');
+      // Both card builders (feedEntryHtml for the main/project feed and
+      // catchupCardHtml for the Catch-Up headlines + Everything view) must
+      // call changesHtml — one match would mean only one path renders the
+      // triad, silently leaving the other on the old summary+files render.
+      assert.ok((html.match(/changesHtml\(/g) || []).length >= 2, 'changes rendered in both card paths');
     });
 
     // ----- team v2 (002_team_v2.sql): invite links, roles, feed, auto-link -----
@@ -1617,14 +1711,26 @@ async function main() {
       source: 'Claude Code',
       ask: 'Wire the receipt PDF and refund guardrails',
       summary: 'Checkout now emails a receipt PDF; refunds are the next milestone.',
+      goal: 'Ship the receipt PDF',
+      decisions: 'Generate PDFs synchronously for now.',
+      gotchas: 'Large carts can push generation past 2s.',
+      changes: [{ file: 'lib/receipts.js', status: 'new', add: 40, del: 0, note: 'PDF renderer', dep: false }],
       created_at: new Date(Date.now() + 5000).toISOString(),
     });
     const feedSummaryRes = await (await fetch(`${hubBase}/api/feed?limit=50`)).json();
-    // NOTE: exercises the read path (team_feed RPC -> normalizeTeam -> /api/feed). The mock cannot model Postgres's create-or-replace return-type constraint, so migration 004 itself must be validated against real Postgres before deploy.
+    // NOTE: exercises the read path (team_feed RPC -> normalizeTeam -> /api/feed). The mock cannot model Postgres's create-or-replace return-type constraint, so migration 008 itself must be validated against real Postgres before deploy.
     check('/api/feed surfaces teammate summaries end-to-end (read path)', () => {
       const teamEntry = feedSummaryRes.entries.find(e => e.origin === 'team' && e.summary);
       assert.ok(teamEntry, 'at least one team entry carries a non-null summary');
       assert.ok(/receipt PDF/.test(teamEntry.summary), `summary text lost: ${teamEntry && teamEntry.summary}`);
+    });
+    // Migration 008: team_feed must also return goal/decisions/gotchas/changes.
+    check('/api/feed surfaces teammate goal/decisions/changes end-to-end (read path)', () => {
+      const teamEntry = feedSummaryRes.entries.find(e => e.origin === 'team' && e.goal === 'Ship the receipt PDF');
+      assert.ok(teamEntry, 'no team entry carries the seeded goal');
+      assert.strictEqual(teamEntry.decisions, 'Generate PDFs synchronously for now.');
+      assert.ok(Array.isArray(teamEntry.changes) && teamEntry.changes.some(c => c.file === 'lib/receipts.js'),
+        `changes missing from feed entry: ${JSON.stringify(teamEntry.changes)}`);
     });
 
     // Phase 1: /api/feed?since threads through to the team_feed RPC p_since arg.
@@ -2182,12 +2288,12 @@ async function main() {
   check('rich: a final text under 80 chars is not emitted as a summary', () => {
     assert.ok(!richEvents().some(e => e.kind === 'summary' && e.session === 'sessShort'), 'short text became a summary');
   });
-  check('rich: renderBlock groups by session with Ask/Result/Tasks/Files', () => {
+  check('rich: renderBlock groups by session with Ask/Did/Tasks/Changes', () => {
     const md = richMd();
     assert.ok(md.includes('Ask: Refactor the payment retry queue with backoff'), 'Ask line missing');
-    assert.ok(md.includes('Result: Refactored the payment retry queue'), 'Result line missing');
+    assert.ok(md.includes('Did: Refactored the payment retry queue'), 'Did line missing');
     assert.ok(md.includes('Tasks: 1/3 done'), 'Tasks line missing');
-    assert.ok(md.includes('Files: src/queue.js'), 'Files line missing');
+    assert.ok(md.includes('Changes: src/queue.js'), 'Changes line missing');
     // the summary-less session keeps the original one-line ask format
     assert.ok(md.includes('Claude Code: Quick tweak to the readme'), 'fallback one-liner missing');
   });
@@ -2282,13 +2388,29 @@ async function main() {
     const flat = digest.plainText('## Heading\n**bold** and `inline` text\n```js\nlet x = 1\n```\ncol a | col b');
     assert.strictEqual(flat, 'Heading bold and inline text let x = 1 col a col b');
     const line = richMd().split('\n').find(l => l.includes('Rewrote the scratch build runner'));
-    assert.ok(line && line.trim().startsWith('Result:'), 'flattened summary missing from the block');
-    assert.ok(!/[*`|#]/.test(line), `markdown survived into the Result line: ${line}`);
+    assert.ok(line && line.trim().startsWith('Did:'), 'flattened summary missing from the block');
+    assert.ok(!/[*`|#]/.test(line), `markdown survived into the Did line: ${line}`);
   });
   check('fix: a summary-only session renders Ask: (not captured)', () => {
     const md = richMd();
     assert.ok(md.includes('Ask: (not captured)'), 'placeholder Ask line missing');
     assert.ok(md.includes('finished wiring the webhook retries'), 'prompt-less summary missing');
+  });
+
+  check('renderBlock: shows Intent/Did/Changes, no 240-char blob truncation', () => {
+    const proj = { events: [
+      { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'do the mcp thing' },
+      { ts: '2026-07-16T00:01:00.000Z', source: 'Claude Code', kind: 'edit', session: 's1', file: '/repo/lib/mcp.js' },
+      { ts: '2026-07-16T00:02:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'Built a read-only MCP server with four tools.', goal: 'Expose memory to MCP clients',
+        decisions: 'read-only by design', gotchas: '', highlights: [{ file: 'lib/mcp.js', note: 'the server' }] },
+    ] };
+    const block = digest.renderBlock('/repo', proj, { distill: { enabled: true }, team: {} }, 'CLAUDE.md');
+    assert.ok(/Intent: Expose memory to MCP clients/.test(block), 'Intent line');
+    assert.ok(/Did: Built a read-only MCP server/.test(block), 'Did line');
+    assert.ok(/Notes:.*read-only by design/.test(block), 'Notes line');
+    assert.ok(/Changes:.*lib\/mcp\.js/.test(block), 'Changes line');
+    assert.ok(!/Result:/.test(block), 'no legacy Result label');
   });
 
   // Team push carries the redacted summary (fresh mock: section 8's is gone).
@@ -2322,6 +2444,25 @@ async function main() {
     delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
     await new Promise(r => mock2.server.close(r));
   }
+
+  check('scan: distilled summary keeps goal/decisions/gotchas/highlights separate', () => {
+    const line = JSON.stringify({
+      session: 's1', ts: '2026-07-16T00:00:00.000Z',
+      goal: 'Expose memory to MCP clients', did: 'Built a read-only MCP server',
+      decisions: 'read-only by design', gotchas: '', highlights: [{ file: 'lib/mcp.js', note: 'the server' }],
+    }) + '\n';
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-scan-'));
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.membridge', 'summaries.jsonl'), line);
+    const st = { projects: { [repo]: { events: [] } }, files: {} };
+    const evs = require('../lib/scan').scanSummaries(st, { distill: { enabled: true } });
+    const ev = evs.find(e => e.session === 's1');
+    assert.ok(ev, 'summary event produced');
+    assert.strictEqual(ev.text, 'Built a read-only MCP server'); // text = did only
+    assert.strictEqual(ev.goal, 'Expose memory to MCP clients');
+    assert.strictEqual(ev.decisions, 'read-only by design');
+    assert.deepStrictEqual(ev.highlights, [{ file: 'lib/mcp.js', note: 'the server' }]);
+  });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
@@ -2431,14 +2572,16 @@ async function main() {
     const d = evs.filter(e => e.kind === 'summary' && e.source === 'Distilled');
     assert.ok(d.some(e => e.session === 'sessR') && d.some(e => e.session === 'sessD') && d.some(e => e.session === 'sessOther'),
       `distilled sessions were: ${JSON.stringify(d.map(e => e.session))}`);
-    assert.ok(d.find(e => e.session === 'sessD').text.includes('Gotchas: Clock skew'), 'gotchas not folded into the text');
+    assert.strictEqual(d.find(e => e.session === 'sessD').text, 'Hardened the webhook auth with HMAC and a replay window; rotated api_key=sk-distilled-secret-123.', 'text should be the did field only');
+    assert.strictEqual(d.find(e => e.session === 'sessD').gotchas, 'Clock skew over 30s breaks verification.', 'gotchas should be kept as a separate structured field');
     const rec = util.loadState().files[summariesFile];
     assert.ok(rec && rec.adapter === 'distill' && rec.offset > 0, `summaries offset record was ${JSON.stringify(rec)}`);
   });
   check('distill: the block prefers Distilled over harvested in every session', () => {
     const md = richMd();
     assert.ok(md.includes('Rebuilt the retry queue end to end'), 'sessR distilled summary missing');
-    assert.ok(md.includes('Decisions: Kept the queue schema'), 'decisions not folded in');
+    const evR = richEvents().find(e => e.kind === 'summary' && e.source === 'Distilled' && e.session === 'sessR');
+    assert.strictEqual(evR.decisions, 'Kept the queue schema; only consumers changed.', 'decisions should be a separate structured field, not folded into the rendered block');
     assert.ok(!md.includes('all pass in CI'), 'sessR harvested summary still shown');
     assert.ok(md.includes('Hardened the webhook auth'), 'sessD distilled summary missing');
     assert.ok(!md.includes('Harvested note'), 'sessD harvested summary still shown');
@@ -2608,6 +2751,270 @@ async function main() {
     await new Promise(r => mock3.server.close(r));
   }
 
+  // Task 6: goal is gated by sharePrompts (same convention as ask), and the
+  // change model (buildEntries' e.changes) ships inside the `files` column
+  // instead of a plain filename list, when present.
+  const mockG = createMockSupabase();
+  await new Promise(r => mockG.server.listen(17949, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    const projG = path.join(ROOT, 'projects', 'goal-app');
+    fs.mkdirSync(projG, { recursive: true });
+    await teamsync.signup(util.getConfig(), 'goal@test.dev', 'pw-g', 'Goalie');
+    const teamG = await teamsync.createTeam(util.getConfig(), 'GoalTeam');
+    await teamsync.linkProject(util.getConfig(), projG, teamG.team_id, 'GoalTeam');
+
+    const gTsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    // Builds one prompt+edit+Distilled-summary entry directly in state (same
+    // shorthand as the trim-app/stateB fixtures above) so buildEntries yields
+    // an entry with both e.goal and e.changes (the highlight matches the
+    // edited file, so deriveChanges produces a non-empty change model).
+    const setGoalEntry = (sec, session, ask, note) => {
+      const st = util.loadState();
+      st.projects[projG] = {
+        events: [
+          { ts: gTsAgo(sec + 20), source: 'Claude Code', kind: 'prompt', session, text: ask },
+          { ts: gTsAgo(sec + 10), source: 'Claude Code', kind: 'edit', session, file: path.join(projG, 'src', 'goal.js') },
+          {
+            ts: gTsAgo(sec), source: 'Distilled', kind: 'summary', session,
+            text: 'Shipped goal tracking end to end.',
+            goal: 'Add persistent goal field to team push',
+            decisions: '', gotchas: '',
+            highlights: [{ file: 'src/goal.js', note }],
+          },
+        ],
+      };
+      util.saveState(st);
+    };
+
+    // setupFixtures opted the main test home into sharePrompts for the legacy
+    // team tests (see the comment near the top of the file) — clear it here
+    // so this first push exercises the gated-off path, like the prompt-gate
+    // section below does for `ask`.
+    {
+      const rc = util.loadUserConfig();
+      if (rc.team) delete rc.team.sharePrompts;
+      util.saveUserConfig(rc);
+    }
+    setGoalEntry(90, 'gsess1', 'Wire up goal tracking', 'the goal field plumbing');
+    await teamsync.syncTeams({ project: projG });
+    check('teamsync: goal gated by sharePrompts; change model ships in its own column', () => {
+      const row = mockG.entries.find(e => e.session === 'gsess1');
+      assert.ok(row, 'entry not pushed');
+      assert.strictEqual(row.goal, null, 'goal leaked with sharePrompts off');
+      // files stays a plain string[] (filenames), never objects.
+      assert.ok(Array.isArray(row.files) && row.files.length, 'files missing');
+      assert.ok(row.files.every(f => typeof f === 'string'),
+        `files must stay string[], got: ${JSON.stringify(row.files)}`);
+      assert.ok(row.files.includes('src/goal.js'), 'expected filename missing from files');
+      // the change model rides in a dedicated `changes` column, as objects.
+      assert.ok(Array.isArray(row.changes) && row.changes.length,
+        `changes column missing the model, got: ${JSON.stringify(row.changes)}`);
+      assert.ok(row.changes.every(c => c && typeof c === 'object' && 'file' in c),
+        `changes should be objects, got: ${JSON.stringify(row.changes)}`);
+      assert.ok(row.changes.some(c => c.file === 'src/goal.js'), 'expected file missing from change model');
+      assert.ok(row.changes.some(c => c.note && c.note.includes('goal field plumbing')), 'change note missing');
+    });
+
+    // Flip sharePrompts on: a fresh entry's goal must ship, scrubbed.
+    const cfgG = util.loadUserConfig();
+    cfgG.team = { ...(cfgG.team || {}), sharePrompts: true };
+    util.saveUserConfig(cfgG);
+    setGoalEntry(30, 'gsess2', 'Wire up goal tracking take 2', 'the second goal field plumbing');
+    await teamsync.syncTeams({ project: projG });
+    check('teamsync: goal ships (scrubbed) once sharePrompts is on', () => {
+      const row2 = mockG.entries.find(e => e.session === 'gsess2');
+      assert.ok(row2, 'second entry not pushed');
+      assert.ok(row2.goal && row2.goal.includes('Add persistent goal field'), `goal was: ${row2.goal}`);
+    });
+
+    // A secret planted in a change note must be scrubbed at the push boundary,
+    // exactly like ask/summary — the note leaves the machine redacted.
+    setGoalEntry(20, 'gsess3', 'Rotate the deploy secret', 'rotate api_key=sk-change-note-SECRET77 in the vault');
+    await teamsync.syncTeams({ project: projG });
+    check('teamsync: a secret in a change note is redacted before push', () => {
+      const row3 = mockG.entries.find(e => e.session === 'gsess3');
+      assert.ok(row3, 'third entry not pushed');
+      assert.ok(Array.isArray(row3.changes) && row3.changes[0], 'change model missing');
+      assert.ok(row3.changes[0].note && row3.changes[0].note.includes('[redacted'),
+        `change note not redacted: ${row3.changes[0].note}`);
+      assert.ok(!JSON.stringify(mockG.entries).includes('sk-change-note-SECRET77'),
+        'secret from a change note reached the server');
+    });
+
+    // A backend missing BOTH the goal and changes columns must still recover:
+    // the push loop drops each missing column, one round-trip at a time, until
+    // the insert lands. Exercises the multi-drop path end to end.
+    setGoalEntry(15, 'gsess4', 'Wire up goal tracking take 4', 'the fourth goal field plumbing');
+    mockG.flags.rejectColumns = new Set(['goal', 'changes']);
+    let multiDropThrew = null;
+    try {
+      await teamsync.syncTeams({ project: projG });
+    } catch (err) {
+      multiDropThrew = err;
+    }
+    mockG.flags.rejectColumns = new Set();
+    check('teamsync: push recovers when both goal and changes columns are missing', () => {
+      assert.strictEqual(multiDropThrew, null, `push threw instead of recovering: ${multiDropThrew && multiDropThrew.message}`);
+      const row4 = mockG.entries.find(e => e.session === 'gsess4');
+      assert.ok(row4, 'entry never landed despite the drop-and-retry loop');
+      // the two rejected columns were dropped from the accepted row ...
+      assert.ok(!('goal' in row4), 'goal column was not dropped');
+      assert.ok(!('changes' in row4), 'changes column was not dropped');
+      // ... while every column the backend DOES have still shipped.
+      assert.ok('summary' in row4 && row4.summary, 'summary was dropped too');
+      assert.ok('files' in row4 && Array.isArray(row4.files), 'files was dropped too');
+      assert.ok('ask' in row4 && row4.ask, 'ask was dropped too');
+    });
+
+    // Pull: a second identity joins the team and pulls Goalie's rows back —
+    // goal and the change-model files must survive the round trip.
+    const projGB = path.join(ROOT, 'projects-gb', 'goal-app');
+    fs.mkdirSync(projGB, { recursive: true });
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-goalpull');
+    util.ensureConfig();
+    const stGB = util.loadState();
+    stGB.projects = { ...(stGB.projects || {}), [projGB]: { events: [] } };
+    util.saveState(stGB);
+    await teamsync.signup(util.getConfig(), 'goalpull@test.dev', 'pw-gb', 'Puller');
+    const joinedG = await teamsync.joinTeam(util.getConfig(), teamG.invite_code);
+    await teamsync.linkProject(util.getConfig(), projGB, joinedG.team_id, joinedG.team_name);
+    await teamsync.syncTeams({ project: projGB });
+    check('teamsync: goal and the change model are pulled back intact', () => {
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => path.resolve(k) === path.resolve(projGB));
+      assert.ok(key, 'pulled project missing from state');
+      const pulled = (st.projects[key].teamEntries || []).find(e => e.session === 'gsess2');
+      assert.ok(pulled, 'pulled entry missing');
+      assert.ok(pulled.goal && pulled.goal.includes('Add persistent goal field'), `pulled goal was: ${pulled.goal}`);
+      // files is string[]; the change model lands in its own `changes` field.
+      assert.ok(Array.isArray(pulled.files) && pulled.files.every(f => typeof f === 'string'),
+        `pulled files must stay string[], got: ${JSON.stringify(pulled.files)}`);
+      assert.ok(pulled.files.includes('src/goal.js'), 'pulled filename missing');
+      assert.ok(Array.isArray(pulled.changes) && pulled.changes.some(c => c.file === 'src/goal.js'),
+        `pulled changes should carry the model, got: ${JSON.stringify(pulled.changes)}`);
+    });
+  } finally {
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mockG.server.close(r));
+  }
+
+  // Task 8: ship decisions/gotchas to teammates end to end, and pull must
+  // survive a backend still missing goal/changes (or any optional column).
+  const mockS = createMockSupabase();
+  await new Promise(r => mockS.server.listen(17951, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17951';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    const projS = path.join(ROOT, 'projects', 'summary-app');
+    fs.mkdirSync(projS, { recursive: true });
+    await teamsync.signup(util.getConfig(), 'summary@test.dev', 'pw-s', 'Summarizer');
+    const teamS = await teamsync.createTeam(util.getConfig(), 'SummaryTeam');
+    await teamsync.linkProject(util.getConfig(), projS, teamS.team_id, 'SummaryTeam');
+    {
+      const rc = util.loadUserConfig();
+      rc.team = { ...(rc.team || {}), sharePrompts: true };
+      util.saveUserConfig(rc);
+    }
+
+    const sTsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    const setSummaryEntry = (sec, session, ask, decisions, gotchas) => {
+      const st = util.loadState();
+      st.projects[projS] = {
+        events: [
+          { ts: sTsAgo(sec + 20), source: 'Claude Code', kind: 'prompt', session, text: ask },
+          { ts: sTsAgo(sec + 10), source: 'Claude Code', kind: 'edit', session, file: path.join(projS, 'src', 'summary.js') },
+          {
+            ts: sTsAgo(sec), source: 'Distilled', kind: 'summary', session,
+            text: 'Shipped the summary fields end to end.',
+            goal: 'Ship summary fields to teammates',
+            decisions, gotchas,
+            highlights: [{ file: 'src/summary.js', note: 'the plumbing' }],
+          },
+        ],
+      };
+      util.saveState(st);
+    };
+
+    setSummaryEntry(60, 'ssess1', 'Wire up decisions/gotchas',
+      'Kept decisions/gotchas as separate columns.', 'A pre-migration backend must not break the pull.');
+    await teamsync.syncTeams({ project: projS });
+    check('teamsync: push ships decisions and gotchas (scrubbed), ungated by sharePrompts', () => {
+      const row = mockS.entries.find(e => e.session === 'ssess1');
+      assert.ok(row, 'entry not pushed');
+      assert.ok(row.decisions && row.decisions.includes('separate columns'), `decisions was: ${row.decisions}`);
+      assert.ok(row.gotchas && row.gotchas.includes('pre-migration backend'), `gotchas was: ${row.gotchas}`);
+    });
+
+    // Second identity joins the team and pulls Summarizer's rows back.
+    const projSB = path.join(ROOT, 'projects-sb', 'summary-app');
+    fs.mkdirSync(projSB, { recursive: true });
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-summarypull');
+    util.ensureConfig();
+    const stSB = util.loadState();
+    stSB.projects = { ...(stSB.projects || {}), [projSB]: { events: [] } };
+    util.saveState(stSB);
+    await teamsync.signup(util.getConfig(), 'summarypull@test.dev', 'pw-sb', 'PullerS');
+    const joinedS = await teamsync.joinTeam(util.getConfig(), teamS.invite_code);
+    await teamsync.linkProject(util.getConfig(), projSB, joinedS.team_id, joinedS.team_name);
+    await teamsync.syncTeams({ project: projSB });
+    check('teamsync: decisions/gotchas pulled back intact and render as a Notes line', () => {
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => path.resolve(k) === path.resolve(projSB));
+      assert.ok(key, 'pulled project missing from state');
+      const pulled = (st.projects[key].teamEntries || []).find(e => e.session === 'ssess1');
+      assert.ok(pulled, 'pulled entry missing');
+      assert.ok(pulled.decisions && pulled.decisions.includes('separate columns'), `pulled decisions: ${pulled.decisions}`);
+      assert.ok(pulled.gotchas && pulled.gotchas.includes('pre-migration backend'), `pulled gotchas: ${pulled.gotchas}`);
+      const block = digest.renderBlock(projSB, st.projects[key], {}, 'CLAUDE.md');
+      assert.ok(/Notes:.*separate columns.*pre-migration backend/.test(block),
+        `expected a Notes line combining decisions + gotchas, got:\n${block}`);
+    });
+
+    // Pull fallback: a backend still missing goal/changes (pre-008-migration)
+    // must not break the pull — the client should drop those columns from
+    // `select` and retry, degrading (null/empty) rather than throwing and
+    // stopping ALL teammate ingestion.
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    setSummaryEntry(30, 'ssess2', 'A second checkpoint',
+      'Second decisions.', 'Second gotchas.');
+    await teamsync.syncTeams({ project: projS }); // push ssess2 from the original identity
+
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-summarypull');
+    mockS.flags.rejectColumns = new Set(['goal', 'changes']);
+    let pullFallbackThrew = null;
+    try {
+      await teamsync.syncTeams({ project: projSB });
+    } catch (err) {
+      pullFallbackThrew = err;
+    }
+    mockS.flags.rejectColumns = new Set();
+    check('teamsync: pull survives a backend still missing goal/changes columns', () => {
+      assert.strictEqual(pullFallbackThrew, null, `pull threw instead of degrading: ${pullFallbackThrew && pullFallbackThrew.message}`);
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => path.resolve(k) === path.resolve(projSB));
+      assert.ok(key, 'pulled project missing from state');
+      const pulled2 = (st.projects[key].teamEntries || []).find(e => e.session === 'ssess2');
+      assert.ok(pulled2, 'entry never landed despite the column-drop-and-retry loop');
+      assert.ok(pulled2.summary, 'summary should still be present (not one of the dropped columns)');
+      assert.ok(Array.isArray(pulled2.files) && pulled2.files.length, 'files should still be present');
+      assert.strictEqual(pulled2.goal, null, 'goal should degrade to null when the column is missing');
+      assert.ok(pulled2.changes === null || (Array.isArray(pulled2.changes) && pulled2.changes.length === 0),
+        `changes should degrade to null/empty, got: ${JSON.stringify(pulled2.changes)}`);
+      // decisions/gotchas were not in the rejected set, so they must survive.
+      assert.ok(pulled2.decisions && pulled2.decisions.includes('Second decisions'), `pulled2.decisions: ${pulled2.decisions}`);
+      assert.ok(pulled2.gotchas && pulled2.gotchas.includes('Second gotchas'), `pulled2.gotchas: ${pulled2.gotchas}`);
+    });
+  } finally {
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mockS.server.close(r));
+  }
+
   // Incremental second read: a summary appended AFTER the first scan must be
   // merged on the next sync. Pins the offset to the byte past the last
   // newline, so an over-advance that silently drops every later summary
@@ -2674,6 +3081,12 @@ async function main() {
     assert.ok(later.includes('2 already written'), 'later checkpoint should state the count');
     assert.ok(later.includes('do not repeat or modify earlier lines'), 'later checkpoint must forbid editing earlier lines');
   });
+  check('hooks: blockReason asks for goal and highlights', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'sess-x', 0);
+    assert.ok(/"goal"/.test(r), 'mentions goal field');
+    assert.ok(/"highlights"/.test(r), 'mentions highlights field');
+    assert.ok(/"did"/.test(r), 'still asks for did');
+  });
   check('checkpoint: countSummaryLines ignores malformed lines, empty did, and other sessions', () => {
     fs.writeFileSync(ckSummaries,
       'not json {\n' +
@@ -2707,6 +3120,25 @@ async function main() {
     assert.deepStrictEqual(digest.sessionSummaries(harvOnly, 's').map(e => e.text), ['only harvested']);
   });
 
+  check('hooks: stop targets the resolved project, not the launch cwd', () => {
+    const parent = path.dirname(proj1);
+    fs.mkdirSync(path.join(proj1, '.membridge'), { recursive: true });
+    const state = util.loadState();
+    state.projects[proj1] = state.projects[proj1] || { events: [] };
+    state.projects[proj1].events.push(
+      { ts: '2026-07-16T12:00:00.000Z', source: 'Claude Code', kind: 'edit', session: 'hook-sess', file: path.join(proj1, 'src', 'login.js') });
+    util.saveState(state);
+    const payload = JSON.stringify({ session_id: 'hook-sess', cwd: parent });
+    const res = spawnSync('node', [BIN, 'hook', 'stop'], { input: payload, env: process.env, encoding: 'utf8' });
+    // Must BLOCK (non-empty stdout) — pre-fix, cwd=parent isn't a tracked project so the
+    // hook returned early with no output; this assertion is the red state.
+    assert.ok(res.stdout && res.stdout.trim(), 'hook must block by resolving the session edits to proj1');
+    const out = JSON.parse(res.stdout.trim());
+    assert.strictEqual(out.decision, 'block', 'decision is block');
+    assert.ok(out.reason.includes(path.join(proj1, '.membridge', 'summaries.jsonl')), 'targets resolved proj1');
+    assert.ok(!out.reason.includes(path.join(parent, '.membridge')), 'not the cwd');
+  });
+
   // Three distilled checkpoints in one session, driven end to end.
   const projSeq = path.join(ROOT, 'projects', 'seq-app');
   fs.mkdirSync(path.join(projSeq, 'src'), { recursive: true });
@@ -2725,7 +3157,7 @@ async function main() {
 
   check('checkpoint: block shows the latest checkpoint; memory.md/json hold the full ordered sequence', () => {
     const claude = read(path.join(projSeq, 'CLAUDE.md'));
-    assert.ok(claude.includes('Result: Checkpoint three'), 'block should show the latest checkpoint');
+    assert.ok(claude.includes('Did: Checkpoint three'), 'block should show the latest checkpoint');
     assert.ok(!claude.includes('Checkpoint one') && !claude.includes('Checkpoint two'), 'block should not show earlier checkpoints');
     assert.ok(!claude.includes('sk-seq-secret-42'), 'secret leaked into the block');
     const mem = read(path.join(projSeq, '.membridge', 'memory.md'));
@@ -2809,7 +3241,7 @@ async function main() {
   });
   check('checkpoint: multi-prompt session — injected block shows only the latest checkpoint', () => {
     const claude = read(path.join(projMp, 'CLAUDE.md'));
-    assert.ok(claude.includes('Result: Checkpoint beta'), 'block missing the latest checkpoint');
+    assert.ok(claude.includes('Did: Checkpoint beta'), 'block missing the latest checkpoint');
     assert.ok(!claude.includes('Checkpoint alpha'), 'block leaked an earlier checkpoint');
     assert.strictEqual(count(claude, 'Checkpoint beta'), 1, 'block repeated the checkpoint');
   });
@@ -3247,6 +3679,96 @@ async function main() {
       created_at: '2026-07-14T05:00:00Z' }, { selfUserId: 'me' });
     assert.strictEqual(n.summary, null);
   });
+  check('feed: local entry carries goal + changes', () => {
+    const proj = { events: [
+      { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'mcp thing' },
+      { ts: '2026-07-16T00:01:00.000Z', source: 'Claude Code', kind: 'edit', session: 's1', file: path.join(proj1, 'src', 'login.js') },
+      { ts: '2026-07-16T00:02:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'Did the thing.', goal: 'Ship MCP', decisions: 'read-only', gotchas: '', highlights: [] },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, {});
+    const withSummary = entries.find(e => e.summary);
+    assert.strictEqual(withSummary.goal, 'Ship MCP');
+    assert.strictEqual(withSummary.decisions, 'read-only');
+    assert.ok(Array.isArray(withSummary.changes), 'changes array attached');
+    const norm = require('../lib/feed').normalizeLocal(withSummary, { projectName: 'p' });
+    assert.strictEqual(norm.goal, 'Ship MCP');
+    assert.ok(Array.isArray(norm.changes));
+  });
+  check('feed: highlight note is redacted on the local path', () => {
+    const proj = { events: [
+      { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'x' },
+      { ts: '2026-07-16T00:01:00.000Z', source: 'Claude Code', kind: 'edit', session: 's1', file: path.join(proj1, 'src', 'login.js') },
+      { ts: '2026-07-16T00:02:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'did', highlights: [{ file: 'src/login.js', note: 'uses SECRET123 token' }] },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, { redact: ['SECRET123'] });
+    const e = entries.find(x => Array.isArray(x.changes) && x.changes.length);
+    assert.ok(e, 'entry with changes exists');
+    const noted = e.changes.find(c => c.note);
+    assert.ok(noted, 'a change carries the highlight note');
+    assert.ok(!/SECRET123/.test(noted.note), 'secret is redacted from the note');
+  });
+  // Task 9 perf fix: deriveChanges (which spawns git subprocesses) must only
+  // run for entries that survive the maxEntries slice — never for distilled
+  // entries discarded by it. Build more distilled entries than maxEntries
+  // allows, then confirm the surviving one still gets a correct change model
+  // and no returned entry leaks the temporary _highlights stash field.
+  check('buildEntries: change model is derived only for entries surviving the maxEntries slice', () => {
+    const mkEvents = (n, session, file, note) => ([
+      { ts: `2026-07-16T00:${String(n).padStart(2, '0')}:00.000Z`, source: 'Claude Code', kind: 'prompt', session, text: `ask ${n}` },
+      { ts: `2026-07-16T00:${String(n).padStart(2, '0')}:01.000Z`, source: 'Claude Code', kind: 'edit', session, file: path.join(proj1, 'src', file) },
+      { ts: `2026-07-16T00:${String(n).padStart(2, '0')}:02.000Z`, source: 'Distilled', kind: 'summary', session,
+        text: `did ${n}`, highlights: [{ file: `src/${file}`, note }] },
+    ]);
+    const events = [
+      ...mkEvents(1, 'sA', 'discarded1.js', 'discarded change one'),
+      ...mkEvents(2, 'sB', 'discarded2.js', 'discarded change two'),
+      ...mkEvents(3, 'sC', 'login.js', 'surviving change'),
+    ];
+    const proj = { events };
+    // Force slicing: maxEntries smaller than the 3 distilled entries above.
+    const entries = memorydb.buildEntries(proj1, proj, { maxEntries: 2 });
+    assert.strictEqual(entries.length, 2, `expected slice to cap at 2, got ${entries.length}`);
+    assert.ok(!entries.some(e => 'discarded1.js' === (e.files || [])[0]), 'the oldest, sliced-away entry survived the slice');
+    const survivor = entries.find(e => (e.files || []).includes('src/login.js'));
+    assert.ok(survivor, 'surviving distilled entry missing its change model');
+    assert.ok(survivor.changes.some(c => c.file === 'src/login.js'), 'surviving change model missing the edited file');
+    assert.ok(survivor.changes.some(c => c.note && c.note.includes('surviving change')), 'surviving change model missing the highlight note');
+    assert.ok(entries.every(e => !('_highlights' in e)), 'temporary _highlights field leaked into a returned entry');
+  });
+  check('feed: normalizeTeam carries goal + change-model from changes, redacted', () => {
+    const redact = t => t.replace(/SECRET123/g, '[redacted]');
+    const row = {
+      author_name: 'Andrew', ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code',
+      goal: 'Ship SECRET123 feature', summary: 'did it',
+      files: ['lib/mcp.js'],
+      changes: [{ file: 'lib/mcp.js', status: 'new', add: 10, del: 0, note: 'uses SECRET123', dep: false }],
+    };
+    const out = require('../lib/feed').normalizeTeam(row, { redact });
+    assert.ok(!/SECRET123/.test(out.goal), 'goal redacted');
+    assert.deepStrictEqual(out.files, ['lib/mcp.js'], 'files stays string[]');
+    assert.strictEqual(out.changes.length, 1, 'change-model read from the changes column');
+    assert.strictEqual(out.changes[0].file, 'lib/mcp.js');
+    assert.ok(!/SECRET123/.test(out.changes[0].note), 'note redacted');
+  });
+  check('feed: normalizeTeam legacy string files yields no change-model', () => {
+    const out = require('../lib/feed').normalizeTeam(
+      { author_name: 'A', ts: '2026-07-16T00:00:00.000Z', source: 'x', files: ['lib/a.js', 'lib/b.js'] }, {});
+    assert.deepStrictEqual(out.changes, []);
+    assert.deepStrictEqual(out.files, ['lib/a.js', 'lib/b.js']);
+  });
+  check('renderBlock: pulled teammate changes render, no [object Object]', () => {
+    const proj = { events: [], teamEntries: [
+      { author: 'Andrew', ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code',
+        goal: 'Ship MCP', summary: 'Built the server.',
+        files: ['lib/mcp.js'],
+        changes: [{ file: 'lib/mcp.js', status: 'new', add: 10, del: 0, note: null, dep: false }] },
+    ] };
+    const block = digest.renderBlock('/repo', proj, { team: {} }, 'CLAUDE.md');
+    assert.ok(/Changes:.*lib\/mcp\.js/.test(block), 'renders the change file');
+    assert.ok(!/\[object Object\]/.test(block), 'no stringified objects');
+  });
   check('feed.buildFeed merges newest-first and drops the team dup of local self work', () => {
     const local = [feed.normalizeLocal(
       { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'same ask', summary: 'local rich', files: [] },
@@ -3339,6 +3861,7 @@ async function main() {
         ask: 'rotate creds token=sk-tamper-mcp-999',
         summary: 'stored the new token api_key=sk-tamper-mcp-888 in the vault',
         files: ['infra/vault.tf'],
+        changes: [{ file: 'infra/vault.tf', status: 'edited', add: 3, del: 1, note: 'rotated token=sk-tamper-mcp-777', dep: false }],
       }];
       state.projects[projPaused] = { events: [{ ts: mcpTsAgo(10), source: 'Claude Code', kind: 'prompt', text: 'paused project work', session: 'x1' }] };
       util.saveState(state);
@@ -3381,8 +3904,12 @@ async function main() {
       assert.strictEqual(gpm.teammates[0].author, 'Priya');
       const blob = JSON.stringify(gpm);
       assert.ok(!blob.includes('sk-test1234567890abcdef'), 'local secret leaked');
-      assert.ok(!blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-888'), 'teammate secret leaked');
+      assert.ok(!blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-888') && !blob.includes('sk-tamper-mcp-777'),
+        'teammate secret leaked');
       assert.ok(count(blob, '[redacted') >= 2, 'expected redaction markers for both the local and teammate secret');
+      // the teammate change model is surfaced (with its note re-redacted)
+      assert.ok(Array.isArray(gpm.teammates[0].changes) && gpm.teammates[0].changes.some(c => c.file === 'infra/vault.tf'),
+        'teammate change model not surfaced');
     });
 
     const { res: unknownRes, data: unknownData } = await callJson('get_project_memory', { project: path.join(ROOT, 'projects', 'does-not-exist') });
@@ -3401,9 +3928,13 @@ async function main() {
       assert.ok(Array.isArray(recent.entries) && recent.entries.length >= 2, 'entries missing');
       const tsList = recent.entries.map(e => e.ts);
       assert.deepStrictEqual(tsList, [...tsList].sort().reverse(), 'entries not sorted newest-first');
-      assert.ok(recent.entries.some(e => e.author === 'Priya'), 'teammate entry missing');
+      const priya = recent.entries.find(e => e.author === 'Priya');
+      assert.ok(priya, 'teammate entry missing');
+      assert.ok(Array.isArray(priya.changes) && priya.changes.some(c => c.file === 'infra/vault.tf'),
+        'teammate change model missing from get_recent_activity');
       const blob = JSON.stringify(recent);
-      assert.ok(!blob.includes('sk-test1234567890abcdef') && !blob.includes('sk-tamper-mcp-999'), 'secret leaked into recent activity');
+      assert.ok(!blob.includes('sk-test1234567890abcdef') && !blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-777'),
+        'secret leaked into recent activity');
     });
 
     const { data: search } = await callJson('search_memory', { query: 'webhook' });
@@ -3468,6 +3999,102 @@ async function main() {
       assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past process.exit');
     });
   }
+
+  check('project-resolve: resolveRoot returns nearest tracked ancestor, else null', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-resolve-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+    const tracked = new Set([require('../lib/util').normPath(repo)]);
+    assert.strictEqual(
+      projectResolve.resolveRoot(path.join(repo, 'src', 'a.js'), tracked), repo);
+    assert.strictEqual(
+      projectResolve.resolveRoot(path.join(base, 'loose', 'b.js'), new Set()), null);
+    assert.strictEqual(
+      projectResolve.resolveRoot(path.join(repo, 'src', 'a.js'), new Set()), repo);
+  });
+
+  check('project-resolve: rehomeEvents splits edits by root, prompt follows dominant', () => {
+    const A = '/root/repoA', B = '/root/repoB';
+    const tracked = new Set([require('../lib/util').normPath(A), require('../lib/util').normPath(B)]);
+    const resolveRoot = f => (f.startsWith(A) ? A : f.startsWith(B) ? B : null);
+    const events = [
+      { kind: 'prompt', project: '/home', session: 's1', text: 'go' },
+      { kind: 'edit', project: '/home', session: 's1', file: A + '/x.js' },
+      { kind: 'edit', project: '/home', session: 's1', file: A + '/y.js' },
+      { kind: 'edit', project: '/home', session: 's1', file: B + '/z.js' },
+      { kind: 'summary', project: '/home', session: 's1', text: 'did' },
+      { kind: 'edit', project: '/home', session: 's2', file: '/elsewhere/u.js' },
+    ];
+    projectResolve.rehomeEvents(events, tracked, { resolveRoot });
+    const by = k => events.filter(e => e.kind === k);
+    assert.deepStrictEqual(by('edit').map(e => e.project), [A, A, B, '/home']);
+    assert.strictEqual(by('prompt')[0].project, A);
+    assert.strictEqual(by('summary')[0].project, A);
+  });
+
+  check('project-resolve: rehomeEvents breaks dominant ties toward the first-touched root', () => {
+    const A = '/tie/repoA', B = '/tie/repoB';
+    const tracked = new Set([require('../lib/util').normPath(A), require('../lib/util').normPath(B)]);
+    const resolveRoot = f => (f.startsWith(A) ? A : f.startsWith(B) ? B : null);
+    const events = [
+      { kind: 'prompt', project: '/home', session: 's1', text: 'go' },
+      { kind: 'edit', project: '/home', session: 's1', file: B + '/1.js' }, // B touched first
+      { kind: 'edit', project: '/home', session: 's1', file: A + '/1.js' }, // A second — 1-1 tie
+    ];
+    projectResolve.rehomeEvents(events, tracked, { resolveRoot });
+    assert.strictEqual(events[0].project, B, 'tie resolves to first-touched root (B)');
+  });
+
+  check('project-resolve: resolveRoot matches when the file sits directly in the tracked root', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-zerohop-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const tracked = new Set([require('../lib/util').normPath(repo)]);
+    assert.strictEqual(projectResolve.resolveRoot(path.join(repo, 'top.js'), tracked), repo);
+  });
+
+  check('project-resolve: rehomeEvents resolves a relative edit path against the event project', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-relpath-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+    const events = [
+      { kind: 'edit', project: repo, session: 's1', file: 'src/rel.js' }, // relative to repo
+    ];
+    projectResolve.rehomeEvents(events, new Set());
+    assert.strictEqual(events[0].project, repo, 'relative edit resolves under its project');
+  });
+
+  check('project-resolve: untracked git repo under a tracked parent is a boundary, not captured', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-boundary-'));
+    const parent = path.join(base, 'workspace');
+    fs.mkdirSync(path.join(parent, '.membridge'), { recursive: true }); // tracked parent
+    const child = path.join(parent, 'newrepo');
+    fs.mkdirSync(path.join(child, '.git'), { recursive: true });        // untracked git repo
+    fs.mkdirSync(path.join(child, 'src'), { recursive: true });
+    const tracked = new Set([require('../lib/util').normPath(parent)]);
+    // the .git boundary stops the walk — child work does NOT get captured by the parent
+    assert.strictEqual(projectResolve.resolveRoot(path.join(child, 'src', 'a.js'), tracked), null);
+    // a file directly under the tracked parent (no nearer marker) still resolves to it
+    assert.strictEqual(projectResolve.resolveRoot(path.join(parent, 'top.js'), tracked), parent);
+    // if the child later becomes tracked, it wins over its own .git boundary
+    const trackedChild = new Set([require('../lib/util').normPath(parent), require('../lib/util').normPath(child)]);
+    assert.strictEqual(projectResolve.resolveRoot(path.join(child, 'src', 'a.js'), trackedChild), child);
+  });
+
+  check('project-resolve: sessionDominantRoot resolves relative edits against their project', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-sdr-'));
+    const repo = path.join(base, 'repo');
+    fs.mkdirSync(path.join(repo, '.membridge'), { recursive: true });
+    const events = [
+      { kind: 'edit', session: 's1', project: repo, file: 'src/rel.js' },  // relative
+      { kind: 'edit', session: 's1', project: repo, file: path.join(repo, 'src', 'abs.js') },
+      { kind: 'edit', session: 's2', project: '/nope', file: '/untracked/x.js' },
+    ];
+    assert.strictEqual(projectResolve.sessionDominantRoot(events, 's1', new Set()), repo);
+    assert.strictEqual(projectResolve.sessionDominantRoot(events, 's2', new Set()), null);
+  });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);
