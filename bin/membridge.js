@@ -429,7 +429,11 @@ async function cmdTeam() {
     }
     const team = teams.find(t => t.team_id === teamId);
     const link = await teamsync.linkProject(config, projectPath, teamId, team ? team.team_name : '');
-    console.log(`Linked ${projectPath} to team "${team ? team.team_name : teamId}".\nRedacted memory entries for this project now sync with your team (${path.join(memorydb.DIR_NAME, 'team.json')} — commit it so teammates' clones auto-link).`);
+    if (link.adopted) {
+      console.log(`Adopted the existing ${path.join(memorydb.DIR_NAME, 'team.json')} — linked ${projectPath} to team "${link.teamName || link.teamId}", the same shared project as the teammate who committed it.`);
+    } else {
+      console.log(`Linked ${projectPath} to team "${team ? team.team_name : teamId}".\nRedacted memory entries for this project now sync with your team (${path.join(memorydb.DIR_NAME, 'team.json')} — commit it so teammates' clones link to the same project from any fork; if ${memorydb.DIR_NAME}/ is gitignored, add a \`!${memorydb.DIR_NAME}/team.json\` exception).`);
+    }
     // First pass right away so the link is visible without waiting a tick.
     await teamSyncPass({ project: projectPath });
     return void link;

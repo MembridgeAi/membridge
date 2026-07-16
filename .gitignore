@@ -13,8 +13,11 @@ web/next-env.d.ts
 BUSINESS.md
 
 # MemBridge's own output in its own repo: the daemon rewrites these while you
-# use AI tools here. Per-machine derived data, not source.
-.membridge/
+# use AI tools here. Per-machine derived data, not source — except team.json,
+# the committed team link that makes every clone (any fork remote) resolve to
+# the same shared project. See lib/teamsync.js linkProject.
+**/.membridge/*
+!**/.membridge/team.json
 CLAUDE.md
 AGENTS.md
 

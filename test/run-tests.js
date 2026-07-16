@@ -1872,6 +1872,87 @@ async function main() {
       assert.strictEqual(link.projectId, apiLink.projectId);
     });
 
+    // ----- cross-fork convergence: a committed team.json beats the remote -----
+    // Grace's clone sits on her own fork remote AND a differently-named
+    // directory, so neither the repo_url upsert nor the name fallback can
+    // match — the committed team.json is the only bridge. Revert the adoption
+    // logic and link_project mints a fresh island row, failing these checks.
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-g');
+    util.ensureConfig();
+    await teamsync.signup(util.getConfig(), 'grace@test.dev', 'pw-g', 'Grace');
+    await teamsync.joinTeam(util.getConfig(), team.invite_code);
+    const committedLink = { projectId: apiLink.projectId, teamId: team.team_id, teamName: 'Acme' };
+    const graceClone = path.join(ROOT, 'projects-g', 'api-server-grace');
+    gitRepo(graceClone, 'https://github.com/grace-fork/api-server.git');
+    fs.mkdirSync(path.join(graceClone, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(graceClone, '.membridge', 'team.json'), JSON.stringify(committedLink, null, 2));
+    const projectRowsBefore = mock.projects.length;
+    const linkG = await teamsync.linkProject(util.getConfig(), graceClone, team.team_id, 'Acme');
+    check('fork link: team link adopts a committed team.json instead of minting a new row', () => {
+      assert.strictEqual(linkG.projectId, apiLink.projectId, 'fork clone got its own project row (island)');
+      assert.strictEqual(linkG.adopted, true, 'adoption not flagged on the returned link');
+      assert.strictEqual(mock.projects.length, projectRowsBefore, 'a new project row was minted');
+      assert.ok(!mock.projects.some(p => String(p.repoUrl || '').includes('grace-fork')),
+        'the fork remote reached the server as a project row');
+      // Adoption must not rewrite the committed file — that would dirty every
+      // teammate's working tree.
+      assert.deepStrictEqual(JSON.parse(read(path.join(graceClone, '.membridge', 'team.json'))), committedLink);
+    });
+
+    // Dana clones the other fork with the same committed file: both clones
+    // resolve to the one shared project row — the convergence the fix is for.
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-d');
+    const melikaClone = path.join(ROOT, 'projects-d', 'api-server-melika');
+    gitRepo(melikaClone, 'git@github.com:melika-fork/api-server.git');
+    fs.mkdirSync(path.join(melikaClone, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(melikaClone, '.membridge', 'team.json'), JSON.stringify(committedLink, null, 2));
+    const linkM = await teamsync.linkProject(util.getConfig(), melikaClone, team.team_id, 'Acme');
+    check('fork link: two fork clones with the same committed team.json converge on one project', () => {
+      assert.strictEqual(linkM.projectId, linkG.projectId, 'the two forks resolved to different project rows');
+      assert.strictEqual(mock.projects.length, projectRowsBefore, 'convergence still minted a row');
+    });
+
+    // Iris is in her own team but not Acme: linking a clone that carries
+    // Acme's committed team.json must refuse with a clear message — never
+    // quietly mint an island row in her team.
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-i');
+    util.ensureConfig();
+    await teamsync.signup(util.getConfig(), 'iris@test.dev', 'pw-i', 'Iris');
+    const irisTeam = await teamsync.createTeam(util.getConfig(), 'IrisCo');
+    const irisClone = path.join(ROOT, 'projects-i', 'api-server');
+    gitRepo(irisClone, 'https://github.com/iris-fork/api-server.git');
+    fs.mkdirSync(path.join(irisClone, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(irisClone, '.membridge', 'team.json'), JSON.stringify(committedLink, null, 2));
+    let irisErr = null;
+    try {
+      await teamsync.linkProject(util.getConfig(), irisClone, irisTeam.team_id, 'IrisCo');
+    } catch (err) {
+      irisErr = err;
+    }
+    check('fork link: a committed team.json for a foreign team fails clearly, never an island', () => {
+      assert.ok(irisErr && /not a member/i.test(irisErr.message), `said: ${irisErr && irisErr.message}`);
+      assert.ok(irisErr && /team\.json/.test(irisErr.message), 'error does not point at the committed file');
+      assert.strictEqual(mock.projects.length, projectRowsBefore, 'a foreign team.json minted an island row');
+      assert.deepStrictEqual(JSON.parse(read(path.join(irisClone, '.membridge', 'team.json'))), committedLink,
+        'the refusal rewrote the committed file');
+    });
+    process.env.MEMBRIDGE_HOME = HOME_A;
+
+    // The shipped .gitignore must let team.json be committed (the whole
+    // cross-fork story depends on it) while the rest of .membridge/ stays
+    // ignored as per-machine derived data, at any depth.
+    const giRepo = path.join(ROOT, 'gitignore-check');
+    fs.mkdirSync(giRepo, { recursive: true });
+    spawnSync('git', ['init', '-q'], { cwd: giRepo });
+    fs.copyFileSync(path.join(__dirname, '..', '.gitignore'), path.join(giRepo, '.gitignore'));
+    const gitIgnores = rel => spawnSync('git', ['-C', giRepo, 'check-ignore', '-q', rel]).status === 0;
+    check('gitignore: .membridge/team.json is committable, the rest of .membridge/ stays ignored', () => {
+      assert.strictEqual(gitIgnores('.membridge/team.json'), false, 'team.json is gitignored — it can never be committed');
+      assert.strictEqual(gitIgnores('.membridge/memory.md'), true, '.membridge/ derived data no longer ignored');
+      assert.strictEqual(gitIgnores('.membridge/memory.json'), true, '.membridge/ derived data no longer ignored');
+      assert.strictEqual(gitIgnores('web/.membridge/memory.md'), true, 'nested .membridge/ no longer ignored');
+    });
+
     // ----- migration 005: project soft-delete (owner/manager, reversible) -----
     // A fresh linked project so archiving never disturbs the shop-app fixtures.
     process.env.MEMBRIDGE_HOME = HOME_A;
@@ -2503,6 +2584,10 @@ async function main() {
   try {
     await teamsync.signup(util.getConfig(), 'distill@test.dev', 'pw-x', 'Distill');
     const teamX = await teamsync.createTeam(util.getConfig(), 'DistillTeam');
+    // projR still carries RichTeam's team.json from the mock2 pass above, and
+    // a link now adopts an existing team.json rather than re-minting — unlink
+    // first, as a user moving a project between teams would.
+    teamsync.unlinkProject(projR);
     await teamsync.linkProject(util.getConfig(), projR, teamX.team_id, 'DistillTeam');
     await teamsync.syncTeams({ project: projR });
     check('distill: pushed summary is the Distilled text, redacted', () => {
