@@ -1687,14 +1687,26 @@ async function main() {
       source: 'Claude Code',
       ask: 'Wire the receipt PDF and refund guardrails',
       summary: 'Checkout now emails a receipt PDF; refunds are the next milestone.',
+      goal: 'Ship the receipt PDF',
+      decisions: 'Generate PDFs synchronously for now.',
+      gotchas: 'Large carts can push generation past 2s.',
+      changes: [{ file: 'lib/receipts.js', status: 'new', add: 40, del: 0, note: 'PDF renderer', dep: false }],
       created_at: new Date(Date.now() + 5000).toISOString(),
     });
     const feedSummaryRes = await (await fetch(`${hubBase}/api/feed?limit=50`)).json();
-    // NOTE: exercises the read path (team_feed RPC -> normalizeTeam -> /api/feed). The mock cannot model Postgres's create-or-replace return-type constraint, so migration 004 itself must be validated against real Postgres before deploy.
+    // NOTE: exercises the read path (team_feed RPC -> normalizeTeam -> /api/feed). The mock cannot model Postgres's create-or-replace return-type constraint, so migration 008 itself must be validated against real Postgres before deploy.
     check('/api/feed surfaces teammate summaries end-to-end (read path)', () => {
       const teamEntry = feedSummaryRes.entries.find(e => e.origin === 'team' && e.summary);
       assert.ok(teamEntry, 'at least one team entry carries a non-null summary');
       assert.ok(/receipt PDF/.test(teamEntry.summary), `summary text lost: ${teamEntry && teamEntry.summary}`);
+    });
+    // Migration 008: team_feed must also return goal/decisions/gotchas/changes.
+    check('/api/feed surfaces teammate goal/decisions/changes end-to-end (read path)', () => {
+      const teamEntry = feedSummaryRes.entries.find(e => e.origin === 'team' && e.goal === 'Ship the receipt PDF');
+      assert.ok(teamEntry, 'no team entry carries the seeded goal');
+      assert.strictEqual(teamEntry.decisions, 'Generate PDFs synchronously for now.');
+      assert.ok(Array.isArray(teamEntry.changes) && teamEntry.changes.some(c => c.file === 'lib/receipts.js'),
+        `changes missing from feed entry: ${JSON.stringify(teamEntry.changes)}`);
     });
 
     // Phase 1: /api/feed?since threads through to the team_feed RPC p_since arg.
@@ -2864,6 +2876,119 @@ async function main() {
     delete process.env.MEMBRIDGE_TEAM_URL;
     delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
     await new Promise(r => mockG.server.close(r));
+  }
+
+  // Task 8: ship decisions/gotchas to teammates end to end, and pull must
+  // survive a backend still missing goal/changes (or any optional column).
+  const mockS = createMockSupabase();
+  await new Promise(r => mockS.server.listen(17951, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17951';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    const projS = path.join(ROOT, 'projects', 'summary-app');
+    fs.mkdirSync(projS, { recursive: true });
+    await teamsync.signup(util.getConfig(), 'summary@test.dev', 'pw-s', 'Summarizer');
+    const teamS = await teamsync.createTeam(util.getConfig(), 'SummaryTeam');
+    await teamsync.linkProject(util.getConfig(), projS, teamS.team_id, 'SummaryTeam');
+    {
+      const rc = util.loadUserConfig();
+      rc.team = { ...(rc.team || {}), sharePrompts: true };
+      util.saveUserConfig(rc);
+    }
+
+    const sTsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    const setSummaryEntry = (sec, session, ask, decisions, gotchas) => {
+      const st = util.loadState();
+      st.projects[projS] = {
+        events: [
+          { ts: sTsAgo(sec + 20), source: 'Claude Code', kind: 'prompt', session, text: ask },
+          { ts: sTsAgo(sec + 10), source: 'Claude Code', kind: 'edit', session, file: path.join(projS, 'src', 'summary.js') },
+          {
+            ts: sTsAgo(sec), source: 'Distilled', kind: 'summary', session,
+            text: 'Shipped the summary fields end to end.',
+            goal: 'Ship summary fields to teammates',
+            decisions, gotchas,
+            highlights: [{ file: 'src/summary.js', note: 'the plumbing' }],
+          },
+        ],
+      };
+      util.saveState(st);
+    };
+
+    setSummaryEntry(60, 'ssess1', 'Wire up decisions/gotchas',
+      'Kept decisions/gotchas as separate columns.', 'A pre-migration backend must not break the pull.');
+    await teamsync.syncTeams({ project: projS });
+    check('teamsync: push ships decisions and gotchas (scrubbed), ungated by sharePrompts', () => {
+      const row = mockS.entries.find(e => e.session === 'ssess1');
+      assert.ok(row, 'entry not pushed');
+      assert.ok(row.decisions && row.decisions.includes('separate columns'), `decisions was: ${row.decisions}`);
+      assert.ok(row.gotchas && row.gotchas.includes('pre-migration backend'), `gotchas was: ${row.gotchas}`);
+    });
+
+    // Second identity joins the team and pulls Summarizer's rows back.
+    const projSB = path.join(ROOT, 'projects-sb', 'summary-app');
+    fs.mkdirSync(projSB, { recursive: true });
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-summarypull');
+    util.ensureConfig();
+    const stSB = util.loadState();
+    stSB.projects = { ...(stSB.projects || {}), [projSB]: { events: [] } };
+    util.saveState(stSB);
+    await teamsync.signup(util.getConfig(), 'summarypull@test.dev', 'pw-sb', 'PullerS');
+    const joinedS = await teamsync.joinTeam(util.getConfig(), teamS.invite_code);
+    await teamsync.linkProject(util.getConfig(), projSB, joinedS.team_id, joinedS.team_name);
+    await teamsync.syncTeams({ project: projSB });
+    check('teamsync: decisions/gotchas pulled back intact and render as a Notes line', () => {
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => path.resolve(k) === path.resolve(projSB));
+      assert.ok(key, 'pulled project missing from state');
+      const pulled = (st.projects[key].teamEntries || []).find(e => e.session === 'ssess1');
+      assert.ok(pulled, 'pulled entry missing');
+      assert.ok(pulled.decisions && pulled.decisions.includes('separate columns'), `pulled decisions: ${pulled.decisions}`);
+      assert.ok(pulled.gotchas && pulled.gotchas.includes('pre-migration backend'), `pulled gotchas: ${pulled.gotchas}`);
+      const block = digest.renderBlock(projSB, st.projects[key], {}, 'CLAUDE.md');
+      assert.ok(/Notes:.*separate columns.*pre-migration backend/.test(block),
+        `expected a Notes line combining decisions + gotchas, got:\n${block}`);
+    });
+
+    // Pull fallback: a backend still missing goal/changes (pre-008-migration)
+    // must not break the pull — the client should drop those columns from
+    // `select` and retry, degrading (null/empty) rather than throwing and
+    // stopping ALL teammate ingestion.
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    setSummaryEntry(30, 'ssess2', 'A second checkpoint',
+      'Second decisions.', 'Second gotchas.');
+    await teamsync.syncTeams({ project: projS }); // push ssess2 from the original identity
+
+    process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-summarypull');
+    mockS.flags.rejectColumns = new Set(['goal', 'changes']);
+    let pullFallbackThrew = null;
+    try {
+      await teamsync.syncTeams({ project: projSB });
+    } catch (err) {
+      pullFallbackThrew = err;
+    }
+    mockS.flags.rejectColumns = new Set();
+    check('teamsync: pull survives a backend still missing goal/changes columns', () => {
+      assert.strictEqual(pullFallbackThrew, null, `pull threw instead of degrading: ${pullFallbackThrew && pullFallbackThrew.message}`);
+      const st = util.loadState();
+      const key = Object.keys(st.projects).find(k => path.resolve(k) === path.resolve(projSB));
+      assert.ok(key, 'pulled project missing from state');
+      const pulled2 = (st.projects[key].teamEntries || []).find(e => e.session === 'ssess2');
+      assert.ok(pulled2, 'entry never landed despite the column-drop-and-retry loop');
+      assert.ok(pulled2.summary, 'summary should still be present (not one of the dropped columns)');
+      assert.ok(Array.isArray(pulled2.files) && pulled2.files.length, 'files should still be present');
+      assert.strictEqual(pulled2.goal, null, 'goal should degrade to null when the column is missing');
+      assert.ok(pulled2.changes === null || (Array.isArray(pulled2.changes) && pulled2.changes.length === 0),
+        `changes should degrade to null/empty, got: ${JSON.stringify(pulled2.changes)}`);
+      // decisions/gotchas were not in the rejected set, so they must survive.
+      assert.ok(pulled2.decisions && pulled2.decisions.includes('Second decisions'), `pulled2.decisions: ${pulled2.decisions}`);
+      assert.ok(pulled2.gotchas && pulled2.gotchas.includes('Second gotchas'), `pulled2.gotchas: ${pulled2.gotchas}`);
+    });
+  } finally {
+    process.env.MEMBRIDGE_HOME = HOME_A;
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mockS.server.close(r));
   }
 
   // Incremental second read: a summary appended AFTER the first scan must be

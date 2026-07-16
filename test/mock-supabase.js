@@ -231,6 +231,17 @@ function createMockSupabase() {
     }
     // GET with the exact filter shapes teamsync emits
     const p = url.searchParams;
+    // Simulates a backend whose schema predates one or more columns being
+    // requested in `select=` — real PostgREST returns a 400 with a
+    // "column ... does not exist" message (distinct shape from the POST
+    // PGRST204 case above), and the client's select-trimming loop should
+    // drop the column and retry rather than losing the whole pull.
+    const selectCols = (p.get('select') || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const col of flags.rejectColumns) {
+      if (selectCols.includes(col)) {
+        return json(res, 400, { message: `column memory_entries.${col} does not exist` });
+      }
+    }
     const eq = (p.get('project_id') || '').replace(/^eq\./, '');
     const neq = (p.get('author_id') || '').replace(/^neq\./, '');
     const gt = decodeURIComponent((p.get('created_at') || '').replace(/^gt\./, ''));
@@ -239,7 +250,15 @@ function createMockSupabase() {
       .filter(e => e.project_id === eq && e.author_id !== neq && e.created_at > gt)
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
       .slice(0, parseInt(p.get('limit') || '200', 10));
-    json(res, 200, rows);
+    // Real PostgREST only returns the requested columns — project to
+    // selectCols (when the caller sent one) so a dropped-and-retried select
+    // (the goal/decisions/gotchas/changes fallback loop) actually exercises
+    // the client's "missing column" degradation instead of leaking a value
+    // the client didn't ask for.
+    const projected = selectCols.length
+      ? rows.map(r => Object.fromEntries(selectCols.filter(c => c in r).map(c => [c, r[c]])))
+      : rows;
+    json(res, 200, projected);
   }
 
   const server = http.createServer((req, res) => {
