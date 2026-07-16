@@ -3130,11 +3130,13 @@ async function main() {
     util.saveState(state);
     const payload = JSON.stringify({ session_id: 'hook-sess', cwd: parent });
     const res = spawnSync('node', [BIN, 'hook', 'stop'], { input: payload, env: process.env, encoding: 'utf8' });
-    if (res.stdout && res.stdout.trim()) {
-      const out = JSON.parse(res.stdout.trim());
-      assert.ok(out.reason.includes(path.join(proj1, '.membridge', 'summaries.jsonl')), 'hook targets resolved proj1');
-      assert.ok(!out.reason.includes(path.join(parent, '.membridge')), 'not the cwd');
-    }
+    // Must BLOCK (non-empty stdout) — pre-fix, cwd=parent isn't a tracked project so the
+    // hook returned early with no output; this assertion is the red state.
+    assert.ok(res.stdout && res.stdout.trim(), 'hook must block by resolving the session edits to proj1');
+    const out = JSON.parse(res.stdout.trim());
+    assert.strictEqual(out.decision, 'block', 'decision is block');
+    assert.ok(out.reason.includes(path.join(proj1, '.membridge', 'summaries.jsonl')), 'targets resolved proj1');
+    assert.ok(!out.reason.includes(path.join(parent, '.membridge')), 'not the cwd');
   });
 
   // Three distilled checkpoints in one session, driven end to end.
