@@ -3358,6 +3358,20 @@ async function main() {
     assert.strictEqual(norm.goal, 'Ship MCP');
     assert.ok(Array.isArray(norm.changes));
   });
+  check('feed: highlight note is redacted on the local path', () => {
+    const proj = { events: [
+      { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'x' },
+      { ts: '2026-07-16T00:01:00.000Z', source: 'Claude Code', kind: 'edit', session: 's1', file: path.join(proj1, 'src', 'login.js') },
+      { ts: '2026-07-16T00:02:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'did', highlights: [{ file: 'src/login.js', note: 'uses SECRET123 token' }] },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, { redact: ['SECRET123'] });
+    const e = entries.find(x => Array.isArray(x.changes) && x.changes.length);
+    assert.ok(e, 'entry with changes exists');
+    const noted = e.changes.find(c => c.note);
+    assert.ok(noted, 'a change carries the highlight note');
+    assert.ok(!/SECRET123/.test(noted.note), 'secret is redacted from the note');
+  });
   check('feed.buildFeed merges newest-first and drops the team dup of local self work', () => {
     const local = [feed.normalizeLocal(
       { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'same ask', summary: 'local rich', files: [] },
