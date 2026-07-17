@@ -3073,19 +3073,29 @@ async function main() {
     assert.strictEqual(out.status, 0);
     assert.strictEqual(out.stdout, '');
   });
-  check('checkpoint: blockReason scopes later checkpoints to only new work', () => {
+  check('checkpoint: blockReason asks every checkpoint for a cumulative whole-session line', () => {
     const first = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', 0);
     const later = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', 2);
-    assert.ok(!/since your previous summary/i.test(first), 'first checkpoint should not reference prior lines');
-    assert.ok(/only the work done since your previous summary/i.test(later), 'later checkpoint must scope to new work');
-    assert.ok(later.includes('2 already written'), 'later checkpoint should state the count');
-    assert.ok(later.includes('do not repeat or modify earlier lines'), 'later checkpoint must forbid editing earlier lines');
+    assert.ok(/whole session/i.test(first), 'first checkpoint asks for the whole session');
+    assert.ok(/whole session/i.test(later), 'later checkpoint asks for the whole session');
+    assert.ok(/supersed/i.test(later), 'later checkpoint declares it supersedes earlier lines');
+    assert.ok(later.includes('2 earlier lines'), 'later checkpoint states the count');
+    assert.ok(/never modify existing lines/i.test(later), 'append-only rule preserved');
+    assert.ok(!/only the work done since/i.test(later), 'delta scoping must be gone');
+    const one = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', 1);
+    assert.ok(one.includes('1 earlier line ') && !/1 earlier lines/.test(one), 'n=1 uses singular "earlier line"');
   });
-  check('hooks: blockReason asks for goal and highlights', () => {
+  check('checkpoint: blockReason demands outcome phrasing and the discreet append command', () => {
     const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'sess-x', 0);
-    assert.ok(/"goal"/.test(r), 'mentions goal field');
-    assert.ok(/"highlights"/.test(r), 'mentions highlights field');
-    assert.ok(/"did"/.test(r), 'still asks for did');
+    assert.ok(/what changed in the project/i.test(r), 'outcome phrasing present');
+    assert.ok(/never a list of files edited/i.test(r), 'activity-list phrasing forbidden');
+    assert.ok(r.includes(hooks.hookCommand() + ' append "/p/.membridge/summaries.jsonl"'), 'canonical append command with quoted target');
+    assert.ok(/no commentary/i.test(r), 'no-commentary instruction present');
+    assert.ok(/exactly ONE command/.test(r), 'single-command instruction present');
+    assert.ok(r.includes('"sess-x"'), 'session id present in the template');
+    assert.ok(/"goal"/.test(r) && /"did"/.test(r) && /"highlights"/.test(r), 'field template intact');
+    assert.ok(/escape it for the shell/i.test(r), 'shell-escaping guidance present');
+    assert.ok(r.includes(String.raw`'\''`), 'shows the apostrophe escape sequence');
   });
   check('checkpoint: countSummaryLines ignores malformed lines, empty did, and other sessions', () => {
     fs.writeFileSync(ckSummaries,
