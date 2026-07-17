@@ -17,7 +17,7 @@ function extract(name) {
   return src.slice(m.index, j);
 }
 
-const names = ['normKeyPart', 'feedKey', 'threadKey', 'buildThreads', 'unitKeyOf', 'buildUnits', 'finalizeUnit', 'promptRowsHtml', 'threadHtml', 'unitHtml', 'attributeSubagents', 'subagentLine', 'sessionPageHtml'];
+const names = ['normKeyPart', 'feedKey', 'threadKey', 'buildThreads', 'unitKeyOf', 'buildUnits', 'finalizeUnit', 'promptRowsHtml', 'threadHtml', 'unitHtml', 'feedDayGroupHtml', 'attributeSubagents', 'subagentLine', 'sessionPageHtml'];
 // feedKey isn't in dashboard's feed section as a standalone? it is — but guard.
 let bodies = '';
 for (const n of names) { try { bodies += extract(n) + '\n'; } catch (e) { /* provide stub below */ } }
@@ -29,14 +29,15 @@ var SESS_BACK = '<button data-sess-back>Activity</button>';
 var catchupExpanded = {};
 var MONO = 'font-family:mono';
 function ago() { return '1m'; }
+function homeDayLabel(iso) { return String(iso).slice(0, 10); }
 function personColor() { return '#000'; }
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 ${/feedKey/.test(bodies) ? '' : 'function feedKey(e){ return String(e.ts)+"|"+(e.author||""); }'}
 ${bodies}
-return { buildThreads: buildThreads, buildUnits: buildUnits, unitHtml: unitHtml, threadHtml: threadHtml, threadKey: threadKey, attributeSubagents: attributeSubagents, subagentLine: subagentLine, sessionPageHtml: sessionPageHtml };
+return { buildThreads: buildThreads, buildUnits: buildUnits, unitHtml: unitHtml, threadHtml: threadHtml, threadKey: threadKey, feedDayGroupHtml: feedDayGroupHtml, attributeSubagents: attributeSubagents, subagentLine: subagentLine, sessionPageHtml: sessionPageHtml };
 `;
 const api = new Function(harness)();
-const { buildThreads, buildUnits, unitHtml, attributeSubagents, subagentLine, sessionPageHtml } = api;
+const { buildThreads, buildUnits, unitHtml, feedDayGroupHtml, attributeSubagents, subagentLine, sessionPageHtml } = api;
 
 let pass = 0;
 function check(name, fn) { try { fn(); pass++; console.log('  ok   ', name); } catch (e) { console.error('  FAIL ', name, '\n        ', e.message); process.exitCode = 1; } }
@@ -246,6 +247,21 @@ check('subagent line fallbacks: distilled > harvested > files > no summary', () 
   assert.strictEqual(subagentLine(filesOnly), 'worked on a.js, b.js +1');
   const bare = buildThreads([mk('d', minAgo(10), 'x', null, false)])[0];
   assert.ok(/no summary/.test(subagentLine(bare)));
+});
+
+check('hideProject omits the project pill (unit card, clutter-guard card, and via feedDayGroupHtml)', () => {
+  // Multi-prompt unit → unitHtml's own meta row.
+  const multi = [mk('main', minAgo(60), 'p1', 'Done', true), mk('main', minAgo(55), 'p2', null, false)];
+  const u = buildUnits(buildThreads(multi))[0];
+  assert.ok(unitHtml(u).indexOf('>membridge</span>') !== -1, 'default unit card lost its project pill');
+  assert.ok(unitHtml(u, { hideProject: true }).indexOf('>membridge</span>') === -1, 'hideProject leaked the pill on the unit card');
+  // Single-run single-prompt → the clutter guard delegates to threadHtml with opts.
+  const solo = buildUnits(buildThreads([mk('s', minAgo(60), 'just one', 'A done', true)]))[0];
+  assert.ok(unitHtml(solo).indexOf('>membridge</span>') !== -1, 'default clutter-guard card lost its project pill');
+  assert.ok(unitHtml(solo, { hideProject: true }).indexOf('>membridge</span>') === -1, 'hideProject leaked the pill on the clutter-guard card');
+  // feedDayGroupHtml threads the option through (and stays default without it).
+  assert.ok(feedDayGroupHtml(multi).indexOf('>membridge</span>') !== -1, 'feedDayGroupHtml default lost the pill');
+  assert.ok(feedDayGroupHtml(multi, { hideProject: true }).indexOf('>membridge</span>') === -1, 'feedDayGroupHtml did not pass hideProject through');
 });
 
 check('XSS: hostile subagent summary/files escaped on the session page', () => {
