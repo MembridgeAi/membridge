@@ -44,12 +44,17 @@
     },
     "afterPack": "scripts/afterPack.js",
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.developer-tools",
       "icon": "app/assets/icon.png"
     },
     "win": {
-      "target": ["zip"]
+      "target": [
+        "zip"
+      ]
     }
   },
   "engines": {
@@ -62,5 +67,8 @@
   "devDependencies": {
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "libsodium-wrappers": "^0.8.4"
   }
 }

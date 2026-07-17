@@ -3393,6 +3393,23 @@ async function main() {
     ['secret-assignment', "config password=hunter2xyz done", 'hunter2xyz'],
     ['high-entropy', `blob ${ENTROPY_TOKEN} done`, ENTROPY_TOKEN],
   ];
+  // E2E crypto primitives (libsodium sealed-box + secretbox). Load once so the
+  // sync check body can use the primitives directly (check() doesn't await).
+  const teamcrypto = require('../lib/teamcrypto');
+  await teamcrypto.ready();
+  check('teamcrypto: seal/unseal + secretbox round trip, wrong-key safe, file paths inside ciphertext', () => {
+    const a = teamcrypto.genKeypair(), b = teamcrypto.genKeypair();
+    const teamKey = teamcrypto.genTeamKey();
+    const sealed = teamcrypto.sealTeamKey(teamKey, b.publicKey);
+    assert.strictEqual(teamcrypto.unsealTeamKey(sealed, b.publicKey, b.privateKey), teamKey, 'unseal round trip');
+    const payload = { ask: 'q', summary: 's', goal: null, decisions: null, gotchas: null, files: ['src/login.js'], changes: null };
+    const enc = teamcrypto.encrypt(payload, teamKey);
+    assert.deepStrictEqual(teamcrypto.decrypt(enc.ciphertext, enc.nonce, teamKey), payload, 'secretbox round trip');
+    assert.strictEqual(teamcrypto.unsealTeamKey(sealed, a.publicKey, a.privateKey), null, 'wrong keypair -> null');
+    assert.strictEqual(teamcrypto.decrypt(enc.ciphertext, enc.nonce, teamcrypto.genTeamKey()), null, 'wrong team key -> null');
+    assert.ok(!Buffer.from(enc.ciphertext, 'base64').toString('latin1').includes('src/login.js'), 'file path leaked into ciphertext');
+    assert.notStrictEqual(teamcrypto.encrypt(payload, teamKey).ciphertext, enc.ciphertext, 'nonce reused');
+  });
   check('redact: every default pattern removes the secret and emits a named marker', () => {
     for (const [name, input, secret] of cases) {
       const out = redactLib.redactDefault(input);
