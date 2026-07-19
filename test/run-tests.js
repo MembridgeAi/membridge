@@ -4925,7 +4925,11 @@ async function main() {
       { cwd: projLine, encoding: 'utf8', env: process.env });
     check('why: a provisional (just-committed, not-yet-settled) line prints "attribution pending" AND file-level history', () => {
       assert.strictEqual(cliPending.status, 0, `exit ${cliPending.status}, stderr: ${cliPending.stderr}`);
-      assert.ok(/just committed.*attribution pending/i.test(cliPending.stdout), `expected the pending annotation in: ${cliPending.stdout}`);
+      assert.ok(/attribution pending/i.test(cliPending.stdout), `expected the pending annotation in: ${cliPending.stdout}`);
+      // A row can stay pending for a full grace window (or longer, while a
+      // credited candidate catches up) — the annotation must not promise
+      // recency it cannot know.
+      assert.ok(!/just committed/i.test(cliPending.stdout), `annotation must not claim "just committed": ${cliPending.stdout}`);
       assert.ok(/Why src\/pending\.js —/.test(cliPending.stdout), `expected file-level history fallback in: ${cliPending.stdout}`);
     });
 
@@ -5821,6 +5825,123 @@ async function main() {
       assert.deepStrictEqual(rec.sessions, [{ session: 'sessionB', files: ['src/shared.js'] }],
         'the settled row must credit sessionB, the true author');
       assert.deepStrictEqual(rec.unattributed, []);
+    });
+  }
+
+  // --- Attributed-gate starvation (panel regression, round 3) --------------
+  // Commit-as-last-act: the session's edit is scanned, the commit lands, and
+  // the chat ENDS — the session never produces a post-commit event, so the
+  // strict per-credited-session gate can never fire. Without a bounded
+  // escape, the row stays provisional forever (why: "pending" indefinitely,
+  // churn excludes it) and — worse — once the events cap evicts the
+  // session's edit, attributeCommit credits nobody and the no-candidate
+  // grace settles the row PERMANENTLY unattributed, destroying provenance
+  // the daemon had already scanned. The escape: once the GLOBAL newest
+  // scanned event is past commit + SETTLE_GRACE_MS, settle WITH the current
+  // attribution — grace (minutes of data time) vastly precedes cap eviction
+  // (hundreds of events).
+  {
+    const projLA = path.join(ROOT, 'projects', 'last-act-app');
+    fs.mkdirSync(path.join(projLA, 'src'), { recursive: true });
+    const gla = args => spawnSync('git', ['-C', projLA, '-c', 'user.email=la@local.dev', '-c', 'user.name=LA', ...args], { encoding: 'utf8' });
+    gla(['init', '-q']);
+    gla(['config', 'user.email', 'la@local.dev']);
+    gla(['config', 'user.name', 'LA']);
+    // The session's edit IS scanned before the commit — evidence is complete.
+    {
+      const st = util.loadState();
+      st.projects[projLA] = { events: [
+        { ts: new Date(Date.now() - 2000).toISOString(), source: 'Claude Code', kind: 'edit', file: path.join(projLA, 'src', 'only.js'), session: 'lastS' },
+      ] };
+      util.saveState(st);
+    }
+    fs.writeFileSync(path.join(projLA, 'src', 'only.js'), 'export const only = 1;\n');
+    gla(['add', '-A']);
+    gla(['commit', '-q', '-m', 'last act of the session']);
+    const laSha = gla(['rev-parse', 'HEAD']).stdout.trim();
+    const laHook = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projLA, env: { ...process.env }, encoding: 'utf8' });
+    // The session ends here: NO post-commit lastS event, ever. Other,
+    // unrelated activity moves data time past the grace window.
+    {
+      const scanMod = require('../lib/scan');
+      const st = util.loadState();
+      st.projects[projLA].events.push(
+        { ts: new Date(Date.now() + scanMod.SETTLE_GRACE_MS + 60000).toISOString(), source: 'Codex', kind: 'prompt', text: 'unrelated later work', session: 'otherU' });
+      util.saveState(st);
+    }
+    syncOnce({ project: projLA });
+    check('last-act: a credited session with no post-commit events settles ATTRIBUTED once data time passes the grace window', () => {
+      assert.strictEqual(laHook.status, 0, laHook.stderr);
+      const rec = require('../lib/commits').loadCommitMap(projLA).find(r => r.sha === laSha);
+      assert.ok(rec, 'commit not recorded');
+      assert.notStrictEqual(rec.provisional, true,
+        'must not stay provisional forever — the session\'s last act was the commit, so its own post-commit event will never come');
+      assert.deepStrictEqual(rec.sessions, [{ session: 'lastS', files: ['src/only.js'] }],
+        'must settle WITH the scanned attribution, to lastS');
+      assert.deepStrictEqual(rec.unattributed, []);
+    });
+
+    check('last-act: eviction of the credited session\'s events can no longer flip the row to unattributed', () => {
+      // Simulate the events-cap eviction that, under the starved gate, used
+      // to destroy the attribution: drop every lastS event, then settle
+      // again. The row settled ATTRIBUTED before eviction could happen, and
+      // settled rows are final — the attribution must survive.
+      const st = util.loadState();
+      st.projects[projLA].events = st.projects[projLA].events.filter(e => e.session !== 'lastS');
+      util.saveState(st);
+      syncOnce({ project: projLA });
+      const rec = require('../lib/commits').loadCommitMap(projLA).find(r => r.sha === laSha);
+      assert.ok(rec, 'row missing');
+      assert.deepStrictEqual(rec.sessions, [{ session: 'lastS', files: ['src/only.js'] }],
+        'the settled attribution must survive eviction — never be replaced by a settled-unattributed row');
+      assert.notStrictEqual(rec.provisional, true);
+    });
+  }
+
+  // --- Corrupt-future-timestamp clamp (panel hardening, round 3) -----------
+  // One garbage event ts far in the future would otherwise satisfy every
+  // data-time grace comparison instantly, voiding the window's protection
+  // (premature unattributed — or, with the escape above, premature
+  // attributed — settling). Events absurdly past the pending commits' own
+  // ts must be ignored by the settle gates.
+  {
+    const projCl = path.join(ROOT, 'projects', 'clamp-app');
+    fs.mkdirSync(projCl, { recursive: true });
+    const gcl = args => spawnSync('git', ['-C', projCl, '-c', 'user.email=cl@local.dev', '-c', 'user.name=CL', ...args], { encoding: 'utf8' });
+    gcl(['init', '-q']);
+    gcl(['config', 'user.email', 'cl@local.dev']);
+    gcl(['config', 'user.name', 'CL']);
+    {
+      const st = util.loadState();
+      st.projects[projCl] = { events: [
+        // Corrupt: decades in the future. Must not count as "caught up".
+        { ts: '2099-01-01T00:00:00.000Z', source: 'Codex', kind: 'prompt', text: 'corrupt clock', session: 'corruptS' },
+      ] };
+      util.saveState(st);
+    }
+    fs.writeFileSync(path.join(projCl, 'solo.js'), 'solo\n');
+    gcl(['add', 'solo.js']);
+    gcl(['commit', '-q', '-m', 'nobody\'s commit']);
+    const clSha = gcl(['rev-parse', 'HEAD']).stdout.trim();
+    spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projCl, env: { ...process.env }, encoding: 'utf8' });
+    check('clamp: one corrupt far-future event ts must not void the grace window and settle the commit prematurely', () => {
+      syncOnce({ project: projCl });
+      const commitsMod = require('../lib/commits');
+      let rec = commitsMod.loadCommitMap(projCl).find(r => r.sha === clSha);
+      assert.ok(rec, 'commit not recorded');
+      assert.strictEqual(rec.provisional, true,
+        'a 2099 timestamp is corruption, not proof the daemon caught up — must stay provisional');
+      // Sane data time really passing the grace window still settles.
+      const scanMod = require('../lib/scan');
+      const st = util.loadState();
+      st.projects[projCl].events.push(
+        { ts: new Date(Date.now() + scanMod.SETTLE_GRACE_MS + 60000).toISOString(), source: 'Codex', kind: 'prompt', text: 'legit later work', session: 'otherV' });
+      util.saveState(st);
+      syncOnce({ project: projCl });
+      rec = commitsMod.loadCommitMap(projCl).find(r => r.sha === clSha);
+      assert.notStrictEqual(rec.provisional, true, 'legitimate post-grace data time must still settle');
+      assert.deepStrictEqual(rec.sessions, []);
+      assert.deepStrictEqual(rec.unattributed, ['solo.js']);
     });
   }
 
