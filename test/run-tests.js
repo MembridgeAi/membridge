@@ -5389,15 +5389,41 @@ async function main() {
       const sha1 = gitCap(['rev-parse', 'HEAD']).stdout.trim();
       syncOnce({ project: projCap });
 
-      check('commits: syncOnce backfills a new commit with attribution and advances the cursor', () => {
+      // Round 3, commit 2: the WALK no longer attributes either — the same
+      // stale-evidence audit bug the hook had survives verbatim in the walk
+      // (daemon-off commits, rebases, non-hook repos are discovered here
+      // against events that may not include the committing session's edits
+      // yet). A walk-discovered LOCAL commit lands provisional and goes
+      // through the same settle gates as a hook-recorded one.
+      check('commits: syncOnce records a walk-discovered local commit PROVISIONALLY and advances the cursor', () => {
         const commitsMod = require('../lib/commits');
         const map = commitsMod.loadCommitMap(projCap);
         assert.strictEqual(map.length, 1, `expected 1 record, got ${JSON.stringify(map)}`);
         assert.strictEqual(map[0].sha, sha1);
         assert.ok(map[0].ts, 'record missing commit ts');
+        assert.strictEqual(map[0].provisional, true,
+          'the walk must not attribute from possibly-stale events — provisional, settle gates decide');
+        assert.deepStrictEqual(map[0].sessions, []);
+        assert.deepStrictEqual(map[0].unattributed, ['src/one.js']);
+        assert.strictEqual(util.loadState().projects[projCap].lastCommitSha, sha1, 'cursor not advanced');
+      });
+
+      // cap1's own post-commit activity arrives — the same settle fast path
+      // that serves hook-recorded rows now settles the walk-discovered one.
+      {
+        const st = util.loadState();
+        st.projects[projCap].events.push(
+          { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'prompt', text: 'cap1 continues', session: 'cap1' });
+        util.saveState(st);
+      }
+      syncOnce({ project: projCap });
+      check('commits: a walk-discovered commit settles attributed once its session\'s own events pass it', () => {
+        const commitsMod = require('../lib/commits');
+        const map = commitsMod.loadCommitMap(projCap);
+        assert.strictEqual(map.length, 1, 'settle must dedupe, not grow the map');
+        assert.notStrictEqual(map[0].provisional, true, 'must be settled now');
         assert.deepStrictEqual(map[0].sessions, [{ session: 'cap1', files: ['src/one.js'] }]);
         assert.deepStrictEqual(map[0].unattributed, []);
-        assert.strictEqual(util.loadState().projects[projCap].lastCommitSha, sha1, 'cursor not advanced');
       });
 
       fs.writeFileSync(path.join(projCap, 'src', 'two.js'), 'two\n');
@@ -5407,14 +5433,34 @@ async function main() {
       syncOnce({ project: projCap });
       syncOnce({ project: projCap }); // and once more with nothing new
 
-      check('commits: a second sync appends only the new commit; a third adds nothing (idempotent)', () => {
+      check('commits: a second sync appends only the new commit (provisional); a third adds nothing (idempotent)', () => {
         const commitsMod = require('../lib/commits');
         const map = commitsMod.loadCommitMap(projCap);
         assert.strictEqual(map.length, 2, `expected 2 records, got ${JSON.stringify(map.map(r => r.sha))}`);
         assert.strictEqual(map[0].sha, sha1, 'first record must be untouched');
         assert.strictEqual(map[1].sha, sha2);
-        assert.deepStrictEqual(map[1].sessions, [{ session: 'cap2', files: ['src/two.js'] }]);
+        assert.strictEqual(map[1].provisional, true, 'walk-discovered c2 must land provisional too');
+        assert.deepStrictEqual(map[1].sessions, []);
         assert.strictEqual(util.loadState().projects[projCap].lastCommitSha, sha2);
+      });
+
+      {
+        const st = util.loadState();
+        st.projects[projCap].events.push(
+          { ts: new Date(Date.now() + 5000).toISOString(), source: 'Codex', kind: 'prompt', text: 'cap2 continues', session: 'cap2' });
+        util.saveState(st);
+      }
+      syncOnce({ project: projCap });
+      check('commits: walk-discovered c2 settles to cap2; MemBridge\'s own swept-in files stay unattributed', () => {
+        const commitsMod = require('../lib/commits');
+        const map = commitsMod.loadCommitMap(projCap);
+        assert.strictEqual(map.length, 2);
+        const rec = map.find(r => r.sha === sha2);
+        assert.notStrictEqual(rec.provisional, true);
+        assert.deepStrictEqual(rec.sessions, [{ session: 'cap2', files: ['src/two.js'] }]);
+        // c2's `git add -A` also swept .membridge/* (no .gitignore in this
+        // fixture) — those stay unattributed; two.js must not be among them.
+        assert.ok(!rec.unattributed.includes('src/two.js'), `two.js must be attributed, got ${JSON.stringify(rec.unattributed)}`);
       });
 
       check('commits: a non-repo project leaves sync green with zero commit rows', () => {
@@ -5978,20 +6024,41 @@ async function main() {
     const shaForeign = rawGit(['rev-parse', 'HEAD']).stdout.trim();
     syncOnce({ project: projGate });
 
-    check('gate: a local-committer commit is attributed to its session', () => {
+    check('gate: a walk-discovered local-committer commit lands provisional (attribution deferred to the settle gates)', () => {
       const map = require('../lib/commits').loadCommitMap(projGate);
       const rec = map.find(r => r.sha === shaLocal);
       assert.ok(rec, 'local commit not recorded');
-      assert.deepStrictEqual(rec.sessions, [{ session: 'gLocal', files: ['src/mine.js'] }]);
-      assert.deepStrictEqual(rec.unattributed, []);
+      assert.strictEqual(rec.provisional, true, 'the walk must not attribute from possibly-stale events');
+      assert.deepStrictEqual(rec.sessions, []);
     });
 
-    check('gate: a foreign-committer (pulled) commit is recorded unattributed-locally, never credited', () => {
+    check('gate: a foreign-committer (pulled) commit is recorded settled-unattributed, never credited, never provisional', () => {
       const map = require('../lib/commits').loadCommitMap(projGate);
       const rec = map.find(r => r.sha === shaForeign);
       assert.ok(rec, 'foreign commit not recorded');
       assert.deepStrictEqual(rec.sessions, [], 'a foreign committer must never be credited to a local session');
       assert.deepStrictEqual(rec.unattributed, ['src/pulled.js'], 'its files are unattributed-locally');
+      assert.notStrictEqual(rec.provisional, true,
+        'a foreign commit must be settled at discovery — provisional would leave a path to attributing it later');
+    });
+
+    // The local commit settles attributed once gLocal's own events pass it —
+    // the walk feeds the same gates as the hook.
+    {
+      const st = util.loadState();
+      st.projects[projGate].events.push(
+        { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'prompt', text: 'g continues', session: 'gLocal' });
+      util.saveState(st);
+    }
+    syncOnce({ project: projGate });
+    check('gate: the walk-discovered local commit settles attributed to its session; the foreign row is untouched', () => {
+      const map = require('../lib/commits').loadCommitMap(projGate);
+      const rec = map.find(r => r.sha === shaLocal);
+      assert.notStrictEqual(rec.provisional, true, 'must be settled now');
+      assert.deepStrictEqual(rec.sessions, [{ session: 'gLocal', files: ['src/mine.js'] }]);
+      assert.deepStrictEqual(rec.unattributed, []);
+      const foreign = map.find(r => r.sha === shaForeign);
+      assert.deepStrictEqual(foreign.sessions, [], 'the settled foreign row must never be revisited into attribution');
     });
 
     check('gate: a repo with no local user.email fails closed (no throw, nothing credited)', () => {
