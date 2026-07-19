@@ -4706,10 +4706,14 @@ async function main() {
     const SHA_W1 = '1'.repeat(40);
     const SHA_MERGE = '2'.repeat(40);
     const SHA_MISSING = '3'.repeat(40);
+    const SHA_PENDING = '4'.repeat(40);
     const lineMap = [
       { sha: SHA_W1, ts: '2026-07-18T09:05:00.000Z', project: projWhy,
         sessions: [{ session: 'w1', files: ['src/auth.js'] }], unattributed: [] },
       { sha: SHA_MERGE, ts: '2026-07-18T09:06:00.000Z', project: projWhy, sessions: [], unattributed: [] },
+      // Provisional-only: recorded by the hook, not yet settled by the daemon.
+      { sha: SHA_PENDING, ts: '2026-07-18T09:07:00.000Z', project: projWhy,
+        sessions: [], unattributed: ['src/auth.js'], provisional: true },
     ];
     const lineDeps = (sha, opts = {}) => ({
       blameLine: opts.throw ? () => { throw new Error('git down'); } : () => sha,
@@ -4753,6 +4757,13 @@ async function main() {
       const mrg = call(2, lineDeps(SHA_MERGE));
       assert.strictEqual(mrg.fallback, 'merge');
       assert.strictEqual(mrg.session, null);
+      // Test 5 (brief's list): a provisional-only commit record → 'pending',
+      // never 'unmapped'/'merge' even though sessions:[] would otherwise read
+      // exactly like one of those.
+      const pend = call(2, lineDeps(SHA_PENDING));
+      assert.strictEqual(pend.fallback, 'pending', `expected pending, got ${pend.fallback}`);
+      assert.strictEqual(pend.session, null);
+      assert.strictEqual(pend.sha, SHA_PENDING);
       // throwing git → git-unavailable
       const dead = call(2, lineDeps(SHA_W1, { throw: true }));
       assert.strictEqual(dead.fallback, 'git-unavailable');
@@ -4889,6 +4900,33 @@ async function main() {
       assert.strictEqual(cliPlain.status, 0, cliPlain.stderr);
       assert.ok(/Why src\/auth\.js —/.test(cliPlain.stdout), `stdout: ${cliPlain.stdout}`);
       assert.ok(!/commit [0-9a-f]/.test(cliPlain.stdout), 'plain why must not print a commit line');
+    });
+
+    // Test 5 (brief's list), CLI half: a provisional-only commit (just
+    // committed, not yet settled) prints the explicit "pending" annotation
+    // AND falls back to file-level history — the same rendering path as the
+    // uncommitted fallback above. A SEPARATE file (not auth.js) so this in no
+    // way disturbs auth.js's still-uncommitted line 2 used above/below.
+    fs.writeFileSync(path.join(projLine, 'src', 'pending.js'), 'const p = 1;\n');
+    gl(['add', 'src/pending.js']);
+    gl(['commit', '-q', '-m', 'pending file']);
+    const pendingSha = gl(['rev-parse', 'HEAD']).stdout.trim();
+    {
+      const st = util.loadState();
+      st.projects[projLine].events.push(
+        { ts: '2026-07-18T09:10:00.000Z', source: 'Claude Code', kind: 'edit', file: path.join(projLine, 'src', 'pending.js'), session: 'L1' });
+      util.saveState(st);
+    }
+    commitsMod.recordCommit(projLine, {
+      sha: pendingSha, ts: '2026-07-18T09:11:00.000Z', project: projLine,
+      sessions: [], unattributed: ['src/pending.js'], provisional: true,
+    });
+    const cliPending = spawnSync(process.execPath, [BIN, 'why', 'src/pending.js:1'],
+      { cwd: projLine, encoding: 'utf8', env: process.env });
+    check('why: a provisional (just-committed, not-yet-settled) line prints "attribution pending" AND file-level history', () => {
+      assert.strictEqual(cliPending.status, 0, `exit ${cliPending.status}, stderr: ${cliPending.stderr}`);
+      assert.ok(/just committed.*attribution pending/i.test(cliPending.stdout), `expected the pending annotation in: ${cliPending.stdout}`);
+      assert.ok(/Why src\/pending\.js —/.test(cliPending.stdout), `expected file-level history fallback in: ${cliPending.stdout}`);
     });
 
     // MCP boundary: the why tool gains an optional line param.
@@ -5246,6 +5284,78 @@ async function main() {
       assert.deepStrictEqual(commits.loadCommitMap(projNoDup), [r1, r2]);
     });
 
+    // Test 3 (brief's list) + the full precedence rule: a SETTLED row (real
+    // or empty) always beats a PROVISIONAL one for the same sha, regardless
+    // of write order — this is the invariant a provisional-hook-row-never-
+    // wins reconciliation design leans on.
+    check('commits: isProvisionalCommit reads the flag; absent/falsy means settled', () => {
+      assert.ok(commits.isProvisionalCommit, 'isProvisionalCommit missing');
+      assert.strictEqual(commits.isProvisionalCommit({ sha: 'x', provisional: true }), true);
+      assert.strictEqual(commits.isProvisionalCommit({ sha: 'x', provisional: false }), false);
+      assert.strictEqual(commits.isProvisionalCommit({ sha: 'x' }), false, 'absent provisional means settled');
+      assert.strictEqual(commits.isProvisionalCommit(null), false);
+    });
+
+    check('commits: dedupe-by-sha — a settled row always beats a provisional row, either write order', () => {
+      const projSettleDedupe = path.join(ROOT, 'projects', 'commit-settle-dedupe-app');
+      fs.mkdirSync(path.join(projSettleDedupe, '.membridge'), { recursive: true });
+
+      // provisional written, then settled-real arrives — settled wins.
+      const provA = { sha: 'pv1', ts: 't1', project: projSettleDedupe, sessions: [], unattributed: ['a.js'], provisional: true };
+      const settledRealA = { sha: 'pv1', ts: 't1', project: projSettleDedupe, sessions: [{ session: 'w1', files: ['a.js'] }], unattributed: [], provisional: false };
+      commits.recordCommit(projSettleDedupe, provA);
+      commits.recordCommit(projSettleDedupe, settledRealA);
+      assert.deepStrictEqual(commits.loadCommitMap(projSettleDedupe).find(r => r.sha === 'pv1'), settledRealA,
+        'settled-real must win over an earlier provisional row');
+
+      // settled-real written FIRST, then a stray provisional for the same sha
+      // arrives later — settled must still win (order must not matter).
+      const settledRealB = { sha: 'pv2', ts: 't1', project: projSettleDedupe, sessions: [{ session: 'w1', files: ['b.js'] }], unattributed: [], provisional: false };
+      const provB = { sha: 'pv2', ts: 't2', project: projSettleDedupe, sessions: [], unattributed: ['b.js'], provisional: true };
+      commits.recordCommit(projSettleDedupe, settledRealB);
+      commits.recordCommit(projSettleDedupe, provB);
+      assert.deepStrictEqual(commits.loadCommitMap(projSettleDedupe).find(r => r.sha === 'pv2'), settledRealB,
+        'a LATER-arriving provisional row must never overwrite an already-settled row');
+
+      // provisional, then settled-EMPTY (foreign/unattributable) — settled,
+      // even though uninformative, still beats provisional.
+      const provC = { sha: 'pv3', ts: 't1', project: projSettleDedupe, sessions: [], unattributed: ['c.js'], provisional: true };
+      const settledEmptyC = { sha: 'pv3', ts: 't1', project: projSettleDedupe, sessions: [], unattributed: ['c.js'], provisional: false };
+      commits.recordCommit(projSettleDedupe, provC);
+      commits.recordCommit(projSettleDedupe, settledEmptyC);
+      assert.deepStrictEqual(commits.loadCommitMap(projSettleDedupe).find(r => r.sha === 'pv3'), settledEmptyC,
+        'settled-empty must still beat provisional');
+
+      // two provisional rows for the same sha (should not happen, but the
+      // existing later-wins tie-break must still hold within the tier).
+      const provD1 = { sha: 'pv4', ts: 't1', project: projSettleDedupe, sessions: [], unattributed: ['d.js'], provisional: true };
+      const provD2 = { sha: 'pv4', ts: 't2', project: projSettleDedupe, sessions: [], unattributed: ['d.js', 'e.js'], provisional: true };
+      commits.recordCommit(projSettleDedupe, provD1);
+      commits.recordCommit(projSettleDedupe, provD2);
+      assert.deepStrictEqual(commits.loadCommitMap(projSettleDedupe).find(r => r.sha === 'pv4'), provD2,
+        'within the provisional tier, later append still wins');
+
+      // Discriminating case: today's writers never produce a provisional row
+      // with a REAL session list (the hook only ever writes provisional with
+      // sessions:[]), but the precedence rule is defined to hold even then —
+      // settled ALWAYS outranks provisional, even settled-EMPTY vs
+      // provisional-REAL. (Under the old real-beats-empty-only rule, ignoring
+      // the provisional flag, provisional-real would have incorrectly won.)
+      const provRealE = { sha: 'pv5', ts: 't1', project: projSettleDedupe, sessions: [{ session: 'x', files: ['e.js'] }], unattributed: [], provisional: true };
+      const settledEmptyE = { sha: 'pv5', ts: 't2', project: projSettleDedupe, sessions: [], unattributed: ['e.js'], provisional: false };
+      commits.recordCommit(projSettleDedupe, provRealE);
+      commits.recordCommit(projSettleDedupe, settledEmptyE);
+      assert.deepStrictEqual(commits.loadCommitMap(projSettleDedupe).find(r => r.sha === 'pv5'), settledEmptyE,
+        'settled-empty must beat provisional-real — settled always outranks provisional, not just real-vs-empty');
+
+      const settledEmptyF = { sha: 'pv6', ts: 't1', project: projSettleDedupe, sessions: [], unattributed: ['f.js'], provisional: false };
+      const provRealF = { sha: 'pv6', ts: 't2', project: projSettleDedupe, sessions: [{ session: 'x', files: ['f.js'] }], unattributed: [], provisional: true };
+      commits.recordCommit(projSettleDedupe, settledEmptyF);
+      commits.recordCommit(projSettleDedupe, provRealF);
+      assert.deepStrictEqual(commits.loadCommitMap(projSettleDedupe).find(r => r.sha === 'pv6'), settledEmptyF,
+        'reverse order: a later provisional-real must not overwrite an earlier settled-empty');
+    });
+
     // Backfill through the real syncOnce over a real repo (git init prior
     // art: the auto-link and gitignore tests above). Events are planted a
     // minute in the past so they predate the commits made now.
@@ -5324,7 +5434,12 @@ async function main() {
       const hook1 = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projCap, env: hookEnv, encoding: 'utf8' });
       const hook2 = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projCap, env: hookEnv, encoding: 'utf8' });
 
-      check('commits: `membridge hook post-commit` records HEAD once — second run is a no-op', () => {
+      // --- Provenance reconciliation (fix/provenance-reconciliation) -------
+      // Test 1 (brief's list): the hook writes a PROVISIONAL, unattributed
+      // row — it must never call attributeCommit itself anymore, because
+      // state.json at commit time is exactly the stale data that used to
+      // cause mis-attribution (see the dedicated core-scenario test below).
+      check('commits: `membridge hook post-commit` records HEAD once, PROVISIONALLY — second run is a no-op', () => {
         assert.strictEqual(hook1.status, 0, `exit ${hook1.status}, stderr: ${hook1.stderr}`);
         assert.strictEqual(hook1.stdout, '', 'a git hook must be silent');
         assert.strictEqual(hook2.status, 0);
@@ -5332,14 +5447,42 @@ async function main() {
         const map = commitsMod.loadCommitMap(projCap);
         assert.strictEqual(map.length, 3, `expected 3 records, got ${JSON.stringify(map.map(r => r.sha))}`);
         assert.strictEqual(map[2].sha, sha3);
-        assert.deepStrictEqual(map[2].sessions, [{ session: 'cap3', files: ['src/three.js'] }]);
+        assert.strictEqual(map[2].provisional, true, 'a fresh local-committer commit must be recorded provisional, not attributed');
+        assert.deepStrictEqual(map[2].sessions, [], 'the hook must not attribute — that is now the daemon settle step\'s job');
+        // `git add -A` on this fixture also sweeps in .membridge/* (no
+        // .gitignore is installed here), so c3's diff is src/three.js plus
+        // MemBridge's own housekeeping files — only assert what matters.
+        assert.ok(map[2].unattributed.includes('src/three.js'), `expected src/three.js in ${JSON.stringify(map[2].unattributed)}`);
       });
 
-      check('commits: daemon sync after the hook adds no duplicate and advances the cursor over it', () => {
+      check('commits: daemon sync after the hook adds no duplicate row and advances the cursor, but leaves it provisional (no newer events yet)', () => {
         syncOnce({ project: projCap });
         const commitsMod = require('../lib/commits');
-        assert.strictEqual(commitsMod.loadCommitMap(projCap).length, 3, 'sync duplicated a hook-recorded commit');
+        const map = commitsMod.loadCommitMap(projCap);
+        assert.strictEqual(map.length, 3, 'sync duplicated a hook-recorded commit');
         assert.strictEqual(util.loadState().projects[projCap].lastCommitSha, sha3, 'cursor must advance over hook-recorded shas');
+        const rec = map.find(r => r.sha === sha3);
+        assert.strictEqual(rec.provisional, true,
+          'no event exists AFTER the commit yet, so the daemon has not necessarily caught up — must stay provisional, not force-settle');
+      });
+
+      // Settle: once an event dated AT OR AFTER the commit exists, the daemon
+      // has caught up and re-attributes from FRESH events on the next pass.
+      {
+        const st = util.loadState();
+        st.projects[projCap].events.push(
+          { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'edit', file: path.join(projCap, 'src', 'four.js'), session: 'cap4' });
+        util.saveState(st);
+      }
+      syncOnce({ project: projCap });
+      check('commits: settle pass attributes a provisional row once the daemon has caught up past the commit', () => {
+        const commitsMod = require('../lib/commits');
+        const map = commitsMod.loadCommitMap(projCap);
+        const rec = map.find(r => r.sha === sha3);
+        assert.ok(rec, 'settled row missing');
+        assert.notStrictEqual(rec.provisional, true, 'row must be settled after the daemon catches up');
+        assert.deepStrictEqual(rec.sessions, [{ session: 'cap3', files: ['src/three.js'] }]);
+        assert.ok(!rec.unattributed.includes('src/three.js'), 'src/three.js must now be attributed, not unattributed');
       });
 
       check('commits: hook outside a tracked project exits 0, silent, records nothing', () => {
@@ -5468,25 +5611,119 @@ async function main() {
         assert.strictEqual(util.loadState().projects[projMany].lastCommitSha, head, 'cursor must converge to HEAD');
       });
 
-      // Stale-state guard: state.json lags the daemon scan, so a commit whose
-      // files have no matching events yet must be DEFERRED to the daemon —
-      // recording a blind row would freeze it (recorded shas are never
-      // re-attributed).
+      // Test 4 (brief's list): a commit with no matching (or no newer) events
+      // must stay provisional, not be force-settled to empty — recording a
+      // blind empty row here would be indistinguishable from "the daemon
+      // hasn't caught up yet". It settles once a newer event exists.
       spawnSync('sh', ['-c',
         `cd "${projMany}" && echo x > later.js && git add later.js && git -c user.email=t@t.t -c user.name=T commit -q -m c55`],
         { encoding: 'utf8' });
-      const deferRun = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projMany, env: hookEnv, encoding: 'utf8' });
-      check('commits: the hook defers an unattributable commit to the daemon instead of freezing an empty row', () => {
-        assert.strictEqual(deferRun.status, 0, deferRun.stderr);
+      const provRun = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projMany, env: hookEnv, encoding: 'utf8' });
+      check('commits: the hook records an unattributable-so-far commit PROVISIONALLY, never a frozen blind row', () => {
+        assert.strictEqual(provRun.status, 0, provRun.stderr);
         const commitsMod = require('../lib/commits');
-        assert.strictEqual(commitsMod.loadCommitMap(projMany).length, 55,
-          'the hook must not record a row it cannot attribute');
-        syncOnce({ project: projMany });
         const map = commitsMod.loadCommitMap(projMany);
-        assert.strictEqual(map.length, 56, 'the daemon must pick the deferred commit up');
-        assert.deepStrictEqual(map[55].unattributed, ['later.js'], 'daemon-recorded row carries the attribution result');
+        assert.strictEqual(map.length, 56, 'the hook must record a provisional row for a new local commit');
+        assert.strictEqual(map[55].provisional, true);
+        assert.deepStrictEqual(map[55].sessions, []);
+      });
+
+      check('commits: a settle pass with NO newer events leaves the commit provisional (not force-settled empty)', () => {
+        syncOnce({ project: projMany }); // projMany has zero events, ever — nothing is "newer" than the commit
+        const commitsMod = require('../lib/commits');
+        const map = commitsMod.loadCommitMap(projMany);
+        assert.strictEqual(map.length, 56, 'no duplicate row from the settle pass');
+        assert.strictEqual(map[55].provisional, true,
+          'with no events at all, the daemon cannot know it has caught up — must not guess "unattributed"');
+      });
+
+      check('commits: settle pass attributes to unattributed (not stuck forever) once a newer event proves the daemon caught up', () => {
+        const st = util.loadState();
+        st.projects[projMany] = st.projects[projMany] || { events: [] };
+        st.projects[projMany].events = [
+          ...(st.projects[projMany].events || []),
+          { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'edit', file: path.join(projMany, 'unrelated.js'), session: 'later-session' },
+        ];
+        util.saveState(st);
+        syncOnce({ project: projMany });
+        const commitsMod = require('../lib/commits');
+        const map = commitsMod.loadCommitMap(projMany);
+        assert.strictEqual(map.length, 56, 'settling must append then dedupe to one row per sha, not grow the deduped view');
+        assert.notStrictEqual(map[55].provisional, true, 'a newer event proves the daemon caught up — this must settle');
+        assert.deepStrictEqual(map[55].unattributed, ['later.js'], 'settled row carries the real attribution result');
+        assert.deepStrictEqual(map[55].sessions, []);
       });
     }
+  }
+
+  // --- Provenance reconciliation, Test 2 (brief's list) — THE core scenario:
+  // stale state that WOULD have mis-attributed under the old hook. Session A
+  // has an OLD edit to shared.js already in state.json when the commit
+  // lands. Session B is the session that ACTUALLY made the commit's edit to
+  // shared.js — but B's edit event has NOT been scanned into state.json yet
+  // at commit time (exactly the daemon-hasn't-caught-up-yet window the audit
+  // describes). Under the OLD hook, attributeCommit would run against
+  // state.json as it stood at commit time — which only has A's edit — and
+  // credit A. The new hook must not attribute at all (provisional, sessions
+  // empty); only once B's edit is scanned in (plus a later event proving the
+  // daemon has caught up) does the settle pass attribute the commit, and it
+  // must attribute to B, never A.
+  {
+    const projCore = path.join(ROOT, 'projects', 'core-scenario-app');
+    fs.mkdirSync(path.join(projCore, 'src'), { recursive: true });
+    const gc = args => spawnSync('git', ['-C', projCore, '-c', 'user.email=core@local.dev', '-c', 'user.name=Core', ...args], { encoding: 'utf8' });
+    gc(['init', '-q']);
+    gc(['config', 'user.email', 'core@local.dev']);
+    gc(['config', 'user.name', 'Core']);
+    const past = ms => new Date(Date.now() - ms).toISOString();
+    // Session A's stale edit is the ONLY thing in state.json at commit time —
+    // this is the data the OLD hook would have (mis)attributed from.
+    {
+      const st = util.loadState();
+      st.projects[projCore] = { events: [
+        { ts: past(600000), source: 'Claude Code', kind: 'edit', file: path.join(projCore, 'src', 'shared.js'), session: 'sessionA' },
+      ] };
+      util.saveState(st);
+    }
+    // Session B makes the REAL edit that produces the commit — its event is
+    // deliberately NOT in state yet (not scanned this tick).
+    fs.writeFileSync(path.join(projCore, 'src', 'shared.js'), 'export const shared = () => "B";\n');
+    gc(['add', '-A']);
+    gc(['commit', '-q', '-m', 'B commits']);
+    const coreSha = gc(['rev-parse', 'HEAD']).stdout.trim();
+
+    const coreHookEnv = { ...process.env };
+    const coreHook = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projCore, env: coreHookEnv, encoding: 'utf8' });
+    check('provenance reconciliation: the hook does NOT credit stale session A at commit time — provisional, unattributed', () => {
+      assert.strictEqual(coreHook.status, 0, coreHook.stderr);
+      const map = require('../lib/commits').loadCommitMap(projCore);
+      const rec = map.find(r => r.sha === coreSha);
+      assert.ok(rec, 'commit not recorded');
+      assert.strictEqual(rec.provisional, true);
+      assert.deepStrictEqual(rec.sessions, [], 'the OLD hook would have credited sessionA here — the new hook must credit nobody yet');
+    });
+
+    // Now the daemon catches up: B's edit is scanned in (timestamped just
+    // before the commit, exactly like a real edit-then-commit), plus a
+    // trailing event proving the daemon has scanned PAST the commit's ts.
+    {
+      const st = util.loadState();
+      st.projects[projCore].events.push(
+        { ts: past(2000), source: 'Claude Code', kind: 'edit', file: path.join(projCore, 'src', 'shared.js'), session: 'sessionB' },
+        { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'prompt', text: 'next prompt', session: 'sessionB' },
+      );
+      util.saveState(st);
+    }
+    syncOnce({ project: projCore });
+    check('provenance reconciliation: the settle pass attributes the commit to the ACTUAL session B, never stale session A', () => {
+      const map = require('../lib/commits').loadCommitMap(projCore);
+      const rec = map.find(r => r.sha === coreSha);
+      assert.ok(rec, 'settled commit missing');
+      assert.notStrictEqual(rec.provisional, true, 'must be settled by now');
+      assert.deepStrictEqual(rec.sessions, [{ session: 'sessionB', files: ['src/shared.js'] }],
+        'the commit must be credited to sessionB (the real author), not sessionA (the stale one)');
+      assert.deepStrictEqual(rec.unattributed, []);
+    });
   }
 
   // --- Phase 3 Task 1: authorship gate end-to-end over a real repo ---------

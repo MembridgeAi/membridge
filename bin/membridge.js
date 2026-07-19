@@ -284,6 +284,7 @@ async function cmdMcp() {
 const LINE_FALLBACK = {
   'no-line': 'no valid line number given',
   'uncommitted': 'that line was last touched by an edit that is not committed yet — not yet attributable',
+  'pending': 'just committed — attribution pending',
   'unmapped': 'that line traces to a commit with no local session attribution',
   'merge': 'that line traces to a merge commit (no single ask)',
   'git-unavailable': 'git blame is unavailable here',
