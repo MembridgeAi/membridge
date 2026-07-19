@@ -5466,16 +5466,20 @@ async function main() {
           'no event exists AFTER the commit yet, so the daemon has not necessarily caught up — must stay provisional, not force-settle');
       });
 
-      // Settle: once an event dated AT OR AFTER the commit exists, the daemon
-      // has caught up and re-attributes from FRESH events on the next pass.
+      // Settle happy path: once the CREDITED session's OWN events include
+      // activity after the commit (a session's file is read sequentially by
+      // offset, so its newer scanned event proves its older edits were
+      // scanned), the next pass settles the attribution. The pushed event is
+      // deliberately cap3's own — an UNRELATED session's newer event must
+      // NOT trigger settling (see the cross-session race block below).
       {
         const st = util.loadState();
         st.projects[projCap].events.push(
-          { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'edit', file: path.join(projCap, 'src', 'four.js'), session: 'cap4' });
+          { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'edit', file: path.join(projCap, 'src', 'four.js'), session: 'cap3' });
         util.saveState(st);
       }
       syncOnce({ project: projCap });
-      check('commits: settle pass attributes a provisional row once the daemon has caught up past the commit', () => {
+      check('commits: settle pass attributes a provisional row once the credited session\'s own events pass the commit', () => {
         const commitsMod = require('../lib/commits');
         const map = commitsMod.loadCommitMap(projCap);
         const rec = map.find(r => r.sha === sha3);
@@ -5637,7 +5641,16 @@ async function main() {
           'with no events at all, the daemon cannot know it has caught up — must not guess "unattributed"');
       });
 
-      check('commits: settle pass attributes to unattributed (not stuck forever) once a newer event proves the daemon caught up', () => {
+      // Grace window (validator regression, test b): when attributeCommit
+      // credits NOBODY, a newer event from an UNRELATED session is NOT proof
+      // the committing session's edits were scanned — cross-file discovery
+      // order is not ts-ordered, so the real author's edit may still be
+      // sitting unscanned in its own session file. Settling unattributed
+      // therefore waits out a grace window (SETTLE_GRACE_MS past the commit
+      // ts, measured in DATA timestamps, no wall clock) that bounds the
+      // cross-file scan race; only past it does "nobody" become the settled
+      // answer.
+      check('commits: within the grace window, an unrelated session\'s newer event must NOT settle the commit unattributed', () => {
         const st = util.loadState();
         st.projects[projMany] = st.projects[projMany] || { events: [] };
         st.projects[projMany].events = [
@@ -5648,10 +5661,25 @@ async function main() {
         syncOnce({ project: projMany });
         const commitsMod = require('../lib/commits');
         const map = commitsMod.loadCommitMap(projMany);
-        assert.strictEqual(map.length, 56, 'settling must append then dedupe to one row per sha, not grow the deduped view');
-        assert.notStrictEqual(map[55].provisional, true, 'a newer event proves the daemon caught up — this must settle');
-        assert.deepStrictEqual(map[55].unattributed, ['later.js'], 'settled row carries the real attribution result');
+        assert.strictEqual(map.length, 56, 'settling must never grow the deduped view');
+        assert.strictEqual(map[55].provisional, true,
+          'an unrelated session newer by seconds is NOT proof the author\'s edits were scanned — must stay provisional inside the grace window');
+      });
+
+      check('commits: beyond the grace window with still no candidate session, the commit settles unattributed (not stuck forever)', () => {
+        const scanMod = require('../lib/scan');
+        assert.ok(Number.isFinite(scanMod.SETTLE_GRACE_MS), 'SETTLE_GRACE_MS missing from lib/scan.js');
+        const st = util.loadState();
+        st.projects[projMany].events.push(
+          { ts: new Date(Date.now() + scanMod.SETTLE_GRACE_MS + 60000).toISOString(), source: 'Claude Code', kind: 'prompt', text: 'much later', session: 'later-session' });
+        util.saveState(st);
+        syncOnce({ project: projMany });
+        const commitsMod = require('../lib/commits');
+        const map = commitsMod.loadCommitMap(projMany);
+        assert.strictEqual(map.length, 56, 'settling must never grow the deduped view');
+        assert.notStrictEqual(map[55].provisional, true, 'past the grace window, no-candidate must settle unattributed');
         assert.deepStrictEqual(map[55].sessions, []);
+        assert.deepStrictEqual(map[55].unattributed, ['later.js'], 'settled row carries the real attribution result');
       });
     }
   }
@@ -5722,6 +5750,76 @@ async function main() {
       assert.notStrictEqual(rec.provisional, true, 'must be settled by now');
       assert.deepStrictEqual(rec.sessions, [{ session: 'sessionB', files: ['src/shared.js'] }],
         'the commit must be credited to sessionB (the real author), not sessionA (the stale one)');
+      assert.deepStrictEqual(rec.unattributed, []);
+    });
+  }
+
+  // --- Cross-session premature-settle race (validator regression, test a) --
+  // The settle gate must be PER-CREDITED-SESSION, not global: an UNRELATED
+  // session C's newer scanned event says nothing about whether the true
+  // author B's edit was scanned — event discovery across different session
+  // files is not ts-ordered (only WITHIN one session's file does sequential
+  // offset reading guarantee order). A global newest-event-ts gate would fire
+  // on C's event and settle the commit to stale session A while B's edit is
+  // still unscanned — permanently, since settled rows are never reprocessed.
+  {
+    const projX = path.join(ROOT, 'projects', 'cross-session-app');
+    fs.mkdirSync(path.join(projX, 'src'), { recursive: true });
+    const gx = args => spawnSync('git', ['-C', projX, '-c', 'user.email=x@local.dev', '-c', 'user.name=X', ...args], { encoding: 'utf8' });
+    gx(['init', '-q']);
+    gx(['config', 'user.email', 'x@local.dev']);
+    gx(['config', 'user.name', 'X']);
+    const past = ms => new Date(Date.now() - ms).toISOString();
+    const future = ms => new Date(Date.now() + ms).toISOString();
+    // Session A's STALE edit to shared.js is scanned; that is ALL state
+    // holds at commit time.
+    {
+      const st = util.loadState();
+      st.projects[projX] = { events: [
+        { ts: past(600000), source: 'Claude Code', kind: 'edit', file: path.join(projX, 'src', 'shared.js'), session: 'sessionA' },
+      ] };
+      util.saveState(st);
+    }
+    // Session B makes the real edit and commits.
+    fs.writeFileSync(path.join(projX, 'src', 'shared.js'), 'export const shared = () => "B";\n');
+    gx(['add', '-A']);
+    gx(['commit', '-q', '-m', 'B commits']);
+    const xSha = gx(['rev-parse', 'HEAD']).stdout.trim();
+    const xHook = spawnSync(process.execPath, [BIN, 'hook', 'post-commit'], { cwd: projX, env: { ...process.env }, encoding: 'utf8' });
+    // An UNRELATED session C's event NEWER than the commit is scanned
+    // (within the grace window); B's edit is still unscanned — the exact
+    // cross-file race the validator reproduced.
+    {
+      const st = util.loadState();
+      st.projects[projX].events.push(
+        { ts: future(5000), source: 'Codex', kind: 'prompt', text: 'unrelated work', session: 'sessionC' });
+      util.saveState(st);
+    }
+    syncOnce({ project: projX });
+    check('cross-session race: an unrelated session\'s newer event must NOT settle the commit to stale session A', () => {
+      assert.strictEqual(xHook.status, 0, xHook.stderr);
+      const rec = require('../lib/commits').loadCommitMap(projX).find(r => r.sha === xSha);
+      assert.ok(rec, 'commit not recorded');
+      assert.strictEqual(rec.provisional, true,
+        `must stay provisional: the only credited candidate (stale sessionA) has no post-commit events of its own, so B's real edit may still be unscanned — got ${JSON.stringify(rec)}`);
+      assert.deepStrictEqual(rec.sessions, [], 'stale sessionA must never be credited');
+    });
+    // Now B's real edit — and B's own post-commit activity, proving B's file
+    // was read past the commit — is scanned in.
+    {
+      const st = util.loadState();
+      st.projects[projX].events.push(
+        { ts: past(2000), source: 'Claude Code', kind: 'edit', file: path.join(projX, 'src', 'shared.js'), session: 'sessionB' },
+        { ts: future(6000), source: 'Claude Code', kind: 'prompt', text: 'B continues', session: 'sessionB' });
+      util.saveState(st);
+    }
+    syncOnce({ project: projX });
+    check('cross-session race: once the true author\'s own events pass the commit, it settles to B — never A', () => {
+      const rec = require('../lib/commits').loadCommitMap(projX).find(r => r.sha === xSha);
+      assert.ok(rec, 'row missing');
+      assert.notStrictEqual(rec.provisional, true, 'must be settled once B\'s own events pass the commit');
+      assert.deepStrictEqual(rec.sessions, [{ session: 'sessionB', files: ['src/shared.js'] }],
+        'the settled row must credit sessionB, the true author');
       assert.deepStrictEqual(rec.unattributed, []);
     });
   }
