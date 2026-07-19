@@ -281,6 +281,49 @@ async function main() {
     assert.strictEqual(out[0].status, 'edited');
     assert.strictEqual(out[0].add, null); // rename counts are best-effort null
   });
+  check('changes: defaultRunGit hardens env (no terminal prompt, no optional locks)', () => {
+    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-stubgit-'));
+    const stubGit = path.join(stubDir, 'git');
+    fs.writeFileSync(stubGit, '#!/bin/sh\necho "$GIT_TERMINAL_PROMPT:$GIT_OPTIONAL_LOCKS"\n');
+    fs.chmodSync(stubGit, 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = stubDir + path.delimiter + prevPath;
+    try {
+      const out = changesLib.defaultRunGit(stubDir)(['status']);
+      assert.strictEqual(out, '0:0\n', `git subprocess env not hardened: ${JSON.stringify(out)}`);
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
+  check('changes: defaultRunGit still throws on nonzero exit (contract preserved for callers)', () => {
+    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-stubgit-'));
+    const stubGit = path.join(stubDir, 'git');
+    fs.writeFileSync(stubGit, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(stubGit, 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = stubDir + path.delimiter + prevPath;
+    try {
+      assert.throws(() => changesLib.defaultRunGit(stubDir)(['status']), 'nonzero exit should still throw');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
+  check('changes: defaultRunGit is bounded — a blocked git is killed within the timeout, not hung', () => {
+    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-stubgit-'));
+    const stubGit = path.join(stubDir, 'git');
+    fs.writeFileSync(stubGit, '#!/bin/sh\nsleep 30\n'); // simulates a credential prompt / lock wait
+    fs.chmodSync(stubGit, 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = stubDir + path.delimiter + prevPath;
+    try {
+      const start = Date.now();
+      assert.throws(() => changesLib.defaultRunGit(stubDir)(['status']), /ETIMEDOUT|SIGKILL/);
+      const elapsed = Date.now() - start;
+      assert.ok(elapsed < 9000, `defaultRunGit did not honor the 5s timeout (took ${elapsed}ms)`);
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
   check('projectDetail: a teammate touch drives team-aware lastTouched + activeLabel + stats', () => {
     const state = util.loadState();
     const key = Object.keys(state.projects).find(k => path.basename(k) === 'shop-app');
