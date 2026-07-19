@@ -706,6 +706,75 @@ async function main() {
       assert.ok(pageHtml.includes('Bring your own key'), 'BYOK copy missing');
       assert.ok(pageHtml.includes('Tools detected: '), 'tools-detected line missing');
     });
+    check('dashboard page has multi-select + bulk delete for local watched projects', () => {
+      assert.ok(embeddedScript.includes('data-bulk-check='), 'per-row bulk checkbox missing');
+      assert.ok(embeddedScript.includes('data-bulk-selectall'), '"select all local" control missing');
+      assert.ok(embeddedScript.includes('data-bulk-delete'), 'delete-selected affordance missing');
+      assert.ok(embeddedScript.includes("This can't be undone."), 'bulk-delete confirm copy missing');
+      // Local-only gating: the checkbox markup must be emitted from a branch keyed
+      // off "not a team project" (the same field the shared/local-only badge
+      // uses) so shared rows never get a bulk checkbox.
+      assert.ok(/isLocal\s*=\s*!p\.team/.test(embeddedScript), 'checkbox gating is not keyed off p.team (local vs shared)');
+    });
+    // deleteProjectsBulk is a pure, injected-fetch helper (house style: offline
+    // testable, no DOM). Extract it from the embedded script by brace-matching
+    // and exercise it directly, mirroring how the rest of the app is tested.
+    function extractFn(src, name) {
+      const startIdx = src.indexOf('function ' + name + '(');
+      if (startIdx === -1) return null;
+      let i = src.indexOf('{', startIdx);
+      let depth = 0, end = i;
+      for (; end < src.length; end++) {
+        if (src[end] === '{') depth++;
+        else if (src[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return src.slice(startIdx, end);
+    }
+    const bulkFnSrc = extractFn(embeddedScript, 'deleteProjectsBulk');
+    check('deleteProjectsBulk helper exists standalone in the embedded script', () => {
+      assert.ok(bulkFnSrc, 'deleteProjectsBulk function not found');
+    });
+    if (bulkFnSrc) {
+      const deleteProjectsBulk = new Function('return (' + bulkFnSrc + ');')();
+      const okResult = await deleteProjectsBulk(['/a', '/b'], () => Promise.resolve({ ok: true }));
+      check('deleteProjectsBulk: all succeed -> both deleted, none failed', () => {
+        assert.deepStrictEqual(okResult, { deleted: ['/a', '/b'], failed: [] });
+      });
+      let calls = 0;
+      const partialResult = await deleteProjectsBulk(['/a', '/b', '/c'], (url, opts) => {
+        calls++;
+        const body = JSON.parse(opts.body);
+        if (body.path === '/b') return Promise.reject(new Error('boom'));
+        return Promise.resolve({ ok: true });
+      });
+      check('deleteProjectsBulk: one failure does not stop the loop', () => {
+        assert.strictEqual(calls, 3, `loop stopped early after a failure (only ${calls} calls)`);
+        assert.deepStrictEqual(partialResult.deleted, ['/a', '/c']);
+        assert.deepStrictEqual(partialResult.failed, ['/b']);
+      });
+      // The server's top-level catch answers a throwing deleteProject with an
+      // HTTP 500 (lib/server.js) — fetch RESOLVES on that, so a resolved but
+      // not-ok response must land in failed, never in deleted.
+      let httpCalls = 0;
+      const httpFailResult = await deleteProjectsBulk(['/a', '/b', '/c'], (url, opts) => {
+        httpCalls++;
+        const body = JSON.parse(opts.body);
+        return body.path === '/b'
+          ? Promise.resolve({ ok: false, status: 500 })
+          : Promise.resolve({ ok: true, status: 200 });
+      });
+      check('deleteProjectsBulk: a resolved non-2xx response counts as failed, loop continues', () => {
+        assert.strictEqual(httpCalls, 3, `loop stopped early on an http error (only ${httpCalls} calls)`);
+        assert.deepStrictEqual(httpFailResult.deleted, ['/a', '/c']);
+        assert.deepStrictEqual(httpFailResult.failed, ['/b']);
+      });
+      let fetchCalledOnEmpty = false;
+      const emptyResult = await deleteProjectsBulk([], () => { fetchCalledOnEmpty = true; return Promise.resolve({ ok: true }); });
+      check('deleteProjectsBulk: empty selection is a no-op', () => {
+        assert.deepStrictEqual(emptyResult, { deleted: [], failed: [] });
+        assert.ok(!fetchCalledOnEmpty, 'fetch was called for an empty selection');
+      });
+    }
     const feedRes = await (await fetch(`${base}/api/feed?limit=50`)).json();
     check('/api/feed returns a merged entries array with a degradation flag', () => {
       assert.ok(Array.isArray(feedRes.entries), 'entries is an array');
