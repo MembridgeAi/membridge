@@ -3780,6 +3780,47 @@ async function main() {
     await new Promise(r => mockG.server.close(r));
   }
 
+  // Task 4 (per-session prompt sharing): reshareSession re-pushes ONE
+  // session's rows with the verbatim prompt forced on (backfill) or off
+  // (scrub), overwriting already-synced rows via merge-duplicates.
+  const mockRS = createMockSupabase();
+  await new Promise(r => mockRS.server.listen(17955, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17955';
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    const projRS = path.join(ROOT, 'projects', 'reshare-app');
+    fs.mkdirSync(projRS, { recursive: true });
+    await teamsync.signup(util.getConfig(), 'reshare@test.dev', 'pw-rs', 'Resha');
+    const teamRS = await teamsync.createTeam(util.getConfig(), 'ReshareTeam');
+    await teamsync.linkProject(util.getConfig(), projRS, teamRS.team_id, 'ReshareTeam');
+    { const rc = util.loadUserConfig(); if (rc.team) delete rc.team.sharePrompts; util.saveUserConfig(rc); } // sharePrompts OFF
+    const rsAgo = sec => new Date(Date.now() - sec * 1000).toISOString();
+    const st = util.loadState();
+    st.projects[projRS] = { events: [
+      { ts: rsAgo(50), source: 'Claude Code', kind: 'prompt', session: 'sA', text: 'do the thing' },
+      { ts: rsAgo(40), source: 'Claude Code', kind: 'edit', session: 'sA', file: path.join(projRS, 'src', 'a.js') },
+      { ts: rsAgo(30), source: 'Distilled', kind: 'summary', session: 'sA', text: 'Did the thing.', goal: 'the goal', decisions: '', gotchas: '', highlights: [{ file: 'src/a.js', note: 'a note' }] },
+    ] };
+    util.saveState(st);
+    await teamsync.syncTeams({ project: projRS });
+    const creds = await teamsync.getAccessToken(util.getConfig());
+    await check('teamsync: reshareSession backfills then scrubs a session prompt (plaintext)', async () => {
+      let row = mockRS.entries.filter(e => e.session === 'sA')[0];
+      assert.ok(row, 'precondition: entry pushed');
+      assert.strictEqual(row.ask, null, 'precondition: unshared (ask should be null)');
+      await teamsync.reshareSession(util.getConfig(), projRS, 'sA', true, { creds, crypto: null });
+      row = mockRS.entries.filter(e => e.session === 'sA')[0];
+      assert.ok(row.ask && /do the thing/.test(row.ask), 'backfill did not populate ask: ' + JSON.stringify(row.ask));
+      await teamsync.reshareSession(util.getConfig(), projRS, 'sA', false, { creds, crypto: null });
+      row = mockRS.entries.filter(e => e.session === 'sA')[0];
+      assert.strictEqual(row.ask, null, 'scrub did not clear ask');
+    });
+  } finally {
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mockRS.server.close(r));
+  }
+
   // Task 8: ship decisions/gotchas to teammates end to end, and pull must
   // survive a backend still missing goal/changes (or any optional column).
   const mockS = createMockSupabase();
