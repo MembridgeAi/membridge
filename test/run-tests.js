@@ -1631,6 +1631,27 @@ async function main() {
     // are unaffected by this test's provider switch.
     await post(`${base}/api/settings`, { advisor: { provider: 'anthropic' } });
 
+    // Review fix: clearing the anthropic key through /api/advisor must retire the
+    // legacy top-level advisor.apiKey, so an explicit clear actually takes effect
+    // instead of the legacy value continuing to win via getAdvisorConfig's
+    // !pconf.apiKey fallback. Seed a legacy flat config, clear, then restore.
+    {
+      const savedAdvisor = util.loadUserConfig().advisor;
+      const rcLegacy = util.loadUserConfig();
+      rcLegacy.advisor = { apiKey: 'sk-legacy-clear', model: 'claude-haiku-4-5' };
+      util.saveUserConfig(rcLegacy);
+      const beforeClear = advisorLib.getAdvisorConfig(util.getConfig());
+      await httpPost(PORT, '/api/advisor', { provider: 'anthropic', apiKey: '' });
+      const afterClear = advisorLib.getAdvisorConfig(util.getConfig());
+      await check('advisor: clearing the anthropic key retires the legacy top-level key', () => {
+        assert.strictEqual(beforeClear.apiKey, 'sk-legacy-clear', 'precondition: legacy key should be active');
+        assert.strictEqual(afterClear.apiKey, '', 'legacy key still winning after explicit clear: ' + JSON.stringify(afterClear.apiKey));
+      });
+      const rcRestore = util.loadUserConfig();
+      if (savedAdvisor === undefined) delete rcRestore.advisor; else rcRestore.advisor = savedAdvisor;
+      util.saveUserConfig(rcRestore);
+    }
+
     // M3: roadmap generation (the mock returns a canned plan and captures the request)
     const planNoKey = await post(`${base}/api/plan/generate`, { path: proj1, goal: 'Ship checkout' });
     check('plan: generating without a key is refused', () => {
