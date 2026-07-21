@@ -5322,6 +5322,13 @@ async function main() {
         created_at: '2026-07-20T00:00:00Z' }, { selfUserId: 'me' });
     assert.strictEqual(team.headline, 'H', 'headline not carried by normalizeTeam');
   });
+  check('feed: local self entries carry a shared flag', () => {
+    const meta = { projectName: 'p', projectPath: '/p', authorId: 'u1' };
+    const on = feed.normalizeLocal({ ts: '2026-01-01T00:00:00Z', session: 's1', ask: 'hi', shared: true }, meta);
+    const off = feed.normalizeLocal({ ts: '2026-01-01T00:00:00Z', session: 's2', ask: 'hi', shared: false }, meta);
+    assert.strictEqual(on.shared, true);
+    assert.strictEqual(off.shared, false);
+  });
   check('feed: local entry carries goal + changes', () => {
     const proj = { events: [
       { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'mcp thing' },
