@@ -67,8 +67,7 @@ exec env ELECTRON_RUN_AS_NODE=1 "\$APP/Contents/MacOS/${APP_NAME}" "\$APP/Conten
 EOF
   chmod +x "$WRAPPER"
   BIN_DIR="$(dirname "$CLI_DEST")"
-  if mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ]; then
-    cp "$WRAPPER" "$CLI_DEST" && chmod +x "$CLI_DEST"
+  if mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ] && cp "$WRAPPER" "$CLI_DEST" && chmod +x "$CLI_DEST"; then
     say "CLI installed at ${CLI_DEST}"
   elif sudo mkdir -p "$BIN_DIR" && sudo cp "$WRAPPER" "$CLI_DEST" && sudo chmod +x "$CLI_DEST"; then
     say "CLI installed at ${CLI_DEST}"
