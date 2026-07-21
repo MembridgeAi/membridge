@@ -9,6 +9,10 @@
   is discreet: one pre-approved `membridge-hook.js append` command (narrow
   `permissions.allow` rule installed/removed by `setup-hooks`/`remove-hooks`),
   no narration, no permission prompt.
+- **Activity cards lead with a one-glance outcome.** Distilled summaries carry an
+  optional short `headline`; cards never headline with harvested AI monologue, guard
+  noisy live prompts to "Working…", clamp to two lines, and move the full summary
+  into the expander.
 
 ## 0.7.0 — 2026-07-14
 
