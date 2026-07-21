@@ -18,6 +18,7 @@ const memorydb = require('../lib/memorydb');
 const { startServer } = require('../lib/server');
 const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
+const binding = require('../lib/binding');
 const hooks = require('../lib/hooks');
 const pkg = require('../package.json');
 
@@ -216,7 +217,9 @@ function cmdStatus() {
   console.log(`Projects:  ${projects.length}`);
   for (const [key, proj] of projects) {
     const paused = util.isProjectOff(key, config) ? ' [paused]' : '';
-    console.log(`  ${key}${paused} — ${proj.events.length} event(s), last sync ${proj.lastSync || 'never'}`);
+    const b = binding.resolveBinding(state, key);
+    const bound = b ? `bound → ${b.projectId}` : 'unbound';
+    console.log(`  ${key}${paused} — ${proj.events.length} event(s), ${bound}, last sync ${proj.lastSync || 'never'}`);
   }
 }
 
@@ -397,6 +400,29 @@ function cmdChurn() {
 function die(msg) {
   console.error(msg);
   process.exit(1);
+}
+
+// Bind the current folder to a team project (declared project identity).
+// Commands read the module-level `args` (process.argv.slice(2)); args[1] is
+// the first operand, matching cmdTeam's convention.
+function cmdBind() {
+  const projectId = args[1];
+  if (!projectId) die('Usage: membridge bind <projectId> [--team <teamId>]');
+  const ti = args.indexOf('--team');
+  const teamId = ti >= 0 ? args[ti + 1] : null;
+  const folder = process.cwd();
+  const state = util.loadState();
+  binding.bindFolder(state, folder, projectId, teamId);
+  util.saveState(state);
+  console.log(`bound ${folder} → ${projectId}`);
+}
+
+function cmdUnbind() {
+  const folder = process.cwd();
+  const state = util.loadState();
+  binding.unbindFolder(state, folder);
+  util.saveState(state);
+  console.log(`unbound ${folder}`);
 }
 
 function credArgs() {
@@ -693,6 +719,8 @@ const commands = {
   login: cmdLogin,
   logout: cmdLogout,
   join: cmdJoin,
+  bind: cmdBind,
+  unbind: cmdUnbind,
   team: cmdTeam,
   hook: cmdHook,
   'setup-hooks': () => {

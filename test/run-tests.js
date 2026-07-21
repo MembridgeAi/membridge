@@ -33,6 +33,7 @@ const feed = require('../lib/feed');
 const mcpMod = require('../lib/mcp');
 const changesLib = require('../lib/changes');
 const projectResolve = require('../lib/project-resolve');
+const binding = require('../lib/binding');
 const { Client: McpClient } = require('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
@@ -208,6 +209,94 @@ async function main() {
     assert.ok(out.some(e => e.session === 's2' && e.kind === 'prompt'), 's2 prompt lost');
     assert.ok(out.some(e => e.session === 's2' && e.file === '/repo/real.js'), 's2 real edit lost');
     assert.ok(out.some(e => e.session === 's3'), 'prompt-only session wrongly dropped');
+  });
+
+  // --- declared project identity: binding module + CLI (offline) ---
+  check('binding.resolveBinding: direct binding on the folder', () => {
+    const state = { projects: { '/repo': { boundProjectId: 'p1', boundTeamId: 't1' } } };
+    assert.deepStrictEqual(binding.resolveBinding(state, '/repo'), { projectId: 'p1', teamId: 't1' });
+  });
+  check('binding.resolveBinding: worktree inherits nearest bound ancestor', () => {
+    const state = { projects: { '/repo': { boundProjectId: 'p1', boundTeamId: 't1' } } };
+    assert.deepStrictEqual(
+      binding.resolveBinding(state, '/repo/.worktrees/feature'),
+      { projectId: 'p1', teamId: 't1' });
+  });
+  check('binding.resolveBinding: unbound folder returns null', () => {
+    const state = { projects: { '/repo': { events: [] } } };
+    assert.strictEqual(binding.resolveBinding(state, '/repo/sub'), null);
+  });
+  check('binding.resolveBinding: nearest ancestor wins over farther one', () => {
+    const state = { projects: {
+      '/repo': { boundProjectId: 'root', boundTeamId: 't1' },
+      '/repo/packages/api': { boundProjectId: 'api', boundTeamId: 't1' },
+    } };
+    assert.strictEqual(binding.resolveBinding(state, '/repo/packages/api/src').projectId, 'api');
+  });
+
+  check('binding.bindFolder: writes state fields and a gitignored mirror', () => {
+    const folder = path.join(ROOT, 'bind-test', 'repo');
+    fs.mkdirSync(folder, { recursive: true });
+    const state = { projects: {} };
+    binding.bindFolder(state, folder, 'proj-abc', 'team-xyz');
+    assert.strictEqual(state.projects[folder].boundProjectId, 'proj-abc');
+    assert.strictEqual(state.projects[folder].boundTeamId, 'team-xyz');
+    const mirror = JSON.parse(fs.readFileSync(path.join(folder, '.membridge', 'team.json'), 'utf8'));
+    assert.strictEqual(mirror.projectId, 'proj-abc');
+    assert.strictEqual(mirror.teamId, 'team-xyz');
+    assert.ok(mirror.boundAt, 'mirror carries a boundAt timestamp');
+  });
+  check('binding.bindFolder: teamId defaults to null when omitted', () => {
+    const folder = path.join(ROOT, 'bind-test', 'noteam');
+    fs.mkdirSync(folder, { recursive: true });
+    const state = { projects: {} };
+    binding.bindFolder(state, folder, 'proj-only');
+    assert.strictEqual(state.projects[folder].boundTeamId, null);
+  });
+  check('binding.unbindFolder: clears fields and removes the mirror', () => {
+    const folder = path.join(ROOT, 'bind-test', 'repo2');
+    fs.mkdirSync(folder, { recursive: true });
+    const state = { projects: {} };
+    binding.bindFolder(state, folder, 'p', 't');
+    binding.unbindFolder(state, folder);
+    assert.strictEqual(state.projects[folder].boundProjectId, undefined);
+    assert.strictEqual(fs.existsSync(path.join(folder, '.membridge', 'team.json')), false);
+  });
+
+  check('binding.migrateLegacyLinks: seeds boundProjectId from a legacy team.json', () => {
+    const folder = path.join(ROOT, 'migrate-test', 'legacy');
+    fs.mkdirSync(path.join(folder, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(folder, '.membridge', 'team.json'),
+      JSON.stringify({ projectId: 'legacy-proj', teamId: 'legacy-team' }));
+    const state = { projects: { [folder]: { events: [] } } };
+    const n = binding.migrateLegacyLinks(state);
+    assert.strictEqual(n, 1);
+    assert.strictEqual(state.projects[folder].boundProjectId, 'legacy-proj');
+    assert.strictEqual(state.projects[folder].boundTeamId, 'legacy-team');
+    assert.strictEqual(binding.migrateLegacyLinks(state), 0);
+  });
+  check('binding.migrateLegacyLinks: leaves already-bound projects untouched', () => {
+    const folder = path.join(ROOT, 'migrate-test', 'already');
+    const state = { projects: { [folder]: { boundProjectId: 'keep', boundTeamId: 'kt' } } };
+    assert.strictEqual(binding.migrateLegacyLinks(state), 0);
+    assert.strictEqual(state.projects[folder].boundProjectId, 'keep');
+  });
+
+  check('cli: bind writes binding + mirror; unbind clears it', () => {
+    const folder = path.join(ROOT, 'cli-bind', 'repo');
+    fs.mkdirSync(folder, { recursive: true });
+    const mirrorFile = path.join(folder, '.membridge', 'team.json');
+    const env = { ...process.env };
+    let r = spawnSync(process.execPath, [BIN, 'bind', 'cli-proj', '--team', 'cli-team'], { cwd: folder, env, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(JSON.parse(fs.readFileSync(mirrorFile, 'utf8')).projectId, 'cli-proj');
+    // The CLI stores the key as the realpath'd cwd (macOS /var -> /private/var).
+    const real = fs.realpathSync(folder);
+    assert.strictEqual(binding.resolveBinding(util.loadState(), real).projectId, 'cli-proj');
+    r = spawnSync(process.execPath, [BIN, 'unbind'], { cwd: folder, env, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(fs.existsSync(mirrorFile), false);
+    assert.strictEqual(binding.resolveBinding(util.loadState(), real), null);
   });
 
   check('prepare-app bundles the CLI into app/bin so the packaged asar carries it', () => {
@@ -2107,6 +2196,23 @@ async function main() {
       const l = JSON.parse(read(path.join(proj1, '.membridge', 'team.json')));
       assert.strictEqual(l.projectId, linkA.projectId);
       assert.strictEqual(l.teamId, team.team_id);
+    });
+
+    await check('syncTeams: a bound folder (no team.json) syncs to boundProjectId', async () => {
+      // Reuse linkA's projectId, but bind a DIFFERENT folder that has no team.json.
+      const boundOnly = path.join(ROOT, 'projects', 'bound-only');
+      fs.mkdirSync(boundOnly, { recursive: true });
+      const st = util.loadState();
+      st.projects[boundOnly] = { events: [{ kind: 'edit', session: 's-bound', file: 'a.js', ts: new Date().toISOString() }] };
+      binding.bindFolder(st, boundOnly, linkA.projectId, team.team_id);
+      util.saveState(st);
+      const res = await teamsync.syncTeams({ project: boundOnly });
+      assert.ok(res.synced.includes(boundOnly), 'bound folder was synced');
+      // Clean up: a second folder bound to proj1's projectId would otherwise
+      // shadow proj1 in later hub/feed tests that map project_id -> local path.
+      const st2 = util.loadState();
+      delete st2.projects[boundOnly];
+      util.saveState(st2);
     });
     const dashboardTeam = await teamPayload();
     check('dashboard: team payload exposes identity, teams and linked projects without tokens', () => {
