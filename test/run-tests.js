@@ -62,6 +62,19 @@ const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
 const count = (hay, needle) => hay.split(needle).length - 1;
 
+// Minimal OpenAI/Gemini-shaped JSON mock. `handler(req, body, send)` returns a
+// response via send(code, obj). Returns the http.Server (already listening).
+function startJsonMock(port, handler) {
+  const srv = http.createServer((req, res) => {
+    const chunks = []; req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      let body = {}; try { body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {}; } catch {}
+      handler(req, body, (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); });
+    });
+  });
+  return new Promise(r => srv.listen(port, '127.0.0.1', () => r(srv)));
+}
+
 function setupFixtures() {
   for (const p of [proj1, proj2, proj3]) fs.mkdirSync(p, { recursive: true });
   // The ingestion gate only keeps sessions landing in an already-tracked root.
@@ -1767,6 +1780,25 @@ async function main() {
       assert.ok(r.text && typeof r.text === 'string', 'no text');
       assert.ok(Number.isFinite(r.usage.input_tokens), 'usage not normalized');
       assert.strictEqual(a.priceFor('claude-haiku-4-5')[0], 1);
+    });
+
+    await check('advisors/openai: chat-completions request shape + normalized usage', async () => {
+      let seen = null;
+      const srv = await startJsonMock(17960, (req, body, send) => {
+        seen = { url: req.url, body };
+        if (req.method === 'GET' && /\/models$/.test(req.url)) return send(200, { data: [{ id: 'gpt-4o' }] });
+        send(200, { choices: [{ message: { content: '{"summary":"ok","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+      });
+      try {
+        const a = advisors.byId('openai');
+        const r = await a.generate({ apiKey: 'sk-x', baseUrl: 'http://127.0.0.1:17960/v1', model: 'gpt-4o', system: 's', prompt: 'p', schema: { type: 'object' }, maxTokens: 300 });
+        assert.strictEqual(seen.body.response_format.type, 'json_schema');
+        assert.strictEqual(seen.body.messages[0].role, 'system');
+        assert.strictEqual(r.usage.input_tokens, 10);
+        assert.strictEqual(r.usage.output_tokens, 5);
+        const test = await a.testKey({ apiKey: 'sk-x', baseUrl: 'http://127.0.0.1:17960/v1' });
+        assert.strictEqual(test.ok, true);
+      } finally { srv.close(); }
     });
 
     // --- Multi-provider advisor: registry + shared helpers ---
