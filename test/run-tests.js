@@ -1172,6 +1172,77 @@ async function main() {
       assert.ok(loadSessSrc && /STALE_GAP[\s\S]{0,200}sessFp|live[\s\S]{0,600}sessFp = fp/.test(loadSessSrc) && /live/.test(loadSessSrc),
         "loadSession's dedup fingerprint ignores liveness — a stale session never repaints to finished");
     });
+    // ---- Round 4: auth-screen polish + the Projects person filter blanking on
+    // shared-project members with no recent local activity. Browser behavior
+    // pinned by source/page-shape assertions; the person filter is a pure
+    // extracted helper exercised directly (deleteProjectsBulk style). ----
+    check('auth screen: password is labeled, display name says what it is, password hint intact', () => {
+      // The micro-label styling must live on an inner span, NOT the <label>
+      // itself: the input is the label's child and would inherit the mono/
+      // uppercase/tracking styles (font-family:inherit + inherited props),
+      // rendering the placeholder as wide-tracked ALL-CAPS mono.
+      assert.ok(/<label[^>]*><span[^>]*>Password<\/span><input name="password"/.test(embeddedScript),
+        'password label missing or its styling sits on the label element (input would inherit mono/uppercase)');
+      assert.ok(embeddedScript.includes('<label style="display:grid;gap:6px;text-align:left"><span'),
+        'the wrapping label is not style-neutral');
+      assert.ok(!embeddedScript.includes('placeholder="How teammates see you"'),
+        'display-name placeholder still reads "How teammates see you"');
+      assert.ok(embeddedScript.includes('placeholder="Display name"'), 'display-name placeholder missing');
+      assert.ok(embeddedScript.includes('placeholder="At least 6 characters"'), 'password hint placeholder lost');
+    });
+    check('auth screen: the mark is a proper MemBridge logo lockup, not a bare toggle-look tile', () => {
+      // the enlarged header-style lockup: brand-mark tile + wordmark side by side
+      assert.ok(pageHtml.includes('brand-mark auth-mark'), 'enlarged auth logo mark missing');
+      assert.ok(/brand-mark auth-mark[\s\S]{0,400}Mem<span/.test(pageHtml),
+        'auth mark is not a lockup with the MemBridge wordmark');
+      assert.ok(/\.auth-mark \{/.test(pageHtml) && /\.auth-mark svg \{/.test(pageHtml),
+        'auth-mark sizing CSS missing (mark or its svg would render header-sized)');
+      // the old toggle-look motif (two overlapped circles) is gone from the auth card
+      const authCard = pageHtml.slice(pageHtml.indexOf('id="view-auth"'), pageHtml.indexOf('<header'));
+      assert.ok(!authCard.includes('margin-left:-9px'), 'old two-circle toggle-look motif still in the auth card');
+    });
+    const pxFilterSrc = extractFn(embeddedScript, 'pxPersonFilter');
+    const pxInProjSrc = extractFn(embeddedScript, 'pxEntryInProject');
+    check('Projects person filter: shared-project team membership keeps the project visible without recent activity', () => {
+      assert.ok(pxFilterSrc, 'pxPersonFilter pure helper missing');
+      assert.ok(pxInProjSrc, 'pxEntryInProject missing');
+      const pxPersonFilter = new Function('return (' + pxFilterSrc + ')')();
+      const pxEntryInProject = new Function('return (' + pxInProjSrc + ')')();
+      const projects = [
+        { name: 'membridge', path: '/w/membridge', team: { teamId: 't1', teamName: 'Melika' } },
+        { name: 'sidecar', path: '/w/sidecar', team: null },
+        { name: 'otherteam', path: '/w/otherteam', team: { teamId: 't2', teamName: 'Elsewhere' } },
+      ];
+      const recent = [{ author: 'You', projectPath: '/w/sidecar', project: 'sidecar' }];
+      const membersByTeam = { t1: ['marco', 'Andrew'] };
+      // marco: t1 member with NO local recent activity -> the shared t1 project stays visible…
+      const marcoVis = pxPersonFilter(projects, 'marco', recent, membersByTeam, pxEntryInProject);
+      assert.deepStrictEqual(marcoVis.map(p => p.name), ['membridge'],
+        `expected only the t1 shared project, got [${marcoVis.map(p => p.name)}]`);
+      // …and membership is TEAM-scoped (t2's project excluded above), local projects excluded above.
+      const youVis = pxPersonFilter(projects, 'You', recent, membersByTeam, pxEntryInProject);
+      assert.deepStrictEqual(youVis.map(p => p.name), ['sidecar'], 'recent-activity match broke');
+      assert.strictEqual(pxPersonFilter(projects, 'All', recent, membersByTeam, pxEntryInProject).length, 3, "'All' must pass everything");
+      assert.strictEqual(pxPersonFilter(projects, 'marco', recent, null, pxEntryInProject).length, 0,
+        'missing member map must degrade to activity-only, not throw');
+    });
+    check('Projects person filter is wired: loader fetches members, render uses the helper, options include members', () => {
+      const renderSrc = extractFn(embeddedScript, 'renderProjectsIndex');
+      assert.ok(/pxPersonFilter\(/.test(renderSrc), 'renderProjectsIndex does not use the pure helper');
+      assert.ok(/personOpts[\s\S]{0,320}feedMembers/.test(renderSrc),
+        'person dropdown does not include team members without recent activity');
+      assert.ok(embeddedScript.includes('feedMembersByTeam'), 'per-team member map missing');
+      const loadPxSrc = extractFn(embeddedScript, 'loadProjectsIndex');
+      assert.ok(/ensureFeedMembers\(\)/.test(loadPxSrc), 'projects loader does not kick off the member-list load');
+      assert.ok(/feedMembers[\s\S]{0,200}\.map\(/.test(loadPxSrc) && /\bfp = JSON\.stringify\([\s\S]{0,260}feedMembers/.test(loadPxSrc),
+        'projects fingerprint ignores the member list — a late member load never repaints the dropdown');
+      // Team-context changes must also reset the member cache: ensureFeedMembers
+      // caches forever (even an empty no-team result), so joining a team
+      // mid-session would otherwise leave feedMembersByTeam empty and reproduce
+      // the blank-filter bug until an app reload; leaving keeps ghosts selectable.
+      assert.ok(/function resetFeedFilterUnions\(\) \{[\s\S]{0,240}feedMembers = null[\s\S]{0,140}feedMembersByTeam = \{\}/.test(embeddedScript),
+        'resetFeedFilterUnions does not reset the member cache — a mid-session team join never loads members');
+    });
     const bulkFnSrc = extractFn(embeddedScript, 'deleteProjectsBulk');
     check('deleteProjectsBulk helper exists standalone in the embedded script', () => {
       assert.ok(bulkFnSrc, 'deleteProjectsBulk function not found');
