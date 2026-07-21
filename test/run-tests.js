@@ -155,6 +155,10 @@ async function waitForHttp(url, ms = 15000) {
   throw new Error(`timeout waiting for ${url}: ${lastErr && lastErr.message}`);
 }
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+// Tiny (port, path) helpers for the in-process/daemon server tests — a thin
+// wrapper over fetch/post that always resolves the parsed JSON body.
+const httpGet = (port, p) => fetch(`http://127.0.0.1:${port}${p}`).then(r => r.json());
+const httpPost = (port, p, body) => post(`http://127.0.0.1:${port}${p}`, body).then(r => r.json());
 
 async function main() {
   console.log(`MemBridge test suite (fixtures in ${ROOT})\n`);
@@ -1610,6 +1614,22 @@ async function main() {
     // Leave distill in its default post-first-run-consent-tests-friendly state
     // for any later checks in this file that rely on the default config shape.
     await post(`${base}/api/settings`, { distill: { enabled: true, minEdits: 1, checkpointEvery: 4 } });
+
+    // Multi-Provider Advisor: /api/advisor exposes the provider registry and
+    // never leaks a saved key value back to the page.
+    await check('server: /api/advisor exposes providers + never leaks key values', async () => {
+      await httpPost(PORT, '/api/advisor', { provider: 'openai', apiKey: 'sk-secret', model: 'gpt-4o' });
+      const adv = await httpGet(PORT, '/api/advisor');
+      assert.strictEqual(adv.provider, 'openai');
+      const oai = adv.providers.find(p => p.id === 'openai');
+      assert.strictEqual(oai.keySet, true);
+      assert.ok(!JSON.stringify(adv).includes('sk-secret'), 'key value leaked to the page');
+      const local = adv.providers.find(p => p.id === 'local');
+      assert.strictEqual(local.needsBaseUrl, true);
+    });
+    // Restore the default provider so later checks (which assume Anthropic)
+    // are unaffected by this test's provider switch.
+    await post(`${base}/api/settings`, { advisor: { provider: 'anthropic' } });
 
     // M3: roadmap generation (the mock returns a canned plan and captures the request)
     const planNoKey = await post(`${base}/api/plan/generate`, { path: proj1, goal: 'Ship checkout' });
