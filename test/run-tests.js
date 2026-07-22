@@ -1252,7 +1252,7 @@ async function main() {
     }
     function evalDayCards(units) {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
-      const fnSrc = ['normKeyPart', 'homeDayLabel', 'firstSentence', 'askHeadline', 'runHeadline', 'buildDayCards']
+      const fnSrc = ['normKeyPart', 'homeDayLabel', 'capLine', 'firstSentence', 'askHeadline', 'runHeadline', 'buildDayCards']
         .map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function(escSrc + '\n' + fnSrc + '\nreturn { buildDayCards: buildDayCards };')();
       return sandbox.buildDayCards(units);
@@ -1471,7 +1471,7 @@ async function main() {
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
       const constSrc = ['MONO', 'STALE_GAP', 'BURST_GAP'].map(n => extractConst(embeddedScript, n)).join('\n');
       const fnSrc = [
-        'personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'promptRowsHtml', 'cardCloseHtml', 'shareToggleHtml',
+        'personColor', 'capLine', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'promptRowsHtml', 'cardCloseHtml', 'shareToggleHtml',
         'threadHtml', 'unitHtml', 'dayCardHtml',
         'feedKey', 'normKeyPart', 'threadKey', 'buildThreads', 'unitKeyOf', 'finalizeUnit', 'buildUnits',
         'homeDayLabel', 'buildDayCards', 'feedDayGroupHtml',
@@ -1525,7 +1525,7 @@ async function main() {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
       const constSrc = extractConst(embeddedScript, 'MONO');
-      const fnSrc = ['personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'shareToggleHtml', 'dayDetailHtml']
+      const fnSrc = ['personColor', 'capLine', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'shareToggleHtml', 'dayDetailHtml']
         .map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function('expandedKeys',
         escSrc + '\n' + agoSrc + '\n' + constSrc + '\nvar catchupExpanded = expandedKeys || {};\n' + fnSrc +
