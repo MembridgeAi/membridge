@@ -315,16 +315,17 @@ async function main() {
   });
   // --- 1b. capture provenance: the codex adapter must never mislabel foreign
   // files. Codex Desktop's history importer writes rollout-SHAPED files for
-  // OTHER tools' sessions (history_mode "legacy", sometimes originator
-  // "Claude Cowork") under ~/.codex/sessions — those and any Claude-Code-shaped
-  // JSONL in the codex root must be skipped, not stamped 'Codex'. ---
-  check('codex: an imported legacy rollout (history_mode "legacy" / Cowork originator) is skipped, never stamped Codex', () => {
+  // OTHER tools' sessions under ~/.codex/sessions, branded in the originator
+  // (Claude Code / Cowork) — those and any Claude-Code-shaped JSONL in the
+  // codex root must be skipped, not stamped 'Codex'. history_mode "legacy" is
+  // NOT a foreignness signal (genuine native Codex sessions carry it too). ---
+  check('codex: an imported rollout (Claude/Cowork originator) is skipped, never stamped Codex', () => {
     const fsA = {};
     const evsA = codexAdapter.extractEvents([
-      { timestamp: '2026-07-18T23:08:43.825Z', type: 'session_meta', payload: { id: 'imp-1', cwd: proj1, originator: 'Codex Desktop', history_mode: 'legacy' } },
+      { timestamp: '2026-07-18T23:08:43.825Z', type: 'session_meta', payload: { id: 'imp-1', cwd: proj1, originator: 'Claude Code', history_mode: 'legacy' } },
       { timestamp: '2026-07-18T23:08:43.831Z', type: 'event_msg', payload: { type: 'user_message', message: 'how do i get to it fast' } },
     ], fsA);
-    assert.deepStrictEqual(evsA, [], 'imported legacy rollout produced Codex events');
+    assert.deepStrictEqual(evsA, [], 'imported Claude-Code rollout produced Codex events');
     assert.ok(fsA.foreign, 'imported file not marked foreign');
     const fsB = {};
     const evsB = codexAdapter.extractEvents([
@@ -364,6 +365,24 @@ async function main() {
     ], fsD);
     assert.strictEqual(evsD2.length, 1, 'validated file stopped ingesting on incremental read');
   });
+  // Regression: current Codex (>= ~0.144) stamps history_mode "legacy" on
+  // GENUINE native sessions, not just imported foreign ones. history_mode is
+  // therefore not a foreignness signal; only a Claude/Cowork originator is. A
+  // native rollout carrying legacy + a Codex originator MUST still ingest.
+  check('codex: a genuine native rollout stamped history_mode "legacy" still ingests as Codex', () => {
+    for (const originator of ['Codex Desktop', 'codex_work_desktop']) {
+      const fsL = {};
+      const evsL = codexAdapter.extractEvents([
+        { timestamp: '2026-07-21T18:56:28.000Z', type: 'session_meta', payload: { id: 'nat-1', cwd: proj1, originator, history_mode: 'legacy', model_provider: 'openai' } },
+        { timestamp: '2026-07-21T18:57:00.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'remove the back button in the activity tab' } },
+      ], fsL);
+      assert.strictEqual(evsL.length, 1, `[${originator}] expected 1 event, got ${evsL.length}`);
+      assert.strictEqual(evsL[0].source, 'Codex', `[${originator}] not stamped Codex`);
+      assert.strictEqual(evsL[0].kind, 'prompt', `[${originator}] not a prompt`);
+      assert.ok(fsL.validated, `[${originator}] genuine legacy rollout not validated`);
+      assert.ok(!fsL.foreign, `[${originator}] genuine legacy rollout wrongly marked foreign`);
+    }
+  });
   check('codex cleanup: purges mislabeled sessions + resets offsets, leaves genuine and undecidable files alone', () => {
     const scanMod = require('../lib/scan');
     const foreignFile = '/fake/.codex/sessions/2026/07/18/rollout-fake-import.jsonl';
@@ -388,7 +407,7 @@ async function main() {
       },
     };
     const purged = scanMod.cleanupCodexMislabels(st, { readFirstEntry: f =>
-      f === foreignFile ? { type: 'session_meta', payload: { id: 'i', cwd: proj1, history_mode: 'legacy' } }
+      f === foreignFile ? { type: 'session_meta', payload: { id: 'i', cwd: proj1, originator: 'Claude Cowork', history_mode: 'legacy' } }
       : f === genuineFile ? { type: 'session_meta', payload: { id: 'g', cwd: '/other/proj' } }
       : null });
     assert.deepStrictEqual(purged, ['rollout-fake-import'], 'purge set is not exactly the foreign file');
@@ -409,6 +428,43 @@ async function main() {
       f === missingFile ? null : { type: 'session_meta', payload: { id: 'z', history_mode: 'legacy' } } });
     assert.deepStrictEqual(purged2, [], 'cleanup re-judged already-decided files');
   });
+  // The reverse migration: the old history_mode gate persisted foreign:true on
+  // GENUINE native sessions and consumed their offsets, so a mere gate fix
+  // leaves them black-holed forever. reopen re-reads each foreign codex file
+  // and, if the corrected gate now accepts it, drops the rec so the next scan
+  // re-reads it from offset 0 and re-ingests. Real imports stay foreign and are
+  // flagged so they're never re-read again (self-quiescing).
+  check('codex reopen: a foreign-marked file that now passes the gate is reset to re-scan; genuine imports stay foreign', () => {
+    const scanMod = require('../lib/scan');
+    const healFile = '/fake/.codex/sessions/2026/07/21/rollout-native-legacy.jsonl';
+    const realImport = '/fake/.codex/sessions/2026/07/18/rollout-cowork.jsonl';
+    const validated = '/fake/.codex/sessions/2026/06/01/rollout-good.jsonl';
+    const st = {
+      files: {
+        [healFile]: { offset: 900, adapter: 'codex', data: { foreign: true } },
+        [realImport]: { offset: 800, adapter: 'codex', data: { foreign: true } },
+        [validated]: { offset: 500, adapter: 'codex', data: { validated: true, cwd: '/p' } },
+        '/fake/claude/y.jsonl': { offset: 5, adapter: 'claude-code', data: { foreign: true } },
+      },
+    };
+    const reader = f =>
+      f === healFile ? { type: 'session_meta', payload: { id: 'h', cwd: '/p', originator: 'codex_work_desktop', history_mode: 'legacy', model_provider: 'openai' } }
+      : f === realImport ? { type: 'session_meta', payload: { id: 'r', cwd: '/p', originator: 'Claude Cowork', history_mode: 'legacy' } }
+      : null;
+    const reopened = scanMod.reopenMislabeledForeignCodex(st, { readFirstEntry: reader });
+    assert.deepStrictEqual(reopened, ['rollout-native-legacy'], 'reopen set is not exactly the healed native file');
+    assert.ok(!st.files[healFile], 'healed file rec not reset (must re-scan from offset 0)');
+    assert.ok(st.files[realImport] && st.files[realImport].data.foreign, 'genuine import lost its foreign verdict');
+    assert.ok(st.files[realImport].data.reopenChecked, 'genuine import not flagged (would be re-read every sync)');
+    assert.strictEqual(st.files[realImport].offset, 800, 'genuine import offset must not move');
+    assert.ok(st.files[validated] && st.files[validated].data.validated && !st.files[validated].data.reopenChecked, 'validated file disturbed');
+    assert.strictEqual(st.files['/fake/claude/y.jsonl'].offset, 5, 'non-codex file disturbed');
+    // idempotent + self-quiescing: nothing left to reopen, and no decided file is re-read
+    let reads = 0;
+    const reopened2 = scanMod.reopenMislabeledForeignCodex(st, { readFirstEntry: f => { reads++; return reader(f); } });
+    assert.deepStrictEqual(reopened2, [], 'second pass reopened something');
+    assert.strictEqual(reads, 0, 'second pass re-read a decided file (not self-quiescing)');
+  });
   // ACCEPTANCE e2e: replicate the real damage (imported rollout on disk, its
   // events already in state as 'Codex') — after a sync, the project has ZERO
   // Codex sessions from imported files, genuine Codex events survive, and a
@@ -418,7 +474,7 @@ async function main() {
     fs.mkdirSync(impDir, { recursive: true });
     const impFile = path.join(impDir, 'rollout-import-e2e.jsonl');
     fs.writeFileSync(impFile, jsonl([
-      { timestamp: '2026-07-18T23:08:43.825Z', type: 'session_meta', payload: { id: 'imp-e2e', cwd: proj1, originator: 'Codex Desktop', history_mode: 'legacy' } },
+      { timestamp: '2026-07-18T23:08:43.825Z', type: 'session_meta', payload: { id: 'imp-e2e', cwd: proj1, originator: 'Claude Cowork', history_mode: 'legacy' } },
       { timestamp: '2026-07-18T23:08:43.831Z', type: 'event_msg', payload: { type: 'user_message', message: 'i had an idea as another feature for membridge' } },
     ]));
     const stSeed = util.loadState();
@@ -462,7 +518,7 @@ async function main() {
     const impDir2 = path.join(process.env.MEMBRIDGE_CODEX_DIR, '2026', '07', '18');
     const impFile2 = path.join(impDir2, 'rollout-import-outer.jsonl');
     fs.writeFileSync(impFile2, jsonl([
-      { timestamp: '2026-07-18T23:08:44.000Z', type: 'session_meta', payload: { id: 'imp-outer', cwd: projX, originator: 'Codex Desktop', history_mode: 'legacy' } },
+      { timestamp: '2026-07-18T23:08:44.000Z', type: 'session_meta', payload: { id: 'imp-outer', cwd: projX, originator: 'Claude Cowork', history_mode: 'legacy' } },
       { timestamp: '2026-07-18T23:08:44.100Z', type: 'event_msg', payload: { type: 'user_message', message: 'polluted mislabeled ask' } },
     ]));
     const stSeed2 = util.loadState();
@@ -490,7 +546,7 @@ async function main() {
     fs.mkdirSync(blankDir, { recursive: true });
     const blankFile = path.join(blankDir, 'rollout-blank-first.jsonl');
     fs.writeFileSync(blankFile,
-      '\n' + JSON.stringify({ timestamp: '2026-07-18T23:08:45.000Z', type: 'session_meta', payload: { id: 'b1', cwd: proj1, history_mode: 'legacy' } }) + '\n');
+      '\n' + JSON.stringify({ timestamp: '2026-07-18T23:08:45.000Z', type: 'session_meta', payload: { id: 'b1', cwd: proj1, originator: 'Claude Cowork', history_mode: 'legacy' } }) + '\n');
     const st = {
       files: { [blankFile]: { offset: 10, adapter: 'codex', data: {} } },
       projects: { [proj1]: { events: [
