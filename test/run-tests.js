@@ -1654,6 +1654,29 @@ async function main() {
       assert.ok(/data-day-back/.test(h), 'not-found still offers the way back');
       assert.ok(/isn|scrolled|no longer/i.test(h), 'not-found copy missing');
     });
+    // FIX 2 (auto/day-card-fixes): kill the not-found flash while the day view's
+    // fetch is still in flight. During loading, show the slow-load spinner —
+    // never the "not in feed" message. Not-found renders ONLY once the fetch has
+    // resolved with no matching day (loading falsy).
+    check('dayDetailHtml: loading state shows the spinner, never the not-found message', () => {
+      const h = evalDayDetailHtml(null, { loading: true });
+      assert.ok(/mbSpin/.test(h), 'loading state must render the slow-load spinner');
+      assert.ok(!/isn|scrolled|no longer/i.test(h), 'not-found copy must NOT render during load');
+      assert.ok(/data-day-back/.test(h), 'loading state still offers the way back');
+    });
+    check('dayDetailHtml: not-found renders only after a resolved fetch (loading falsy)', () => {
+      const h = evalDayDetailHtml(null, { loading: false });
+      assert.ok(/isn|scrolled|no longer/i.test(h), 'a resolved fetch with no day must show not-found');
+      assert.ok(!/mbSpin/.test(h), 'a resolved empty fetch is not a loading state');
+    });
+    check('day view wiring: startDay paints the loading state before the fetch, loadDay renders after it', () => {
+      const startSrc = extractFn(embeddedScript, 'startDay');
+      const loadSrc = extractFn(embeddedScript, 'loadDay');
+      assert.ok(/dayDetailHtml\(null,\s*\{\s*loading:\s*true\s*\}\)/.test(startSrc),
+        'startDay must paint the loading state (dayDetailHtml(null,{loading:true})) before loadDay resolves');
+      assert.ok(loadSrc.indexOf('dayDetailHtml(card)') !== -1 && loadSrc.indexOf('.then(') < loadSrc.indexOf('dayDetailHtml(card)'),
+        'loadDay must render the resolved card (not-found included) only inside the fetch .then');
+    });
     // BUG 2 (fix/share-live-and-clamp): day-detail text must never end
     // mid-word. Local rows render the full ask (askFull); rows that only
     // exist clipped (team rows, pre-fix data) get their tail tidied to the
