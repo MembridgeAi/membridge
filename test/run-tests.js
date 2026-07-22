@@ -5137,6 +5137,25 @@ async function main() {
   // Private-key storage. The real keychain only exists on macOS, so off-darwin
   // this asserts the fail-closed contract instead of skipping blind.
   const keychain = require('../lib/keychain');
+  // argv hardening (E2E completion Task 2): argv is world-readable via `ps`,
+  // so the secret must travel to `security` on stdin, never as an argument.
+  // Runner-injected so the assertion is about command construction, not the
+  // real keychain; the darwin round-trip check below exercises the real path.
+  check('keychain: store passes the secret via stdin, never argv', () => {
+    if (process.platform !== 'darwin') return; // store() fails closed off-darwin by design
+    const calls = [];
+    const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
+    try {
+      const secret = 'U0VDUkVULXZh+bHVl/wow==';
+      assert.ok(keychain.store('membridge.test.stdin', secret), 'store failed');
+      assert.ok(calls.every(c => !c.args.join(' ').includes(secret)), 'secret leaked into argv');
+      const store = calls.find(c => c.args[0] === '-i');
+      assert.ok(store, 'store must run security in -i (stdin command) mode');
+      assert.ok(store.input.includes(secret), 'secret travels on stdin');
+      assert.ok(/add-generic-password/.test(store.input), 'stdin carries the add command');
+      assert.ok(/-U/.test(store.input), 'idempotent update flag preserved');
+    } finally { keychain._setRunner(prev); }
+  });
   check('keychain: store/load/remove round trip on macOS; fails closed elsewhere', () => {
     if (!keychain.available()) {
       assert.strictEqual(keychain.load('anything'), null, 'unavailable load must be null');
