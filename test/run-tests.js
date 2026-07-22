@@ -1505,11 +1505,10 @@ async function main() {
       assert.ok(!/entries\.forEach[\s\S]{0,200}tools\[e\.source\]/.test(barFnSrc),
         'feedFilterBarHtml still derives tool options from its entries argument the old collapsing way');
     });
-    check('Activity back control clears filters and re-renders Activity in place (no longer exits to the Projects index)', () => {
+    check('Activity top level does not render a persistent back control', () => {
       assert.ok(!embeddedScript.includes('← Catch-Up'), 'old "← Catch-Up" label still present');
-      assert.ok(embeddedScript.includes('← All activity'), 'new honest back-link label missing');
-      assert.ok(/data-feed="back"[\s\S]{0,600}feedFilters\s*=\s*\{\s*author:\s*null,\s*project:\s*null,\s*source:\s*null\s*\}/.test(embeddedScript),
-        'back handler does not clear feedFilters to {author:null,project:null,source:null}');
+      assert.ok(!embeddedScript.includes('← All activity'), 'persistent Activity back-link label still present');
+      assert.ok(!/data-feed="back"/.test(embeddedScript), 'persistent Activity back-link target still present');
     });
     check('Team empty-state card reuses the header brand mark above "No team yet"', () => {
       const noneFnSrc = extractFn(embeddedScript, 'teamScreenNone');
@@ -3775,6 +3774,17 @@ async function main() {
     const ev = evs.find(e => e.session === 's1');
     assert.ok(ev && ev.headline === 'tight line', 'headline not carried by scanSummaries');
   });
+  check('scanSummaries labels Codex fallback summaries as Codex, not Distilled', () => {
+    const proj = path.join(ROOT, 'projects', 'codex-summary-source'); fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.membridge', 'summaries.jsonl'),
+      JSON.stringify({ session: 'codex-standalone', ts: '2026-07-22T00:00:00Z', did: 'Codex finished the UI fix.' }) + '\n');
+    const st = { projects: { [proj]: { events: [] } }, files: {} };
+    const evs = require('../lib/scan').scanSummaries(st, {});
+    const ev = evs.find(e => e.session === 'codex-standalone');
+    assert.ok(ev, 'codex summary event missing');
+    assert.strictEqual(ev.source, 'Codex');
+    assert.strictEqual(ev.distilled, true);
+  });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
@@ -5858,6 +5868,25 @@ async function main() {
     const norm = require('../lib/feed').normalizeLocal(withSummary, { projectName: 'p' });
     assert.strictEqual(norm.goal, 'Ship MCP');
     assert.ok(Array.isArray(norm.changes));
+  });
+  check('feed: standalone Codex summary becomes a visible local entry labeled Codex', () => {
+    const proj = { events: [
+      { ts: '2026-07-22T01:58:13.000Z', source: 'Distilled', kind: 'summary', session: 'codex-standalone',
+        text: 'Removed the persistent Activity back control.', goal: 'Remove the always-visible back button',
+        decisions: 'Kept day-detail breadcrumbs.', gotchas: '', highlights: [] },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, {});
+    assert.strictEqual(entries.length, 1, `entries were ${JSON.stringify(entries)}`);
+    assert.strictEqual(entries[0].source, 'Codex');
+    assert.strictEqual(entries[0].ask, '(not captured)');
+    assert.strictEqual(entries[0].summary, 'Removed the persistent Activity back control.');
+    assert.strictEqual(entries[0].goal, 'Remove the always-visible back button');
+    assert.strictEqual(entries[0].decisions, 'Kept day-detail breadcrumbs.');
+    assert.strictEqual(entries[0].distilled, true);
+    const norm = require('../lib/feed').normalizeLocal(entries[0], { projectName: 'Membridge', projectPath: proj1 });
+    assert.strictEqual(norm.source, 'Codex');
+    assert.strictEqual(norm.summary, 'Removed the persistent Activity back control.');
+    assert.strictEqual(norm.session, 'codex-standalone');
   });
   check('feed: highlight note is redacted on the local path', () => {
     const proj = { events: [
