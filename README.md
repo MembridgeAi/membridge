@@ -1,96 +1,100 @@
-# MemBridge — your team's AI work, in one place
+# MemBridge
 
 [![CI](https://github.com/mmelika/membridge/actions/workflows/ci.yml/badge.svg)](https://github.com/mmelika/membridge/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 
-**One app where your whole team sees what everyone's AI coding tools are
-doing — and where the tools themselves stay on the same page.**
+MemBridge is a menu-bar app (and CLI) for teams that code with AI. It gives
+you one feed of what everyone's AI coding tools have been doing, and it keeps
+the tools themselves in sync: Claude Code, Codex, Gemini CLI and any other
+agent can see each other's recent work, across tools and across teammates.
 
-MemBridge is a team collaboration app for AI-assisted development. It lives
-in your menu bar, and its dashboard is the product: one **unified,
-summary-first feed** of everything your team's AI tools got done — you and
-your teammates, across every project, newest first — plus, underneath it all,
-a memory engine that keeps Claude Code, Codex, Gemini CLI, and any other
-agent aware of each other's work, across tools *and* across teammates.
+<img src="docs/screenshots/activity-feed.png" alt="The Activity feed: day cards for each person and project, with live sessions marked Working now" width="100%">
 
-So when Andrew's Codex refactors checkout validation, you see it in the
-feed — leading with *what got done*, not just the prompt — and your Claude
-Code already knows about it the next time you open the project.
+When Andrew's Codex refactors checkout validation, you see it in the feed,
+and your Claude Code knows about it the next time you open the project.
 
-The whole dashboard is three surfaces: **Home** (the feed), **project
-pages**, and **Settings**. Nothing else to learn.
+Three things happen under the hood:
+
+- A local daemon watches the session logs your AI tools already write to
+  disk, and distills them into a small per-project memory.
+- That memory is injected into the context files every tool already reads at
+  startup (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`), inside a clearly marked
+  block. Your own notes are never touched.
+- Optionally, a redacted digest of that memory syncs to your team, so
+  everyone's dashboard (and everyone's agents) can see what happened in
+  shared projects.
 
 Everything starts local: no cloud, no accounts, no API keys until you decide
-to connect a team. (Prefer a terminal? Everything the app does is also a
-[CLI](#the-cli).)
+to connect a team.
 
-## The dashboard — three surfaces
+## Install
 
-The header is just: logo · a running/sync status pill (click it to sync
-now) · **Invite** · a settings gear. Everything else is one of three
-surfaces.
+macOS (Apple Silicon), one command:
 
-### Home — the unified feed
+```sh
+curl -fsSL https://membridge.me/install.sh | sh
+```
 
-The default view is a single centered column: every ask your team's AI
-tools completed, you and your teammates, across all projects, newest first.
-Each entry is **summary-first** — it leads with *what got done*, with the
-original prompt tucked underneath as a muted `Asked:` line — and carries a
-per-person avatar, the tool that did it, a project pill, the files it
-touched, and a relative time. A session that's still running (or a tool that
-doesn't distill) shows a `Working on:` line instead, so unfinished work
-never looks finished.
+This installs `MemBridge.app` to `/Applications` and the `membridge` CLI to
+`/usr/local/bin` (that step may ask for your password once), verifies the
+download's SHA-256, and launches without a Gatekeeper warning. Want to read
+it first? `curl -fsSL https://membridge.me/install.sh -o install.sh`.
 
-Three quiet filter chips sit above the feed — **person**, **project**,
-**tool** — populated from the feed itself. Click a person anywhere to filter
-the feed to them; click a project pill to open its page. If the team backend
-is briefly unreachable, the feed still renders your local work with a
-one-line notice and recovers on the next poll.
+On Intel Macs, Linux, Windows, or servers, use the CLI instead:
 
-### Project pages
+```sh
+npm install -g membridge
+membridge scan       # read-only: see which AI tools and projects it found
+membridge start      # run the background daemon
+membridge dashboard  # open the dashboard at http://127.0.0.1:7437
+```
 
-Open any project and you get one merged stream — your local work and your
-teammates' interleaved, same summary-first format, grouped by day. The
-header carries **Copy for AI** (a trimmed, redacted digest on your clipboard
-for pasting into ChatGPT, claude.ai, or any web AI that can't see your disk)
-and a `⋯` menu for everything else: open the memory log, see the
-context-file targets, pause/resume, share with the team or unlink, remove
-the injected memory block, or delete the project. The roadmap generator
-lives in a collapsed section at the bottom.
+That's the zero-setup core: your own tools start seeing each other's work,
+and the dashboard fills with your sessions. No account needed for any of it.
 
-### Settings
+To add your team: click **Invite** in the header (sign up, create the team,
+share the invite link), have teammates join and install, then share a project
+from its page. Commit the resulting `.membridge/team.json` so teammates'
+clones connect too. Terminal folks: `membridge join <link>` does signup and
+join in one command.
 
-One place for app settings *and* all management. **Team**: switch or rename
-a team, manage members and roles, mint and revoke invite links, create/join
-another team or leave, and your account with log out. **Projects**: add a
-project, run the detected-tools scan, and manage the watched-projects list
-(pause or delete) — the way to reach a project with no recent feed activity.
-Plus the usual settings: session summaries (distillation toggle and
-checkpoint knobs), bring-your-own-key and planner model, sync interval and
-target files, and a self-hosted-backend card for operators. No config-file
-editing required.
+## The dashboard
 
-Signing up, creating a team, inviting people, joining, and linking projects
-all happen right in the app — no terminal required.
+The app is four views: Projects, Activity, Team, and Settings.
 
-**Teammates who haven't installed anything** can still follow along: the
-hosted **web workspace** ([`web/`](web/README.md), Next.js + Supabase) opens
-invite links at `/join/<token>`, shows a day-grouped feed with filters,
-project stats, and member/role/invite management from any browser.
+**Projects** lists what MemBridge is watching, local-only or shared, with a
+week of stats per project. **Activity** is the feed above: one card per
+person, project, and day, opening with the summary of what got done and
+marking sessions that are still running. Filter by person, project, or tool.
 
-## How it works — the memory engine
+Open a project and you get the merged stream: your sessions and your
+teammates', interleaved and grouped by day. Each entry leads with the
+outcome; the original prompt sits underneath as an `Intent` line.
+
+<img src="docs/screenshots/project-page.png" alt="A project page: your and your teammates' sessions in one stream, each entry leading with what got done" width="100%">
+
+The **Copy for AI** button on a project page puts a trimmed, redacted digest
+on your clipboard, for pasting into ChatGPT, claude.ai, or any web AI that
+can't see your disk.
+
+**Team** handles members, roles, and invites. Teammates who haven't
+installed anything can follow along in the hosted web workspace
+([`web/`](web/README.md), Next.js + Supabase): invite links open at
+`/join/<token>`, and the feed, project stats, and member management work
+from any browser.
+
+<img src="docs/screenshots/team.png" alt="The Team view: members, roles, and the join code" width="100%">
+
+## How it works
 
 Every AI coding assistant keeps its own siloed session history. Claude Code
 doesn't know what Codex did this morning; your Codex has no idea what your
 teammate's Claude Code shipped an hour ago.
 
-But every major tool already reads a per-project context file at startup —
-`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex and most agents,
-`GEMINI.md` for Gemini CLI — and writes its session transcripts to a known
-folder on disk. MemBridge's background daemon connects the two: it watches
-the transcripts, distills a brief per-project memory, and injects it into
-every context file inside a clearly-delimited block:
+But every major tool already reads a per-project context file at startup,
+and writes its session transcripts to a known folder on disk. MemBridge's
+daemon connects the two:
 
 ```
 Claude Code ─┐                          ┌─> CLAUDE.md   (read by Claude Code)
@@ -100,188 +104,128 @@ any tool ────┘        memory            └─> GEMINI.md…  (configu
       team sync (opt-in, redacted) — your teammates' MemBridge daemons
 ```
 
+The injected block looks like this (taken from a real project):
+
 ```markdown
 <!-- membridge:begin -->
 ## Shared AI memory (MemBridge)
 
 Recent asks across tools:
-- 2026-07-09 10:00 · Claude Code: Build the login page with OAuth
-- 2026-07-09 10:06 · Codex: Add unit tests for the login form
+- 2026-07-21 16:02 · Claude Code
+  Intent: Fix the flaky cart total test
+  Did: The cart total test is deterministic now — totals are summed in
+  cents, so float order no longer changes the result.
+  Changes: src/cart.js · test/cart.test.js
+- 2026-07-21 17:34 · Claude Code: Migrate the product images to WebP
 
 Teammates' AI activity (MemBridge team sync):
-- 2026-07-09 10:30 · Andrew · Codex: Refactor checkout validation
+- 2026-07-21 14:43 · Andrew · Codex: Refactor checkout validation
+  Did: Checkout validation runs address and payment checks in a single
+  pass, so a bad card no longer hides an address error.
 
-Files recently modified by AI tools: src/login.js
+Files recently modified by AI tools: src/cart.js, test/cart.test.js
 <!-- membridge:end -->
 ```
 
-The rest of your file is never touched, and the **Remove block** button (or
-`membridge remove`) strips the blocks cleanly.
+Only the content between the markers is ever rewritten. The **Remove block**
+button (or `membridge remove`) strips it cleanly and restores your file
+byte-for-byte.
 
-Beyond the brief block, MemBridge keeps a structured memory database inside
-each project at `.membridge/`:
+Each project also gets a structured memory database in `.membridge/`:
+`memory.json` (every update as a structured entry, plus an ignore-aware index
+of the project's files) and `memory.md` (the same memory as readable
+markdown). Add `.membridge/` to `.gitignore` if you don't want it committed,
+or commit it to share AI context with your whole team.
 
-- **`memory.json`** — every AI update as a structured entry: timestamp,
-  which tool, what was asked, and exactly which files it touched, plus an
-  **index of the project's local files** (ignore-aware, so
-  `node_modules`/`.git` never pollute it) that lets one LLM point another at
-  the precise files a change refers to.
-- **`memory.md`** — the same memory rendered as markdown, readable by humans
-  and by any agent that opens the project.
+## Session summaries
 
-Add `.membridge/` to your project's `.gitignore` if you don't want the
-memory committed — or commit it to share AI context with your whole team.
+A summary harvested from the agent's last chat message is decent; a summary
+the agent writes on purpose is better. The app asks once, on first run,
+whether to turn this on (Settings toggles it any time; CLI:
+`membridge setup-hooks` / `remove-hooks`).
 
-## Quick start
+Enabled, it registers a [Stop hook](https://docs.claude.com/en/docs/claude-code/hooks)
+in `~/.claude/settings.json`. When a Claude Code session that edited files
+tries to stop, the hook blocks the stop once and asks the agent to append
+one JSON line to `<project>/.membridge/summaries.jsonl`: what was asked,
+what changed, key decisions, surprises. These become the `Distilled`
+summaries that take precedence everywhere: the context block, `memory.md`,
+the Copy-for-AI digest, and the team feed. The feed your teammates read is
+written by the agent that did the work.
 
-1. **Install the app + CLI** (macOS, Apple Silicon) with one command. It
-   downloads the pinned release, installs `MemBridge.app` to `/Applications`
-   and the `membridge` CLI to `/usr/local/bin`, and launches with **no
-   Gatekeeper warning**:
+Long sessions get checkpoints rather than one shot: the hook re-asks every
+few edits (defaults: first summary after 1 edit, then every 4), and the
+newest line wins while `memory.md` keeps the full history. The hook is
+strictly fail-open: any error, a paused project, or a too-small session
+means Claude Code stops normally. Nothing is installed silently, and
+turning it off removes exactly what was added.
 
-   ```sh
-   curl -fsSL https://membridge.me/install.sh | sh
-   ```
+Codex and other `AGENTS.md` readers have no hook, so the injected block
+carries a standing instruction to append the same line on completion.
+Well-behaved agents comply; when they don't, MemBridge falls back to the
+harvested summary.
 
-   The app opens with zero prompts — `curl` downloads without the
-   `com.apple.quarantine` flag that triggers Gatekeeper. Installing the CLI
-   into `/usr/local/bin` may ask for your password once. Prefer to read before
-   you run? `curl -fsSL https://membridge.me/install.sh -o install.sh` and
-   inspect it — it verifies the download's SHA-256 before touching your disk.
-   On Intel Macs, Windows, or a server, use [the CLI](#the-cli) via npm instead.
-2. **Watch your own tools sync.** That's the zero-setup core: the Home feed
-   fills with your work, and Claude Code and Codex start seeing each
-   other's work. No account needed for any of this.
-3. **Create your team** from the header **Invite** button (or Settings →
-   Team): sign up, create the team, mint an invite, and share the link (add
-   an expiry or use cap if you like).
-   The backend ships with the app — nothing to install or configure.
-4. **Teammates join** by opening the invite link in the web workspace (one
-   click, works before they've installed anything) — then install the app
-   so their own AI activity flows into the feed. Terminal folks:
-   `membridge join <link>` does signup and join in one command.
-5. **Share a project** from **Settings → Projects** (or a project page's
-   `⋯` menu) — and commit the resulting `.membridge/team.json` so teammates'
-   clones connect
-   too. When MemBridge spots a clone of a repo a teammate already shares
-   (same normalized git remote), it **suggests** the link in the dashboard —
-   nothing is shared until you confirm (or opt into
-   `"team": { "autoLink": true }`).
+## Team sync and privacy
 
-**What leaves your machine (and only for linked projects):** the same
-redacted digest entries you see in `.membridge/memory.md` — timestamps, tool
-names, redacted asks, relative file paths. Never file contents, never
-unlinked projects, and row-level security means only your team's members can
-read any of it.
+What leaves your machine, and only for projects you explicitly share: the
+same redacted digest entries you see in `.membridge/memory.md`. Timestamps,
+tool names, redacted asks, relative file paths. Never file contents, never
+unshared projects. Row-level security limits every row to your team.
+
+The daemon binds to `127.0.0.1` only. There is no telemetry. The only files
+MemBridge writes are the context files (inside its own markers) and its own
+state in `~/.membridge`; transcripts are read incrementally and never
+modified.
+
+Secrets are redacted before any text leaves a transcript, in every path
+(context blocks, memory files, Copy-for-AI, roadmap prompts, team sync).
+The built-in patterns cover AWS/GitHub/Google/Slack/Anthropic/OpenAI key
+formats, JWTs, PEM blocks, credentials in connection URIs,
+`Authorization`/`Bearer` headers, and `password=`/`api_key:` assignments,
+plus a Shannon-entropy backstop for high-entropy blobs that match no known
+shape. Each match becomes a named `[redacted:<name>]` marker. Add your own
+patterns with `redact`/`redactExtra` in config.
+
+Be clear about the limits: regex-and-entropy redaction cannot recognize
+every secret shape. It's defense in depth, not permission to paste live
+credentials into AI sessions. Use `exclude` or a `.membridge-off` file for
+projects that handle sensitive material.
 
 <details>
-<summary><b>Running your own backend</b> (self-hosting / operators)</summary>
+<summary>Running your own backend (self-hosting)</summary>
 
 Team sync talks to a Supabase project. Official builds ship pointed at the
-hosted MemBridge backend (baked into [`lib/backend.json`](lib/backend.json)),
-so users configure nothing. To run your own instead:
+hosted backend ([`lib/backend.json`](lib/backend.json)), so users configure
+nothing. To run your own:
 
 1. Create a [Supabase](https://supabase.com) project (free tier is plenty),
-   open its SQL Editor, and run [`supabase/schema.sql`](supabase/schema.sql)
-   followed by the files in [`supabase/migrations/`](supabase/migrations)
-   (invite links, roles, the feed the apps use).
-2. Grab the Project URL and `anon` public key from Settings → API. Both are
-   safe to publish — the anon key is meant for client apps, and row-level
-   security is what protects the data.
-3. Either bake them into `lib/backend.json` before building, or point an
-   existing install at them per-machine:
-   ```bash
-   membridge team setup --url https://<ref>.supabase.co --anon-key <anon key>
-   ```
+   and run [`supabase/schema.sql`](supabase/schema.sql) plus the files in
+   [`supabase/migrations/`](supabase/migrations) in its SQL Editor.
+2. Grab the Project URL and `anon` key from Settings → API (both are safe to
+   publish; row-level security protects the data).
+3. Bake them into `lib/backend.json` before building, or point an install at
+   them: `membridge team setup --url https://<ref>.supabase.co --anon-key <key>`
 </details>
 
-## Session summaries (distillation)
+## Roadmaps (optional, bring your own key)
 
-Harvested summaries (the agent's last chat message) are decent; a summary
-the agent writes *on purpose* is better. The app asks once, on first run,
-whether to turn this on; the Settings → Session summaries card toggles it
-any time (CLI: `membridge setup-hooks` / `remove-hooks`).
+The free core never calls any API. Add your own Anthropic key in Settings
+and each project page grows a roadmap generator: describe what you want to
+build, see the estimated cost on the button (about 1¢ with the default
+model), and get a phased plan where every task names the AI model suited to
+it, from "Everyday — Haiku" up to "Frontier — Fable", with a cross-check
+task for a second tool. The plan is saved to `.membridge/plan.json` and one
+`Current roadmap:` line joins the shared memory block, so your agents see
+the plan too.
 
-Enabled, it registers a
-[Stop hook](https://docs.claude.com/en/docs/claude-code/hooks) in
-`~/.claude/settings.json`. When a Claude Code session that edited files
-tries to stop, the hook blocks the stop once and asks the agent to save
-one JSON line — via a single pre-approved append command, no narration — to
-`<project>/.membridge/summaries.jsonl`:
-
-```json
-{"session":"<id>","ts":"<ISO time>","goal":"What was asked.","did":"What changed in the project.","decisions":"Key choices.","gotchas":"Surprises.","highlights":[{"file":"lib/feed.js","note":"why it matters"}]}
-```
-
-MemBridge merges these as high-quality `Distilled` summaries that take
-precedence over harvested ones everywhere — the context block, `memory.md`,
-the Copy-for-AI digest, and the team feed (redacted like everything else
-before it leaves the machine). So the feed your teammates read is written by
-the agent that did the work, on purpose.
-
-**Checkpoints, not one-shot.** A ten-turn session shouldn't be frozen by a
-summary it wrote in turn two. The first checkpoint is asked once a session
-has `distill.minEdits` edits (default 1); after that, the hook re-blocks
-every `distill.checkpointEvery` further edits (default 4) and asks for a
-fresh line summarizing the whole session so far, phrased as the outcome a
-teammate would experience. Each line is appended, never edited — the newest
-line is the summary; older ones are the session's history. The context
-block and team feed always show the latest checkpoint, while `memory.md`
-keeps the full numbered sequence so anyone can read the whole arc of a long
-session. Both knobs live under Settings → Session summaries → Advanced.
-
-**Consent model.** Nothing is installed silently: the daemon never touches
-`~/.claude/settings.json` on its own — only the first-run prompt, the
-Settings toggle, or `membridge setup-hooks` do, they append without
-disturbing your existing hooks — the Stop hook plus one narrow auto-approve
-rule so the summary write never raises a permission prompt — and turning it
-off strips exactly what was added. The hook itself is strictly fail-open —
-any error, a paused/untracked project, a too-small session, or
-`distill.enabled: false` means Claude Code stops normally, uninterrupted. It
-never blocks the same stop twice.
-
-**Codex fallback (tiering).** Claude Code is the *enforced* tier — the Stop
-hook guarantees the ask. Tools reading `AGENTS.md` (Codex and friends) have
-no hook, so they get the *requested* tier: the injected block carries a
-standing instruction to append the same summary line on task completion.
-Well-behaved agents comply; nothing breaks when they don't — MemBridge just
-falls back to the harvested summary.
-
-## Roadmaps — the bring-your-own-key upgrade
-
-The free core never talks to any API. Add your own Anthropic API key in
-Settings and each project page's **roadmap section** (collapsed at the
-bottom) becomes a generator:
-
-- Describe what you want to build next; the estimated cost sits on the
-  button before you click (about 1¢ per roadmap with the default model).
-- You get a phased plan where **every task names the AI model that should do
-  it** — "Everyday — Haiku" up to "Frontier — Fable", plus an independent
-  "Cross-check — Codex" — each with a one-line reason and a size. The
-  routing philosophy is baked in: start cheap, escalate on failure — never
-  the reverse.
-- The actual cost, from real usage, is shown afterwards. The plan is saved
-  to `.membridge/plan.json`, and one line — `Current roadmap: …` — is
-  written into the shared memory block, **so Claude Code and Codex see the
-  plan too**.
-- What's sent to Anthropic (with your key, only when you click Generate):
-  the project's name, your goal, recent asks (already redacted), file paths
-  touched, and top-level folder names. Never file contents, never other
-  projects.
+What's sent with your key, only when you click Generate: project name, your
+goal, recent asks (already redacted), file paths, and top-level folder
+names. Never file contents.
 
 ## The CLI
 
-Everything above is also a command — the app and the CLI are the same
-daemon at feature parity, so headless boxes, Linux, and terminal-first
-teammates are first-class:
-
-```bash
-npm install -g membridge
-
-membridge scan       # read-only: see which AI tools and projects it found
-membridge start      # run the background daemon
-membridge dashboard  # open the same dashboard in your browser
-```
+The app and the CLI are the same daemon with the same features, so headless
+boxes and terminal-first teammates aren't second-class:
 
 | Command | What it does |
 | --- | --- |
@@ -291,86 +235,34 @@ membridge dashboard  # open the same dashboard in your browser
 | `membridge scan` | Read-only report of discovered tools and projects |
 | `membridge remove [--project <path>]` | Strip injected memory blocks |
 | `membridge enable-autostart` / `disable-autostart` | Run at login |
-| `membridge setup-hooks` / `remove-hooks` | Session distillation hook (see above) |
+| `membridge setup-hooks` / `remove-hooks` | Session summary hook |
 | `membridge signup` / `login` / `logout` | Team account |
 | `membridge join <link-or-code>` | Accept an invite (creates the account if needed) |
-| `membridge team create` / `invite` / `revoke-invite` | Create a team, mint and revoke invite links |
-| `membridge team link` / `unlink` / `list` | Share (or stop sharing) a project with your team |
-| `membridge team setup` | Advanced: point at a self-hosted backend |
-| `membridge mcp` | Start a read-only MCP server over stdio (see below) |
+| `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
+| `membridge team link` / `unlink` / `list` | Share or stop sharing a project |
+| `membridge team setup` | Point at a self-hosted backend |
+| `membridge mcp` | Read-only MCP server over stdio |
 
-### MCP server (read-only)
+`membridge mcp` exposes the shared memory as read-only MCP tools
+(`list_projects`, `get_project_memory`, `get_recent_activity`,
+`search_memory`) for Claude Desktop, Cursor, and other MCP clients. Nothing
+it exposes can write files or trigger sync, and every field passes through
+the same redaction as the context files. The SDK isn't part of the
+zero-dependency core, so install it once before first use:
+`npm install @modelcontextprotocol/sdk zod`, then point your client at
+`{ "command": "membridge", "args": ["mcp"] }`.
 
-`membridge mcp` exposes the same shared memory as a set of read-only MCP
-tools — `list_projects`, `get_project_memory`, `get_recent_activity`,
-`search_memory` — so MCP-capable clients (Claude Desktop, Cursor, Cowork, ...)
-can query it live, over stdio. No trigger/side-effect tools: nothing it
-exposes can push/pull team sync, write a context file, or mutate state, and
-every text field is redacted the same way CLAUDE.md/AGENTS.md injection is.
-
-It's opt-in: `@modelcontextprotocol/sdk` and `zod` are not part of MemBridge's
-core install (`npm install membridge` stays zero-dependency), so a one-time
-install is needed the first time you use it:
-
-```bash
-npm install @modelcontextprotocol/sdk zod
-```
-
-Then point your MCP client's config at:
-
-```json
-{
-  "mcpServers": {
-    "membridge": {
-      "command": "membridge",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-## Supported AI coding tools
+## Supported tools
 
 | Tool | Support | How |
 | --- | --- | --- |
 | Claude Code | Built in | Reads `~/.claude/projects` transcripts, writes `CLAUDE.md` |
 | Codex (OpenAI) | Built in | Reads `~/.codex/sessions` rollouts, writes `AGENTS.md` |
-| Gemini CLI | Custom adapter | Point a config-driven adapter at its logs, add `GEMINI.md` to targets |
-| Cursor, opencode, Copilot CLI, … | Custom adapter | Any tool that logs sessions as JSONL works — no code required |
+| Gemini CLI | Custom adapter | Point an adapter at its logs, add `GEMINI.md` to targets |
+| Cursor, opencode, Copilot CLI, … | Custom adapter | Any tool that logs sessions as JSONL, no code required |
 
-## Configuration (advanced)
-
-The Settings view covers the common options. Under the hood it's
-`~/.membridge/config.json` (created on first run), which also holds the
-advanced ones:
-
-```jsonc
-{
-  "intervalSec": 60,                     // how often to sync
-  "dashboardPort": 7437,
-  "targets": ["CLAUDE.md", "AGENTS.md"], // add "GEMINI.md" etc.
-  "exclude": ["C:\\work\\secret-project", "*archive*"],
-  "redactDefaults": true,        // built-in secret redaction (see below)
-  "redact": [],                  // your own regexes, replaced with [redacted]
-  "redactExtra": [],             // additive, same syntax as redact
-  "maxPrompts": 8,
-  "maxFiles": 10,
-  "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 4 }, // Stop-hook session checkpoints
-  "adapters": {
-    "claude-code": { "enabled": true },
-    "codex": { "enabled": true },
-    "custom": []
-  }
-}
-```
-
-To pause a single project, click Pause in the dashboard — or drop an empty
-`.membridge-off` file in its root.
-
-### Connect any other AI tool (custom adapters)
-
-If a tool logs its sessions as JSONL anywhere on disk, wire it up in config —
-no code required:
+A custom adapter is a config entry that tells MemBridge where a tool's JSONL
+logs live and which fields hold the project path, timestamp, and message:
 
 ```jsonc
 "custom": [{
@@ -387,132 +279,104 @@ no code required:
 }]
 ```
 
-Dot-paths work for nested fields (`payload.cwd`). If the project path appears
-only once per file (like Codex's `session_meta`), MemBridge carries it forward
+Dot-paths reach nested fields (`payload.cwd`), and a project path that
+appears only once per file (like Codex's `session_meta`) is carried forward
 automatically.
 
-## Privacy and security
+## Configuration
 
-- **100% local by default.** The daemon binds to `127.0.0.1` only; nothing
-  leaves your machine unless you opt in. The two optional network paths:
-  team sync (only redacted digest entries, only for projects you explicitly
-  link) and the roadmap generator (your own Anthropic key, only when you
-  click Generate, sending only the redacted digest listed above; the key
-  lives in `~/.membridge/config.json`, chmod 600, never in any project
-  folder, and is never shown back to the dashboard page). No telemetry.
-- **Secrets are redacted by default**, everywhere text leaves a transcript —
-  the injected `CLAUDE.md`/`AGENTS.md` block, `.membridge/memory.md` and
-  `memory.json`, the Copy-for-AI digest, the roadmap prompt, and team-sync
-  pushes all flow through one redaction pipeline before anything is written or
-  sent. Covered out of the box (`redactDefaults`, on unless set to `false`):
-  AWS / GitHub / Google / Slack / Anthropic / OpenAI key formats, JWTs, PEM
-  private-key blocks, credentials embedded in `postgres://…@` connection URIs,
-  `Authorization`/`Bearer` header values, and generic `password=`/`api_key:`
-  assignments (the value is redacted, the key name kept). A **Shannon-entropy
-  backstop** also catches standalone high-entropy blobs (24+ chars) that match
-  no known shape — while deliberately leaving file paths, URLs, git SHAs,
-  UUIDs (your session ids), and repeated identifiers alone. Each match becomes
-  a named `[redacted:<name>]` marker so you can see *what* was scrubbed.
-  - Add your own patterns with `redact` / `redactExtra` (matched case-insensitively,
-    replaced with a bare `[redacted]`); both are additive to the defaults.
-  - Set `redactDefaults: false` to turn the built-in layer off entirely (then
-    only your `redact`/`redactExtra` patterns apply).
-  - **This is a backstop, not a guarantee.** Regex-and-entropy redaction cannot
-    recognize every secret shape — a novel token format or a secret split across
-    words can slip through. Treat it as defense in depth on top of the real
-    rule: don't paste live credentials into your AI sessions, and use `exclude`
-    or a `.membridge-off` file for projects that handle sensitive material.
-- **Team data is minimal and scoped.** Only linked projects sync; entries are
-  redacted before upload; file references outside the project fall back to
-  the basename so absolute paths never leak usernames or machine layout; git
-  remote credentials are stripped from repo URLs; and row-level security
-  restricts every row to your team's members.
-- **Transcripts are read-only** (incrementally, by byte offset). The only files
-  MemBridge writes are the configured context files — inside its own markers —
-  plus its own state in `~/.membridge`.
+Settings covers the common options. Under the hood it's
+`~/.membridge/config.json`:
+
+```jsonc
+{
+  "intervalSec": 60,                     // how often to sync
+  "dashboardPort": 7437,
+  "targets": ["CLAUDE.md", "AGENTS.md"], // add "GEMINI.md" etc.
+  "exclude": ["C:\\work\\secret-project", "*archive*"],
+  "redactDefaults": true,                // built-in secret redaction
+  "redact": [],                          // your own regexes -> [redacted]
+  "redactExtra": [],                     // additive, same syntax
+  "maxPrompts": 8,
+  "maxFiles": 10,
+  "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 4 },
+  "adapters": {
+    "claude-code": { "enabled": true },
+    "codex": { "enabled": true },
+    "custom": []
+  }
+}
+```
+
+To pause a single project, click Pause in the dashboard, or drop an empty
+`.membridge-off` file in its root.
 
 ## FAQ
 
-**Do I need the terminal?**
-No. Installing the app, creating a team, inviting people, sharing projects,
-and every setting are all in the UI. The CLI exists for Linux/headless
-machines and people who prefer it.
+**Do I need the terminal?** No. Installing, creating a team, inviting,
+sharing projects, and every setting are in the UI. The CLI exists for
+Linux, headless machines, and people who prefer it.
 
-**Do I need an account?**
-Only for the team layer. Syncing your own tools with each other works with
-zero accounts, zero keys, and zero network.
+**Do I need an account or API key?** Only for the team layer (account) and
+roadmaps (your own Anthropic key). Syncing your own tools with each other
+needs neither, and never touches the network.
 
-**Do I need an API key?**
-No. An Anthropic API key (added in Settings) unlocks exactly one optional
-feature: per-project roadmaps (the roadmap section on each project page),
-billed to your key at roughly a cent per roadmap.
+**Will it mess up my existing CLAUDE.md / AGENTS.md?** No. Only the content
+between the `<!-- membridge -->` markers is rewritten, and removing the
+block restores your file exactly.
 
-**Does my whole team need the app installed?**
-Everyone whose AI activity should sync runs MemBridge. Teammates who just
-want to *see* what's happening can use the hosted web workspace — the feed,
-projects, and member management work from a browser alone.
+**Does my whole team need it installed?** Everyone whose AI activity should
+sync runs MemBridge. People who just want to watch can use the web
+workspace from a browser.
 
-**How do I make Codex aware of what Claude Code did?**
-Just run MemBridge. It summarizes recent Claude Code activity into
-`AGENTS.md`, which Codex reads automatically — and vice versa into
-`CLAUDE.md`.
-
-**Does it work with more than two tools?**
-Yes. Adapters are pluggable: Claude Code and Codex are built in, and the
-config-driven custom adapter connects anything that logs JSONL. All tools
-share the same memory.
-
-**Will it mess up my existing CLAUDE.md / AGENTS.md?**
-No. MemBridge only ever rewrites the content between its `<!-- membridge -->`
-markers. Your own notes are preserved byte-for-byte, and removing the block
-restores files exactly.
-
-**How much overhead does it add?**
-Near zero: it reads only the bytes appended since the last pass, sleeps between
-syncs (60s default), and has zero runtime dependencies.
+**How much overhead does it add?** Near zero. It reads only the bytes
+appended since the last pass, sleeps between syncs (60s default), and the
+core has zero runtime dependencies.
 
 ## Development
 
 ```bash
 node test/run-tests.js   # zero-dependency offline suite (temp dirs + mock Supabase)
 npm run app              # run the tray app from source (Electron)
-npm run dist:mac         # build the macOS menu-bar app (zip; feeds the curl installer)
+npm run dist:mac         # build the macOS menu-bar app
 ```
 
-The core stays zero-dependency; Electron is a devDependency used only by the
-tray app. CI runs the suite on Linux, Windows, and macOS across Node 18/20/22,
-and the "Build app" workflow produces macOS builds on Apple runners.
+The core stays zero-dependency; Electron is a devDependency used only by
+the tray app. CI runs the suite on Linux, Windows, and macOS across Node
+18/20/22.
 
-The suite is fully offline and hermetic: it runs in temp dirs and talks to
-mock backends (the advisor honors a `MEMBRIDGE_API_BASE` override; team sync
-honors `MEMBRIDGE_TEAM_URL`). To hack on the dashboard against fake data
-without touching your real `~/.membridge`, run the daemon with the
-`MEMBRIDGE_HOME`, `MEMBRIDGE_CLAUDE_DIR`, `MEMBRIDGE_CODEX_DIR` and
-`MEMBRIDGE_PORT` env overrides pointed at a scratch folder.
+The suite is fully offline: it runs in temp dirs and talks to mock backends
+(`MEMBRIDGE_API_BASE`, `MEMBRIDGE_TEAM_URL`). To hack on the dashboard
+against fake data without touching your real `~/.membridge`, use the
+`MEMBRIDGE_HOME`, `MEMBRIDGE_CLAUDE_DIR`, `MEMBRIDGE_CODEX_DIR`, and
+`MEMBRIDGE_PORT` env overrides — or run `node scripts/readme-demo.js`,
+which builds a two-user demo team on port 7541 (it's how the screenshots
+in this README were made).
 
 Code map: [`lib/scan.js`](lib/scan.js) (adapters → events → sync),
 [`lib/digest.js`](lib/digest.js) (memory block + injection),
 [`lib/memorydb.js`](lib/memorydb.js) (per-project `.membridge/` DB),
-[`lib/redact.js`](lib/redact.js) (the redaction pipeline),
+[`lib/redact.js`](lib/redact.js) (redaction pipeline),
 [`lib/hooks.js`](lib/hooks.js) + [`lib/consent.js`](lib/consent.js)
-(distillation hook + consent),
-[`lib/feed.js`](lib/feed.js) (merge local + team activity into the unified feed),
-[`lib/advisor.js`](lib/advisor.js) (BYOK roadmaps, raw fetch, zero deps),
-[`lib/teamsync.js`](lib/teamsync.js) (team sync, raw fetch against Supabase),
+(summary hook + consent),
+[`lib/feed.js`](lib/feed.js) (merge local + team activity),
+[`lib/advisor.js`](lib/advisor.js) (BYOK roadmaps),
+[`lib/teamsync.js`](lib/teamsync.js) (team sync against Supabase),
 [`lib/server.js`](lib/server.js) (local HTTP API),
 [`lib/dashboard.js`](lib/dashboard.js) +
-[`lib/dashboard-team.js`](lib/dashboard-team.js) (the whole web UI, no build
-step), [`bin/membridge.js`](bin/membridge.js) (CLI),
-[`web/`](web/README.md) (hosted team workspace, Next.js). The working product
-plan is [PLAN.md](PLAN.md); recent changes are in [CHANGELOG.md](CHANGELOG.md).
+[`lib/dashboard-team.js`](lib/dashboard-team.js) (the web UI, no build step),
+[`bin/membridge.js`](bin/membridge.js) (CLI),
+[`web/`](web/README.md) (hosted team workspace, Next.js).
+The working plan is [PLAN.md](PLAN.md); recent changes are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Roadmap
 
-The working plan lives in [PLAN.md](PLAN.md). Next up:
+Next up, in rough order:
 
 - Presence ("Andrew's Claude Code is working in src/checkout right now")
 - Web workspace parity with the desktop dashboard's team features
-- LLM-powered summaries (optional API key): richer memory in fewer lines
+- LLM-powered summaries (optional API key)
 - Import ChatGPT / claude.ai data exports
 - First-class adapters for Gemini CLI, Cursor, opencode, Copilot CLI
 - Signed + notarized macOS builds
