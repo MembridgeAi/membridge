@@ -128,7 +128,10 @@ function setupFixtures() {
   // The legacy team-sync tests assert prompt text crossing the wire, so the
   // main test home opts into prompt sharing. The prompt-gate section removes
   // and restores this flag to pin the shipped (ask=null) default explicitly.
-  cfg.team = { ...(cfg.team || {}), sharePrompts: true };
+  // encrypt:false is the explicit escape hatch (encryption defaults ON): the
+  // whole legacy section doubles as proof the hatch restores plaintext sync
+  // byte-identically, and keeps these tests off the real macOS keychain.
+  cfg.team = { ...(cfg.team || {}), sharePrompts: true, encrypt: false };
   cfg.adapters = cfg.adapters || {};
   cfg.adapters.custom = [{
     id: 'mytool',
@@ -2638,7 +2641,7 @@ async function main() {
     {
       // Marco's pull asserts Andrew's verbatim ask, so this home opts in too.
       const cfgB = util.loadUserConfig();
-      cfgB.team = { ...(cfgB.team || {}), sharePrompts: true };
+      cfgB.team = { ...(cfgB.team || {}), sharePrompts: true, encrypt: false }; // legacy plaintext home — hatch keeps it off the real keychain
       util.saveUserConfig(cfgB);
     }
     const stateB = util.loadState();
@@ -3311,7 +3314,7 @@ async function main() {
     {
       // The accepted-suggestion check asserts Dana's ask reached the server.
       const cfgD = util.loadUserConfig();
-      cfgD.team = { ...(cfgD.team || {}), sharePrompts: true };
+      cfgD.team = { ...(cfgD.team || {}), sharePrompts: true, encrypt: false };
       util.saveUserConfig(cfgD);
     }
     const danaApi = path.join(ROOT, 'projects-d', 'api-server');
@@ -3338,7 +3341,7 @@ async function main() {
     // Erin opts into full auto-link: her clone links without a prompt.
     process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-e');
     const erinCfg = util.loadUserConfig();
-    erinCfg.team = { ...(erinCfg.team || {}), autoLink: true };
+    erinCfg.team = { ...(erinCfg.team || {}), autoLink: true, encrypt: false };
     util.saveUserConfig(erinCfg);
     const erinApi = path.join(ROOT, 'projects-e', 'api-server');
     gitRepo(erinApi, 'https://github.com/acme/api-server.git');
@@ -3569,6 +3572,11 @@ async function main() {
     // must not let her push into (or read) the team's project.
     process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-c');
     util.ensureConfig();
+    { // legacy plaintext home: explicit hatch (and keeps Mallory off the real keychain)
+      const cfgC = util.loadUserConfig();
+      cfgC.team = { ...(cfgC.team || {}), encrypt: false };
+      util.saveUserConfig(cfgC);
+    }
     const projC = path.join(ROOT, 'projects-c', 'shop-app');
     fs.mkdirSync(path.join(projC, '.membridge'), { recursive: true });
     fs.writeFileSync(path.join(projC, '.membridge', 'team.json'),
@@ -4269,7 +4277,7 @@ async function main() {
 
     // Flip sharePrompts on: a fresh entry's goal must ship, scrubbed.
     const cfgG = util.loadUserConfig();
-    cfgG.team = { ...(cfgG.team || {}), sharePrompts: true };
+    cfgG.team = { ...(cfgG.team || {}), sharePrompts: true, encrypt: false };
     util.saveUserConfig(cfgG);
     setGoalEntry(30, 'gsess2', 'Wire up goal tracking take 2', 'the second goal field plumbing');
     await teamsync.syncTeams({ project: projG });
@@ -4404,7 +4412,7 @@ async function main() {
         assert.strictEqual(row.ask, null, 'fail-closed must not backfill the prompt in plaintext');
       } finally {
         const rc2 = util.loadUserConfig();
-        if (rc2.team) delete rc2.team.encrypt;
+        if (rc2.team) rc2.team.encrypt = false; // encryption defaults ON — restore the legacy home's explicit hatch
         util.saveUserConfig(rc2);
       }
     });
@@ -5569,6 +5577,24 @@ async function main() {
       }, 'decrypting must return exactly the seven content fields');
     });
 
+    // Cutover flag (E2E completion Task 5): plaintextOff strips every content
+    // column — the row that crosses the wire is ciphertext + routing metadata
+    // only, and the ciphertext still round-trips to the full payload.
+    check('teamsync: encryptRow with plaintextOff ships ciphertext-only rows — content columns null, payload intact', () => {
+      const teamKey = tcReal.genTeamKey();
+      const off = teamsync.encryptRow(pushRow, teamKey, 2, { teamcrypto: tcReal, plaintextOff: true });
+      for (const col of ['ask', 'goal', 'decisions', 'gotchas', 'summary', 'files', 'changes']) {
+        assert.strictEqual(off[col], null, `${col} must be null under plaintextOff`);
+      }
+      assert.strictEqual(off.key_epoch, 2, 'epoch must ride along');
+      assert.strictEqual(off.project_id, 'p-1', 'routing metadata must survive');
+      assert.strictEqual(off.session, 's1', 'session id must survive for threading');
+      const payload = tcReal.decrypt(off.ciphertext, off.nonce, teamKey);
+      assert.strictEqual(payload.ask, 'redacted ask', 'payload must still carry the full content');
+      assert.deepStrictEqual(payload.files, ['src/a.js'], 'files must live inside the ciphertext');
+      assert.ok(!('ciphertext' in pushRow), 'input row must not be mutated');
+    });
+
     // Fail-closed wiring: flag ON, crypto/keychain unavailable. The pass must
     // push today's plaintext rows, never throw — and must LOG the fallback,
     // which is what separates "the wiring engaged and failed closed" from
@@ -5583,7 +5609,12 @@ async function main() {
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
       const projE = path.join(ROOT, 'projects', 'encrypt-app');
       fs.mkdirSync(projE, { recursive: true });
-      let syncErr = null, syncRes = null, logDelta = '';
+      // Fail-closed (E2E completion Task 4): with encryption on (the DEFAULT
+      // — this home sets no encrypt flag at all) and crypto unavailable,
+      // NOTHING may leave in plaintext. The pass pauses, records why, and a
+      // later pass with working crypto pushes the held entries encrypted.
+      let syncErr = null, syncRes = null, syncRes2 = null, logDelta = '';
+      let pushedWhileUnavailable = -1, pausedFlag = null, pausedFlag2 = null;
       try {
         await teamsync.signup(util.getConfig(), 'enc@test.dev', 'pw-e', 'Enc');
         const teamE = await teamsync.createTeam(util.getConfig(), 'EncTeam');
@@ -5595,8 +5626,7 @@ async function main() {
         ] };
         util.saveState(st);
         const raw = util.loadUserConfig();
-        raw.team = { ...(raw.team || {}), encrypt: true };
-        util.saveUserConfig(raw);
+        if (raw.team) { delete raw.team.encrypt; util.saveUserConfig(raw); } // default-on is the point
         let logBefore = 0;
         try { logBefore = fs.statSync(util.logPath()).size; } catch {}
         syncRes = await teamsync.syncTeams({
@@ -5608,24 +5638,41 @@ async function main() {
           },
         });
         try { logDelta = fs.readFileSync(util.logPath(), 'utf8').slice(logBefore); } catch {}
+        pushedWhileUnavailable = mockE.entries.length;
+        pausedFlag = util.loadState().teamCryptoPaused || null;
+        // Recovery pass: crypto works now (in-memory keychain, real libsodium).
+        const kcMem = new Map();
+        syncRes2 = await teamsync.syncTeams({
+          project: projE,
+          cryptoDeps: {
+            keychain: { available: () => true, load: a => kcMem.get(a) || null, store: (a, s) => { kcMem.set(a, s); return true; }, remove: a => kcMem.delete(a) },
+            teamcrypto: tcReal,
+          },
+        });
+        pausedFlag2 = util.loadState().teamCryptoPaused || null;
       } catch (e) { syncErr = e; } finally {
         const raw = util.loadUserConfig();
-        if (raw.team) { delete raw.team.encrypt; util.saveUserConfig(raw); }
+        raw.team = { ...(raw.team || {}), encrypt: false }; // restore the legacy-home hatch
+        util.saveUserConfig(raw);
         process.env.MEMBRIDGE_TEAM_URL = savedEnvUrl;
         process.env.MEMBRIDGE_TEAM_ANON_KEY = savedEnvKey;
         mockE.server.close();
       }
-      check('teamsync: flag-on push with unavailable crypto falls back to plaintext rows, logs it, never throws', () => {
+      check('teamsync: encrypted push (default-on) with unavailable crypto fails closed — nothing leaves, pass pauses and says why', () => {
         assert.ok(!syncErr, `syncTeams threw: ${syncErr && syncErr.message}`);
-        assert.deepStrictEqual(syncRes.errors, [], `sync errors: ${JSON.stringify(syncRes && syncRes.errors)}`);
-        assert.ok(mockE.entries.length >= 1, 'expected at least one pushed row');
-        for (const r of mockE.entries) {
-          assert.ok(!('ciphertext' in r) && !('nonce' in r) && !('key_epoch' in r),
-            'unavailable crypto must push plaintext-only rows');
-        }
-        assert.ok(mockE.entries.some(e => /encrypt me maybe/.test(e.ask || '')), 'plaintext content missing from push');
-        assert.ok(/team encrypt/.test(logDelta),
-          'expected a logged "team encrypt" fallback line proving the flag path engaged fail-closed');
+        assert.strictEqual(pushedWhileUnavailable, 0, 'fail-closed push must upload NOTHING without a key');
+        assert.ok(pausedFlag, 'state.teamCryptoPaused must record the pause');
+        assert.ok((syncRes.errors || []).some(e => /encryption|paused/i.test(e)),
+          `pass must surface a paused error, got: ${JSON.stringify(syncRes && syncRes.errors)}`);
+        assert.ok(/team encrypt/.test(logDelta), 'expected a logged "team encrypt" line naming the pause');
+      });
+      check('teamsync: held entries push encrypted on the next pass with working crypto, and the pause clears', () => {
+        assert.ok(!syncErr, `syncTeams threw: ${syncErr && syncErr.message}`);
+        assert.deepStrictEqual(syncRes2.errors, [], `recovery errors: ${JSON.stringify(syncRes2 && syncRes2.errors)}`);
+        assert.ok(mockE.entries.length >= 1, 'recovery pass must push the held entries');
+        assert.ok(mockE.entries.every(r => r.ciphertext && r.nonce && r.key_epoch === 1),
+          'recovered rows must carry ciphertext/nonce/key_epoch');
+        assert.strictEqual(pausedFlag2, null, 'teamCryptoPaused must clear after a successful pass');
       });
     }
   }
@@ -5772,6 +5819,94 @@ async function main() {
       assert.ok(!JSON.stringify(bobEntries).includes('sk-e2e-alice-999'),
         'secret must have been redacted before encryption');
     });
+
+    // Fail-closed pull (E2E completion Task 4): a ciphertext row that cannot
+    // be decrypted must render OPAQUE — never its server-controlled plaintext
+    // columns (a stripping/corrupting server would otherwise force a silent
+    // downgrade). The explicit encrypt:false hatch restores the legacy
+    // plaintext read for the same row.
+    {
+      const mockT = createMockSupabase();
+      const homeD = path.join(ROOT, 'home-e2ed');
+      const homeE = path.join(ROOT, 'home-e2ee');
+      const projT = path.join(ROOT, 'projects', 'tamper-app');
+      fs.mkdirSync(projT, { recursive: true });
+      const kcDana = mkMemKeychain(), kcEve = mkMemKeychain();
+      let tErr = null, eveEntriesClosed = null, eveEntriesHatch = null, resEveClosed = null;
+      try {
+        await new Promise(r => mockT.server.listen(17955, '127.0.0.1', r));
+        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17955';
+        process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+
+        process.env.MEMBRIDGE_HOME = homeD;
+        setTeamCfg();
+        await teamsync.signup(util.getConfig(), 'dana-e2e@test.dev', 'pw-d', 'Dana');
+        const teamT = await teamsync.createTeam(util.getConfig(), 'TamperTeam');
+        await teamsync.linkProject(util.getConfig(), projT, teamT.team_id, 'TamperTeam');
+
+        process.env.MEMBRIDGE_HOME = homeE;
+        setTeamCfg();
+        await teamsync.signup(util.getConfig(), 'eve-e2e@test.dev', 'pw-v', 'Eve');
+        await teamsync.joinTeam(util.getConfig(), teamT.invite_code);
+        await teamsync.syncTeams({ cryptoDeps: { keychain: kcEve, teamcrypto: tcE2E } });
+
+        process.env.MEMBRIDGE_HOME = homeD;
+        const stD = util.loadState();
+        stD.projects[projT] = { events: [
+          { ts: '2026-07-18T14:00:00.000Z', source: 'Claude Code', kind: 'prompt', text: 'the real content', session: 't1' },
+          { ts: '2026-07-18T14:01:00.000Z', source: 'Claude Code', kind: 'summary', text: 'real summary', session: 't1' },
+        ] };
+        util.saveState(stD);
+        await teamsync.syncTeams({ project: projT, cryptoDeps: { keychain: kcDana, teamcrypto: tcE2E } });
+
+        // The hostile server corrupts every ciphertext but leaves poisoned
+        // plaintext columns in place.
+        for (const e of mockT.entries) {
+          if (e.ciphertext) e.ciphertext = Buffer.from('garbage-' + e.ciphertext).toString('base64');
+          e.ask = 'POISONED ask';
+          e.summary = 'POISONED summary';
+        }
+
+        process.env.MEMBRIDGE_HOME = homeE;
+        const stE = util.loadState();
+        stE.projects[projT] = { events: [] };
+        util.saveState(stE);
+        resEveClosed = await teamsync.syncTeams({ project: projT, cryptoDeps: { keychain: kcEve, teamcrypto: tcE2E } });
+        eveEntriesClosed = ((util.loadState().projects[projT] || {}).teamEntries || []).map(e => ({ ...e }));
+
+        // Explicit hatch: encrypt:false rereads the same rows the legacy way.
+        const rawE = util.loadUserConfig();
+        rawE.team = { ...(rawE.team || {}), encrypt: false };
+        util.saveUserConfig(rawE);
+        const stE2 = util.loadState();
+        stE2.projects[projT] = { events: [] }; // fresh pull cursor
+        util.saveState(stE2);
+        await teamsync.syncTeams({ project: projT });
+        eveEntriesHatch = ((util.loadState().projects[projT] || {}).teamEntries || []).map(e => ({ ...e }));
+      } catch (e) { tErr = e; } finally {
+        process.env.MEMBRIDGE_HOME = savedHome;
+        process.env.MEMBRIDGE_TEAM_URL = savedUrl2;
+        process.env.MEMBRIDGE_TEAM_ANON_KEY = savedKey2;
+        mockT.server.close();
+      }
+
+      check('teamsync: a ciphertext row that cannot decrypt renders opaque — plaintext columns never surface (fail-closed pull)', () => {
+        assert.ok(!tErr, `tamper scenario threw: ${tErr && tErr.message}`);
+        assert.deepStrictEqual((resEveClosed || {}).errors, [], `eve sync errors: ${JSON.stringify(resEveClosed && resEveClosed.errors)}`);
+        assert.ok(eveEntriesClosed.length >= 1, 'expected pulled entries');
+        assert.ok(!JSON.stringify(eveEntriesClosed).includes('POISONED'),
+          'server-controlled plaintext surfaced from an undecryptable ciphertext row');
+        const t1 = eveEntriesClosed.filter(e => e.session === 't1');
+        assert.ok(t1.length >= 1 && t1.every(e => e.undecryptable === true), 'row must be marked undecryptable');
+        assert.ok(t1.every(e => e.ask == null && e.summary == null), 'content fields must be null on an undecryptable row');
+      });
+
+      check('teamsync: the explicit encrypt:false hatch restores the legacy plaintext read for the same rows', () => {
+        assert.ok(!tErr, `tamper scenario threw: ${tErr && tErr.message}`);
+        assert.ok(eveEntriesHatch.some(e => e.summary === 'POISONED summary'),
+          'hatch pull must read the plaintext columns exactly as a legacy client would');
+      });
+    }
 
     // Pre-migration backend (no 009 columns): flag-on push must drop the
     // three new columns and land plaintext (PGRST204 retry), and the pull
