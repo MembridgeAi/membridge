@@ -9571,6 +9571,125 @@ async function main() {
     });
   }
 
+  // New-device key recovery: a member whose keypair rotated (new machine /
+  // reset key store) is otherwise stuck forever — their stale sealed row is
+  // never overwritten and join-seal skips them. Two paths must recover them:
+  // (1) self-heal drops the stale row so a re-trusting holder re-seals the
+  // SAME key (history recovered); (2) an owner can `rekey` to a fresh epoch.
+  {
+    const tcR = require('../lib/teamcrypto');
+    const mkMemKc = () => { const m = new Map(); return {
+      available: () => true, load: a => m.get(a) || null,
+      store: (a, s) => { m.set(a, s); return true; }, remove: a => m.delete(a), _m: m }; };
+    const setCfg = () => { util.ensureConfig(); const raw = util.loadUserConfig();
+      raw.team = { ...(raw.team || {}), sharePrompts: true, encrypt: true }; util.saveUserConfig(raw); };
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const savedUrl = process.env.MEMBRIDGE_TEAM_URL;
+    const savedKey = process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    const homeA = path.join(ROOT, 'home-recA');
+    const homeB = path.join(ROOT, 'home-recB');
+    const projR = path.join(ROOT, 'projects', 'rec-app');
+    fs.mkdirSync(projR, { recursive: true });
+    const kcA = mkMemKc();
+    const kcBold = mkMemKc();      // Bob's original device
+    const kcBnew = mkMemKc();      // Bob's NEW device (fresh keypair)
+    const mockR = createMockSupabase();
+    let err = null;
+    let bobStaleDropped = null, bobRecovered = null, rekeyRes = null, rekeyEpoch = null;
+    let nonOwnerRekey = null, aliceUserId = null, bobUserId = null;
+    try {
+      await new Promise(r => mockR.server.listen(17961, '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17961';
+      process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+
+      // Alice owns the team; Bob joins and bootstraps his ORIGINAL identity.
+      process.env.MEMBRIDGE_HOME = homeA; setCfg();
+      await teamsync.signup(util.getConfig(), 'a-rec@test.dev', 'pw', 'Alice');
+      const teamR = await teamsync.createTeam(util.getConfig(), 'REC');
+      await teamsync.linkProject(util.getConfig(), projR, teamR.team_id, 'REC');
+      aliceUserId = mockR.users.get('a-rec@test.dev').id;
+
+      process.env.MEMBRIDGE_HOME = homeB; setCfg();
+      await teamsync.signup(util.getConfig(), 'b-rec@test.dev', 'pw', 'Bob');
+      await teamsync.joinTeam(util.getConfig(), teamR.invite_code);
+      bobUserId = mockR.users.get('b-rec@test.dev').id;
+      // Bob's home must carry the linked project in state so syncTeams
+      // actually processes it (the team.json link is shared via the project
+      // dir; the state entry is what the sync loop iterates).
+      { const st = util.loadState(); st.projects[projR] = { events: [] }; util.saveState(st); }
+      await teamsync.syncTeams({ cryptoDeps: { keychain: kcBold, teamcrypto: tcR } });
+
+      // Alice mints epoch-1 sealed to both (she pushes a session).
+      process.env.MEMBRIDGE_HOME = homeA;
+      const stA = util.loadState();
+      stA.projects[projR] = { events: [
+        { ts: '2026-07-18T12:00:00.000Z', source: 'Claude Code', kind: 'prompt', text: 'do the thing', session: 'r1' },
+        { ts: '2026-07-18T12:01:00.000Z', source: 'Claude Code', kind: 'edit', file: path.join(projR, 'a.js'), session: 'r1' },
+        { ts: '2026-07-18T12:02:00.000Z', source: 'Claude Code', kind: 'summary', text: 'did the thing', session: 'r1' },
+      ] };
+      util.saveState(stA);
+      await teamsync.syncTeams({ project: projR, cryptoDeps: { keychain: kcA, teamcrypto: tcR } });
+
+      // Bob switches to a NEW device: fresh keychain, same home/creds. His
+      // sync uploads a new pubkey (overwriting the old) and must self-heal the
+      // now-unopenable epoch-1 row.
+      process.env.MEMBRIDGE_HOME = homeB;
+      await teamsync.syncTeams({ project: projR, cryptoDeps: { keychain: kcBnew, teamcrypto: tcR } });
+      bobStaleDropped = !mockR.teamKeys.some(k => k.member_user_id === bobUserId);
+
+      // Alice re-trusts Bob's rotated key (out-of-band verified) and syncs:
+      // join-seal re-seals epoch-1 to Bob's NEW key.
+      process.env.MEMBRIDGE_HOME = homeA;
+      await teamsync.trustMember(util.getConfig(), bobUserId);
+      await teamsync.syncTeams({ project: projR, cryptoDeps: { keychain: kcA, teamcrypto: tcR } });
+
+      // Bob syncs again on the new device: he can now open the team key.
+      process.env.MEMBRIDGE_HOME = homeB;
+      const rb = await teamsync.syncTeams({ project: projR, cryptoDeps: { keychain: kcBnew, teamcrypto: tcR } });
+      bobRecovered = (rb.errors || []).length === 0 && !util.loadState().teamCryptoPaused;
+
+      // Owner rekey path: Alice rekeys; a fresh epoch seals to both trusted
+      // members and she can open her own new row.
+      process.env.MEMBRIDGE_HOME = homeA;
+      rekeyRes = await teamsync.rekeyTeam(util.getConfig(), teamR.team_id,
+        { cryptoDeps: { keychain: kcA, teamcrypto: tcR } });
+      rekeyEpoch = rekeyRes.epoch;
+
+      // Non-owner rekey is refused.
+      process.env.MEMBRIDGE_HOME = homeB;
+      nonOwnerRekey = await teamsync.rekeyTeam(util.getConfig(), teamR.team_id,
+        { cryptoDeps: { keychain: kcBnew, teamcrypto: tcR } });
+    } catch (e) { err = e; } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+      process.env.MEMBRIDGE_TEAM_URL = savedUrl;
+      process.env.MEMBRIDGE_TEAM_ANON_KEY = savedKey;
+      mockR.server.close();
+    }
+
+    check('teamsync: a rotated-key device self-heals — its stale sealed row is dropped so a holder can re-seal', () => {
+      assert.ok(!err, `recovery scenario threw: ${err && err.message}`);
+      assert.strictEqual(bobStaleDropped, true, 'Bob\'s stale epoch-1 row must be deleted on his new device');
+    });
+    check('teamsync: after the holder re-trusts + syncs, the rotated-key device recovers the same key (history included)', () => {
+      assert.ok(!err, `recovery scenario threw: ${err && err.message}`);
+      assert.ok(mockR.teamKeys.some(k => k.member_user_id === bobUserId && String(k.epoch) === '1'),
+        'epoch-1 must be re-sealed to Bob\'s new key');
+      assert.strictEqual(bobRecovered, true, 'Bob must resolve the key with no pause after recovery');
+    });
+    check('teamsync: owner rekey mints a fresh epoch sealed to every trusted member, openable by the owner', () => {
+      assert.ok(!err, `recovery scenario threw: ${err && err.message}`);
+      assert.ok(rekeyRes && rekeyRes.ok, `rekey failed: ${rekeyRes && rekeyRes.error}`);
+      assert.strictEqual(rekeyEpoch, 2, 'rekey must advance to epoch 2');
+      assert.strictEqual(rekeyRes.sealed, 2, 'new epoch must seal to both members');
+      assert.ok(mockR.teamKeys.filter(k => String(k.epoch) === '2').length === 2, 'two epoch-2 rows expected');
+    });
+    check('teamsync: rekey is owner/admin only — a plain member is refused', () => {
+      assert.ok(!err, `recovery scenario threw: ${err && err.message}`);
+      assert.ok(nonOwnerRekey && nonOwnerRekey.ok === false, 'non-owner rekey must fail');
+      assert.ok(/owner or admin/i.test(nonOwnerRekey.error || ''), `expected role error, got: ${nonOwnerRekey && nonOwnerRekey.error}`);
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

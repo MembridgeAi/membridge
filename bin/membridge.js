@@ -576,6 +576,30 @@ async function cmdTeam() {
     return;
   }
 
+  // Owner/admin recovery: mint a fresh team key sealed to every trusted
+  // member's CURRENT key. Use when this device can't get the existing key
+  // (e.g. a new machine whose keypair rotated) and can't wait for a teammate
+  // to re-share. Forward-only — encrypted history from before the rekey stays
+  // readable only by whoever already holds those older keys.
+  if (sub === 'rekey') {
+    let teamId = opt('--team') || args[2];
+    const teams = await teamsync.listTeams(config);
+    if (!teams.length) die('You are not in any team yet.');
+    if (!teamId && teams.length === 1) teamId = teams[0].team_id;
+    if (!teamId) {
+      die('You are in multiple teams — pick one with --team <id>:\n' +
+        teams.map(t => `  ${t.team_id}  ${t.team_name || ''}`).join('\n'));
+    }
+    const r = await teamsync.rekeyTeam(config, teamId);
+    if (!r.ok) die(r.error);
+    console.log(`Team rekeyed — new epoch ${r.epoch}, sealed to ${r.sealed} member(s). Encryption is active on this device now.`);
+    if (r.withheld && r.withheld.length) {
+      console.log(`  Withheld from (unpublished or unverified key): ${r.withheld.join(', ')}`);
+      console.log('  They rejoin encryption once their key is trusted (`membridge team trust <name>`) and they sync.');
+    }
+    return;
+  }
+
   if (sub === 'create') {
     const name = args[2];
     if (!name) die('Usage: membridge team create <name>');

@@ -380,6 +380,25 @@ function createMockSupabase() {
           res.writeHead(201);
           return res.end();
         }
+        if (req.method === 'DELETE') {
+          // A member may delete only their OWN sealed rows (self-heal for a
+          // rotated key). RLS: member_user_id must equal the caller.
+          const q0 = url.searchParams;
+          const tEq0 = (q0.get('team_id') || '').replace(/^eq\./, '');
+          const mEq0 = (q0.get('member_user_id') || '').replace(/^eq\./, '');
+          const epIn = (q0.get('epoch') || '').replace(/^in\./, '').replace(/[()]/g, '');
+          const epochs = new Set(epIn ? epIn.split(',').map(s => s.trim()) : []);
+          if (mEq0 && mEq0 !== userId) return json(res, 403, { message: 'row-level security violation' });
+          for (let i = teamKeys.length - 1; i >= 0; i--) {
+            const k = teamKeys[i];
+            if ((!tEq0 || k.team_id === tEq0) && k.member_user_id === userId &&
+                (!epochs.size || epochs.has(String(k.epoch)))) {
+              teamKeys.splice(i, 1);
+            }
+          }
+          res.writeHead(204);
+          return res.end();
+        }
         // GET (013 policy): every key row of a team the caller belongs to is
         // visible — epoch membership is how any member detects rotation and
         // join needs. Sealed blobs ride along; only the target's private key
