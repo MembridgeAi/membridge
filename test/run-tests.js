@@ -3851,6 +3851,16 @@ async function main() {
     const ev = evs.find(e => e.session === 's1');
     assert.ok(ev && ev.headline === 'tight line', 'headline not carried by scanSummaries');
   });
+  check('headline: mergeEvents preserves headline on the stored summary event', () => {
+    const state = { projects: {} };
+    const ev = { ts: '2026-07-22T00:00:00Z', project: path.join(ROOT, 'projects', 'hl-merge'),
+      source: 'Distilled', kind: 'summary', session: 's1', text: 'did text', headline: 'tight glance line' };
+    digest.mergeEvents(state, [ev], {});
+    const key = Object.keys(state.projects)[0];
+    const stored = state.projects[key].events.find(e => e.kind === 'summary');
+    assert.ok(stored, 'summary event stored');
+    assert.strictEqual(stored.headline, 'tight glance line', 'headline dropped by mergeEvents (never reaches buildEntries)');
+  });
   check('scanSummaries labels Codex fallback summaries as Codex, not Distilled', () => {
     const proj = path.join(ROOT, 'projects', 'codex-summary-source'); fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
     fs.writeFileSync(path.join(proj, '.membridge', 'summaries.jsonl'),
@@ -6360,6 +6370,32 @@ async function main() {
     const norm = require('../lib/feed').normalizeLocal(withSummary, { projectName: 'p' });
     assert.strictEqual(norm.goal, 'Ship MCP');
     assert.ok(Array.isArray(norm.changes));
+  });
+  check('headline: buildEntries carries a distilled summary headline onto the entry and out through feed', () => {
+    const proj = { events: [
+      { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask' },
+      { ts: '2026-07-16T00:02:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'Did a long thing that would otherwise be first-sentenced and truncated.',
+        headline: 'Short glance line', goal: 'g', decisions: '', gotchas: '', highlights: [] },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, {});
+    const withSummary = entries.find(e => e.summary);
+    assert.strictEqual(withSummary.headline, 'Short glance line', 'headline not carried onto the entry');
+    const norm = require('../lib/feed').normalizeLocal(withSummary, { projectName: 'p' });
+    assert.strictEqual(norm.headline, 'Short glance line', 'headline lost through normalizeLocal — card would fall back to first-sentence');
+  });
+  check('headline: buildEntries takes rep.headline from the latest checkpoint (multi-checkpoint session)', () => {
+    const proj = { events: [
+      { ts: '2026-07-16T00:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask' },
+      { ts: '2026-07-16T00:01:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'First checkpoint.', headline: 'early headline', goal: 'g', decisions: '', gotchas: '', highlights: [] },
+      { ts: '2026-07-16T00:02:00.000Z', source: 'Distilled', kind: 'summary', session: 's1',
+        text: 'Second checkpoint supersedes the first.', headline: 'latest headline', goal: 'g', decisions: '', gotchas: '', highlights: [] },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, {});
+    const withHeadline = entries.filter(e => e.headline);
+    assert.strictEqual(withHeadline.length, 1, 'exactly one entry (the rep) should carry the headline');
+    assert.strictEqual(withHeadline[0].headline, 'latest headline', 'rep.headline must be the latest checkpoint, not an earlier one');
   });
   check('feed: standalone Codex summary becomes a visible local entry labeled Codex', () => {
     const proj = { events: [

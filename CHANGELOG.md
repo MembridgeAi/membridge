@@ -40,7 +40,10 @@
   hard 80-character budget and the append command enforces it (an over-budget
   headline fails loudly so the agent shortens and retries) — the card shows it
   verbatim, and the longer `did` story stays one click away in the expander.
-  Legacy over-long headlines degrade at a word boundary with an ellipsis.
+  Legacy over-long headlines degrade at a word boundary with an ellipsis. Also
+  fixes a pipeline gap where the distilled `headline` was captured but dropped
+  by `mergeEvents` and `buildEntries`, so local cards had been falling back to a
+  truncated first sentence of `did` and never actually showed the short line.
 
 ## 0.7.0 — 2026-07-14
 
