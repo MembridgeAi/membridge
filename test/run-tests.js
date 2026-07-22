@@ -5267,15 +5267,23 @@ async function main() {
       assert.strictEqual(fresh.calls.gen, 1, 'expected exactly one keypair generation');
       assert.strictEqual(fresh.stored.get('membridge.box.privatekey'), 'PRIV1', 'private key not stored');
       assert.strictEqual(fresh.stored.get('membridge.box.publickey'), 'PUB1', 'public key not stored');
-      assert.deepStrictEqual(fresh.calls.upload, [{ user_id: 'user-1', public_key: 'PUB1' }],
-        'expected exactly one upload of { user_id, public_key }');
+      // Both block-level calls have already run by check time; the FIRST
+      // upload is the generation-time one (the second is the self-heal
+      // upsert asserted below).
+      assert.deepStrictEqual(fresh.calls.upload[0], { user_id: 'user-1', public_key: 'PUB1' },
+        'first call must upload { user_id, public_key }');
     });
 
-    check('teamsync: ensureIdentity second call reuses the stored pair and does not re-upload', () => {
+    check('teamsync: ensureIdentity second call reuses the stored pair and re-upserts the pubkey (self-heal)', () => {
       assert.ok(!idErr, `ensureIdentity threw: ${idErr && idErr.message}`);
       assert.deepStrictEqual(id2, { publicKey: 'PUB1', privateKey: 'PRIV1' });
       assert.strictEqual(fresh.calls.gen, 1, 'second call must not regenerate');
-      assert.strictEqual(fresh.calls.upload.length, 1, 'second call must not re-upload');
+      // The upsert is idempotent (merge-duplicates on user_id) and MUST run
+      // every call: a locally-persisted identity whose first upload failed
+      // (e.g. keypair generated before the backend migrated) would otherwise
+      // never publish its pubkey and the team key could never seal to it.
+      assert.strictEqual(fresh.calls.upload.length, 2, 'every call must (re)upsert the pubkey');
+      assert.strictEqual(fresh.calls.upload[1].public_key, 'PUB1', 'the re-upsert must carry the stored pubkey');
     });
 
     check('teamsync: ensureIdentity fails closed — unavailable crypto/keychain or missing creds return null, nothing stored or uploaded', () => {
