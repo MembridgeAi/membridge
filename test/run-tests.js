@@ -1146,15 +1146,12 @@ async function main() {
       const ask = overrides.ask !== undefined ? overrides.ask : 'Do the thing';
       const entry = { ts, ask, author, authorId };
       const run = { ts, key: 'run' + id, entries: [entry], rep: repEntry };
-      const source = overrides.source !== undefined ? overrides.source : 'Claude Code';
       return {
         key: 'unit' + id,
         ts,
         author, authorId,
         self: overrides.self !== undefined ? overrides.self : false,
-        source,
-        // Mirrors finalizeUnit's output shape: the unit's deduped tool union.
-        sources: overrides.sources !== undefined ? overrides.sources : (source ? [source] : []),
+        source: overrides.source !== undefined ? overrides.source : 'Claude Code',
         project, projectId, projectPath,
         agentCount: overrides.agentCount !== undefined ? overrides.agentCount : 1,
         promptCount: overrides.promptCount !== undefined ? overrides.promptCount : 1,
@@ -1224,58 +1221,58 @@ async function main() {
       assert.deepStrictEqual(evalDayCards([]), []);
       assert.ok(evalDayCards([unitWith({ ts: 'not-a-date' })]).length === 1);
     });
-    // Tool union (the "All models shows only Claude" bug): a rolled-up card
-    // spans every tool that worked that day, but source alone is the NEWEST
-    // unit's tool — rendering only it made a mixed Claude+Codex day read as
-    // all-Claude, Codex invisible until the Tool filter narrowed the feed.
-    // The fix carries a deduped, newest-first sources union at both rollup
-    // levels (finalizeUnit, buildDayCards) and renders one pill per tool.
-    check('units: finalizeUnit collects the deduped newest-first tool union across runs', () => {
-      const fnSrc = extractFn(embeddedScript, 'finalizeUnit');
-      const sandbox = new Function('var STALE_GAP = 45 * 60 * 1000;\n' + fnSrc + '\nreturn { finalizeUnit: finalizeUnit };')();
-      const mkRun = (ts, source) => ({ ts, entries: [{ ts, source, author: 'Marco' }], rep: null });
-      const u = {
-        ts: '2026-07-22T02:00:00Z',
-        runs: [
-          mkRun('2026-07-22T02:00:00Z', 'Claude Code'),
-          mkRun('2026-07-22T01:40:00Z', 'Codex'),
-          mkRun('2026-07-22T01:20:00Z', 'Claude Code'),
-        ],
+    // The "All models shows only Claude" bug: buildUnits keyed a work unit on
+    // author+project alone, so a Claude Code run and a Codex run in the same
+    // burst collapsed into ONE unit that finalizeUnit then labeled by its
+    // newest entry's tool — hiding the other tool on the unfiltered Activity
+    // view until the Tool filter narrowed to it. unitKeyOf now includes the
+    // tool; different tools never share a unit, and buildDayCards' key carries
+    // the tool too so they never share a day card either.
+    function evalBuildUnits(entries) {
+      const escSrc = extractVarFn(embeddedScript, 'esc') || '';
+      const fnSrc = ['normKeyPart', 'feedKey', 'threadKey', 'buildThreads', 'unitKeyOf', 'finalizeUnit', 'buildUnits']
+        .map(n => extractFn(embeddedScript, n)).join('\n');
+      const sandbox = new Function(
+        'var STALE_GAP = 45 * 60 * 1000, BURST_GAP = 30 * 60 * 1000;\n' + escSrc + '\n' + fnSrc +
+        '\nreturn { buildUnits: buildUnits, buildThreads: buildThreads };'
+      )();
+      return sandbox.buildUnits(sandbox.buildThreads(entries));
+    }
+    function rawEntry(overrides) {
+      overrides = overrides || {};
+      return {
+        ts: overrides.ts, ask: overrides.ask !== undefined ? overrides.ask : '',
+        author: overrides.author !== undefined ? overrides.author : 'You',
+        authorId: overrides.authorId, self: true,
+        source: overrides.source,
+        project: overrides.project !== undefined ? overrides.project : 'ProjA',
+        projectId: overrides.projectId, projectPath: overrides.projectPath,
+        session: overrides.session,
       };
-      sandbox.finalizeUnit(u);
-      assert.strictEqual(u.source, 'Claude Code', 'legacy single-source field still tracks the newest entry');
-      assert.deepStrictEqual(u.sources, ['Claude Code', 'Codex'], 'sources union missing or unordered');
+    }
+    check('units: different tools in one author+project burst never merge (Claude != Codex)', () => {
+      const t = dayCardsLocalTs(0, 14);
+      const units = evalBuildUnits([
+        rawEntry({ ts: t, source: 'Claude Code', session: 'cc-1' }),
+        rawEntry({ ts: t, source: 'Codex', session: 'cx-1' }),
+      ]);
+      assert.strictEqual(units.length, 2, 'a Claude run and a Codex run in one burst must stay separate units');
+      assert.deepStrictEqual(units.map(u => u.source).sort(), ['Claude Code', 'Codex']);
     });
-    check('dayCards: card.sources unions tools across the day\'s units — Codex visible beside Claude', () => {
+    check('units: same tool in one burst still merges into a single unit', () => {
+      const units = evalBuildUnits([
+        rawEntry({ ts: dayCardsLocalTs(0, 14), source: 'Claude Code', session: 'cc-1' }),
+        rawEntry({ ts: dayCardsLocalTs(0, 14), source: 'Claude Code', session: 'cc-2' }),
+      ]);
+      assert.strictEqual(units.length, 1, 'same author+project+tool within the burst window is one unit');
+      assert.strictEqual(units[0].agentCount, 2, 'both runs roll up as agents inside the one unit');
+    });
+    check('dayCards: same author+project+day but different tools -> separate cards', () => {
       const claude = unitWith({ ts: dayCardsLocalTs(0, 14), source: 'Claude Code' });
       const codex = unitWith({ ts: dayCardsLocalTs(0, 10), source: 'Codex' });
       const cards = evalDayCards([claude, codex]);
-      assert.strictEqual(cards.length, 1);
-      assert.deepStrictEqual(cards[0].sources, ['Claude Code', 'Codex']);
-      assert.strictEqual(cards[0].source, 'Claude Code', 'legacy single-source field still tracks the newest unit');
-    });
-    check('dayCards: units without a sources field (old shape) fall back to u.source', () => {
-      const a = unitWith({ ts: dayCardsLocalTs(0, 14), source: 'Claude Code' });
-      const b = unitWith({ ts: dayCardsLocalTs(0, 10), source: 'Codex' });
-      delete a.sources; delete b.sources;
-      assert.deepStrictEqual(evalDayCards([a, b])[0].sources, ['Claude Code', 'Codex']);
-    });
-    check('cards: tool pills render EVERY tool in the union, on every card surface', () => {
-      const escSrc = extractVarFn(embeddedScript, 'esc') || '';
-      const fnSrc = extractFn(embeddedScript, 'toolPillsHtml');
-      assert.ok(fnSrc, 'toolPillsHtml helper not found');
-      const sandbox = new Function("var MONO = 'font-family:monospace';\n" + escSrc + '\n' + fnSrc + '\nreturn { toolPillsHtml: toolPillsHtml };')();
-      const html = sandbox.toolPillsHtml(['Claude Code', 'Codex']);
-      assert.ok(html.includes('Claude Code') && html.includes('Codex'), 'a tool in the union is missing a pill');
-      assert.strictEqual(sandbox.toolPillsHtml([], null), '');
-      assert.strictEqual(sandbox.toolPillsHtml(null, null), '');
-      assert.ok(sandbox.toolPillsHtml(null, 'Codex').includes('Codex'), 'single-source fallback dropped');
-      assert.ok(sandbox.toolPillsHtml(['<x>']).includes('&lt;x&gt;'), 'pill text not escaped');
-      // Every rolled-up card surface routes its tool chip through the union
-      // helper — a lone esc(c.source)/esc(u.source) pill is the bug itself.
-      assert.ok(/toolPillsHtml\(/.test(extractFn(embeddedScript, 'dayCardHtml')), 'dayCardHtml does not render the tool union');
-      assert.ok(/toolPillsHtml\(/.test(extractFn(embeddedScript, 'unitHtml')), 'unitHtml does not render the tool union');
-      assert.ok(/toolPillsHtml\(/.test(extractFn(embeddedScript, 'dayDetailHtml')), 'dayDetailHtml session cards do not label their tool');
+      assert.strictEqual(cards.length, 2, 'Claude and Codex must not share a day card');
+      assert.deepStrictEqual(cards.map(c => c.source).sort(), ['Claude Code', 'Codex']);
     });
     // v2 checklist data (docs/superpowers/specs/2026-07-20-activity-day-cards-v2-design.md, Task 1):
     // each card carries a checklist[] — one {glyph, text, live} row per unit,
@@ -1320,7 +1317,7 @@ async function main() {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
       const constSrc = extractConst(embeddedScript, 'MONO');
-      const fnSrc = ['personColor', 'toolPillsHtml', 'dayCardHtml'].map(n => extractFn(embeddedScript, n)).join('\n');
+      const fnSrc = ['personColor', 'dayCardHtml'].map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function('expandedKeys',
         escSrc + '\n' + agoSrc + '\n' + constSrc + '\nvar catchupExpanded = expandedKeys || {};\n' + fnSrc +
         '\nreturn { dayCardHtml: dayCardHtml };'
@@ -1385,7 +1382,7 @@ async function main() {
       const constSrc = ['MONO', 'STALE_GAP', 'BURST_GAP'].map(n => extractConst(embeddedScript, n)).join('\n');
       const fnSrc = [
         'personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'promptRowsHtml', 'cardCloseHtml', 'shareToggleHtml',
-        'toolPillsHtml', 'threadHtml', 'unitHtml', 'dayCardHtml',
+        'threadHtml', 'unitHtml', 'dayCardHtml',
         'feedKey', 'normKeyPart', 'threadKey', 'buildThreads', 'unitKeyOf', 'finalizeUnit', 'buildUnits',
         'homeDayLabel', 'buildDayCards', 'feedDayGroupHtml',
       ].map(n => extractFn(embeddedScript, n)).join('\n');
@@ -1438,7 +1435,7 @@ async function main() {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
       const constSrc = extractConst(embeddedScript, 'MONO');
-      const fnSrc = ['personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'shareToggleHtml', 'toolPillsHtml', 'dayDetailHtml']
+      const fnSrc = ['personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'shareToggleHtml', 'dayDetailHtml']
         .map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function('expandedKeys',
         escSrc + '\n' + agoSrc + '\n' + constSrc + '\nvar catchupExpanded = expandedKeys || {};\n' + fnSrc +
