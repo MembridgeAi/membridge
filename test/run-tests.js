@@ -1382,7 +1382,7 @@ async function main() {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
       const constSrc = extractConst(embeddedScript, 'MONO');
-      const fnSrc = ['personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'shareToggleHtml', 'dayDetailHtml']
+      const fnSrc = ['personColor', 'firstSentence', 'askHeadline', 'runHeadline', 'wordSafeTail', 'promptCellText', 'shareToggleHtml', 'dayDetailHtml']
         .map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function('expandedKeys',
         escSrc + '\n' + agoSrc + '\n' + constSrc + '\nvar catchupExpanded = expandedKeys || {};\n' + fnSrc +
@@ -1427,6 +1427,24 @@ async function main() {
       const h = evalDayDetailHtml(null);
       assert.ok(/data-day-back/.test(h), 'not-found still offers the way back');
       assert.ok(/isn|scrolled|no longer/i.test(h), 'not-found copy missing');
+    });
+    // BUG 2 (fix/share-live-and-clamp): day-detail text must never end
+    // mid-word. Local rows render the full ask (askFull); rows that only
+    // exist clipped (team rows, pre-fix data) get their tail tidied to the
+    // last whole word before the ellipsis.
+    check('dayDetailHtml: prompt/summary text never cut mid-word — full local text, word-safe fallback', () => {
+      const fullAsk = 'refactor the authentication checkpoints module end to end';
+      const dFull = unitWith({ ts: dayCardsLocalTs(0, 10), ask: 'refactor the authentication chec…' });
+      dFull.runs[0].entries[0].askFull = fullAsk;
+      const dClipped = unitWith({ ts: dayCardsLocalTs(0, 9), ask: 'triage the flaky supabase chec…' });
+      const dClipSum = unitWith({ ts: dayCardsLocalTs(0, 8), repEntry: { headline: 'Clip headline', summary: 'Landed the share fix across chec…' } });
+      const h = evalDayDetailHtml(evalDayCards([dFull, dClipped, dClipSum])[0]);
+      assert.ok(h.includes(fullAsk), 'local prompt row must render the complete ask (askFull)');
+      assert.ok(!h.includes('authentication chec…'), 'the clipped local ask must not render once the full text exists');
+      assert.ok(!h.includes('supabase chec…'), 'a clipped-only ask must not end mid-word anywhere (title or row)');
+      assert.ok(h.includes('supabase…'), 'the clipped-only ask ends at a word boundary instead');
+      assert.ok(!h.includes('across chec…'), 'a clipped-only summary must not end mid-word');
+      assert.ok(h.includes('across…'), 'the clipped-only summary ends at a word boundary instead');
     });
     // Regression: the day-cards v2 redesign dropped the per-session share toggle
     // from the Activity view (it survived only on the project page). It belongs on
@@ -5894,6 +5912,15 @@ async function main() {
     assert.deepStrictEqual(n.files, ['a.js', 'b.js']);
     assert.strictEqual(n.cursor, null);
   });
+  check('feed.normalizeLocal carries askFull through (unclipped twin, local rows only)', () => {
+    const e = { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'fix the authentication chec…',
+      askFull: 'fix the authentication checkpoints module', files: [] };
+    const n = feed.normalizeLocal(e, { projectPath: '/p', projectName: 'p', projectId: null });
+    assert.strictEqual(n.askFull, 'fix the authentication checkpoints module');
+    const bare = feed.normalizeLocal({ ts: e.ts, source: e.source, ask: 'short', files: [] },
+      { projectPath: '/p', projectName: 'p', projectId: null });
+    assert.strictEqual(bare.askFull, null, 'no clipped ask -> askFull stays null');
+  });
   check('feed.normalizeLocal picks up meta.authorId when provided', () => {
     const e = { ts: '2026-07-14T06:00:00Z', source: 'Claude Code', ask: 'x', files: [] };
     const withId = feed.normalizeLocal(e, { projectPath: '/p', projectName: 'p', projectId: null, authorId: 'me' });
@@ -5997,6 +6024,28 @@ async function main() {
     const noted = e.changes.find(c => c.note);
     assert.ok(noted, 'a change carries the highlight note');
     assert.ok(!/SECRET123/.test(noted.note), 'secret is redacted from the note');
+  });
+  // BUG 2 (fix/share-live-and-clamp): digest.clip cuts at a raw character
+  // count, so a >300-char ask is stored ending mid-word ("…chec…"). The
+  // day-detail view needs the full text — keep an unclipped, still-redacted
+  // twin (askFull), exactly like summaryFull, and never let it cross the
+  // team boundary.
+  check('buildEntries: a clipped ask keeps its full text in askFull (local-only twin of summaryFull)', () => {
+    const longAsk = ('please refactor the authentication checkpoints module carefully ').repeat(6).trim();
+    const proj = { events: [
+      { ts: '2026-07-16T01:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's-long', text: longAsk },
+      { ts: '2026-07-16T01:01:00.000Z', source: 'Claude Code', kind: 'prompt', session: 's-short', text: 'short ask' },
+    ] };
+    const entries = memorydb.buildEntries(proj1, proj, {});
+    const long = entries.find(x => x.session === 's-long');
+    assert.ok(long.ask.length <= 300 && long.ask.endsWith('…'), 'precondition: the stored ask is clipped');
+    assert.strictEqual(long.askFull, longAsk, 'askFull must carry the complete redacted text');
+    const short = entries.find(x => x.session === 's-short');
+    assert.ok(!('askFull' in short), 'an unclipped ask needs no askFull twin');
+  });
+  check('teamsync source never touches askFull — the unclipped ask stays on this machine', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'teamsync.js'), 'utf8');
+    assert.ok(!/askFull/.test(src), 'teamsync must not push, pull, or reshare askFull');
   });
   // Task 9 perf fix: deriveChanges (which spawns git subprocesses) must only
   // run for entries that survive the maxEntries slice — never for distilled
