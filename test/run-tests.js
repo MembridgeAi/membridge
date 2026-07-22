@@ -637,48 +637,41 @@ async function main() {
     assert.strictEqual(out[0].status, 'edited');
     assert.strictEqual(out[0].add, null); // rename counts are best-effort null
   });
+  // Stubs cp.execFileSync itself (lib/changes.js calls it via the module
+  // object, not a destructured const, exactly so it can be swapped here) —
+  // proves what defaultRunGit passes to the subprocess call without needing
+  // a real spawnable fake `git`, whose shape (shebang script vs. PE exe) is
+  // not portable across POSIX and Windows.
+  const cp = require('child_process');
+  function withStubExecFileSync(stub, fn) {
+    const real = cp.execFileSync;
+    cp.execFileSync = stub;
+    try { return fn(); } finally { cp.execFileSync = real; }
+  }
   check('changes: defaultRunGit hardens env (no terminal prompt, no optional locks)', () => {
-    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-stubgit-'));
-    const stubGit = path.join(stubDir, 'git');
-    fs.writeFileSync(stubGit, '#!/bin/sh\necho "$GIT_TERMINAL_PROMPT:$GIT_OPTIONAL_LOCKS"\n');
-    fs.chmodSync(stubGit, 0o755);
-    const prevPath = process.env.PATH;
-    process.env.PATH = stubDir + path.delimiter + prevPath;
-    try {
-      const out = changesLib.defaultRunGit(stubDir)(['status']);
-      assert.strictEqual(out, '0:0\n', `git subprocess env not hardened: ${JSON.stringify(out)}`);
-    } finally {
-      process.env.PATH = prevPath;
-    }
+    let seenEnv = null;
+    withStubExecFileSync((file, args, opts) => { seenEnv = opts.env; return 'ok'; }, () => {
+      changesLib.defaultRunGit('/repo')(['status']);
+    });
+    assert.ok(seenEnv, 'execFileSync was not called');
+    assert.strictEqual(seenEnv.GIT_TERMINAL_PROMPT, '0', 'GIT_TERMINAL_PROMPT not hardened');
+    assert.strictEqual(seenEnv.GIT_OPTIONAL_LOCKS, '0', 'GIT_OPTIONAL_LOCKS not hardened');
   });
   check('changes: defaultRunGit still throws on nonzero exit (contract preserved for callers)', () => {
-    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-stubgit-'));
-    const stubGit = path.join(stubDir, 'git');
-    fs.writeFileSync(stubGit, '#!/bin/sh\nexit 1\n');
-    fs.chmodSync(stubGit, 0o755);
-    const prevPath = process.env.PATH;
-    process.env.PATH = stubDir + path.delimiter + prevPath;
-    try {
-      assert.throws(() => changesLib.defaultRunGit(stubDir)(['status']), 'nonzero exit should still throw');
-    } finally {
-      process.env.PATH = prevPath;
-    }
+    withStubExecFileSync(() => { throw Object.assign(new Error('Command failed'), { status: 1 }); }, () => {
+      assert.throws(() => changesLib.defaultRunGit('/repo')(['status']), 'nonzero exit should still throw');
+    });
   });
   check('changes: defaultRunGit is bounded — a blocked git is killed within the timeout, not hung', () => {
-    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-stubgit-'));
-    const stubGit = path.join(stubDir, 'git');
-    fs.writeFileSync(stubGit, '#!/bin/sh\nsleep 30\n'); // simulates a credential prompt / lock wait
-    fs.chmodSync(stubGit, 0o755);
-    const prevPath = process.env.PATH;
-    process.env.PATH = stubDir + path.delimiter + prevPath;
-    try {
-      const start = Date.now();
-      assert.throws(() => changesLib.defaultRunGit(stubDir)(['status']), /ETIMEDOUT|SIGKILL/);
-      const elapsed = Date.now() - start;
-      assert.ok(elapsed < 9000, `defaultRunGit did not honor the 5s timeout (took ${elapsed}ms)`);
-    } finally {
-      process.env.PATH = prevPath;
-    }
+    let seenOpts = null;
+    withStubExecFileSync((file, args, opts) => {
+      seenOpts = opts;
+      throw Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT', signal: 'SIGKILL' });
+    }, () => {
+      assert.throws(() => changesLib.defaultRunGit('/repo')(['status']), /ETIMEDOUT|SIGKILL/);
+    });
+    assert.strictEqual(seenOpts.timeout, 5000, 'timeout not set to 5s');
+    assert.strictEqual(seenOpts.killSignal, 'SIGKILL', 'killSignal not set');
   });
   check('projectDetail: a teammate touch drives team-aware lastTouched + activeLabel + stats', () => {
     const state = util.loadState();
