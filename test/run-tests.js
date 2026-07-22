@@ -1056,24 +1056,40 @@ async function main() {
     // embedded script and evaluate them in a sandbox, same technique as
     // deleteProjectsBulk above. See specs/2026-07-20-activity-display-headline.
     check('headline helpers: firstSentence / askHeadline behavior', () => {
-      const src = ['esc', 'firstSentence', 'askHeadline'].map(n => extractFn(embeddedScript, n)).join('\n');
-      const sandbox = new Function(src + '\nreturn { firstSentence: firstSentence, askHeadline: askHeadline };')();
+      const src = ['esc', 'capLine', 'firstSentence', 'askHeadline'].map(n => extractFn(embeddedScript, n)).join('\n');
+      const sandbox = new Function(src + '\nreturn { capLine: capLine, firstSentence: firstSentence, askHeadline: askHeadline };')();
       assert.strictEqual(sandbox.firstSentence('One thing. Two thing.'), 'One thing.');
       assert.strictEqual(sandbox.firstSentence(''), '');
       assert.ok(sandbox.firstSentence('x'.repeat(200)).length <= 92, 'not capped');
+      // capLine: at-cap lines pass verbatim; over-cap lines end in an ellipsis.
+      assert.strictEqual(sandbox.capLine('y'.repeat(90)), 'y'.repeat(90), 'at-cap line must pass untouched');
+      const overCap = sandbox.capLine('y'.repeat(91));
+      assert.ok(overCap.length <= 90 && overCap.endsWith('…'), 'over-cap line not capped with ellipsis');
       assert.strictEqual(sandbox.askHeadline(''), null);
       assert.strictEqual(sandbox.askHeadline('Add a logout button'), 'Add a logout button');
       assert.strictEqual(sandbox.askHeadline('Install failed: Error at /x lockdownd\n\n\nstack'), null, 'noisy ask not degraded');
     });
     check('headline helpers: runHeadline behavior', () => {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
-      const fnSrc = ['firstSentence', 'askHeadline', 'runHeadline'].map(n => extractFn(embeddedScript, n)).join('\n');
+      const fnSrc = ['capLine', 'firstSentence', 'askHeadline', 'runHeadline'].map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function(escSrc + '\n' + fnSrc + '\nreturn { runHeadline: runHeadline };')();
       // Distilled rep WITH a headline wins outright, and is escaped.
       assert.strictEqual(
         sandbox.runHeadline({ headline: 'Fixed the <bug>', summary: 'Long summary text. More.' }, null, false),
         'Fixed the &lt;bug&gt;'
       );
+      // A capture-compliant headline (hooks.HEADLINE_MAX = 80 chars) renders
+      // verbatim — even when it contains sentence punctuation.
+      const compliant = ('Fixed sync. Codex sessions now visible to teammates. ' + 'x'.repeat(80)).slice(0, 80);
+      assert.strictEqual(sandbox.runHeadline({ headline: compliant }, null, false), compliant, 'compliant headline altered');
+      // A legacy over-long headline degrades at a word boundary with an
+      // ellipsis instead of hitting the CSS clamp mid-word.
+      const legacy = ('alpha bravo '.repeat(20)).trim();
+      const capped = sandbox.runHeadline({ headline: legacy }, null, false);
+      assert.ok(capped.endsWith('…'), 'legacy over-long headline not capped');
+      assert.ok(capped.length <= 90, 'legacy cap exceeded');
+      const stem = capped.slice(0, -1);
+      assert.ok(legacy.startsWith(stem) && legacy[stem.length] === ' ', 'cap must land on a word boundary');
       // Distilled rep with NO headline falls back to the first sentence of the summary.
       assert.strictEqual(
         sandbox.runHeadline({ summary: 'Did the thing. And then some more.' }, null, false),
@@ -4706,10 +4722,13 @@ async function main() {
     assert.ok(/escape it for the shell/i.test(r), 'shell-escaping guidance present');
     assert.ok(r.includes(String.raw`'\''`), 'shows the apostrophe escape sequence');
   });
-  check('headline: blockReason asks for a short headline field', () => {
+  check('headline: blockReason asks for a character-bounded headline', () => {
     const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 's1', 0);
     assert.ok(/"headline"/.test(r), 'JSON template includes headline');
-    assert.ok(/10 words|glance/i.test(r), 'headline guidance present');
+    assert.strictEqual(hooks.HEADLINE_MAX, 80, 'HEADLINE_MAX is the 80-char card budget');
+    assert.ok(r.includes(hooks.HEADLINE_MAX + ' characters'), 'headline character max stated in the prompt');
+    assert.ok(!/10 words/.test(r), 'word-count phrasing replaced by the character max');
+    assert.ok(/glance/i.test(r), 'glance-outcome guidance still present');
   });
   check('checkpoint: countSummaryLines ignores malformed lines, empty did, and other sessions', () => {
     fs.writeFileSync(ckSummaries,
@@ -4769,6 +4788,21 @@ async function main() {
     assert.strictEqual(run({ ...base, headline: 'Short outcome' }).status, 0, 'headline line rejected');
     assert.strictEqual(run(base).status, 0, 'headline-less line rejected');
     assert.notStrictEqual(run({ ...base, headline: 42 }).status, 0, 'non-string headline accepted');
+  });
+  check('headline: append enforces the character max loudly and writes nothing over it', () => {
+    const proj = path.join(ROOT, 'projects', 'hl-max'); fs.mkdirSync(proj, { recursive: true });
+    const target = path.join(proj, '.membridge', 'summaries.jsonl');
+    const base = { session: 's1', ts: '2026-07-21T00:00:00Z', did: 'did a thing' };
+    const run = obj => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', target, JSON.stringify(obj)], { encoding: 'utf8' });
+    assert.strictEqual(run({ ...base, headline: 'h'.repeat(hooks.HEADLINE_MAX) }).status, 0, 'exactly-max headline rejected');
+    assert.strictEqual(run({ ...base, headline: '  ' + 'h'.repeat(hooks.HEADLINE_MAX) + '  ' }).status, 0,
+      'padding must not count against the max (trimmed length governs)');
+    const over = run({ ...base, headline: 'h'.repeat(hooks.HEADLINE_MAX + 1) });
+    assert.notStrictEqual(over.status, 0, 'over-max headline accepted');
+    assert.ok(over.stderr.includes(String(hooks.HEADLINE_MAX)), 'error names the limit');
+    assert.ok(over.stderr.includes(String(hooks.HEADLINE_MAX + 1)), 'error names the actual length');
+    assert.ok(/"did"/.test(over.stderr), 'error points the agent at did for the longer text');
+    assert.strictEqual(read(target).trim().split('\n').length, 2, 'rejected line must not be written');
   });
   check('append: bare invocation still runs the stop hook (allows on garbage stdin)', () => {
     const out = spawnSync(process.execPath, [HOOK_SCRIPT], { input: 'not json', encoding: 'utf8' });
