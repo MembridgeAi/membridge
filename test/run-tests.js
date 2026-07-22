@@ -3990,6 +3990,15 @@ async function main() {
     { type: 'user', message: { role: 'user', content: 'Quick tweak to the readme' }, cwd: projR, timestamp: '2026-07-12T09:10:00.000Z' },
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] }, cwd: projR, timestamp: '2026-07-12T09:11:00.000Z' },
   ]));
+  // A shareable coding session (has an edit) that produced NO >=80-char summary:
+  // exercises the fallback one-liner render + summary-null push under the
+  // zero-edit suppression rule. Prompt-first so its edit attaches to its own
+  // entry, not a neighbouring session's.
+  fs.writeFileSync(path.join(rDir, 'sessEditNoSummary.jsonl'), jsonl([
+    { type: 'user', message: { role: 'user', content: 'Bump the package version' }, cwd: projR, timestamp: '2026-07-12T09:16:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(projR, 'package.json') } }] }, cwd: projR, timestamp: '2026-07-12T09:16:30.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Bumped.' }] }, cwd: projR, timestamp: '2026-07-12T09:17:00.000Z' },
+  ]));
   // Grant consent so the summaries instruction appears in AGENTS.md
   { const rc = util.loadUserConfig(); if (!rc.distill) rc.distill = {}; rc.distill.consent = 'granted'; util.saveUserConfig(rc); }
   syncOnce();
@@ -4020,8 +4029,11 @@ async function main() {
     assert.ok(md.includes('Did: Refactored the payment retry queue'), 'Did line missing');
     assert.ok(md.includes('Tasks: 1/3 done'), 'Tasks line missing');
     assert.ok(md.includes('Changes: src/queue.js'), 'Changes line missing');
-    // the summary-less session keeps the original one-line ask format
-    assert.ok(md.includes('Claude Code: Quick tweak to the readme'), 'fallback one-liner missing');
+    // A shareable (edited) session with no summary keeps the one-line ask format.
+    assert.ok(md.includes('Claude Code: Bump the package version'), 'fallback one-liner missing');
+    // A zero-edit Claude Code session (readme tweak, no edit captured) is ops
+    // noise and suppressed from the block entirely.
+    assert.ok(!md.includes('Quick tweak to the readme'), 'zero-edit session should be suppressed');
   });
   check('rich: summaries and todo items are redacted everywhere they land', () => {
     assert.ok(!richMd().includes('sk-test1234567890abcdef'), 'summary secret leaked into the block');
@@ -4097,7 +4109,8 @@ async function main() {
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(ROOT, 'outside-place', 'tmp-script.sh') } }] }, cwd: projR, timestamp: '2026-07-12T09:31:00.000Z' },
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: MD_SUMMARY }] }, cwd: projR, timestamp: '2026-07-12T09:32:00.000Z' },
   ]));
-  // A session whose only capture is the agent's self-report (no user prompt).
+  // A session whose only capture is the agent's self-report (no user prompt,
+  // no edit). A zero-edit Claude Code session — suppressed under the rule.
   fs.writeFileSync(path.join(rDir, 'sessNoAsk.jsonl'), jsonl([
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Resumed after a crash and finished wiring the webhook retries; the full suite is passing again.' }] }, cwd: projR, timestamp: '2026-07-12T09:40:00.000Z' },
   ]));
@@ -4117,10 +4130,11 @@ async function main() {
     assert.ok(line && line.trim().startsWith('Did:'), 'flattened summary missing from the block');
     assert.ok(!/[*`|#]/.test(line), `markdown survived into the Did line: ${line}`);
   });
-  check('fix: a summary-only session renders Ask: (not captured)', () => {
+  check('fix: a zero-edit summary-only session is suppressed from the block', () => {
+    // No prompt, no edit — only a harvested self-report. A Claude Code session
+    // that changed nothing is ops noise now and never reaches the block.
     const md = richMd();
-    assert.ok(md.includes('Ask: (not captured)'), 'placeholder Ask line missing');
-    assert.ok(md.includes('finished wiring the webhook retries'), 'prompt-less summary missing');
+    assert.ok(!md.includes('finished wiring the webhook retries'), 'zero-edit summary-only session leaked into the block');
   });
 
   check('renderBlock: shows Intent/Did/Changes, no 240-char blob truncation', () => {
@@ -9317,6 +9331,54 @@ async function main() {
     // Restore the real accumulated state so nothing after this section (just
     // the summary print below) is affected by these probes.
     fs.writeFileSync(util.statePath(), priorRaw);
+  }
+
+  // --- ops-noise suppression (classify + feed/push/block filters) ---
+  {
+    const classify = require('../lib/classify');
+    // Edit file lives OUTSIDE the project so it is dropped from rendered files
+    // (no git/deriveChanges on a fake path) — the edit EVENT still marks the
+    // session shareable, which is what these filters key on.
+    const opsProj = { events: [
+      { ts: '2026-07-20T09:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'ops', text: 'open browser' },
+      { ts: '2026-07-20T09:01:00.000Z', source: 'Claude Code', kind: 'summary', session: 'ops', text: 'the tab is open now' }, // no edit -> ops noise
+      { ts: '2026-07-20T09:02:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'code', text: 'fix bug' },
+      { ts: '2026-07-20T09:03:00.000Z', source: 'Claude Code', kind: 'edit', session: 'code', file: '/outside-proj/a.js' },
+      // Codex never emits edit events, so its zero-edit sessions must still show.
+      { ts: '2026-07-20T09:04:00.000Z', source: 'Codex', kind: 'prompt', session: 'cx', text: 'refactor the parser' },
+      { ts: '2026-07-20T09:05:00.000Z', source: 'Codex', kind: 'summary', session: 'cx', text: 'parser refactor done' },
+    ] };
+
+    check('classify: suppresses zero-edit sessions from edit-capturing tools, exempts Codex', () => {
+      const set = classify.shareableSessions(opsProj.events);
+      assert.ok(!set.has('ops'), 'zero-edit Claude Code session must be suppressed');
+      assert.ok(set.has('code'), 'a Claude Code session with an edit must be shareable');
+      assert.ok(set.has('cx'), 'a Codex session (never emits edits) must always be shareable');
+      assert.strictEqual(classify.isShareableLocal(opsProj.events, 'ops'), false);
+      assert.strictEqual(classify.isShareableLocal(opsProj.events, 'cx'), true);
+      const filtered = classify.filterShareableEntries(
+        [{ session: 'ops' }, { session: 'code' }, { session: 'cx' }], opsProj.events);
+      assert.deepStrictEqual(filtered.map(e => e.session), ['code', 'cx']);
+      // Fail-open: garbage never throws.
+      assert.deepStrictEqual([...classify.shareableSessions(null)], []);
+      assert.strictEqual(classify.isShareableLocal(null, 'x'), false);
+    });
+
+    check('feed/push: buildEntries source drops zero-edit Claude Code sessions, keeps edits and Codex', () => {
+      const all = memorydb.buildEntries(ROOT, opsProj, util.getConfig());
+      const sessions = new Set(classify.filterShareableEntries(all, opsProj.events).map(e => e.session));
+      assert.ok(!sessions.has('ops'), 'ops-noise session leaked into the feed/push source');
+      assert.ok(sessions.has('code'), 'edit session missing from feed/push source');
+      assert.ok(sessions.has('cx'), 'Codex session missing from feed/push source');
+    });
+
+    check('block: sessionGroups drops zero-edit Claude Code sessions, keeps edits and Codex', () => {
+      const groups = digest.sessionGroups(ROOT, opsProj, util.getConfig());
+      const asks = new Set(groups.map(g => (g.prompts[0] && g.prompts[0].text) || ''));
+      assert.ok(!asks.has('open browser'), 'ops-noise session leaked into the context block');
+      assert.ok(asks.has('fix bug'), 'edit session missing from the context block');
+      assert.ok(asks.has('refactor the parser'), 'Codex session missing from the context block');
+    });
   }
 
   // --- summary ---
