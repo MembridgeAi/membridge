@@ -4901,6 +4901,16 @@ async function main() {
     assert.ok(!/10 words/.test(r), 'word-count phrasing replaced by the character max');
     assert.ok(/glance/i.test(r), 'glance-outcome guidance still present');
   });
+  check('purpose: blockReason frames every field as teammate communication — what was done and why', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'sess-p', 0);
+    assert.ok(/teammate|team member/i.test(r.slice(0, 250)), 'purpose leads: a team member reads this, stated before the mechanics');
+    assert.ok(/what was done and why/i.test(r), 'names the reader\'s need: what was done and why');
+    assert.ok(/goal:[^;]*(intent|why)/i.test(r), 'goal field tied to the why/intent behind the session');
+    assert.ok(/decisions:[^;]*why/i.test(r), 'decisions field asks for the reasoning, not just the choice');
+    assert.ok(/gotchas:[^;]*teammate/i.test(r), 'gotchas field framed as sparing a teammate the same pitfall');
+    const mentions = (r.match(/teammate|team member/gi) || []).length;
+    assert.ok(mentions >= 5, `teammate framing reinforced across the fields (found ${mentions}, want >= 5)`);
+  });
   check('checkpoint: countSummaryLines ignores malformed lines, empty did, and other sessions', () => {
     fs.writeFileSync(ckSummaries,
       'not json {\n' +
