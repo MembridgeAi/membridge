@@ -1184,6 +1184,91 @@ async function main() {
       assert.ok(finished.includes('session ended') && finished.includes('no summary shared'), 'finished no-ask placeholder missing');
       assert.ok(!finished.includes('HARVESTED PROSE'), 'harvested text leaked into the headline');
     });
+    // Activity feed rolling window + View more: page one always covers the
+    // last FEED_WINDOW_HOURS (24h), older history pages in on demand. The
+    // button HTML is a pure helper (feedMoreHtml) — sandbox it like the other
+    // pure client fns; the async fetch/render wiring is asserted by grep.
+    check('dashboard Activity feed: 24h window param + View more wiring', () => {
+      assert.ok(/FEED_WINDOW_HOURS\s*=\s*24/.test(embeddedScript), '24h window constant missing');
+      assert.ok(embeddedScript.includes("'window=' + FEED_WINDOW_HOURS"), 'feedViewUrl must request the rolling window');
+      assert.ok(embeddedScript.includes('function loadMoreFeed'), 'View more loader missing');
+      assert.ok(embeddedScript.includes("closest('#feedMoreBtn')"), 'View more click delegation missing');
+    });
+    check('dashboard feedMoreHtml: View more renders only with a cursor', () => {
+      const escSrc = extractVarFn(embeddedScript, 'esc') || '';
+      const fnSrc = extractFn(embeddedScript, 'feedMoreHtml');
+      assert.ok(fnSrc, 'feedMoreHtml helper missing from the embedded script');
+      const sandbox = new Function(escSrc + '\n' + fnSrc + '\nreturn { feedMoreHtml: feedMoreHtml };')();
+      assert.ok(!/feedMoreBtn/.test(sandbox.feedMoreHtml(null)), 'no cursor must render no button');
+      const html = sandbox.feedMoreHtml('2026-07-14T01:00:00Z');
+      assert.ok(html.indexOf('id="feedMoreBtn"') !== -1, 'button id missing');
+      assert.ok(html.indexOf('data-before="2026-07-14T01:00:00Z"') !== -1, 'cursor missing from the button');
+      assert.ok(html.indexOf('View more') !== -1, 'View more label missing');
+    });
+    // Behavioral coverage for the client paging state machine: feedCombined's
+    // dedupe/append, and the stale-response guard — a View more fetch that
+    // resolves AFTER the filters/team context changed (resetFeedPaging ran)
+    // must be dropped, or old-context entries leak into feedExtra forever.
+    {
+      const escSrc = extractVarFn(embeddedScript, 'esc') || '';
+      const fnSrc = ['feedKey', 'feedCombined', 'resetFeedPaging', 'loadMoreFeed']
+        .map(n => extractFn(embeddedScript, n)).join('\n');
+      const mkSandbox = new Function(
+        escSrc +
+        '\nvar feedBase = [], feedExtra = [], feedNextBefore = null, feedPageGen = 0;' +
+        '\nvar setPill = function () {}; var renderFeed = function () {};' +
+        '\nvar feedViewUrl = function () { return "/api/feed?limit=100&window=24"; };' +
+        '\nvar document = { getElementById: function () { return null; } };' +
+        '\nvar fetch = function () { throw new Error("fetch not stubbed"); };\n' +
+        fnSrc +
+        '\nreturn {' +
+        ' state: function () { return { extra: feedExtra, next: feedNextBefore }; },' +
+        ' setBase: function (b) { feedBase = b; },' +
+        ' setNext: function (n) { feedNextBefore = n; },' +
+        ' setFetch: function (f) { fetch = f; },' +
+        ' feedCombined: feedCombined, resetFeedPaging: resetFeedPaging, loadMoreFeed: loadMoreFeed };');
+      const entry = (ts, ask) => ({ project: 'p', projectId: null, projectPath: null, ts, ask });
+      const btnFor = ts => ({ disabled: false, getAttribute: () => ts });
+      const pageResponse = (entries, nextBefore) =>
+        Promise.resolve({ json: () => Promise.resolve({ entries, nextBefore }) });
+
+      // Happy path: an older page appends (deduped against the base) and
+      // adopts the deeper cursor.
+      const sHappy = mkSandbox();
+      sHappy.setBase([entry('2026-07-14T05:00:00Z', 'new'), entry('2026-07-14T04:00:00Z', 'edge')]);
+      sHappy.setNext('2026-07-14T04:00:00Z');
+      sHappy.setFetch(() => pageResponse(
+        [entry('2026-07-14T04:00:00Z', 'edge'), entry('2026-07-14T03:00:00Z', 'older')],
+        '2026-07-14T03:00:00Z'));
+      sHappy.loadMoreFeed(btnFor('2026-07-14T04:00:00Z'));
+      await new Promise(r => setImmediate(r));
+      check('dashboard feed paging: View more appends the deduped older page and keeps the deeper cursor', () => {
+        const st = sHappy.state();
+        assert.strictEqual(st.extra.length, 1, 'only the genuinely older entry is appended');
+        assert.strictEqual(st.extra[0].ask, 'older');
+        assert.strictEqual(st.next, '2026-07-14T03:00:00Z', 'cursor advanced to the deeper page tail');
+        const combined = sHappy.feedCombined([entry('2026-07-14T05:00:00Z', 'new'), entry('2026-07-14T04:00:00Z', 'edge')]);
+        assert.deepStrictEqual(combined.map(e => e.ask), ['new', 'edge', 'older'], 'combined render = base then extras');
+      });
+
+      // Stale response: the filter/team context changes (resetFeedPaging)
+      // while the View more fetch is in flight — its response must be dropped.
+      const sStale = mkSandbox();
+      sStale.setBase([entry('2026-07-14T05:00:00Z', 'old-filter-base')]);
+      let releaseStale;
+      sStale.setFetch(() => new Promise(resolve => { releaseStale = resolve; }));
+      sStale.loadMoreFeed(btnFor('2026-07-14T05:00:00Z'));
+      sStale.resetFeedPaging(); // user changed filters mid-flight
+      sStale.setBase([entry('2026-07-14T06:00:00Z', 'new-filter-base')]);
+      releaseStale({ json: () => Promise.resolve({ entries: [entry('2026-07-14T02:00:00Z', 'stale-page')], nextBefore: '2026-07-14T02:00:00Z' }) });
+      await new Promise(r => setImmediate(r));
+      await new Promise(r => setImmediate(r));
+      check('dashboard feed paging: a View more response landing after a context reset is dropped', () => {
+        const st = sStale.state();
+        assert.strictEqual(st.extra.length, 0, 'stale old-context page leaked into feedExtra');
+        assert.strictEqual(st.next, null, 'stale cursor leaked into feedNextBefore');
+      });
+    }
     // Task 3 (specs/2026-07-20-activity-display-headline): threadHtml/unitHtml
     // must call runHeadline for their card headline instead of the old inline
     // three-way ternary that could fall back to repHarvested prose, the
@@ -2035,6 +2120,14 @@ async function main() {
       assert.ok('teamUnavailable' in feedRes, 'response carries the teamUnavailable flag');
       assert.ok(feedRes.entries.every(e => 'summary' in e && 'origin' in e),
         'every entry is normalized (has origin + summary)');
+    });
+    // window= over HTTP is a smoke test only (the endpoint clock is the real
+    // one, so fixture recency varies); the deterministic floor behavior is
+    // covered in-process with an injected `now` and in the buildFeed units.
+    const feedWindow = await (await fetch(`${base}/api/feed?limit=1&window=24`)).json();
+    check('/api/feed window= is accepted and never shrinks the page below limit', () => {
+      assert.ok(Array.isArray(feedWindow.entries), 'entries is an array');
+      assert.ok(feedWindow.entries.length >= 1, 'window must never return fewer than limit entries');
     });
     const beforeTs = '2099-01-01T00:00:00Z';
     const feedBefore = await (await fetch(`${base}/api/feed?before=${encodeURIComponent(beforeTs)}&limit=50`)).json();
@@ -3078,6 +3171,30 @@ async function main() {
     check('feedPayload: entries expose goal + changes', () => {
       const e = (goalChangesFeed.entries || [])[0];
       if (e) { assert.ok('goal' in e, 'goal key present'); assert.ok('changes' in e, 'changes key present'); }
+    });
+
+    // Rolling-window floor (Activity "always show the last 24h"): window=
+    // must lift a small limit so page one covers every entry inside the
+    // window, and a before= page (the View more path) must bypass the floor —
+    // otherwise every older page would re-inflate back to the window size.
+    // `now` is injected so the fixture's fixed 2026-07-09 timestamps stay
+    // inside the window forever (no time bombs, per the teamMaxAgeHours rule).
+    const pinnedNow = '2026-07-09T20:00:00.000Z';
+    const windowCutoff = '2026-07-08T20:00:00.000Z';
+    const oneFeed = await feedPayload({ limit: 1 });
+    const windowFeed = await feedPayload({ limit: 1, window: 24, now: pinnedNow });
+    const wfBoundary = (windowFeed.entries[1] || {}).ts || windowCutoff;
+    const windowBeforeFeed = await feedPayload({ limit: 1, window: 24, now: pinnedNow, before: wfBoundary });
+    check('feedPayload: window= lifts the limit to cover the last 24h; before= bypasses the floor', () => {
+      assert.strictEqual(oneFeed.entries.length, 1, 'control: limit=1 without window returns one entry');
+      assert.ok(windowFeed.entries.length >= 3,
+        'fixture must hold >=3 entries inside the pinned window to exercise the floor; got ' + windowFeed.entries.length);
+      assert.ok(windowFeed.entries.every(e => String(e.ts) >= windowCutoff),
+        'page one leaked an entry older than the window');
+      assert.strictEqual(windowBeforeFeed.entries.length, 1,
+        'a before= page must honor the plain limit, not the window floor');
+      assert.strictEqual(String(windowBeforeFeed.entries[0].ts), String(wfBoundary),
+        'the before= boundary is inclusive');
     });
 
     check('dashboard: card render includes Intent + changesHtml wiring', () => {
@@ -6970,6 +7087,43 @@ async function main() {
     const res = feed.buildFeed({ local: [], team, teamUnavailable: false, limit: 2 });
     assert.strictEqual(res.entries.length, 2);
     assert.strictEqual(res.nextBefore, null, 'no cursor when exactly limit entries remain');
+  });
+  // Rolling-window floor: windowStart (ISO) marks the oldest ts page one must
+  // still include — the Activity view's "always show the last 24 hours".
+  check('feed.buildFeed windowStart extends page one past limit to cover the window', () => {
+    const team = [1, 2, 3, 4, 5].map(i => feed.normalizeTeam(
+      { id: i, project_id: 'p', project_name: 'p', author_id: 'x', author_name: 'X',
+        ts: '2026-07-14T0' + i + ':00:00Z', source: 'Codex', ask: 'a' + i, summary: 's' + i,
+        files: [], created_at: '2026-07-14T0' + i + ':00:00Z' }, { selfUserId: 'me' }));
+    const res = feed.buildFeed({ local: [], team, teamUnavailable: false, limit: 2, windowStart: '2026-07-14T02:00:00Z' });
+    assert.strictEqual(res.entries.length, 4, 'page one must cover every entry inside the window');
+    assert.strictEqual(res.entries[0].ask, 'a5', 'newest first');
+    assert.strictEqual(res.entries[3].ask, 'a2', 'the windowStart boundary entry is inclusive');
+    assert.strictEqual(res.nextBefore, res.entries[3].ts, 'cursor points at the page tail for View more');
+  });
+  check('feed.buildFeed windowStart keeps the limit floor when the window is sparse', () => {
+    const team = [
+      { id: 9, ts: '2026-07-14T10:00:00Z' }, // inside the window
+      { id: 3, ts: '2026-07-12T03:00:00Z' },
+      { id: 2, ts: '2026-07-12T02:00:00Z' },
+      { id: 1, ts: '2026-07-12T01:00:00Z' },
+    ].map(r => feed.normalizeTeam(
+      { id: r.id, project_id: 'p', project_name: 'p', author_id: 'x', author_name: 'X',
+        ts: r.ts, source: 'Codex', ask: 'a' + r.id, summary: 's' + r.id,
+        files: [], created_at: r.ts }, { selfUserId: 'me' }));
+    const res = feed.buildFeed({ local: [], team, teamUnavailable: false, limit: 3, windowStart: '2026-07-14T00:00:00Z' });
+    assert.strictEqual(res.entries.length, 3, 'a sparse window still fills the page to the limit');
+    assert.strictEqual(res.entries[0].ask, 'a9');
+    assert.strictEqual(res.nextBefore, res.entries[2].ts, 'filler tail still yields a View more cursor');
+  });
+  check('feed.buildFeed windowStart covering everything returns all entries and no cursor', () => {
+    const team = [1, 2, 3].map(i => feed.normalizeTeam(
+      { id: i, project_id: 'p', project_name: 'p', author_id: 'x', author_name: 'X',
+        ts: '2026-07-14T0' + i + ':00:00Z', source: 'Codex', ask: 'a' + i, summary: 's' + i,
+        files: [], created_at: '2026-07-14T0' + i + ':00:00Z' }, { selfUserId: 'me' }));
+    const res = feed.buildFeed({ local: [], team, teamUnavailable: false, limit: 2, windowStart: '2026-07-14T00:00:00Z' });
+    assert.strictEqual(res.entries.length, 3, 'the whole stream is inside the window');
+    assert.strictEqual(res.nextBefore, null, 'nothing older remains, so no cursor');
   });
 
   // --- 14. MCP server (lib/mcp.js): read-only, no side effects ---
