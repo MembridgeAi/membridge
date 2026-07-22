@@ -4816,6 +4816,25 @@ async function main() {
       row = mockRS.entries.filter(e => e.session === 'sA')[0];
       assert.strictEqual(row.ask, null, 'scrub did not clear ask');
     });
+    // Regression: a reshare batch mixes entries that have a distilled goal with
+    // entries that don't. entryToRow must never emit an `undefined`-valued key —
+    // JSON.stringify drops those, so a goal-less row would ship WITHOUT the `goal`
+    // key while a goaled row ships WITH it, and PostgREST rejects the mixed-shape
+    // array with "All object keys must match" (the "share doesn't work" bug).
+    await check('teamsync: entryToRow emits a stable key set across mixed entries (no undefined keys)', () => {
+      const rx = digest.compileRedactions(util.getConfig());
+      const cr = { userId: 'u1', displayName: 'Resha' };
+      const withGoal = { ts: rsAgo(30), source: 'Claude Code', session: 'sM', ask: 'do it', goal: 'the goal', files: [] };
+      const noGoal = { ts: rsAgo(20), source: 'Claude Code', session: 'sM', ask: '(file edits)', files: [] };
+      const rowA = JSON.parse(JSON.stringify(teamsync.entryToRow(withGoal, 'p1', cr, true, rx)));
+      const rowB = JSON.parse(JSON.stringify(teamsync.entryToRow(noGoal, 'p1', cr, true, rx)));
+      const keysA = Object.keys(rowA).sort();
+      const keysB = Object.keys(rowB).sort();
+      assert.deepStrictEqual(keysB, keysA, 'goal-less row is missing keys present on the goaled row: ' +
+        JSON.stringify({ onlyOnGoaled: keysA.filter(k => !keysB.includes(k)) }));
+      assert.ok('goal' in rowB, 'goal key dropped from the goal-less row (undefined value)');
+      assert.strictEqual(rowB.goal, null, 'goal should serialize as null, not vanish');
+    });
     // Fail-closed: on an encrypted team with no usable key, reshareSession must
     // refuse rather than push a plaintext-only row (which merge-duplicates would
     // apply while leaving any prior ciphertext — still holding the real prompt —
