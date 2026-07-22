@@ -1640,7 +1640,7 @@ async function main() {
       const constSrc = ['MONO', 'STALE_GAP', 'BURST_GAP'].map(n => extractConst(embeddedScript, n)).join('\n');
       const fnSrc = [
         'personColor', 'capLine', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'promptRowsHtml', 'cardCloseHtml', 'shareToggleHtml',
-        'threadHtml', 'unitHtml', 'dayCardHtml',
+        'intentRowHtml', 'threadHtml', 'unitHtml', 'dayCardHtml',
         'feedKey', 'normKeyPart', 'threadKey', 'buildThreads', 'unitKeyOf', 'finalizeUnit', 'buildUnits',
         'homeDayLabel', 'buildDayCards', 'feedDayGroupHtml',
       ].map(n => extractFn(embeddedScript, n)).join('\n');
@@ -1683,6 +1683,18 @@ async function main() {
       const h = evalFeedDayGroupHtml().feedDayGroupHtml(v2FeedEntries, { unitCards: true, hideProject: true });
       assert.ok(!/data-day-open/.test(h), 'project page must not render day cards');
       assert.ok(/<article/.test(h), 'per-unit cards must still render');
+    });
+    // The Intent row is always rendered per card so the layout stays stable;
+    // when no distilled goal exists it shows a muted "(not captured)" rather
+    // than dropping the row (present-goal keeps its text).
+    check('intentRowHtml: always renders an Intent row, "(not captured)" when no goal', () => {
+      const escSrc = extractVarFn(embeddedScript, 'esc') || '';
+      const fn = new Function(escSrc + '\n' + extractFn(embeddedScript, 'intentRowHtml') + '\nreturn intentRowHtml;')();
+      const withGoal = fn('Ship the thing');
+      assert.ok(/class="flabel">Intent</.test(withGoal) && withGoal.includes('Ship the thing'), 'goal text must render');
+      const noGoal = fn('');
+      assert.ok(/class="flabel">Intent</.test(noGoal), 'Intent row must render even without a goal');
+      assert.ok(noGoal.includes('(not captured)'), 'goal-less card must show the (not captured) placeholder');
     });
     // Level-2 day-detail view (docs/superpowers/specs/2026-07-20-activity-day-cards-v2-design.md, Task 3):
     // dayDetailHtml renders the session view for one author-day card —
@@ -2364,10 +2376,14 @@ async function main() {
     // and toggling distill.enabled installs/removes the Claude Code Stop hook
     // AND records consent — otherwise the first-run popup (needsConsentPrompt)
     // would keep nagging even after the Settings toggle already acted.
+    // hookInstalled is already true here: the daemon force-registers the Stop
+    // hook at boot (hooks.ensureInstalled), so it is present regardless of the
+    // Settings toggle. Disabling still removes it in-session; the next daemon
+    // boot re-registers it (unconditional by design).
     const consentLib = require('../lib/consent');
     const stFresh = await (await fetch(`${base}/api/settings`)).json();
     check('settings: hookInstalled + distill fields are reported', () => {
-      assert.strictEqual(stFresh.hookInstalled, false, 'hook should not be installed yet');
+      assert.strictEqual(stFresh.hookInstalled, true, 'daemon should auto-register the Stop hook at boot');
       assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 4 });
     });
     const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
@@ -4423,6 +4439,39 @@ async function main() {
       input: 'garbage', encoding: 'utf8', env: { ...process.env },
     });
     assert.strictEqual(blocked.status, 0, 'entry must fail open on garbage stdin');
+  });
+  check('auto-register: ensureInstalled installs the Stop hook silently and is idempotent', () => {
+    const arFile = path.join(ROOT, 'claude-settings-autoreg.json');
+    fs.writeFileSync(arFile, JSON.stringify({ model: 'opus', hooks: { Stop: [] } }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = arFile;
+    try {
+      hooks.ensureInstalled();
+      const after1 = JSON.parse(read(arFile));
+      assert.strictEqual(after1.hooks.Stop.length, 1, 'Stop hook not auto-registered');
+      assert.strictEqual(after1.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'auto-registered command is not the resolved form');
+      assert.strictEqual(after1.model, 'opus', 'unrelated settings key lost');
+      hooks.ensureInstalled();
+      const after2 = JSON.parse(read(arFile));
+      assert.strictEqual(after2.hooks.Stop.length, 1, 'ensureInstalled duplicated the Stop entry');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('auto-register: post-commit sweep runs once per version, then is skipped', () => {
+    const repo = path.join(ROOT, 'autoreg-repo');
+    fs.mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true });
+    const st = util.loadState();
+    util.saveState({ ...st, projects: { ...(st.projects || {}), [repo]: { events: [] } }, hooksInstalledVersion: 'v-stale' });
+
+    hooks.ensurePostCommitForVersion();
+    const hookFile = path.join(repo, '.git', 'hooks', 'post-commit');
+    assert.ok(fs.existsSync(hookFile), 'post-commit hook not installed on the version-mismatch run');
+    assert.strictEqual(util.loadState().hooksInstalledVersion, require('../package.json').version, 'version marker not stamped after sweep');
+
+    fs.unlinkSync(hookFile); // a gated second run must NOT recreate it
+    hooks.ensurePostCommitForVersion();
+    assert.strictEqual(fs.existsSync(hookFile), false, 'sweep re-ran despite a matching version marker');
   });
   check('distill: setup-hooks upgrades a stale PATH-based command in place', () => {
     const staleFile = path.join(ROOT, 'claude-settings-stale.json');

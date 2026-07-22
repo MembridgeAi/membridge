@@ -107,6 +107,11 @@ function cmdDaemon() {
   fs.writeFileSync(util.pidPath(), String(process.pid));
   util.log(`daemon started (pid ${process.pid}, interval ${config.intervalSec}s, v${pkg.version})`);
 
+  // Auto-register the Claude Code Stop hook on every daemon boot, so it lands
+  // however MemBridge was installed (git clone, npm, curl) without a manual
+  // `setup-hooks` step. Silent and fail-open — never blocks the daemon.
+  hooks.ensureInstalled();
+
   const cleanup = () => {
     try {
       if (readPid() === process.pid) fs.unlinkSync(util.pidPath());

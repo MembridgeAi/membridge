@@ -19,6 +19,7 @@ const util = lib('util');
 const { syncOnce } = lib('scan');
 const { startServer } = lib('server');
 const teamsync = lib('teamsync');
+const hooks = lib('hooks');
 
 const SMOKE = process.argv.includes('--smoke');
 let tray = null;
@@ -108,15 +109,33 @@ function openDashboard() {
   });
 }
 
-// Notify (once per version) when a newer release exists. Best-effort and
-// fail-silent — never blocks startup. MemBridge has no in-app auto-updater
-// (that would need an Apple Developer signature), so we point the user at the
-// one-line installer instead of updating for them.
-async function checkForUpdate() {
+// Check for a newer release. Best-effort and fail-silent. MemBridge has no
+// in-app auto-updater (that would need an Apple Developer signature), so we
+// point the user at the one-line installer instead of updating for them.
+//
+// Two modes:
+//  - automatic (on launch): silent unless a newer version exists, and only
+//    nags once per version.
+//  - manual ("Check for updates…" menu item): always reports a result, forces
+//    a fresh network check, and ignores the once-per-version guard.
+async function checkForUpdate({ manual = false } = {}) {
+  const updateCheck = lib('update-check');
   try {
-    const updateCheck = lib('update-check');
-    const r = await updateCheck.check({ current: app.getVersion() });
-    if (!r.updateAvailable || updateCheck.alreadyNotified(r.latest)) return;
+    const r = await updateCheck.check({ current: app.getVersion(), force: manual });
+    if (!r.updateAvailable) {
+      if (manual) {
+        await dialog.showMessageBox({
+          type: 'info',
+          title: 'MemBridge',
+          message: r.latest
+            ? `You're up to date — v${r.current} is the latest version.`
+            : `Couldn't reach the update server. You're on v${r.current}.`,
+          buttons: ['OK'],
+        });
+      }
+      return;
+    }
+    if (!manual && updateCheck.alreadyNotified(r.latest)) return;
     updateCheck.markNotified(r.latest);
     const command = updateCheck.updateCommand('app');
     const { response } = await dialog.showMessageBox({
@@ -131,6 +150,16 @@ async function checkForUpdate() {
     if (response === 0) shell.openExternal(updateCheck.RELEASES_PAGE);
   } catch {
     // an update check must never take the app down
+    if (manual) {
+      try {
+        await dialog.showMessageBox({
+          type: 'warning',
+          title: 'MemBridge',
+          message: 'Could not check for updates right now.',
+          buttons: ['OK'],
+        });
+      } catch {}
+    }
   }
 }
 
@@ -161,6 +190,7 @@ function updateMenu() {
       },
     },
     { type: 'separator' },
+    { label: `Check for updates… (v${app.getVersion()})`, click: () => checkForUpdate({ manual: true }) },
     {
       label: 'Start at login',
       type: 'checkbox',
@@ -205,6 +235,11 @@ if (!gotLock) {
 
     // smoke mode verifies tray + server boot only — it must never sync/write
     if (!SMOKE) {
+      // Auto-register the Claude Code Stop hook when the app launches, so users
+      // who only ever download and open MemBridge.app get it without a manual
+      // `setup-hooks` step. Silent and fail-open. Kept inside !SMOKE so the
+      // CI/build boot-check never writes to a real ~/.claude/settings.json.
+      hooks.ensureInstalled();
       tick();
       setInterval(tick, config.intervalSec * 1000);
       // Fire-and-forget: notify once per version if a newer release exists.
