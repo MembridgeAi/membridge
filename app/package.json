@@ -1,6 +1,6 @@
 {
   "name": "membridge-app",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MemBridge tray app - shared memory across your AI coding tools",
   "main": "main.js",
   "author": "Marco Melika <marco@melika.com>",
