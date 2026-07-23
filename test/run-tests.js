@@ -2122,23 +2122,34 @@ async function main() {
         'latest pick must go by ts, not array order');
       assert.strictEqual(pxLatestEntry(p, null, pxEntryInProject), null, 'null feed must not throw');
       const counts = pxSparkCounts(p, recent, pxEntryInProject, now);
-      assert.strictEqual(counts.length, 14, 'sparkline must have 14 daily buckets');
-      assert.strictEqual(counts[13], 1, 'today bucket misses the 2h-ago session');
-      assert.strictEqual(counts[12], 1, 'yesterday bucket misses the 26h-ago session');
-      assert.strictEqual(counts.reduce((a, b) => a + b, 0), 2,
-        'other-project or >14d sessions leaked into the sparkline');
+      assert.strictEqual(counts.length, 24, 'sparkline must have 24 hourly buckets');
+      assert.strictEqual(counts[21], 1, 'the 2h-ago session must land in the 2-hours-back bucket');
+      assert.strictEqual(counts.reduce((a, b) => a + b, 0), 1,
+        'sessions older than 24h or from other projects leaked into the sparkline');
       assert.strictEqual(pxSparkCounts(p, null, pxEntryInProject, now).reduce((a, b) => a + b, 0), 0,
         'null feed must yield an all-zero sparkline, not throw');
+      const pxClipSrc = extractFn(embeddedScript, 'pxClipSummary');
+      assert.ok(pxClipSrc, 'pxClipSummary pure helper missing');
+      const pxClipSummary = new Function('return (' + pxClipSrc + ')')();
+      assert.strictEqual(pxClipSummary('short text', 160), 'short text', 'short summaries must pass through untouched');
+      const clipped = pxClipSummary('word '.repeat(60).trim(), 160);
+      assert.ok(clipped.length <= 161 && clipped.endsWith('\u2026'), 'long summaries must clip with an ellipsis');
+      assert.ok(!/\s\u2026$/.test(clipped), 'clip must land on a word boundary, not trailing space');
+      assert.strictEqual(pxClipSummary('x'.repeat(300), 160), 'x'.repeat(160) + '\u2026',
+        'an unbreakable string must hard-cut at the limit');
     });
     check('Projects index renders the 1c compact grid with every row action hook intact', () => {
       const rowSrc = extractFn(embeddedScript, 'pxRowHtml');
       const renderSrc = extractFn(embeddedScript, 'renderProjectsIndex');
       assert.ok(/px-hdr/.test(renderSrc) && /Latest session/.test(renderSrc), '1c column header row missing');
       assert.ok(/px-spark/.test(rowSrc) && /px-who/.test(rowSrc), 'sparkline/avatar cells missing from rows');
+      assert.ok(/pxClipSummary\(/.test(rowSrc), 'latest-session summary is not length-capped');
+      assert.ok(/title="' \+ esc\(summary\)/.test(rowSrc), 'full summary tooltip missing from the latest-session cell');
       assert.ok(/px-row dim/.test(rowSrc), 'paused/dormant rows do not collapse to the dim one-line form');
       ['data-px-open', 'data-px-menu', 'data-px-pause', 'data-px-askdel', 'data-px-dodel', 'data-px-canceldel'].forEach((a) => {
         assert.ok(rowSrc.includes(a), a + ' hook lost in the 1c redesign');
       });
+      assert.ok(!rowSrc.includes('Roadmap'), 'the removed Roadmap item is back in the row menu');
       assert.ok(pageHtml.includes('.px-hdr'), '1c grid CSS missing from the stylesheet');
     });
     const bulkFnSrc = extractFn(embeddedScript, 'deleteProjectsBulk');
