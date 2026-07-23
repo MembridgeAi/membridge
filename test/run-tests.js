@@ -9568,7 +9568,7 @@ async function main() {
 
     check('update-check: updateCommand matches install kind', () => {
       assert.strictEqual(uc.updateCommand('app'), 'curl -fsSL https://membridge.me/install.sh | sh');
-      assert.strictEqual(uc.updateCommand('npm'), 'npm install -g membridge');
+      assert.strictEqual(uc.updateCommand('npm'), 'npm install -g @membridgeai/membridge');
     });
   }
 

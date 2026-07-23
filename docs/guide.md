@@ -45,7 +45,7 @@ it first? `curl -fsSL https://membridge.me/install.sh -o install.sh`.
 On Intel Macs, Linux, Windows, or servers, use the CLI instead:
 
 ```sh
-npm install -g membridge
+npm install -g @membridgeai/membridge
 membridge scan       # read-only: see which AI tools and projects it found
 membridge start      # run the background daemon
 membridge dashboard  # open the dashboard at http://127.0.0.1:7437
