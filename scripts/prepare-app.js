@@ -21,6 +21,29 @@ console.log('app/bin refreshed from bin/');
 // The app version must always track the root package.json — a stale
 // app/package.json version labels a fresh build as an old release.
 const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+
+// Copies the runtime dependency closure into app/node_modules so the packaged
+// app can require what lib/ requires (app/package.json declares no deps, so
+// electron-builder installs nothing on its own). The walk must be transitive:
+// libsodium-wrappers is a thin wrapper whose engine is the separate
+// `libsodium` package — bundling only the wrapper leaves require() throwing
+// inside the asar, and team encryption pauses fail-closed on every build.
+// A dep missing from root node_modules throws here: a loud build failure
+// beats an app that quietly cannot encrypt.
+const modDest = path.join(root, 'app', 'node_modules');
+fs.rmSync(modDest, { recursive: true, force: true });
+const bundled = new Set();
+const queue = Object.keys(rootPkg.dependencies || {});
+while (queue.length) {
+  const name = queue.shift();
+  if (bundled.has(name)) continue;
+  bundled.add(name);
+  const src = path.join(root, 'node_modules', name);
+  const pkg = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8'));
+  fs.cpSync(src, path.join(modDest, name), { recursive: true });
+  queue.push(...Object.keys(pkg.dependencies || {}));
+}
+console.log(`app/node_modules refreshed (${[...bundled].sort().join(', ')})`);
 const appPkgPath = path.join(root, 'app', 'package.json');
 const appPkg = JSON.parse(fs.readFileSync(appPkgPath, 'utf8'));
 if (appPkg.version !== rootPkg.version) {

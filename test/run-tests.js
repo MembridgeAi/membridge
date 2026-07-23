@@ -220,6 +220,33 @@ async function main() {
     assert.ok(fs.existsSync(binned), 'app/bin/membridge.js not created by prepare-app');
   });
 
+  check('prepare-app bundles the runtime dependency closure into app/node_modules', () => {
+    // Regression: packaged builds shipped libsodium-wrappers WITHOUT its
+    // `libsodium` engine dependency, so require() failed inside the asar and
+    // team encryption paused fail-closed whenever the tray app ran the sync.
+    // Walk root dependencies transitively; every package in the closure must
+    // land in app/node_modules or the packaged app cannot require it.
+    const r = spawnSync('node', [path.join(__dirname, '..', 'scripts', 'prepare-app.js')], { encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, `prepare-app failed: ${r.stderr}`);
+    const appRoot = path.join(__dirname, '..');
+    const rootPkg = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+    const want = new Set();
+    const queue = Object.keys(rootPkg.dependencies || {});
+    while (queue.length) {
+      const name = queue.shift();
+      if (want.has(name)) continue;
+      want.add(name);
+      const pkg = JSON.parse(fs.readFileSync(
+        path.join(appRoot, 'node_modules', name, 'package.json'), 'utf8'));
+      queue.push(...Object.keys(pkg.dependencies || {}));
+    }
+    assert.ok(want.size >= 2, 'closure should hold libsodium-wrappers plus its engine');
+    for (const name of want) {
+      assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', name, 'package.json')),
+        `app/node_modules/${name} missing — the packaged app cannot require it`);
+    }
+  });
+
   check('gen-install: sha256File hashes file contents', () => {
     const gen = require('../scripts/install/gen-install');
     const f = path.join(ROOT, 'fixture.zip');
