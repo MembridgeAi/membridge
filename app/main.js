@@ -142,13 +142,31 @@ async function checkForUpdate({ manual = false } = {}) {
     const { response } = await dialog.showMessageBox({
       type: 'info',
       title: 'Update available',
-      message: 'A new version of MemBridge is available.',
-      detail: `You're on v${r.current}. The latest is v${r.latest}.\n\nTo update, run this in your terminal:\n  ${command}`,
-      buttons: ['Get the update', 'Later'],
+      message: `MemBridge v${r.latest} is available (you're on v${r.current}).`,
+      detail: 'Install now? MemBridge will quit, update, and reopen automatically — this takes a few seconds.',
+      buttons: ['Install and restart', 'Later'],
       defaultId: 0,
       cancelId: 1,
     });
-    if (response === 0) shell.openExternal(updateCheck.RELEASES_PAGE);
+    if (response === 0) {
+      // Install in place instead of opening a web page. Run the pinned installer
+      // DETACHED (its own session) so it survives this app quitting — install.sh
+      // quits the running MemBridge to replace its bundle, then reopens the new
+      // version itself (its step 8 `open`). stdio is ignored; it finishes on its own.
+      const { spawn } = require('child_process');
+      try {
+        spawn('/bin/sh', ['-c', command], { detached: true, stdio: 'ignore' }).unref();
+        await dialog.showMessageBox({
+          type: 'info',
+          title: 'Updating MemBridge',
+          message: `Installing v${r.latest}…`,
+          detail: 'MemBridge will quit while it updates, then reopen automatically.',
+          buttons: ['OK'],
+        });
+      } catch {
+        shell.openExternal(updateCheck.RELEASES_PAGE); // fallback if the installer can't launch
+      }
+    }
   } catch {
     // an update check must never take the app down
     if (manual) {
