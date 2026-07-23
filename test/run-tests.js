@@ -2101,6 +2101,46 @@ async function main() {
       assert.ok(/function resetFeedFilterUnions\(\) \{[\s\S]{0,240}feedMembers = null[\s\S]{0,140}feedMembersByTeam = \{\}/.test(embeddedScript),
         'resetFeedFilterUnions does not reset the member cache — a mid-session team join never loads members');
     });
+    check('Projects 1c: latest-entry and sparkline helpers are pure, ts-ordered and clock-injected', () => {
+      const pxLatestSrc = extractFn(embeddedScript, 'pxLatestEntry');
+      const pxSparkSrc = extractFn(embeddedScript, 'pxSparkCounts');
+      assert.ok(pxLatestSrc, 'pxLatestEntry pure helper missing');
+      assert.ok(pxSparkSrc, 'pxSparkCounts pure helper missing');
+      const pxEntryInProject = new Function('return (' + pxInProjSrc + ')')();
+      const pxLatestEntry = new Function('return (' + pxLatestSrc + ')')();
+      const pxSparkCounts = new Function('return (' + pxSparkSrc + ')')();
+      const p = { name: 'membridge', path: '/w/membridge' };
+      // Local-noon clock so the day bucketing is stable in any timezone.
+      const now = new Date(2026, 6, 22, 12, 0, 0).getTime();
+      const recent = [
+        { projectPath: '/w/membridge', ts: new Date(now - 26 * 3600e3).toISOString(), summary: 'older' },
+        { projectPath: '/w/membridge', ts: new Date(now - 2 * 3600e3).toISOString(), summary: 'newest' },
+        { projectPath: '/w/other', ts: new Date(now).toISOString(), summary: 'other project' },
+        { projectPath: '/w/membridge', ts: new Date(now - 20 * 86400e3).toISOString(), summary: 'outside window' },
+      ];
+      assert.strictEqual(pxLatestEntry(p, recent, pxEntryInProject).summary, 'newest',
+        'latest pick must go by ts, not array order');
+      assert.strictEqual(pxLatestEntry(p, null, pxEntryInProject), null, 'null feed must not throw');
+      const counts = pxSparkCounts(p, recent, pxEntryInProject, now);
+      assert.strictEqual(counts.length, 14, 'sparkline must have 14 daily buckets');
+      assert.strictEqual(counts[13], 1, 'today bucket misses the 2h-ago session');
+      assert.strictEqual(counts[12], 1, 'yesterday bucket misses the 26h-ago session');
+      assert.strictEqual(counts.reduce((a, b) => a + b, 0), 2,
+        'other-project or >14d sessions leaked into the sparkline');
+      assert.strictEqual(pxSparkCounts(p, null, pxEntryInProject, now).reduce((a, b) => a + b, 0), 0,
+        'null feed must yield an all-zero sparkline, not throw');
+    });
+    check('Projects index renders the 1c compact grid with every row action hook intact', () => {
+      const rowSrc = extractFn(embeddedScript, 'pxRowHtml');
+      const renderSrc = extractFn(embeddedScript, 'renderProjectsIndex');
+      assert.ok(/px-hdr/.test(renderSrc) && /Latest session/.test(renderSrc), '1c column header row missing');
+      assert.ok(/px-spark/.test(rowSrc) && /px-who/.test(rowSrc), 'sparkline/avatar cells missing from rows');
+      assert.ok(/px-row dim/.test(rowSrc), 'paused/dormant rows do not collapse to the dim one-line form');
+      ['data-px-open', 'data-px-menu', 'data-px-pause', 'data-px-askdel', 'data-px-dodel', 'data-px-canceldel'].forEach((a) => {
+        assert.ok(rowSrc.includes(a), a + ' hook lost in the 1c redesign');
+      });
+      assert.ok(pageHtml.includes('.px-hdr'), '1c grid CSS missing from the stylesheet');
+    });
     const bulkFnSrc = extractFn(embeddedScript, 'deleteProjectsBulk');
     check('deleteProjectsBulk helper exists standalone in the embedded script', () => {
       assert.ok(bulkFnSrc, 'deleteProjectsBulk function not found');
