@@ -5665,6 +5665,16 @@ async function main() {
   const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N';
   const PG_URI = 'postgres://app:hunter2secret@db.internal:5432/prod';
   const ENTROPY_TOKEN = 'aB3dE5gH7jK9mN1pQ3rS5tU7wX9zA1cE'; // 32-char base64, entropy > 4.5
+  const STRIPE_KEY = 'sk_live_' + 'ABCDEFGHIJKLMNOP1234567890';
+  const STRIPE_WEBHOOK = 'whsec_' + 'ABCDEFGHIJKLMNOPabcdefghij1234';
+  const GOOGLE_OAUTH_SECRET = 'GOCSPX-' + 'ABCDEFGHIJKLMNOP1234567890';
+  const SENDGRID_KEY = 'SG.' + 'ABCDEFGHIJKLMNOP1234' + '.' + 'abcdefghijklmnop1234ABCDEFGHIJKLMNOP567';
+  const NPM_TOKEN = 'npm_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; // npm_ + 36
+  // Split across a + so no full webhook-URL literal appears contiguously in
+  // source — GitHub push protection flags the shape even for obviously-fake
+  // tokens. The runtime value (what the redactor is tested against) is identical.
+  const SLACK_WEBHOOK = 'https://hooks.slack.com' + '/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX';
+  const DISCORD_WEBHOOK = 'https://discord.com/api' + '/webhooks/123456789012345678/AbC-dEf_1234567890AbCdEfGhIjKlMnOpQrStUvWx';
   const cases = [
     ['aws-access-key', `creds ${AWS_KEY} here`, AWS_KEY],
     ['github-token', `rotate ${GH_TOKEN} now`, GH_TOKEN],
@@ -5675,6 +5685,13 @@ async function main() {
     ['private-key', '-----BEGIN RSA PRIVATE KEY-----\nMIIBhaha+notreal/xyz==\n-----END RSA PRIVATE KEY-----', 'MIIBhaha'],
     ['credentials', `DB ${PG_URI} yo`, 'hunter2secret'],
     ['secret-assignment', "config password=hunter2xyz done", 'hunter2xyz'],
+    ['stripe-key', `pay ${STRIPE_KEY} now`, STRIPE_KEY],
+    ['stripe-webhook-secret', `sig ${STRIPE_WEBHOOK} end`, STRIPE_WEBHOOK],
+    ['google-oauth-secret', `oauth ${GOOGLE_OAUTH_SECRET} end`, GOOGLE_OAUTH_SECRET],
+    ['sendgrid-key', `mail ${SENDGRID_KEY} sent`, SENDGRID_KEY],
+    ['npm-token', `registry ${NPM_TOKEN} used`, NPM_TOKEN],
+    ['slack-webhook-url', `post ${SLACK_WEBHOOK} now`, SLACK_WEBHOOK],
+    ['discord-webhook-url', `hook ${DISCORD_WEBHOOK} set`, DISCORD_WEBHOOK],
     ['high-entropy', `blob ${ENTROPY_TOKEN} done`, ENTROPY_TOKEN],
   ];
   // E2E crypto primitives (libsodium sealed-box + secretbox). Load once so the
