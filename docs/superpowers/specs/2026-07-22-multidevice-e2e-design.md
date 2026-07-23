@@ -58,14 +58,14 @@ new device **without a key rotation**.
 
 ## Changes by area (implementation order)
 
-### 1. `lib/device.js` (new) — stable per-device id
+### 1. `lib/device.js` (new) — stable per-device id ✅ done
 `deviceId()` lazily creates `device.json` in `util.homeDir()`:
 `{ deviceId: crypto.randomUUID(), label: os.hostname() }`, returns the id. Honors
 `MEMBRIDGE_DEVICE_ID` env override (mirrors the `MEMBRIDGE_HOME` test-isolation
 pattern in `util.js`). Atomic write (tmp + rename) like `teampins.save`. Corrupt/
 missing file → regenerate.
 
-### 2. `lib/keychain.js` — cross-platform key storage
+### 2. `lib/keychain.js` — cross-platform key storage ✅ done
 - Keep the macOS `security` backend and its `_setRunner` seam unchanged.
 - Add a **Windows DPAPI** backend (no native deps): `available()` true on `win32`;
   `store/load/remove` shell out to `powershell` using
@@ -101,15 +101,23 @@ rows. A **new device** for a known user is a first-sight pin (allowed), **not** 
 alert; a **changed key for an existing device** is an alert. Preserves the
 anti-MITM guarantee per device. Migrate legacy flat pins on load.
 
-### 5. `supabase/migrations/016_multidevice_keys.sql` (new, re-runnable, guarded)
-- `member_pubkeys`: `add column if not exists device_id text`; clear existing rows
-  (safe — `ensureIdentity` re-uploads every sync); drop the old `user_id` PK, add
-  composite PK `(user_id, device_id)`. RLS unchanged (own-or-shared-team select,
-  own-row insert/update).
-- `team_keys`: `add column if not exists device_id text` (**nullable** — legacy rows
-  stay NULL and readable); optional index on `(member_user_id, device_id)`. **Do
-  not clear** — clearing destroys decryptability of existing entries. Client always
-  writes a `device_id` on new rows.
+### 5. `supabase/migrations/016_multidevice_keys.sql` (new, re-runnable, guarded) ✅ written
+- `member_pubkeys`: add `device_id`, clear existing rows (safe — `ensureIdentity`
+  re-uploads every sync), drop the old `user_id` PK, add composite PK
+  `(user_id, device_id)`. RLS unchanged (own-or-shared-team select, own-row
+  insert/update — device_id doesn't affect those predicates).
+- `team_keys`: add `device_id` and **make it part of the PK**:
+  `(team_id, epoch, member_user_id, device_id)`. **Do not clear** — clearing
+  destroys decryptability of existing entries; legacy rows backfill to `''` and
+  stay readable. Index on `(member_user_id, device_id)`.
+  - **Correction to the original note:** it proposed leaving `device_id` NULLABLE
+    with the PK unchanged. That fails — a second device's row for the same
+    `(team, epoch, member)` collides with the existing PK regardless of
+    `device_id`, so the new device never gets its own row (the exact bug). So
+    `device_id` must be `NOT NULL` and join the PK; legacy rows use a `''`
+    sentinel (a PK column cannot be NULL). **Consequence for section 3:** the
+    client's `insertSealedRows` on-conflict target becomes
+    `(team_id, epoch, member_user_id, device_id)`.
 - `memory_entries`: unchanged (ciphertext is per-row, team-key-scoped).
 - Same deploy-gate discipline as 009/013: **apply to live Supabase before shipping
   the client.**
