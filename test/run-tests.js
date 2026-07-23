@@ -4968,6 +4968,77 @@ async function main() {
     }
   }
 
+  // SECURITY (fix/dashboard-csrf): the local dashboard API binds 127.0.0.1, which
+  // stops remote attackers but NOT cross-site ones — any page the user's browser
+  // loads while the daemon runs can fire a form POST at 127.0.0.1:<port> and drive
+  // a mutating endpoint (e.g. overwrite team.url so the next sync ships the Supabase
+  // refresh token to an attacker). The guard runs before route dispatch: a POST
+  // whose Origin is present and cross-site, an opaque "null" Origin, or a non-JSON
+  // content-type is refused with 403; same-origin and no-Origin (CLI/tests) pass;
+  // reads (GET) are never blocked. We assert against /api/projects/add because it
+  // 400s on a missing path, so a passed guard is observable as 400 (not a mutation).
+  {
+    const CSRF_PORT = 17983;
+    const srvCsrf = startServer(CSRF_PORT, { retries: 0 });
+    try {
+      const base = 'http://127.0.0.1:' + CSRF_PORT;
+      await waitForHttp(base + '/api/status');
+      const raw = (p, opts) => fetch(base + p, opts);
+
+      const cross = await raw('/api/projects/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+        body: JSON.stringify({ path: '/tmp/whatever' }),
+      });
+      await check('server(csrf): cross-origin POST is blocked before the route (403)', () => {
+        assert.strictEqual(cross.status, 403);
+      });
+
+      const nullOrigin = await raw('/api/projects/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'null' },
+        body: JSON.stringify({ path: '/tmp/whatever' }),
+      });
+      await check('server(csrf): opaque "null" Origin POST is blocked (403)', () => {
+        assert.strictEqual(nullOrigin.status, 403);
+      });
+
+      const wrongType = await raw('/api/projects/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain', Origin: base },
+        body: JSON.stringify({ path: '/tmp/whatever' }),
+      });
+      await check('server(csrf): non-JSON content-type POST is blocked (403)', () => {
+        assert.strictEqual(wrongType.status, 403);
+      });
+
+      const same = await raw('/api/projects/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: base },
+        body: JSON.stringify({}),
+      });
+      await check('server(csrf): same-origin POST passes the guard (reaches route → 400)', () => {
+        assert.strictEqual(same.status, 400);
+      });
+
+      const noOrigin = await raw('/api/projects/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      await check('server(csrf): POST without an Origin is allowed (non-browser client → 400)', () => {
+        assert.strictEqual(noOrigin.status, 400);
+      });
+
+      const readCross = await raw('/api/status', { headers: { Origin: 'http://evil.example' } });
+      await check('server(csrf): cross-origin GET is still served (reads are safe → 200)', () => {
+        assert.strictEqual(readCross.status, 200);
+      });
+    } finally {
+      if (srvCsrf) await new Promise(r => srvCsrf.close(r));
+    }
+  }
+
   // BUG 1 (fix/share-live-and-clamp): sharing a LIVE / never-pushed session.
   // reshareSession must refresh stale credentials like every other
   // authenticated call (it used raw loadCredentials, so an expired JWT made
