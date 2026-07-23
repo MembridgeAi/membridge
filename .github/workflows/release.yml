@@ -20,6 +20,10 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Prod deps from the lockfile; MCP SDK + zod are deliberately opt-in
+      # (not in package.json) but the MCP tests require them. Mirrors ci.yml.
+      - run: npm ci --omit=dev --no-audit --no-fund
+      - run: npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4
       - run: node test/run-tests.js
       - run: npm publish --provenance --access public
         env:

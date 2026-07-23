@@ -5,19 +5,21 @@ release regenerates and republishes `install.sh`.
 
 1. Bump `version` in `package.json` (and let `scripts/prepare-app.js` sync
    `app/package.json` on the next build).
-2. Build the app — this runs `prepare-app.js` (which bundles `bin/` into the
-   app) and produces `dist/MemBridge-<version>-arm64.zip`:
+2. Create the GitHub release tagged `v<version>`. Publishing the release
+   triggers the **Build app** workflow, which builds the macOS and Windows
+   zips on CI and attaches them with `--clobber` — CI's zips are the
+   canonical assets. Do NOT stamp the pin from a locally built zip: CI will
+   overwrite the asset and the SHA-256 will no longer match.
+3. Wait for the release's **Build app** run to finish, then download the
+   CI-built asset and stamp the pin from it:
    ```sh
-   npm run dist:mac
-   ```
-3. Stamp the pin into `scripts/install/install.sh`:
-   ```sh
+   curl -fsSL -o dist/MemBridge-<version>-arm64.zip \
+     https://github.com/MembridgeAi/membridge/releases/download/v<version>/MemBridge-<version>-arm64.zip
    node scripts/install/gen-install.js
    ```
    It prints the version + SHA-256 it embedded.
-4. Create the GitHub release tagged `v<version>` and upload
-   `dist/MemBridge-<version>-arm64.zip` as a release asset. The asset name must
-   match `MemBridge-<version>-arm64.zip` (the installer builds the URL from it).
+4. (The asset name must match `MemBridge-<version>-arm64.zip` — the installer
+   builds the download URL from it.)
 5. Publish `install.sh` so `https://membridge.me/install.sh` serves it: copy
    `scripts/install/install.sh` to the root of the `mmelika/membridge-site`
    repo as `install.sh`, commit, and push (GitHub Pages serves it). The raw

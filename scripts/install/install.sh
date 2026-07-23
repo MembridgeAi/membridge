@@ -6,7 +6,7 @@
 set -eu
 
 VERSION="0.1.0"
-SHA256="3ebed40abf5fc92e7b07d381fa8d65293f21679da76ecdbe05abda757bef9cf6"
+SHA256="a8f979d1380e1a20fa8dfc1ceab60fc1ab1ca68100e6aceefd34722753291863"
 REPO="MembridgeAi/membridge"
 APP_NAME="MemBridge"
 APP_DEST="/Applications/${APP_NAME}.app"
