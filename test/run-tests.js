@@ -5774,6 +5774,28 @@ async function main() {
       else process.env.MEMBRIDGE_DEVICE_ID = savedEnv;
     }
   });
+  // Race-safety guard for concurrent first-boot mint (daemon + parallel session):
+  // minting must adopt an existing id rather than re-mint, must never throw, and
+  // must not leave a device.json .tmp behind. The true two-process race can't be
+  // reproduced in-process (sync fs never interleaves), so this locks the
+  // observable invariants the atomic-link path guarantees.
+  check('device: mint is race-safe — adopts an existing id, never throws, leaves no tmp', () => {
+    const savedEnv = process.env.MEMBRIDGE_DEVICE_ID;
+    delete process.env.MEMBRIDGE_DEVICE_ID;
+    try {
+      const dp = device.devicePath();
+      try { fs.unlinkSync(dp); } catch {}
+      const id = device.deviceId();
+      assert.strictEqual(device.deviceId(), id, 'existing id is adopted, not re-minted');
+      const dir = path.dirname(dp);
+      const base = path.basename(dp);
+      const leftover = fs.readdirSync(dir).filter(f => f.startsWith(base + '.') && f.endsWith('.tmp'));
+      assert.deepStrictEqual(leftover, [], 'no leftover device.json .tmp files: ' + leftover.join(','));
+    } finally {
+      if (savedEnv === undefined) delete process.env.MEMBRIDGE_DEVICE_ID;
+      else process.env.MEMBRIDGE_DEVICE_ID = savedEnv;
+    }
+  });
   // Private-key storage. The real keychain only exists on macOS, so off-darwin
   // this asserts the fail-closed contract instead of skipping blind.
   const keychain = require('../lib/keychain');
@@ -5837,14 +5859,21 @@ async function main() {
       assert.strictEqual(keychain._winLoad('membridge.box.privatekey'), null, 'load after remove must be null');
     } finally { keychain._setWinRunner(prev); }
   });
-  check('keychain(win): real DPAPI round trip on win32', () => {
-    if (process.platform !== 'win32') return; // exercised only on the Windows box
-    const acct = 'membridge.test.' + Date.now();
-    assert.ok(keychain.store(acct, 'WIN-SECRET'), 'store failed');
-    assert.strictEqual(keychain.load(acct), 'WIN-SECRET', 'load round trip');
-    assert.ok(keychain.remove(acct), 'remove failed');
-    assert.strictEqual(keychain.load(acct), null, 'load after remove must be null');
-  });
+  if (process.platform === 'win32') {
+    check('keychain(win): real DPAPI round trip on win32', () => {
+      const acct = 'membridge.test.' + Date.now();
+      assert.ok(keychain.store(acct, 'WIN-SECRET'), 'store failed');
+      assert.strictEqual(keychain.load(acct), 'WIN-SECRET', 'load round trip');
+      assert.ok(keychain.remove(acct), 'remove failed');
+      assert.strictEqual(keychain.load(acct), null, 'load after remove must be null');
+    });
+  } else {
+    // Skip LOUDLY: off Windows the real DPAPI path cannot run, so we must NOT
+    // register a passing check — a green suite would otherwise falsely imply the
+    // Windows backend was exercised when only the fake-seam test above ran. A
+    // real Windows CI leg is what actually covers keychain.store/load on win32.
+    console.log('  skip  keychain(win): real DPAPI round trip — not win32 (needs a Windows CI leg)');
+  }
   // Identity bootstrap (ensureIdentity, plan Task 4): pure by injection, so
   // every scenario runs offline against fakes — no network, no real keychain.
   // Awaits happen at block level (check() doesn't await), wrapped so a missing
