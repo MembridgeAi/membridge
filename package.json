@@ -1,5 +1,5 @@
 {
-  "name": "@andrewb36/membridge",
+  "name": "@membridgeai/membridge",
   "version": "0.1.2",
   "description": "Shared memory across your AI coding tools. A tiny background daemon that watches Claude Code, Codex and any other agent's session logs, distills a brief per-project memory, and syncs it into the context files every tool reads (CLAUDE.md, AGENTS.md, ...).",
   "keywords": [

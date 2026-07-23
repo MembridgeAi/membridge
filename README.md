@@ -21,7 +21,7 @@ curl -fsSL https://membridge.me/install.sh | sh
 <p align="center"><sub><code>local-first · no account · no API keys</code></sub></p>
 
 The one-liner is macOS (Apple Silicon). Everywhere else:
-`npm install -g membridge && membridge start`. Every install option, the
+`npm install -g @membridgeai/membridge && membridge start`. Every install option, the
 full CLI, configuration, and the FAQ live in **[the guide](docs/guide.md)** —
 and this page has an animated twin at
 **[docs/readme.html](docs/readme.html)** ([membridge.me](https://membridge.me)).
