@@ -17,8 +17,12 @@ export function supabase() {
 
 // Display name kept in auth user metadata (the CLI keeps its own copy in
 // credentials.json; entries carry the name they were pushed with).
+// GitHub OAuth accounts have no display_name — GitHub writes full_name and
+// user_name instead, so fall through those before the email fragment.
 export function displayNameOf(user) {
-  return (user && (user.user_metadata?.display_name || user.email?.split('@')[0])) || '';
+  if (!user) return '';
+  const m = user.user_metadata || {};
+  return m.display_name || m.full_name || m.user_name || user.email?.split('@')[0] || '';
 }
 
 const PALETTE = ['#0052ff', '#0e9f6e', '#b43403', '#7c3aed', '#c81e64', '#0694a2', '#8a6a00'];

@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import AuthForm from '../../../components/AuthForm';
 import { supabase, displayNameOf } from '../../../lib/supabase';
@@ -11,8 +11,10 @@ export default function Join() {
   const { token } = useParams();
   const router = useRouter();
   const [peek, setPeek] = useState(undefined); // undefined loading, null unknown token
+  const [user, setUser] = useState(null);
   const [joined, setJoined] = useState(null);
   const [error, setError] = useState('');
+  const redeeming = useRef(false);
 
   useEffect(() => {
     const sb = supabase();
@@ -23,21 +25,34 @@ export default function Join() {
         return;
       }
       setPeek(data && data.length ? data[0] : null);
-      // Already signed in? Join straight away.
-      sb.auth.getUser().then(({ data: u }) => {
-        if (u.user && data && data.length && data[0].valid) redeem(u.user);
-      });
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
-  async function redeem(user) {
+  // Fires for the session already in storage (INITIAL_SESSION), a password
+  // login in the form, and the return leg of the GitHub OAuth redirect.
+  useEffect(() => {
+    const { data: sub } = supabase().auth.onAuthStateChange((_event, session) => {
+      if (session?.user) setUser(session.user);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // Signed in + valid invite -> join straight away (idempotent server-side).
+  useEffect(() => {
+    if (user && peek && peek.valid && !joined) redeem(user);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, peek]);
+
+  async function redeem(u) {
+    if (redeeming.current) return;
+    redeeming.current = true;
     const sb = supabase();
     const { data, error } = await sb.rpc('redeem_invite', {
       p_token: token,
-      p_display_name: displayNameOf(user),
+      p_display_name: displayNameOf(u),
     });
     if (error) {
+      redeeming.current = false;
       setError(error.message);
       return;
     }

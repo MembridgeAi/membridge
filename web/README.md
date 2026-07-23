@@ -8,10 +8,11 @@ both.
 Screens:
 
 - `/` — thin marketing landing
-- `/login` — email/password (same account as `membridge login`)
+- `/login` — GitHub or email/password (same account as `membridge login`;
+  the GitHub provider needs one-time setup, see `docs/AUTH-SETUP.md`)
 - `/join/<token>` — invite landing: shows the team name (`peek_invite`),
-  inline signup/login, auto-joins (`redeem_invite`), then nudges the CLI
-  install
+  inline signup/login (GitHub or email), auto-joins (`redeem_invite`), then
+  nudges the CLI install
 - `/feed` — the team timeline, grouped by day, filter by person / project /
   tool, keyset "load older" pagination (`team_feed` RPC — one query per page)
 - `/projects` — cards from the `project_stats` view; click pre-filters the feed
