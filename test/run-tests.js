@@ -7450,7 +7450,7 @@ async function main() {
       const projT = path.join(ROOT, 'projects', 'tamper-app');
       fs.mkdirSync(projT, { recursive: true });
       const kcDana = mkMemKeychain(), kcEve = mkMemKeychain();
-      let tErr = null, eveEntriesClosed = null, eveEntriesHatch = null, resEveClosed = null, feedEve = null;
+      let tErr = null, eveEntriesClosed = null, eveEntriesHatch = null, resEveClosed = null, feedEve = null, feedEveStale = null;
       let fpEve = null, trustRes = null, pinsAfterTrust = null, danaId = null, danaNewPub = null;
       try {
         await new Promise(r => mockT.server.listen(17955, '127.0.0.1', r));
@@ -7520,6 +7520,19 @@ async function main() {
         util.saveUserConfig(rawE2);
         feedEve = await feedPayload({ limit: 50, cryptoDeps: { keychain: kcEve, teamcrypto: tcE2E } });
 
+        // Same bug class as reshareSession (BUG 1 above), at the dashboard's
+        // own call site: feedPayload read raw loadCredentials, which never
+        // checks expiresAt, and handed that dead token to buildCryptoContext.
+        // Identity bootstrap then failed with "JWT expired" and EVERY team row
+        // rendered opaque — indistinguishable from tampering. Expire the stored
+        // access token, keep the refresh token valid: the feed must refresh and
+        // still decrypt.
+        const savedCredsEve = JSON.parse(fs.readFileSync(teamsync.credentialsPath(), 'utf8'));
+        fs.writeFileSync(teamsync.credentialsPath(), JSON.stringify({
+          ...savedCredsEve, accessToken: 'expired-dead-token', expiresAt: Date.now() - 60000,
+        }));
+        feedEveStale = await feedPayload({ limit: 50, cryptoDeps: { keychain: kcEve, teamcrypto: tcE2E } });
+
         // CLI surface (E2E completion Task 7): fingerprint report from Eve's
         // keychain + pins, then a deliberate trust re-pin after Dana rotates
         // her published key (the only path that ever replaces a pin).
@@ -7562,6 +7575,15 @@ async function main() {
           `fresh encrypted row must decrypt in the feed, got: ${JSON.stringify(feedEve.entries.map(e => ({ ask: e.ask, undecryptable: e.undecryptable })))}`);
         assert.ok(feedEve.entries.some(e => e.undecryptable === true),
           'corrupted rows must carry the undecryptable marker through normalizeTeam');
+      });
+
+      check('feed: feedPayload refreshes a stale token instead of rendering every team row opaque', () => {
+        assert.ok(!tErr, `tamper scenario threw: ${tErr && tErr.message}`);
+        assert.ok(feedEveStale && Array.isArray(feedEveStale.entries), 'feedPayload must return entries with a stale stored token');
+        assert.ok(feedEveStale.entries.some(e => e.ask === 'fresh content after corruption'),
+          `a stale-but-refreshable token must refresh, not fail identity bootstrap and blank the feed, got: ${JSON.stringify(feedEveStale.entries.map(e => ({ ask: e.ask, undecryptable: e.undecryptable })))}`);
+        assert.ok(!JSON.stringify(feedEveStale.entries).includes('POISONED'),
+          'the refreshed feed must stay fail-closed on genuinely corrupted rows');
       });
 
       check('teamsync: fingerprintReport shows my key and every pinned teammate in the human-readable format', () => {
