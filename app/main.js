@@ -192,12 +192,27 @@ async function checkForUpdate({ manual = false } = {}) {
 function updateMenu() {
   if (!tray) return;
   let projects = 0;
+  // The tray made the same claim the header pill used to: "last sync <time>" on
+  // a machine that syncs with nobody. Solo says what is actually true.
+  let solo = false;
   try {
-    projects = Object.keys(util.loadState().projects || {}).length;
+    const state = util.loadState();
+    const keys = Object.keys(state.projects || {});
+    projects = keys.length;
+    solo = teamsync.isSoloMachine(
+      keys.map(k => teamsync.loadTeamLink(k)),
+      state.teamCounts || {},
+      !!teamsync.loadCredentials(),
+    );
   } catch {}
   const menu = Menu.buildFromTemplate([
     { label: paused ? 'MemBridge — paused' : 'MemBridge — running', enabled: false },
-    { label: `${projects} project(s) · last sync ${ago(lastSync)}`, enabled: false },
+    {
+      label: solo
+        ? `${projects} project(s) · local only`
+        : `${projects} project(s) · last sync ${ago(lastSync)}`,
+      enabled: false,
+    },
     { type: 'separator' },
     { label: 'Open dashboard', click: openDashboard },
     {

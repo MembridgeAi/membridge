@@ -19,7 +19,7 @@ delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not 
 const util = require('../lib/util');
 const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('../lib/scan');
 const digest = require('../lib/digest');
-const { startServer, teamPayload, teamProjectsPayload, statusPayload, feedPayload, projectDetail, planPayload } = require('../lib/server');
+const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
 const { createMockSupabase } = require('./mock-supabase');
 const advisorLib = require('../lib/advisor');
@@ -775,6 +775,37 @@ async function main() {
     assert.ok(!paths.some(p => p.startsWith('.membridge')), 'own dir indexed');
     assert.ok(db.fileIndex.files.every(f => typeof f.size === 'number' && f.mtime), 'index entries incomplete');
   });
+  // The cap used to bite DURING the directory walk, so an over-cap repo kept
+  // whatever paths the walker reached first (roughly alphabetical) and silently
+  // lost the rest — including the files actually being worked on. The index
+  // exists to point an AI at the files in play, so age decides, not walk order.
+  check('file index: over the cap it keeps the most recently modified, not the first walked', () => {
+    const projIdx = path.join(ROOT, 'projects', 'index-cap-app');
+    fs.mkdirSync(projIdx, { recursive: true });
+    // 'a-old-*' sort first and would win a walk-order cut; 'z-fresh-*' are newer.
+    const old = new Date('2020-01-01T00:00:00Z');
+    for (let i = 0; i < 6; i++) {
+      const f = path.join(projIdx, `a-old-${i}.js`);
+      fs.writeFileSync(f, 'x');
+      fs.utimesSync(f, old, old);
+    }
+    const fresh = new Date('2026-07-14T00:00:00Z');
+    for (let i = 0; i < 3; i++) {
+      const f = path.join(projIdx, `z-fresh-${i}.js`);
+      fs.writeFileSync(f, 'x');
+      fs.utimesSync(f, fresh, fresh);
+    }
+    const idx = memorydb.buildFileIndex(projIdx, { maxIndexFiles: 3 });
+    assert.strictEqual(idx.count, 3, `expected 3 indexed, got ${idx.count}`);
+    assert.ok(idx.truncated, 'over-cap index must report truncated');
+    const paths = idx.files.map(f => f.path);
+    assert.deepStrictEqual(paths, ['z-fresh-0.js', 'z-fresh-1.js', 'z-fresh-2.js'], `kept the wrong files: ${paths}`);
+    // under the cap nothing is dropped and the output stays path-sorted
+    const all = memorydb.buildFileIndex(projIdx, { maxIndexFiles: 100 });
+    assert.strictEqual(all.count, 9);
+    assert.ok(!all.truncated, 'under-cap index must not report truncated');
+    assert.deepStrictEqual(all.files.map(f => f.path), [...all.files.map(f => f.path)].sort(), 'index not path-sorted');
+  });
   check('memory.md renders the log and the injected block points to it', () => {
     const md = read(path.join(proj1, '.membridge', 'memory.md'));
     assert.ok(md.includes('Claude Code'), 'source missing in memory.md');
@@ -1064,6 +1095,137 @@ async function main() {
       assert.strictEqual(enc.keyAlerts, 0, 'no key alerts expected');
       assert.strictEqual(typeof enc.plaintextOff, 'boolean', 'plaintextOff must be present');
     });
+    check('projectsPayload reports lifetime sessions and first activity', () => {
+      const rows = projectsPayload();
+      assert.ok(Array.isArray(rows) && rows.length, 'fixture projects expected');
+      rows.forEach(p => {
+        assert.strictEqual(typeof p.sessionsTotal, 'number', p.name + ' is missing sessionsTotal');
+        assert.ok(p.sessionsTotal >= 0, 'sessionsTotal must never be negative');
+        assert.ok(p.firstActivity === null || !isNaN(Date.parse(p.firstActivity)),
+          p.name + ' firstActivity must be null or a parseable timestamp');
+        if (p.lastActivity && p.firstActivity) {
+          assert.ok(String(p.firstActivity) <= String(p.lastActivity),
+            'firstActivity must not be newer than lastActivity');
+        }
+      });
+      const active = rows.find(p => p.lastActivity);
+      if (active) assert.ok(active.sessionsTotal > 0, 'a project with activity must have counted sessions');
+    });
+    check('projectsPayload reports whether the managed block is really in each target', () => {
+      const rows = projectsPayload();
+      assert.ok(rows.length, 'fixture projects expected');
+      rows.forEach(p => {
+        (p.targets || []).forEach(t => {
+          assert.strictEqual(typeof t.injected, 'boolean',
+            p.name + ' target ' + t.file + ' is missing injected');
+          if (!t.exists) assert.strictEqual(t.injected, false,
+            'a target file that does not exist cannot contain the block');
+        });
+      });
+      const before = JSON.stringify(projectsPayload().map(p => p.targets));
+      assert.strictEqual(before, JSON.stringify(projectsPayload().map(p => p.targets)),
+        'repeat calls must be stable');
+    });
+    // Solo drives the whole header: it suppresses the encryption badge and
+    // turns "Synced" into "Local only". It must be decided from the LOCAL
+    // team.json links only — /api/status is polled every few seconds, so a
+    // network round-trip here would be both slow and wrong (a reachable
+    // backend does not mean this machine shares anything).
+    check('statusPayload reports solo when no project is linked to a team', () => {
+      const s = statusPayload();
+      assert.strictEqual(typeof s.solo, 'boolean', 'solo flag must be present');
+      assert.strictEqual(s.solo, true, 'fixtures link no project to a team, so this home is solo');
+      assert.ok(s.projectCount > 0, 'guard: solo must be asserted with projects present, not an empty home');
+    });
+    // Setup wizard. The gate and the pre-selection are the two decisions that
+    // can ruin first run — one hijacks the window, the other hands the user an
+    // unreviewable list — so both are asserted against the REAL shipped source,
+    // pulled out of the rendered page rather than reimplemented here.
+    check('setup wizard: gate refuses on anything it cannot positively confirm', () => {
+      const html = require('../lib/dashboard').dashboardPage();
+      const src = html.match(/function swShouldRun[\s\S]*?\n}/);
+      assert.ok(src, 'swShouldRun missing from the shipped page');
+      const out = {};
+      new Function('out', src[0] + '\nout.f = swShouldRun;')(out);
+      assert.strictEqual(out.f({ projectCount: 0, setupDone: false }), true, 'fresh install must run setup');
+      assert.strictEqual(out.f({ projectCount: 0, setupDone: true }), false, 'a completed/skipped setup must never re-take the window');
+      assert.strictEqual(out.f({ projectCount: 2, setupDone: false }), false, 'an install with projects is not a first run');
+      assert.strictEqual(out.f(null), false, 'a failed status fetch must not hijack a working install');
+    });
+    check('setup wizard: pre-selects the busiest projects and never an already-tracked one', () => {
+      const html = require('../lib/dashboard').dashboardPage();
+      const src = html.match(/function swPreselect[\s\S]*?\n}/);
+      assert.ok(src, 'swPreselect missing from the shipped page');
+      const out = {};
+      new Function('out', src[0] + '\nout.f = swPreselect;')(out);
+      const picked = out.f([
+        { path: '/quiet', sessionCount: 5 },
+        { path: '/busiest', sessionCount: 99 },
+        { path: '/middle', sessionCount: 50 },
+        { path: '/already', sessionCount: 900, tracked: true },
+      ], 2);
+      assert.deepStrictEqual(picked, ['/busiest', '/middle'], 'must take the busiest N, tracked excluded');
+      assert.deepStrictEqual(out.f([], 5), [], 'no discoveries is not an error');
+      assert.deepStrictEqual(out.f(null, 5), [], 'a missing scan payload must degrade, not throw');
+    });
+    // Step 3's proof. It must read the block agents actually see in CLAUDE.md,
+    // not the memory log — and it must return an honest empty answer rather
+    // than inventing one when nothing has been written yet.
+    check('projectBlockPayload returns the real injected block, or an honest empty', () => {
+      const { projectBlockPayload } = require('../lib/server');
+      const proj = fs.mkdtempSync(path.join(ROOT, 'blockproj-'));
+      assert.deepStrictEqual(
+        projectBlockPayload(proj), { file: null, block: null },
+        'a project with no context file must report nothing written',
+      );
+      const file = path.join(proj, 'CLAUDE.md');
+      fs.writeFileSync(file, `# Notes\nmine\n${digest.BEGIN}\n## Project memory\nretries cap at 3\n${digest.END}\ntail\n`);
+      const got = projectBlockPayload(proj);
+      assert.strictEqual(got.file, file, 'must report the file it read');
+      assert.ok(/retries cap at 3/.test(got.block), 'must return the block contents');
+      assert.ok(!/mine|tail/.test(got.block), 'must return ONLY the text between the markers');
+    });
+    // Upgrade flow. The two decisions that can strand a user: where the flow
+    // resumes for someone who is already signed in or already on a team, and
+    // what a mid-flow failure leaves behind. Asserted against the shipped
+    // source rather than a reimplementation.
+    check('upgrade flow: resumes at the right step and never "upgrades" an existing team', () => {
+      const html = require('../lib/dashboard').dashboardPage();
+      const src = html.match(/function ugResumeStep[\s\S]*?\n}/);
+      assert.ok(src, 'ugResumeStep missing from the shipped page');
+      const out = {};
+      new Function('out', src[0] + '\nout.f = ugResumeStep;')(out);
+      assert.strictEqual(out.f({ authenticated: false, teams: [] }), 1, 'signed-out starts at the value step');
+      assert.strictEqual(out.f({ authenticated: true, teams: [] }), 3, 'already signed in skips the account step');
+      assert.strictEqual(out.f({ authenticated: true, teams: [{ teamId: 't' }] }), 0, 'already on a team is not an upgrade');
+      assert.strictEqual(out.f(null), 1, 'an unreadable team state falls back to the start, never a crash');
+    });
+    check('upgrade flow: a failure leaves the user solo, and never creates a second team', () => {
+      const html = require('../lib/dashboard').dashboardPage();
+      const src = html.match(/function ugRecover[\s\S]*?\n}/);
+      assert.ok(src, 'ugRecover missing from the shipped page');
+      const out = {};
+      new Function('out', src[0] + '\nout.f = ugRecover;')(out);
+      const early = out.f({ step: 2, team: null }, new Error('sign-in failed'));
+      assert.strictEqual(early.team, null, 'no team should exist after an account failure');
+      assert.strictEqual(early.step, 2, 'the user stays on the step that failed');
+      assert.strictEqual(early.err, 'sign-in failed', 'the real reason must be surfaced');
+      const late = out.f({ step: 4, team: { teamId: 't1' } }, new Error('invite failed'));
+      assert.deepStrictEqual(late.team, { teamId: 't1' }, 'an already-created team must be carried forward');
+      assert.strictEqual(late.step, 3, 'retry returns to the share step so the team is reused, not recreated');
+    });
+    // The header markup a solo user actually gets. Signed-out used to hide
+    // #openInvite outright, leaving no route into a team from the header.
+    check('dashboard ships solo header chrome: honest pill and a visible upgrade CTA', () => {
+      const html = require('../lib/dashboard').dashboardPage();
+      assert.ok(/applySoloChrome/.test(html), 'solo chrome hook missing');
+      assert.ok(/Local only/.test(html), 'solo pill label missing');
+      assert.ok(/Invite a teammate/.test(html), 'solo upgrade CTA missing');
+      assert.ok(
+        /body\.signed-out:not\(\.solo\) #openInvite \{ display:none; \}/.test(html),
+        'signed-out must no longer hide the CTA from solo users',
+      );
+    });
     const page = await fetch(base);
     const pageHtml = await page.text();
     check('dashboard page serves 200 html', () => {
@@ -1216,19 +1378,27 @@ async function main() {
         sandbox.runHeadline({ summary: 'Did the thing. And then some more.' }, null, false),
         'Did the thing.'
       );
-      // No rep + live + clean ask -> guarded "Working on: <ask>".
+      // Was: no rep + live + clean ask -> "Working on: <ask>". The prompt is
+      // what was asked, not what changed, so it no longer titles the card in
+      // any state — live or ended.
       const liveClean = sandbox.runHeadline(null, { ask: 'Add a logout button' }, true);
-      assert.ok(liveClean.includes('Working on:') && liveClean.includes('Add a logout button'), 'clean live ask not shown');
-      // No rep + live + noisy ask -> "Working…", never the raw noisy ask.
+      assert.ok(liveClean.includes('Working now'), 'a live run must say it is working');
+      assert.ok(!liveClean.includes('Add a logout button'), 'the prompt must not be the live headline');
+      // The noisy-ask guard is now moot — no ask reaches the headline at all,
+      // clean or noisy — but the leak assertion still earns its place.
       const liveNoisy = sandbox.runHeadline(null, { ask: 'Install failed: Error at /x lockdownd\n\n\nstack' }, true);
-      assert.ok(liveNoisy.includes('Working…'), 'noisy live ask not guarded to Working…');
+      assert.ok(liveNoisy.includes('Working now'), 'a live run must say it is working');
       assert.ok(!liveNoisy.includes('lockdownd'), 'noisy live ask text leaked through');
       // No rep + finished + no ask -> plain placeholder, never harvested prose.
       // runHeadline's signature is (rep, newest, live) — it has no repHarvested
       // parameter at all, so any harvested-looking data hanging off `newest`
       // cannot reach the headline; this proves the finished branch ignores it.
       const finished = sandbox.runHeadline(null, { ask: '', repHarvested: { summary: 'HARVESTED PROSE' } }, false);
-      assert.ok(finished.includes('session ended') && finished.includes('no summary shared'), 'finished no-ask placeholder missing');
+      // "captured", not "shared": sharing is a team concept, and a solo user
+      // with no team still needs to know the session produced no summary.
+      assert.ok(finished.includes('session ended') && finished.includes('no summary captured'),
+        'finished no-ask placeholder missing');
+      assert.ok(!finished.includes('HARVESTED PROSE'), 'harvested prose reached the headline');
       assert.ok(!finished.includes('HARVESTED PROSE'), 'harvested text leaked into the headline');
     });
     // Activity feed rolling window + View more: page one always covers the
@@ -1439,9 +1609,17 @@ async function main() {
       assert.ok(evalDayCards([tieOldDistilled, tieNewDistilled])[0]
         .headline.includes(tieNewDistilled.expectedHeadline));
     });
-    check('dayCards: no distilled rep -> live "Working…" / finished "N sessions · no summaries shared"', () => {
+    // Was: a finished day with no distilled rep got an "N sessions · no
+    // summaries shared" headline. Such a card is no longer rendered at all
+    // , so the count-of-nothing headline is retired and
+    // the only no-rep card that survives to display is a live one.
+    check('dayCards: no distilled rep -> live says it is working; a finished one is not shown', () => {
       assert.ok(/Working/.test(evalDayCards([liveNoRep])[0].headline));
-      assert.ok(/no summaries shared/.test(evalDayCards([staleNoRep, staleNoRep2])[0].headline));
+      const finished = evalDayCards([staleNoRep, staleNoRep2])[0];
+      assert.ok(!/no summaries shared/.test(finished.headline),
+        'the count-of-nothing headline is retired');
+      assert.strictEqual(finished.checklist.length, 0,
+        'a finished day with nothing summarised has no rows, so the card is filtered out at render');
     });
     // Option B — teammate harvested fallback. A teammate's summary can never be
     // distilled locally (the distilled bit isn't propagated over team sync, and
@@ -1457,12 +1635,16 @@ async function main() {
         `teammate harvested summary missing from headline: ${c.headline}`);
       assert.ok(!/no summaries shared/.test(c.headline), 'still fell through to the empty fallback');
     });
-    check('dayCards: your OWN harvested-only summary still reads "no summaries shared"', () => {
+    // Your own harvested prose is mid-session reasoning, not a brief, so it
+    // still must not surface. The day card used to say "no summaries shared"
+    // instead; now it produces no rows at all and is filtered out at render.
+    check('dayCards: your OWN harvested-only summary produces no card', () => {
       const mine = unitWith({ self: true, ts: dayCardsLocalTs(0, 11), repEntry: null,
         harvestedEntry: { summary: 'mid-session reasoning line, not a real brief' } });
       const c = evalDayCards([mine])[0];
-      assert.ok(/no summaries shared/.test(c.headline),
+      assert.ok(!/mid-session reasoning/.test(c.headline),
         `self harvested summary must not surface on the day card: ${c.headline}`);
+      assert.strictEqual(c.checklist.length, 0, 'harvested-only self day earns no checklist row');
     });
     check('dayCards: distilled still beats harvested for a teammate, regardless of promptCount', () => {
       const harvestedBig = unitWith({ self: false, promptCount: 9, ts: dayCardsLocalTs(0, 15),
@@ -1561,7 +1743,14 @@ async function main() {
       assert.strictEqual(cards[0].units.length, 3, 'every tool\'s work unit is retained on the card');
       assert.ok(Array.isArray(cards[0].tools), 'card carries a tools badge set');
       assert.deepStrictEqual(cards[0].tools.slice().sort(), ['Claude Code', 'Codex', 'Distilled'], 'all three tools present as badges');
-      assert.strictEqual(cards[0].checklist.length, 3, 'checklist includes a row from every tool');
+      // Every tool's unit is retained on the card (nothing is hidden from the
+      // totals), but only units that are live or actually summarised earn a
+      // checklist row: the plain Claude Code unit here has neither.
+      assert.strictEqual(cards[0].checklist.length, 2,
+        'checklist rows come from live or summarised units only');
+      assert.ok(cards[0].checklist.some(r => r.live), 'the live unit keeps its row');
+      assert.ok(cards[0].checklist.some(r => r.text.includes('Distilled outcome')),
+        'the distilled unit keeps its row');
       assert.strictEqual(cards[0].checklist[0].live, true, 'live-first: the live Codex unit heads the checklist');
     });
     check('dayCards: a single-tool day carries exactly one tool badge', () => {
@@ -1579,15 +1768,22 @@ async function main() {
       const staleNoSum = unitWith({ ts: dayCardsLocalTs(0, 12), ask: 'Old chore' });
       const c = evalDayCards([distilledNewest, liveMid, staleNoSum])[0];
       assert.ok(Array.isArray(c.checklist), 'card has a checklist array');
-      assert.strictEqual(c.checklist.length, 3, 'one row per unit');
+      // Was: one row per unit, including a "○" row for a finished session with
+      // no summary. Such a session produced no record of what changed, so it is
+      // omitted entirely rather than given a row that says nothing — which
+      // retires the ○ glyph along with it.
+      assert.strictEqual(c.checklist.length, 2, 'only live or summarised units get a row');
+      assert.ok(!c.checklist.some(r => r.glyph === '○'), 'the no-summary glyph is retired');
+      assert.ok(!c.checklist.some(r => r.text.includes('Old chore')),
+        'the unsummarised unit must not appear at all');
       assert.strictEqual(c.checklist[0].glyph, '◐', 'live row sorts first with the half-moon glyph');
       assert.strictEqual(c.checklist[0].live, true, 'live row carries live:true');
-      assert.ok(c.checklist[0].text.includes('Wire the toggle'), 'live row text is its runHeadline (the ask)');
+      assert.ok(c.checklist[0].text.includes('Working now'), 'live row text is its runHeadline');
+      assert.ok(!c.checklist[0].text.includes('Wire the toggle'), 'the prompt must not leak into the checklist row');
       assert.strictEqual(c.checklist[1].glyph, '✓', 'distilled finished row gets the check glyph');
       assert.strictEqual(c.checklist[1].live, false, 'finished row carries live:false');
       assert.ok(c.checklist[1].text.includes('Shipped checklist item'), 'distilled row text is its rep headline');
-      assert.strictEqual(c.checklist[2].glyph, '○', 'finished-no-summary row gets the open-circle glyph');
-      assert.ok(c.checklist[2].text.includes('Old chore'), 'no-summary row text falls back to the ask');
+      assert.strictEqual(c.checklist[2], undefined, 'there is no third row to render');
     });
     check('dayCards v2: fileCount = distinct files across the day (changes first, files fallback, deduped)', () => {
       const u1 = unitWith({ ts: dayCardsLocalTs(0, 14) });
@@ -1645,11 +1841,14 @@ async function main() {
       assert.ok(h.indexOf('6 sessions') < h.indexOf('data-day-expand'), 'stat row sits left of the expander in the footer');
       assert.ok(!/data-day-expand/.test(evalDayCardHtml(v2Card3)), 'a 4-rows-or-fewer card needs no expander');
     });
-    check('dayCardHtml v2: live row first with the working-now tag; glyphs ◐/✓/○ by state', () => {
+    check('dayCardHtml v2: live row first with the working-now tag; glyphs ◐/✓ by state', () => {
       const h = evalDayCardHtml(v2MixedCard);
       const iLive = h.indexOf('◐'), iDone = h.indexOf('✓'), iBare = h.indexOf('○');
-      assert.ok(iLive !== -1 && iDone !== -1 && iBare !== -1, 'all three state glyphs render');
-      assert.ok(iLive < iDone && iDone < iBare, 'live row first, then distilled, then no-summary');
+      // Two states now, not three: a finished session with no summary is
+      // omitted from the checklist entirely, so ○ has nothing left to mark.
+      assert.ok(iLive !== -1 && iDone !== -1, 'live and finished glyphs must render');
+      assert.strictEqual(iBare, -1, 'the no-summary glyph must not appear');
+      assert.ok(iLive < iDone, 'live row still sorts ahead of the finished row');
       assert.strictEqual((h.match(/working now/g) || []).length, 1, 'exactly the live row carries the tag');
     });
     // FIX 1 render side: the consolidated card shows one badge per tool used.
@@ -1676,6 +1875,37 @@ async function main() {
       const h = evalDayCardHtml(v2Card6, {}, exp);
       assert.ok(/<div data-day-more="[^"]*"[^>]*display:block/.test(h), 'expanded fold must render open');
       assert.ok(/Show fewer/.test(h), 'expander label flips when open');
+    });
+    // Capture health: a project whose git hook keeps recording commits while
+    // the transcript scan has gone silent used to render as an ordinary quiet
+    // project, so a dead adapter was invisible until someone went looking.
+    function evalCaptureStale() {
+      const constSrc = ['PX_DORMANT_DAYS', 'PX_CAPTURE_GAP_MS'].map(n => extractConst(embeddedScript, n)).join('\n');
+      const fnSrc = extractFn(embeddedScript, 'pxCaptureStale');
+      assert.ok(fnSrc, 'pxCaptureStale not found in the embedded client script');
+      return new Function(constSrc + '\n' + fnSrc + '\nreturn pxCaptureStale;')();
+    }
+    check('projects: commits landing with no captured session flags a broken capture', () => {
+      const pxCaptureStale = evalCaptureStale();
+      const hoursAgo = h => new Date(Date.now() - h * 3600000).toISOString();
+      assert.strictEqual(
+        pxCaptureStale({ lastCommit: hoursAgo(1), lastActivity: hoursAgo(40) }), true,
+        'commits 39h newer than the last captured session must flag');
+      assert.strictEqual(
+        pxCaptureStale({ lastCommit: hoursAgo(1), lastActivity: hoursAgo(2) }), false,
+        'a normal working project must not flag');
+      assert.strictEqual(
+        pxCaptureStale({ lastCommit: hoursAgo(1), lastActivity: null }), true,
+        'commits with nothing ever captured must flag');
+      // a repo nobody has touched in months is dormant, not broken
+      assert.strictEqual(
+        pxCaptureStale({ lastCommit: hoursAgo(24 * 60), lastActivity: hoursAgo(24 * 90) }), false,
+        'a dormant repo must not be reported as broken capture');
+      // paused is a deliberate choice, and no commit data means no evidence
+      assert.strictEqual(pxCaptureStale({ paused: true, lastCommit: hoursAgo(1), lastActivity: hoursAgo(40) }), false);
+      assert.strictEqual(pxCaptureStale({ lastCommit: null, lastActivity: hoursAgo(40) }), false);
+      assert.strictEqual(pxCaptureStale({ lastCommit: 'not-a-date', lastActivity: hoursAgo(40) }), false);
+      assert.strictEqual(pxCaptureStale(null), false);
     });
     // feedDayGroupHtml wiring: like the drilldown branch's wiring checks, a
     // plain pageHtml.includes() can't tell "defined" from "wired", so these run
@@ -1712,6 +1942,11 @@ async function main() {
         projectId: overrides.projectId,
         projectPath: overrides.projectPath,
         session: overrides.session,
+        // These fixtures exercise GROUPING and layout, so they must look like
+        // real, summarised sessions — an unsummarised one is now filtered out
+        // of the Activity feed entirely and would test nothing.
+        summary: overrides.summary !== undefined ? overrides.summary : 'Reworked the importer so malformed rows fail loudly.',
+        distilled: overrides.distilled !== undefined ? overrides.distilled : true,
       };
     }
     const v2FeedEntries = [
@@ -1734,14 +1969,17 @@ async function main() {
     // The Intent row is always rendered per card so the layout stays stable;
     // when no distilled goal exists it shows a muted "(not captured)" rather
     // than dropping the row (present-goal keeps its text).
-    check('intentRowHtml: always renders an Intent row, "(not captured)" when no goal', () => {
+    // Was: the row always rendered, showing "(not captured)" when there was no
+    // goal. That put an empty labelled row on most cards — the same noise the
+    // Projects cards dropped when blocks started drawing only when they have
+    // something to say.
+    check('intentRowHtml: renders only when an intent was actually captured', () => {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const fn = new Function(escSrc + '\n' + extractFn(embeddedScript, 'intentRowHtml') + '\nreturn intentRowHtml;')();
       const withGoal = fn('Ship the thing');
       assert.ok(/class="flabel">Intent</.test(withGoal) && withGoal.includes('Ship the thing'), 'goal text must render');
-      const noGoal = fn('');
-      assert.ok(/class="flabel">Intent</.test(noGoal), 'Intent row must render even without a goal');
-      assert.ok(noGoal.includes('(not captured)'), 'goal-less card must show the (not captured) placeholder');
+      assert.strictEqual(fn(''), '', 'no goal must render no row at all');
+      assert.strictEqual(fn(null), '', 'a null goal must not throw or render a placeholder');
     });
     // Level-2 day-detail view (docs/superpowers/specs/2026-07-20-activity-day-cards-v2-design.md, Task 3):
     // dayDetailHtml renders the session view for one author-day card —
@@ -1762,9 +2000,22 @@ async function main() {
     }
     const dSum = unitWith({ ts: dayCardsLocalTs(0, 15), repEntry: { headline: 'Shipped it', summary: 'Did the thing end to end. Wired the tests. Landed green.' } });
     const dLive = unitWith({ ts: dayCardsLocalTs(0, 14), live: true, ask: 'Keep wiring' });
-    const dBare = unitWith({ ts: dayCardsLocalTs(0, 13), ask: 'Chore run' });
-    const dNoAsk = unitWith({ ts: dayCardsLocalTs(0, 12), ask: '' });
+    // These two exercise the share toggle and the prompt cell, not the summary
+    // rule, so they carry a summary — an unsummarised unit no longer renders a
+    // session card at all (asserted separately below).
+    const dBare = unitWith({ ts: dayCardsLocalTs(0, 13), ask: 'Chore run',
+      repEntry: { headline: 'Ran the chore', summary: 'Ran the chore end to end.' } });
+    const dNoAsk = unitWith({ ts: dayCardsLocalTs(0, 12), ask: '',
+      repEntry: { headline: 'Tidied up', summary: 'Tidied up the leftovers.' } });
     const dDetailCard = evalDayCards([dSum, dLive, dBare, dNoAsk])[0];
+    check('dayDetailHtml: an unsummarised session gets no card when you drill in', () => {
+      const unsummarised = unitWith({ ts: dayCardsLocalTs(0, 11), ask: 'Chore with no summary' });
+      const card = evalDayCards([dSum, unsummarised])[0];
+      const h = evalDayDetailHtml(card);
+      assert.ok(!/no summary captured/.test(h),
+        'drilling in must not reveal the rows the level above dropped');
+      assert.ok(h.includes('Shipped it'), 'the summarised session still renders');
+    });
     check('dayDetailHtml: breadcrumb + day headline; one session card per unit, live-first', () => {
       const h = evalDayDetailHtml(dDetailCard);
       assert.ok(/data-day-back/.test(h), 'breadcrumb back control missing');
@@ -1838,9 +2089,13 @@ async function main() {
     // last whole word before the ellipsis.
     check('dayDetailHtml: prompt/summary text never cut mid-word — full local text, word-safe fallback', () => {
       const fullAsk = 'refactor the authentication checkpoints module end to end';
-      const dFull = unitWith({ ts: dayCardsLocalTs(0, 10), ask: 'refactor the authentication chec…' });
+      // Both carry a summary so their session cards render — the check is about
+      // how the PROMPT cell wraps, which only exists on a card that is shown.
+      const dFull = unitWith({ ts: dayCardsLocalTs(0, 10), ask: 'refactor the authentication chec…',
+        repEntry: { headline: 'Refactored auth', summary: 'Refactored the auth checkpoints.' } });
       dFull.runs[0].entries[0].askFull = fullAsk;
-      const dClipped = unitWith({ ts: dayCardsLocalTs(0, 9), ask: 'triage the flaky supabase chec…' });
+      const dClipped = unitWith({ ts: dayCardsLocalTs(0, 9), ask: 'triage the flaky supabase chec…',
+        repEntry: { headline: 'Triaged flakes', summary: 'Triaged the flaky supabase checks.' } });
       const dClipSum = unitWith({ ts: dayCardsLocalTs(0, 8), repEntry: { headline: 'Clip headline', summary: 'Landed the share fix across chec…' } });
       const h = evalDayDetailHtml(evalDayCards([dFull, dClipped, dClipSum])[0]);
       assert.ok(h.includes(fullAsk), 'local prompt row must render the complete ask (askFull)');
@@ -1858,7 +2113,12 @@ async function main() {
       const ts = overrides.ts !== undefined ? overrides.ts : dayCardsLocalTs(0, 11);
       const entry = { ts, ask: overrides.ask, author: 'Marco', self: overrides.entrySelf,
         session: overrides.session, projectPath: overrides.projectPath, shared: !!overrides.shared };
+      // Carries a summary so the card actually renders: these checks are about
+      // the share toggle and the prompt cell, and an unsummarised session no
+      // longer gets a session card at all.
       return unitWith({ ts, self: true, author: 'Marco', project: 'ProjA',
+        repEntry: overrides.repEntry !== undefined ? overrides.repEntry
+          : { headline: 'Did a thing', summary: 'Did a thing, properly.' },
         runs: [{ ts, key: 'run-' + (overrides.session || 'x'), entries: [entry], rep: null }] });
     }
     check('dayDetailHtml: restores the per-session share toggle on your own session card', () => {
@@ -2156,6 +2416,17 @@ async function main() {
       assert.strictEqual(pxLatestEntry(p, recent, pxEntryInProject).summary, 'newest',
         'latest pick must go by ts, not array order');
       assert.strictEqual(pxLatestEntry(p, null, pxEntryInProject), null, 'null feed must not throw');
+      // With the predicate injected, an unsummarised newest must lose to the
+      // most recent session that actually has something to say.
+      const summarised = e => !!e.distilled;
+      const mixed = [
+        { projectPath: '/w/membridge', ts: new Date(now - 3600e3).toISOString(), summary: 'real', distilled: true },
+        { projectPath: '/w/membridge', ts: new Date(now).toISOString(), summary: 'harvested chatter' },
+      ];
+      assert.strictEqual(pxLatestEntry(p, mixed, pxEntryInProject, summarised).summary, 'real',
+        'an unsummarised newer session must not win the glance line');
+      assert.strictEqual(pxLatestEntry(p, [mixed[1]], pxEntryInProject, summarised), null,
+        'nothing summarised means no latest entry at all');
       const counts = pxSparkCounts(p, recent, pxEntryInProject, now);
       assert.strictEqual(counts.length, 24, 'sparkline must have 24 hourly buckets');
       assert.strictEqual(counts[21], 1, 'the 2h-ago session must land in the 2-hours-back bucket');
@@ -2163,29 +2434,145 @@ async function main() {
         'sessions older than 24h or from other projects leaked into the sparkline');
       assert.strictEqual(pxSparkCounts(p, null, pxEntryInProject, now).reduce((a, b) => a + b, 0), 0,
         'null feed must yield an all-zero sparkline, not throw');
-      const pxClipSrc = extractFn(embeddedScript, 'pxClipSummary');
-      assert.ok(pxClipSrc, 'pxClipSummary pure helper missing');
-      const pxClipSummary = new Function('return (' + pxClipSrc + ')')();
-      assert.strictEqual(pxClipSummary('short text', 160), 'short text', 'short summaries must pass through untouched');
-      const clipped = pxClipSummary('word '.repeat(60).trim(), 160);
-      assert.ok(clipped.length <= 161 && clipped.endsWith('\u2026'), 'long summaries must clip with an ellipsis');
-      assert.ok(!/\s\u2026$/.test(clipped), 'clip must land on a word boundary, not trailing space');
-      assert.strictEqual(pxClipSummary('x'.repeat(300), 160), 'x'.repeat(160) + '\u2026',
-        'an unbreakable string must hard-cut at the limit');
+      const pxGlanceSrc = extractFn(embeddedScript, 'pxGlanceFor');
+      assert.ok(pxGlanceSrc, 'pxGlanceFor pure helper missing');
+      const pxGlanceFor = new Function('return (' + pxGlanceSrc + ')')();
+      const long = 'x'.repeat(400);
+      assert.deepStrictEqual(pxGlanceFor({ headline: 'Shipped the thing', summary: 'longer text' }),
+        { text: 'Shipped the thing', kind: 'headline' }, 'headline must win and pass through verbatim');
+      assert.deepStrictEqual(pxGlanceFor({ summary: long, distilled: true }), { text: long, kind: 'summary' },
+        'a distilled summary must render in full \u2014 this line never truncates');
+      // Harvested prose is the agent's last chat message, not a summary of what
+      // changed. Showing it is how the page ends up quoting Claude back at itself.
+      assert.strictEqual(pxGlanceFor({ summary: 'Three remaining: the day card falls back...' }).kind, 'none',
+        'an undistilled (harvested) summary must never headline a card');
+      assert.strictEqual(pxGlanceFor({ ask: 'please fix the login bug' }).kind, 'none',
+        'a raw prompt must never be shown as the glance line');
+      assert.strictEqual(pxGlanceFor(null).kind, 'none', 'a missing entry must not throw');
+      assert.strictEqual(pxGlanceFor({ headline: '   ' }).kind, 'none',
+        'a whitespace-only headline must fall through, not render blank');
+      assert.ok(!extractFn(embeddedScript, 'pxClipSummary'),
+        'pxClipSummary must be gone \u2014 the glance line is no longer capped');
     });
-    check('Projects index renders the 1c compact grid with every row action hook intact', () => {
+    check('Projects: filters and person-scoped blocks hide when there is nobody to filter by', () => {
+      const src = extractFn(embeddedScript, 'pxVisibleFilters');
+      assert.ok(src, 'pxVisibleFilters pure helper missing');
+      const pxVisibleFilters = new Function('return (' + src + ')')();
+      const solo = pxVisibleFilters([{ name: 'a' }, { name: 'b' }], ['You']);
+      assert.strictEqual(solo.person, false, 'one person means nothing to filter by');
+      assert.strictEqual(solo.show, false, 'all-local projects make the Shared/Local switch meaningless');
+      const mixed = pxVisibleFilters([{ name: 'a' }, { name: 'b', team: { teamId: 't1' } }], ['You', 'Andrew']);
+      assert.strictEqual(mixed.person, true, 'two people means the Person filter earns its space');
+      assert.strictEqual(mixed.show, true, 'a mix of shared and local earns the Show filter');
+      const allShared = pxVisibleFilters([{ name: 'a', team: { teamId: 't1' } }], ['You', 'Andrew']);
+      assert.strictEqual(allShared.show, false, 'all-shared is as unfilterable as all-local');
+      assert.deepStrictEqual(pxVisibleFilters([], []), { show: false, person: false },
+        'an empty list must not throw');
+    });
+    check('Projects: who stack, sparkline and new-count no longer assume teammates', () => {
+      const rowSrc = extractFn(embeddedScript, 'pxRowHtml');
+      const newSrc = extractFn(embeddedScript, 'pxNewCount');
+      assert.ok(/who\.length > 1/.test(rowSrc), 'the avatar stack must not draw for a single person');
+      assert.ok(/sparkTotal > 1/.test(rowSrc), 'the sparkline must not draw an empty 24h shape');
+      assert.ok(!/pxIsSolo\(\)/.test(newSrc),
+        'pxNewCount must reach zero from the data, not from a solo special-case');
+    });
+    check('Projects: a context file with no MemBridge block is reported as broken', () => {
+      const src = extractFn(embeddedScript, 'pxBlockMissing');
+      assert.ok(src, 'pxBlockMissing pure helper missing');
+      const pxBlockMissing = new Function('return (' + src + ')')();
+      assert.strictEqual(pxBlockMissing({ targets: [
+        { file: 'CLAUDE.md', exists: true, injected: true },
+        { file: 'AGENTS.md', exists: true, injected: false },
+      ] }), true, 'any present-but-uninjected target means the memory is not reaching that tool');
+      assert.strictEqual(pxBlockMissing({ targets: [
+        { file: 'CLAUDE.md', exists: true, injected: true },
+      ] }), false, 'a fully injected project is healthy');
+      assert.strictEqual(pxBlockMissing({ targets: [
+        { file: 'CLAUDE.md', exists: false, injected: false },
+      ] }), false, 'a file that does not exist yet is not a failure -- nothing was written there');
+      assert.strictEqual(pxBlockMissing({ paused: true, targets: [
+        { file: 'CLAUDE.md', exists: true, injected: false },
+      ] }), false, 'a paused project is meant to have no block');
+      assert.strictEqual(pxBlockMissing(null), false, 'a missing project must not throw');
+      assert.strictEqual(pxBlockMissing({}), false, 'a project with no targets must not throw');
+    });
+    check('Projects: the accumulation line states sessions, span and tools', () => {
+      const src = extractFn(embeddedScript, 'pxAccumulation');
+      assert.ok(src, 'pxAccumulation pure helper missing');
+      const pxAccumulation = new Function('return (' + src + ')')();
+      const now = new Date(2026, 6, 25, 12, 0, 0).getTime();
+      const march = new Date(2026, 2, 4, 9, 0, 0).toISOString();
+      const out = pxAccumulation(
+        { sessionsTotal: 412, firstActivity: march, tools: ['Claude Code', 'Cursor'] }, now);
+      assert.ok(/412 sessions/.test(out.text), 'the session total must lead: ' + out.text);
+      assert.ok(/Mar/.test(out.text), 'the span must name when memory started: ' + out.text);
+      assert.ok(/Claude Code/.test(out.text) && /Cursor/.test(out.text),
+        'the tools that worked here must be listed: ' + out.text);
+      assert.strictEqual(pxAccumulation({ sessionsTotal: 1, firstActivity: march, tools: [] }, now).text
+        .indexOf('1 session,'), 0, 'a single session must not be pluralised');
+      assert.strictEqual(pxAccumulation({ sessionsTotal: 0, firstActivity: null, tools: [] }, now), null,
+        'a project with nothing captured has no accumulation line');
+      assert.strictEqual(pxAccumulation(null, now), null, 'a missing project must not throw');
+    });
+    check('Projects: open todos come from the latest session as text, capped with a remainder', () => {
+      const src = extractFn(embeddedScript, 'pxOpenTodos');
+      assert.ok(src, 'pxOpenTodos pure helper missing');
+      const pxOpenTodos = new Function('return (' + src + ')')();
+      const entry = { tasks: { items: [
+        { text: 'wire up the parser', status: 'in_progress' },
+        { text: 'delete the old shim', status: 'pending' },
+        { text: 'ship it', status: 'pending' },
+        { text: 'write the test', status: 'completed' },
+      ] } };
+      const out = pxOpenTodos(entry, 2);
+      assert.deepStrictEqual(out.items, ['wire up the parser', 'delete the old shim'],
+        'open todos must keep source order and stop at the cap');
+      assert.strictEqual(out.more, 1, 'the uncapped remainder must be counted, completed items excluded');
+      assert.deepStrictEqual(pxOpenTodos({ tasks: { items: [{ text: 'done', status: 'completed' }] } }, 2),
+        { items: [], more: 0 }, 'an all-complete session has nothing outstanding');
+      assert.deepStrictEqual(pxOpenTodos(null, 2), { items: [], more: 0 }, 'a missing entry must not throw');
+      assert.deepStrictEqual(pxOpenTodos({ tasks: null }, 2), { items: [], more: 0 },
+        'an entry with no todo snapshot must not throw');
+      assert.deepStrictEqual(pxOpenTodos({ tasks: { items: [{ status: 'pending' }] } }, 2),
+        { items: [], more: 0 }, 'a todo with no text must be dropped, not rendered blank');
+    });
+    check('Projects: pagination splits active cards from dim rows and counts the overflow', () => {
+      const pxPagSrc = extractFn(embeddedScript, 'pxPaginate');
+      assert.ok(pxPagSrc, 'pxPaginate pure helper missing');
+      const pxPaginate = new Function('return (' + pxPagSrc + ')')();
+      const isDormant = p => !!p.dormant;
+      const ps = [
+        { name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' },
+        { name: 'e' }, { name: 'f' }, { name: 'g' },
+        { name: 'z', dormant: true },
+      ];
+      const out = pxPaginate(ps, 6, isDormant);
+      assert.strictEqual(out.cards.length, 6, 'exactly `limit` active cards must render');
+      assert.strictEqual(out.hidden, 1, 'the 7th active project must be counted as hidden');
+      assert.deepStrictEqual(out.dim.map(p => p.name), ['z'],
+        'dormant projects must be split out, never counted against the limit');
+      const all = pxPaginate(ps, 99, isDormant);
+      assert.strictEqual(all.hidden, 0, 'a limit above the count must hide nothing');
+      assert.strictEqual(all.cards.length, 7, 'all active projects render when nothing is hidden');
+      assert.deepStrictEqual(pxPaginate([], 6, isDormant),
+        { cards: [], dim: [], hidden: 0 }, 'an empty project list must not throw');
+    });
+    check('Projects index renders cards with every row action hook intact', () => {
       const rowSrc = extractFn(embeddedScript, 'pxRowHtml');
       const renderSrc = extractFn(embeddedScript, 'renderProjectsIndex');
-      assert.ok(/px-hdr/.test(renderSrc) && /Latest session/.test(renderSrc), '1c column header row missing');
+      assert.ok(/px-card/.test(rowSrc), 'project rows must render as cards');
+      assert.ok(/pxPaginate\(/.test(renderSrc), 'the index must page its cards');
       assert.ok(/px-spark/.test(rowSrc) && /px-who/.test(rowSrc), 'sparkline/avatar cells missing from rows');
-      assert.ok(/pxClipSummary\(/.test(rowSrc), 'latest-session summary is not length-capped');
-      assert.ok(/title="' \+ esc\(summary\)/.test(rowSrc), 'full summary tooltip missing from the latest-session cell');
+      assert.ok(/pxGlanceFor\(/.test(rowSrc), 'the card must use the never-truncating glance chain');
+      assert.ok(!/pxClipSummary/.test(rowSrc), 'the glance line must not be length-capped');
+      assert.ok(!/latest\.ask/.test(rowSrc), 'the raw prompt must never be the glance line');
       assert.ok(/px-row dim/.test(rowSrc), 'paused/dormant rows do not collapse to the dim one-line form');
       ['data-px-open', 'data-px-menu', 'data-px-pause', 'data-px-askdel', 'data-px-dodel', 'data-px-canceldel'].forEach((a) => {
         assert.ok(rowSrc.includes(a), a + ' hook lost in the 1c redesign');
       });
       assert.ok(!rowSrc.includes('Roadmap'), 'the removed Roadmap item is back in the row menu');
-      assert.ok(pageHtml.includes('.px-hdr'), '1c grid CSS missing from the stylesheet');
+      assert.ok(pageHtml.includes('.px-card'), 'card CSS missing from the stylesheet');
     });
     const bulkFnSrc = extractFn(embeddedScript, 'deleteProjectsBulk');
     check('deleteProjectsBulk helper exists standalone in the embedded script', () => {
@@ -4231,6 +4618,282 @@ async function main() {
     const ev = evs.find(e => e.kind === 'todos');
     assert.strictEqual(ev.items.length, 20, `stored ${ev.items.length} items`);
   });
+  // No summary, no row. A session that produced nothing to say has no place on
+  // a timeline: the placeholder was honest but it was still a row of nothing,
+  // and a page of "no summary captured" is not a record of anything.
+  check('feed: an unsummarised session is omitted, not rendered as a placeholder', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    // Local brace-matching extractor: the dashboard block's own extractFn is
+    // scoped to that block and this check lives with the adapter units.
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const has = grab(src, 'pxHasSummary');
+    assert.ok(has, 'pxHasSummary predicate missing');
+    const pxGlanceFor = new Function('return (' + grab(src, 'pxGlanceFor') + ')')();
+    const pxHasSummary = new Function('var pxGlanceFor=' + grab(src, 'pxGlanceFor') + ';return (' + has + ')')();
+    assert.strictEqual(pxHasSummary({ headline: 'Shipped the thing' }), true, 'a headline counts');
+    assert.strictEqual(pxHasSummary({ summary: 'x', distilled: true }), true, 'a distilled summary counts');
+    assert.strictEqual(pxHasSummary({ summary: 'harvested chatter' }), false, 'harvested prose does not count');
+    assert.strictEqual(pxHasSummary({ ask: 'do the thing' }), false, 'a prompt does not count');
+    assert.strictEqual(pxHasSummary(null), false, 'a missing entry does not throw');
+    assert.strictEqual(pxGlanceFor({ ask: 'x' }).kind, 'none', 'glance and the predicate must agree');
+    // Both list renderers must consult it rather than emitting a placeholder row.
+    ['feedEntryHtml', 'catchupCardHtml'].forEach(function (fn) {
+      const body = grab(src, fn) || '';
+      assert.ok(/pxHasSummary\(/.test(body), fn + ' must skip unsummarised entries');
+    });
+  });
+  // Every surface, not just the two already fixed: a prompt is what you asked,
+  // and echoing it back as the outcome makes the feed a transcript instead of a
+  // record of what changed.
+  check('feed: no surface falls back to the raw prompt for its headline', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    assert.ok(!/esc\(e\.summary \|\| e\.ask/.test(src),
+      'a renderer still headlines the raw prompt (summary || ask)');
+    assert.ok(!/newest\.ask \? esc\(newest\.ask\)/.test(src),
+      'the day card still falls back to the newest prompt as its headline');
+    assert.ok(!/'Working on:&nbsp;<\/span>' \+ \(newest\.ask/.test(src),
+      'the live day card still shows the prompt as what is being worked on');
+    const rh = src.slice(src.indexOf('function runHeadline'));
+    const rhBody = rh.slice(0, rh.indexOf('\nfunction threadHtml'));
+    assert.ok(!/newest\.ask/.test(rhBody),
+      'runHeadline still derives its title from the prompt');
+    assert.ok(!/askHeadline\(/.test(rhBody),
+      'runHeadline still routes the prompt through askHeadline');
+  });
+  check('feed: session counts are pluralised', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    assert.ok(!/sessionCount \+ ' sessions/.test(src),
+      '"1 sessions" — the count must be pluralised');
+  });
+  // A health warning the user cannot act on is just nagging. "Memory not in
+  // your context files" is fixable in one click -- a project sync rewrites the
+  // block -- so the row offers the fix instead of only reporting the problem.
+  check('projects: a broken-memory row offers a fix, and reads like English', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const row = src.slice(src.indexOf('function pxRowHtml'));
+    const body = row.slice(0, row.indexOf('\nfunction pxNewCount'));
+    assert.ok(/pxFixBlockHtml\(/.test(body), 'the missing-block row must offer a fix action');
+    const fixFn = src.slice(src.indexOf('function pxFixBlockHtml'));
+    assert.ok(/data-px-fixblock="/.test(fixFn.slice(0, 400)),
+      'the fix control must carry the hook the listener looks for');
+    assert.ok(!/no AI session since/.test(body),
+      '"commits are landing, but no AI session since ever" is not a sentence');
+    assert.ok(!/the block is missing from a file that exists/.test(body),
+      'the missing-block copy must say what to do, not restate the internal check');
+    assert.ok(/nothing has been captured since/.test(body) && /nothing has ever been captured/.test(body),
+      'both capture-stale phrasings must be grammatical');
+    // The handler has to exist, or the button is decoration.
+    const listener = src.slice(src.indexOf("getElementById('view-home').addEventListener"));
+    assert.ok(/data-px-fixblock/.test(listener.slice(0, 4000)),
+      'the fix action needs a delegated click handler');
+  });
+  // The Activity card had the same defect the Projects card did: it fell back
+  // to the raw prompt for its headline, so a feed of real work read "build
+  // that" and "merge this with the stable release, but keep it in the...".
+  // A prompt is what you asked, not what happened.
+  check('activity: the card headline is an outcome, never the raw prompt', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const card = src.slice(src.indexOf('function catchupCardHtml'));
+    const body = card.slice(0, card.indexOf('\nfunction '));
+    assert.ok(!/e\.summary \|\| e\.ask/.test(body),
+      'the activity headline must not fall back to the raw prompt');
+    assert.ok(/pxGlanceFor\(/.test(body),
+      'the activity card must use the same glance chain as the Projects card');
+    // The ask is still available, just not masquerading as the outcome.
+    assert.ok(/The ask/.test(body), 'the expanded detail must still quote the ask');
+  });
+  check('activity: the Intent row draws only when an intent was captured', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const fn = src.slice(src.indexOf('function intentRowHtml'));
+    const body = fn.slice(0, fn.indexOf('\n// One teammate'));
+    assert.ok(/return ''/.test(body),
+      'intentRowHtml must return nothing when there is no goal, not a "(not captured)" placeholder');
+    assert.ok(!/\(not captured\)/.test(body),
+      'the "(not captured)" placeholder must be gone — an empty row is noise on every card');
+  });
+  // The pill had two authors: setPill (which knows about solo) and
+  // renderSyncBanner (which did not, and ran on a timer). The banner won, so a
+  // solo machine flipped back to "Synced" seconds after saying "Local only".
+  check('solo: the header pill has exactly one author, so it cannot say Synced when solo', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const banner = src.slice(src.indexOf('function renderSyncBanner'));
+    const body = banner.slice(0, banner.indexOf('\nfunction '));
+    assert.ok(!/pillLabelEl\.textContent\s*=/.test(body),
+      'renderSyncBanner must not write the pill label directly — it bypasses the solo branch');
+    assert.ok(/setPill\(/.test(body),
+      'renderSyncBanner must delegate the pill to setPill');
+    const setPillSrc = src.slice(src.indexOf('var setPill'), src.indexOf('function setE2EBadge'));
+    assert.ok(/isSolo/.test(setPillSrc), 'setPill must still be the place the solo label is decided');
+  });
+  // Solo is about whether anyone else is actually there, not whether a team
+  // row exists. Creating a team of one is the normal first step of the upgrade
+  // flow, and it must not flip the whole header to "shared" before a single
+  // teammate has joined.
+  check('solo: a team nobody has joined is still solo', () => {
+    const { isSoloMachine } = require('../lib/teamsync');
+    const T1 = 'team-1', T2 = 'team-2';
+    const IN = true;
+    assert.strictEqual(isSoloMachine([null, null], {}, IN), true,
+      'no team links at all is solo');
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }], { [T1]: 1 }, IN), true,
+      'a team of one is still solo — nobody has joined yet');
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }], { [T1]: 2 }, IN), false,
+      'a second member means the machine is genuinely sharing');
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }, { teamId: T2 }], { [T1]: 1, [T2]: 5 }, IN), false,
+      'one populated team is enough to stop being solo');
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }, null], { [T1]: 1 }, IN), true,
+      'an unlinked project alongside a team of one stays solo');
+    // The count is cached from the last sync. Before the first sync after an
+    // upgrade it is simply unknown, and guessing "solo" there would tell a real
+    // team member their memory is local-only — the worse of the two errors.
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }], {}, IN), false,
+      'an unknown member count must not be assumed solo');
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }], { [T1]: 0 }, IN), true,
+      'a zero count is degenerate but certainly not shared');
+    // Signed out beats every link: a team.json with no credentials is inert,
+    // so claiming the work is shared would be a lie. This is the state a fresh
+    // install is in when a teammate's team.json is committed in the repo.
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }], { [T1]: 9 }, false), true,
+      'signed out is solo even against a populated team');
+    assert.strictEqual(isSoloMachine([{ teamId: T1 }], {}, false), true,
+      'signed out with an unknown count is solo, not an unknowable in-between');
+  });
+  // Claude Code replaced TodoWrite with TaskCreate/TaskUpdate. TodoWrite ships
+  // the whole list in one input; the task tools ship one task per call and
+  // return its id in the tool_result, so the list only exists as reconstructed
+  // state. Without this the todos stream is silently empty on current
+  // transcripts — which is what "Where you left off" reads.
+  check('rich: TaskCreate/TaskUpdate rebuild the task list into a todos event', () => {
+    const st = {};
+    const evs = claudeAdapter.extractEvents([
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu1', name: 'TaskCreate', input: { subject: 'Wire the parser' } },
+        { type: 'tool_use', id: 'tu2', name: 'TaskCreate', input: { subject: 'Delete the shim' } },
+      ] }, cwd: projR, timestamp: '2026-07-12T10:00:00.000Z', sessionId: 'sX' },
+      { type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu1', content: 'Task #1 created successfully: Wire the parser' },
+        { type: 'tool_result', tool_use_id: 'tu2', content: 'Task #2 created successfully: Delete the shim' },
+      ] }, cwd: projR, timestamp: '2026-07-12T10:00:01.000Z', sessionId: 'sX' },
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu3', name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } },
+      ] }, cwd: projR, timestamp: '2026-07-12T10:05:00.000Z', sessionId: 'sX' },
+    ], st);
+    const ev = evs.filter(e => e.kind === 'todos').pop();
+    assert.ok(ev, 'no todos event was rebuilt from the task tools');
+    assert.deepStrictEqual(ev.items, [
+      { text: 'Wire the parser', status: 'completed' },
+      { text: 'Delete the shim', status: 'pending' },
+    ], 'task list must carry text and reflect the latest status per id');
+    assert.strictEqual(ev.session, 'sX', 'the todos event must stay bound to its session');
+  });
+  check('rich: a deleted task leaves the list, and an unknown id is ignored', () => {
+    const evs = claudeAdapter.extractEvents([
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu1', name: 'TaskCreate', input: { subject: 'Keep me' } },
+        { type: 'tool_use', id: 'tu2', name: 'TaskCreate', input: { subject: 'Drop me' } },
+      ] }, cwd: projR, timestamp: '2026-07-12T11:00:00.000Z', sessionId: 'sY' },
+      { type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu1', content: 'Task #1 created successfully: Keep me' },
+        { type: 'tool_result', tool_use_id: 'tu2', content: 'Task #2 created successfully: Drop me' },
+      ] }, cwd: projR, timestamp: '2026-07-12T11:00:01.000Z', sessionId: 'sY' },
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu3', name: 'TaskUpdate', input: { taskId: '2', status: 'deleted' } },
+        { type: 'tool_use', id: 'tu4', name: 'TaskUpdate', input: { taskId: '99', status: 'completed' } },
+      ] }, cwd: projR, timestamp: '2026-07-12T11:05:00.000Z', sessionId: 'sY' },
+    ], {});
+    const ev = evs.filter(e => e.kind === 'todos').pop();
+    assert.deepStrictEqual(ev.items, [{ text: 'Keep me', status: 'pending' }],
+      'a deleted task must leave the list and an unknown id must not invent one');
+  });
+  check('rich: task events survive an incremental read via fileState', () => {
+    const st = {};
+    claudeAdapter.extractEvents([
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu1', name: 'TaskCreate', input: { subject: 'Started earlier' } },
+      ] }, cwd: projR, timestamp: '2026-07-12T12:00:00.000Z', sessionId: 'sZ' },
+      { type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu1', content: 'Task #1 created successfully: Started earlier' },
+      ] }, cwd: projR, timestamp: '2026-07-12T12:00:01.000Z', sessionId: 'sZ' },
+    ], st);
+    // Second pass: only the status change is in this batch. The task text was
+    // learned last pass, so it must come from fileState, not be lost.
+    const evs2 = claudeAdapter.extractEvents([
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu9', name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } },
+      ] }, cwd: projR, timestamp: '2026-07-12T12:10:00.000Z', sessionId: 'sZ' },
+    ], st);
+    const ev = evs2.filter(e => e.kind === 'todos').pop();
+    assert.ok(ev, 'the second pass emitted no todos event');
+    assert.deepStrictEqual(ev.items, [{ text: 'Started earlier', status: 'in_progress' }],
+      'task text learned in an earlier read must survive in fileState');
+  });
+  // Prompt hygiene: the stream is supposed to hold what a HUMAN typed. The
+  // `<`-prefix test alone missed two shapes seen in the wild — a machine
+  // payload with no angle bracket at all, and an envelope riding along behind
+  // a real ask in the same turn (joining the blocks first hid it from the
+  // prefix test and pasted harness scaffolding into the stored prompt).
+  check('prompt: agent chatter without an angle bracket is not a prompt', () => {
+    assert.ok(!claudeAdapter.isRealPrompt('idle_notification: agent has been idle for 5 minutes'));
+    assert.ok(!claudeAdapter.isRealPrompt('{"type":"idle_notification","session":"abc"}'));
+    assert.ok(!claudeAdapter.isRealPrompt('[teammate-message] please rebase'));
+    assert.ok(!claudeAdapter.isRealPrompt('<teammate-message>please rebase</teammate-message>'));
+    // and the guard must not eat real asks that mention the words — including
+    // one that OPENS with the token, which is exactly how someone asks about
+    // this very filter
+    assert.ok(claudeAdapter.isRealPrompt('the idle_notification handler drops events — fix it'));
+    assert.ok(claudeAdapter.isRealPrompt('idle_notification should be filtered out of the prompt stream'));
+    assert.ok(claudeAdapter.isRealPrompt('teammate-message envelopes are leaking into memory.md'));
+    assert.ok(claudeAdapter.isRealPrompt('Ship the export pipeline'));
+  });
+  check('prompt: an injected envelope block is stripped, the human ask survives', () => {
+    const evs = claudeAdapter.extractEvents([
+      {
+        type: 'user',
+        sessionId: 'sessP',
+        message: { role: 'user', content: [
+          { type: 'text', text: 'Rename the cron module' },
+          { type: 'text', text: '<system-reminder>do not mention this block</system-reminder>' },
+        ] },
+        cwd: projR,
+        timestamp: '2026-07-12T10:05:00.000Z',
+      },
+    ], {});
+    const p = evs.find(e => e.kind === 'prompt');
+    assert.ok(p, 'real ask was dropped along with the envelope');
+    assert.strictEqual(p.text, 'Rename the cron module');
+    // an envelope-only turn still yields nothing at all
+    const only = claudeAdapter.extractEvents([
+      { type: 'user', sessionId: 'sessP', message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>x</system-reminder>' }] }, cwd: projR, timestamp: '2026-07-12T10:06:00.000Z' },
+    ], {});
+    assert.ok(!only.some(e => e.kind === 'prompt'), 'envelope-only turn became a prompt');
+  });
+  // The Stop hook keys its summary on the payload's session_id. scan.js falls
+  // back to the transcript FILENAME, which diverges after a resume/compaction —
+  // and a summary that cannot find its prompts mints an "(not captured)" entry.
+  check('prompt: events carry the entry sessionId, not just the filename fallback', () => {
+    const evs = claudeAdapter.extractEvents([
+      { type: 'user', sessionId: 'real-session-id', message: { role: 'user', content: 'Do the thing' }, cwd: projR, timestamp: '2026-07-12T10:07:00.000Z' },
+      { type: 'assistant', sessionId: 'real-session-id', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(projR, 'a.js') } }] }, cwd: projR, timestamp: '2026-07-12T10:08:00.000Z' },
+    ], {});
+    for (const kind of ['prompt', 'edit']) {
+      const ev = evs.find(e => e.kind === kind);
+      assert.strictEqual(ev.session, 'real-session-id', `${kind} event lost the entry session id`);
+    }
+    // no sessionId on the entry: still undefined, so scan.js's filename fallback applies
+    const legacy = claudeAdapter.extractEvents([
+      { type: 'user', message: { role: 'user', content: 'Do the thing' }, cwd: projR, timestamp: '2026-07-12T10:09:00.000Z' },
+    ], {});
+    assert.strictEqual(legacy.find(e => e.kind === 'prompt').session, undefined, 'fallback path was broken');
+  });
   check('rich: codex summaries parse both string and content-array payloads', () => {
     const long = 'The Codex agent finished the task: it rewrote the retry logic and added regression tests for the queue.';
     const meta = { timestamp: '2026-07-12T10:00:00.000Z', type: 'session_meta', payload: { id: 'x', cwd: projR } };
@@ -5787,15 +6450,18 @@ async function main() {
     JSON.stringify({ session: 'seq1', ts: '2026-07-14T03:25:00.000Z', did: 'Checkpoint three: deleted the legacy cookie path and updated every test to the token flow.' }) + '\n');
   syncOnce();
 
-  check('checkpoint: block shows the latest checkpoint; memory.md/json hold the full ordered sequence', () => {
+  check('checkpoint: block AND memory.md show only the latest checkpoint; memory.json keeps the sequence', () => {
     const claude = read(path.join(projSeq, 'CLAUDE.md'));
     assert.ok(claude.includes('Did: Checkpoint three'), 'block should show the latest checkpoint');
     assert.ok(!claude.includes('Checkpoint one') && !claude.includes('Checkpoint two'), 'block should not show earlier checkpoints');
     assert.ok(!claude.includes('sk-seq-secret-42'), 'secret leaked into the block');
+    // Checkpoints are written CUMULATIVELY (each restates the whole session and
+    // supersedes the last), so rendering the trail here printed one outcome as
+    // three rewordings of itself in the file agents read. Latest only.
     const mem = read(path.join(projSeq, '.membridge', 'memory.md'));
-    assert.ok(mem.includes('Checkpoints:'), 'memory.md checkpoints header missing');
-    const i1 = mem.indexOf('Checkpoint one'), i2 = mem.indexOf('Checkpoint two'), i3 = mem.indexOf('Checkpoint three');
-    assert.ok(i1 > -1 && i2 > i1 && i3 > i2, `memory.md checkpoints out of order: ${[i1, i2, i3]}`);
+    assert.ok(mem.includes('Result: Checkpoint three'), 'memory.md should show the latest checkpoint as the result');
+    assert.ok(!mem.includes('Checkpoints:'), 'memory.md should no longer render the superseded trail');
+    assert.ok(!mem.includes('Checkpoint one') && !mem.includes('Checkpoint two'), 'memory.md leaked a superseded checkpoint');
     assert.ok(!mem.includes('sk-seq-secret-42'), 'secret leaked into memory.md');
     const db = JSON.parse(read(path.join(projSeq, '.membridge', 'memory.json')));
     const entry = db.entries.find(e => Array.isArray(e.checkpoints));
@@ -5862,14 +6528,12 @@ async function main() {
     assert.ok(!others.includes('Checkpoint alpha') && !others.includes('Checkpoint beta'),
       'checkpoint text leaked onto another entry');
   });
-  check('checkpoint: multi-prompt session — memory.md renders one Checkpoints block, in order', () => {
+  check('checkpoint: multi-prompt session — memory.md renders the latest checkpoint once, nothing superseded', () => {
     const mem = read(path.join(projMp, '.membridge', 'memory.md'));
-    assert.strictEqual(count(mem, 'Checkpoints:'), 1, `expected exactly one Checkpoints block, got ${count(mem, 'Checkpoints:')}`);
-    const i1 = mem.indexOf('1. Checkpoint alpha'), i2 = mem.indexOf('2. Checkpoint beta');
-    assert.ok(i1 > -1 && i2 > i1, `numbered checkpoints missing or out of order: ${[i1, i2]}`);
-    assert.strictEqual(count(mem, 'Checkpoint alpha'), 1, 'first checkpoint text duplicated in memory.md');
-    assert.strictEqual(count(mem, 'Checkpoint beta'), 1, 'second checkpoint text duplicated in memory.md');
-    assert.ok(!mem.includes('Result: Checkpoint'), 'a checkpoint also rendered as a Result line');
+    assert.strictEqual(count(mem, 'Checkpoints:'), 0, 'memory.md should no longer render the superseded trail');
+    assert.strictEqual(count(mem, 'Checkpoint beta'), 1, `latest checkpoint should appear exactly once, got ${count(mem, 'Checkpoint beta')}`);
+    assert.ok(mem.includes('Result: Checkpoint beta'), 'latest checkpoint should render as the entry result');
+    assert.strictEqual(count(mem, 'Checkpoint alpha'), 0, 'superseded checkpoint leaked into memory.md');
   });
   check('checkpoint: multi-prompt session — injected block shows only the latest checkpoint', () => {
     const claude = read(path.join(projMp, 'CLAUDE.md'));
@@ -9688,6 +10352,61 @@ async function main() {
     assert.strictEqual(kept.length, 1, '.membridge marker keeps the session');
   });
 
+  // Adoption: the dashboard's discovered list and the ingestion gate must agree
+  // on what "tracked" means, or it would offer to adopt something already
+  // watched (or hide something that is not). Both now run isTrackedProject.
+  check('adopt: isTrackedProject matches the gate — state key or .membridge marker', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    const A = '/gate/repoA';
+    const M = '/gate/marker-repo';
+    const tracked = new Set([util.normPath(A)]);
+    const noMarker = { hasMembridge: () => false };
+    assert.strictEqual(isTrackedProject(A, tracked, noMarker), true, 'state key is tracked');
+    assert.strictEqual(isTrackedProject('/gate/other', tracked, noMarker), false, 'unknown dir is not tracked');
+    assert.strictEqual(
+      isTrackedProject(M, new Set(), { hasMembridge: d => util.normPath(d) === util.normPath(M) }),
+      true, 'marker dir alone is tracked');
+    // Same inputs, same answer as the gate — the property that keeps them honest.
+    const ev = [{ kind: 'prompt', project: '/gate/other', session: 's1', ts: '2026-07-10T10:00:00.000Z', text: 'go' }];
+    assert.strictEqual(filterTrackedSessions(ev, tracked, noMarker).length, 0, 'gate agrees: dropped');
+  });
+
+  check('adopt: isTrackedProject is defensive — bad input is "not tracked", never a throw', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    const tracked = new Set([util.normPath('/gate/repoA')]);
+    assert.strictEqual(isTrackedProject(null, tracked, { hasMembridge: () => false }), false);
+    assert.strictEqual(isTrackedProject('', tracked, { hasMembridge: () => false }), false);
+    assert.strictEqual(isTrackedProject('/x', tracked, { hasMembridge: () => { throw new Error('disk'); } }), false,
+      'a throwing marker check drops to false');
+  });
+
+  check('adopt: adoptProjects adds untracked, reports already-tracked and bad paths, never throws', () => {
+    const { adoptProjects } = require('../lib/server');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-adopt-'));
+    const good = path.join(base, 'repo-one');
+    const alsoGood = path.join(base, 'repo-two');
+    const notADir = path.join(base, 'a-file.txt');
+    fs.mkdirSync(good); fs.mkdirSync(alsoGood); fs.writeFileSync(notADir, 'x');
+
+    const first = adoptProjects([good, alsoGood]);
+    assert.strictEqual(first.adoptedCount, 2, 'both fresh dirs adopted');
+    assert.deepStrictEqual(first.skipped, [], 'nothing skipped on the happy path');
+
+    // Re-adopting is a no-op, not an error, and one bad path never abandons the rest.
+    const second = adoptProjects([good, notADir, path.join(base, 'repo-three')]);
+    fs.mkdirSync(path.join(base, 'repo-three'));
+    assert.strictEqual(second.adoptedCount, 0, 'already-tracked + non-dir adopt nothing');
+    assert.strictEqual(second.skippedCount, 3, 'every path is accounted for');
+    assert.ok(second.skipped.some(s => s.reason === 'already tracked'), 'repeat is reported, not re-added');
+    assert.ok(second.skipped.some(s => s.reason === 'not a directory'), 'file path is rejected');
+
+    // Non-string members are reported rather than crashing the sweep.
+    const third = adoptProjects([null, 42, '']);
+    assert.strictEqual(third.adoptedCount, 0);
+    assert.strictEqual(third.skippedCount, 3, 'junk input is survivable');
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
   check('gate: defensive — bad events or a throwing resolver drop, never throw', () => {
     const tracked = new Set([util.normPath('/gate/repoA')]);
     assert.deepStrictEqual(filterTrackedSessions(null, tracked, {}), [], 'null events -> []');
@@ -9905,6 +10624,34 @@ async function main() {
       assert.strictEqual(folded.length, 0, 'a normal nested project must not be folded');
       assert.ok(state.projects['/repo/packages/api'], 'nested project was wrongly removed');
     });
+
+    // Regression: fold targets are resolved from a snapshot of the original
+    // keys, so a nested fragment could name a parent fragment the same pass
+    // was about to delete — merging into it RE-CREATED the deleted key and
+    // left a worktree standing as its own project. Targets now chase through
+    // the chain to a key that is not itself folding.
+    check('worktree: a nested worktree folds to the main repo, never re-creating its parent fragment', () => {
+      const ev = p => [{ ts: '2026-07-20T09:00:00.000Z', source: 'Claude Code', kind: 'edit', session: 's-' + p, file: p + '/x.js', project: p }];
+      const WT = '/repo/.worktrees/feature';
+      const state = { projects: {
+        '/repo': { events: ev('/repo') },
+        [WT]: { events: ev(WT) },
+        [WT + '/web']: { events: ev(WT + '/web') },
+      }, files: {} };
+      scan.foldWorktreeProjects(state, util.getConfig());
+      assert.deepStrictEqual(Object.keys(state.projects), ['/repo'],
+        'both worktree fragments must collapse into the main repo');
+    });
+
+    check('worktree: a fold cycle terminates instead of spinning', () => {
+      // Two worktrees-container paths that resolve to each other cannot arise
+      // from real git layout, but the chase must still halt.
+      const A = '/repo/worktrees/a';
+      const B = '/repo/worktrees/a/worktrees/b';
+      const state = { projects: { [A]: { events: [] }, [B]: { events: [] } }, files: {} };
+      const folded = scan.foldWorktreeProjects(state, util.getConfig());
+      assert.ok(Array.isArray(folded), 'fold returned without hanging');
+    });
   }
 
   // --- update check (version compare + cached, fail-silent release lookup) ---
@@ -9923,6 +10670,11 @@ async function main() {
       assert.strictEqual(uc.isNewer('0.1.1', '0.1.1'), false);
       assert.strictEqual(uc.isNewer('0.1.0', '0.1.1'), false);
     });
+    // Every 0.1.0-beta.N parsed to the same [0,1,0], so the beta channel looked
+    // like one version and a beta user was never told a newer beta existed.
+    // Beta-only: the prerelease-precedence check belongs to the beta channel's
+    // update-check, which stable does not ship. Left out of the port with its
+    // implementation rather than asserted against stable's release logic.
 
     await check('update-check: reports an available update from the API', async () => {
       clearCache();

@@ -19,6 +19,9 @@ BUSINESS.md
 # the same shared project. See lib/teamsync.js linkProject.
 **/.membridge/*
 !**/.membridge/team.json
+# stable MemBridge may also run in this checkout; keep its output out too
+**/.membridge/*
+!**/.membridge/team.json
 CLAUDE.md
 AGENTS.md
 

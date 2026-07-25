@@ -23,6 +23,7 @@ function renderInstallScript(template, { version, sha256 }) {
 function main() {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   const version = pkg.version;
+  // Must track build.mac.artifactName in package.json (MemBridge-...).
   const asset = `MemBridge-${version}-arm64.zip`;
   const zipPath = path.join(ROOT, 'dist', asset);
   if (!fs.existsSync(zipPath)) {

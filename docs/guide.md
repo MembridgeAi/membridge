@@ -1,11 +1,11 @@
-# The MemBridge guide
+# The MemBridge Beta guide
 
 The full manual: installing, the dashboard, how sync works, session
 summaries, team sync and privacy, roadmaps, the CLI, supported tools,
 configuration, FAQ, and development. For the short version, start at the
 [README](../README.md).
 
-MemBridge is a menu-bar app (and CLI) for teams that code with AI. It gives
+MemBridge Beta is a menu-bar app (and CLI) for teams that code with AI. It gives
 you one feed of what everyone's AI coding tools have been doing, and it keeps
 the tools themselves in sync: Claude Code, Codex, Gemini CLI and any other
 agent can see each other's recent work, across tools and across teammates.
@@ -37,7 +37,7 @@ macOS (Apple Silicon), one command:
 curl -fsSL https://membridge.me/install.sh | sh
 ```
 
-This installs `MemBridge.app` to `/Applications` and the `membridge` CLI to
+This installs `MemBridge Beta.app` to `/Applications` and the `membridge` CLI to
 `/usr/local/bin` (that step may ask for your password once), verifies the
 download's SHA-256, and launches without a Gatekeeper warning. Want to read
 it first? `curl -fsSL https://membridge.me/install.sh -o install.sh`.
@@ -46,9 +46,9 @@ On Intel Macs, Linux, Windows, or servers, use the CLI instead:
 
 ```sh
 npm install -g @membridgeai/membridge
-membridge scan       # read-only: see which AI tools and projects it found
-membridge start      # run the background daemon
-membridge dashboard  # open the dashboard at http://127.0.0.1:7437
+membridge-beta scan       # read-only: see which AI tools and projects it found
+membridge-beta start      # run the background daemon
+membridge-beta dashboard  # open the dashboard at http://127.0.0.1:7437
 ```
 
 That's the zero-setup core: your own tools start seeing each other's work,
@@ -57,14 +57,14 @@ and the dashboard fills with your sessions. No account needed for any of it.
 To add your team: click **Invite** in the header (sign up, create the team,
 share the invite link), have teammates join and install, then share a project
 from its page. Commit the resulting `.membridge/team.json` so teammates'
-clones connect too. Terminal folks: `membridge join <link>` does signup and
+clones connect too. Terminal folks: `membridge-beta join <link>` does signup and
 join in one command.
 
 ## The dashboard
 
 The app is four views: Projects, Activity, Team, and Settings.
 
-**Projects** lists what MemBridge is watching, local-only or shared, with a
+**Projects** lists what MemBridge Beta is watching, local-only or shared, with a
 week of stats per project. **Activity** is the feed above: one card per
 person, project, and day, opening with the summary of what got done and
 marking sessions that are still running. Filter by person, project, or tool.
@@ -94,7 +94,7 @@ doesn't know what Codex did this morning; your Codex has no idea what your
 teammate's Claude Code shipped an hour ago.
 
 But every major tool already reads a per-project context file at startup,
-and writes its session transcripts to a known folder on disk. MemBridge's
+and writes its session transcripts to a known folder on disk. MemBridge Beta's
 daemon connects the two:
 
 ```
@@ -102,14 +102,14 @@ Claude Code ─┐                          ┌─> CLAUDE.md   (read by Claude 
 Codex ───────┼─> per-project shared ────┼─> AGENTS.md   (read by Codex & most agents)
 any tool ────┘        memory            └─> GEMINI.md…  (configurable)
                         ⇅
-      team sync (opt-in, redacted) — your teammates' MemBridge daemons
+      team sync (opt-in, redacted) — your teammates' MemBridge Beta daemons
 ```
 
 The injected block looks like this (taken from a real project):
 
 ```markdown
 <!-- membridge:begin -->
-## Shared AI memory (MemBridge)
+## Shared AI memory (MemBridge Beta)
 
 Recent asks across tools:
 - 2026-07-21 16:02 · Claude Code
@@ -119,7 +119,7 @@ Recent asks across tools:
   Changes: src/cart.js · test/cart.test.js
 - 2026-07-21 17:34 · Claude Code: Migrate the product images to WebP
 
-Teammates' AI activity (MemBridge team sync):
+Teammates' AI activity (MemBridge Beta team sync):
 - 2026-07-21 14:43 · Andrew · Codex: Refactor checkout validation
   Did: Checkout validation runs address and payment checks in a single
   pass, so a bad card no longer hides an address error.
@@ -129,7 +129,7 @@ Files recently modified by AI tools: src/cart.js, test/cart.test.js
 ```
 
 Only the content between the markers is ever rewritten. The **Remove block**
-button (or `membridge remove`) strips it cleanly and restores your file
+button (or `membridge-beta remove`) strips it cleanly and restores your file
 byte-for-byte.
 
 Each project also gets a structured memory database in `.membridge/`:
@@ -143,7 +143,7 @@ or commit it to share AI context with your whole team.
 A summary harvested from the agent's last chat message is decent; a summary
 the agent writes on purpose is better. The app asks once, on first run,
 whether to turn this on (Settings toggles it any time; CLI:
-`membridge setup-hooks` / `remove-hooks`).
+`membridge-beta setup-hooks` / `remove-hooks`).
 
 Enabled, it registers a [Stop hook](https://docs.claude.com/en/docs/claude-code/hooks)
 in `~/.claude/settings.json`. When a Claude Code session that edited files
@@ -163,7 +163,7 @@ turning it off removes exactly what was added.
 
 Codex and other `AGENTS.md` readers have no hook, so the injected block
 carries a standing instruction to append the same line on completion.
-Well-behaved agents comply; when they don't, MemBridge falls back to the
+Well-behaved agents comply; when they don't, MemBridge Beta falls back to the
 harvested summary.
 
 ## Team sync and privacy
@@ -174,7 +174,7 @@ tool names, redacted asks, relative file paths. Never file contents, never
 unshared projects. Row-level security limits every row to your team.
 
 The daemon binds to `127.0.0.1` only. There is no telemetry. The only files
-MemBridge writes are the context files (inside its own markers) and its own
+MemBridge Beta writes are the context files (inside its own markers) and its own
 state in `~/.membridge`; transcripts are read incrementally and never
 modified.
 
@@ -205,7 +205,7 @@ nothing. To run your own:
 2. Grab the Project URL and `anon` key from Settings → API (both are safe to
    publish; row-level security protects the data).
 3. Bake them into `lib/backend.json` before building, or point an install at
-   them: `membridge team setup --url https://<ref>.supabase.co --anon-key <key>`
+   them: `membridge-beta team setup --url https://<ref>.supabase.co --anon-key <key>`
 </details>
 
 ## Roadmaps (optional, bring your own key)
@@ -230,21 +230,21 @@ boxes and terminal-first teammates aren't second-class:
 
 | Command | What it does |
 | --- | --- |
-| `membridge start` / `stop` / `status` | Manage the background daemon |
-| `membridge dashboard` | Open the web UI at `http://127.0.0.1:7437` |
-| `membridge sync [--dry-run] [--project <path>]` | One sync pass right now |
-| `membridge scan` | Read-only report of discovered tools and projects |
-| `membridge remove [--project <path>]` | Strip injected memory blocks |
-| `membridge enable-autostart` / `disable-autostart` | Run at login |
-| `membridge setup-hooks` / `remove-hooks` | Session summary hook |
-| `membridge signup` / `login` / `logout` | Team account |
-| `membridge join <link-or-code>` | Accept an invite (creates the account if needed) |
-| `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
-| `membridge team link` / `unlink` / `list` | Share or stop sharing a project |
-| `membridge team setup` | Point at a self-hosted backend |
-| `membridge mcp` | Read-only MCP server over stdio |
+| `membridge-beta start` / `stop` / `status` | Manage the background daemon |
+| `membridge-beta dashboard` | Open the web UI at `http://127.0.0.1:7437` |
+| `membridge-beta sync [--dry-run] [--project <path>]` | One sync pass right now |
+| `membridge-beta scan` | Read-only report of discovered tools and projects |
+| `membridge-beta remove [--project <path>]` | Strip injected memory blocks |
+| `membridge-beta enable-autostart` / `disable-autostart` | Run at login |
+| `membridge-beta setup-hooks` / `remove-hooks` | Session summary hook |
+| `membridge-beta signup` / `login` / `logout` | Team account |
+| `membridge-beta join <link-or-code>` | Accept an invite (creates the account if needed) |
+| `membridge-beta team create` / `invite` / `revoke-invite` | Create a team, manage invites |
+| `membridge-beta team link` / `unlink` / `list` | Share or stop sharing a project |
+| `membridge-beta team setup` | Point at a self-hosted backend |
+| `membridge-beta mcp` | Read-only MCP server over stdio |
 
-`membridge mcp` exposes the shared memory as read-only MCP tools
+`membridge-beta mcp` exposes the shared memory as read-only MCP tools
 (`list_projects`, `get_project_memory`, `get_recent_activity`,
 `search_memory`) for Claude Desktop, Cursor, and other MCP clients. Nothing
 it exposes can write files or trigger sync, and every field passes through
@@ -262,7 +262,7 @@ zero-dependency core, so install it once before first use:
 | Gemini CLI | Custom adapter | Point an adapter at its logs, add `GEMINI.md` to targets |
 | Cursor, opencode, Copilot CLI, … | Custom adapter | Any tool that logs sessions as JSONL, no code required |
 
-A custom adapter is a config entry that tells MemBridge where a tool's JSONL
+A custom adapter is a config entry that tells MemBridge Beta where a tool's JSONL
 logs live and which fields hold the project path, timestamp, and message:
 
 ```jsonc
@@ -327,7 +327,7 @@ between the `<!-- membridge -->` markers is rewritten, and removing the
 block restores your file exactly.
 
 **Does my whole team need it installed?** Everyone whose AI activity should
-sync runs MemBridge. People who just want to watch can use the web
+sync runs MemBridge Beta. People who just want to watch can use the web
 workspace from a browser.
 
 **How much overhead does it add?** Near zero. It reads only the bytes
