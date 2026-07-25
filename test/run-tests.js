@@ -9960,6 +9960,34 @@ async function main() {
       assert.strictEqual(folded.length, 0, 'a normal nested project must not be folded');
       assert.ok(state.projects['/repo/packages/api'], 'nested project was wrongly removed');
     });
+
+    // Regression: fold targets are resolved from a snapshot of the original
+    // keys, so a nested fragment could name a parent fragment the same pass
+    // was about to delete — merging into it RE-CREATED the deleted key and
+    // left a worktree standing as its own project. Targets now chase through
+    // the chain to a key that is not itself folding.
+    check('worktree: a nested worktree folds to the main repo, never re-creating its parent fragment', () => {
+      const ev = p => [{ ts: '2026-07-20T09:00:00.000Z', source: 'Claude Code', kind: 'edit', session: 's-' + p, file: p + '/x.js', project: p }];
+      const WT = '/repo/.worktrees/feature';
+      const state = { projects: {
+        '/repo': { events: ev('/repo') },
+        [WT]: { events: ev(WT) },
+        [WT + '/web']: { events: ev(WT + '/web') },
+      }, files: {} };
+      scan.foldWorktreeProjects(state, util.getConfig());
+      assert.deepStrictEqual(Object.keys(state.projects), ['/repo'],
+        'both worktree fragments must collapse into the main repo');
+    });
+
+    check('worktree: a fold cycle terminates instead of spinning', () => {
+      // Two worktrees-container paths that resolve to each other cannot arise
+      // from real git layout, but the chase must still halt.
+      const A = '/repo/worktrees/a';
+      const B = '/repo/worktrees/a/worktrees/b';
+      const state = { projects: { [A]: { events: [] }, [B]: { events: [] } }, files: {} };
+      const folded = scan.foldWorktreeProjects(state, util.getConfig());
+      assert.ok(Array.isArray(folded), 'fold returned without hanging');
+    });
   }
 
   // --- update check (version compare + cached, fail-silent release lookup) ---
