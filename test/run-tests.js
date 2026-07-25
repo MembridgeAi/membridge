@@ -9688,6 +9688,61 @@ async function main() {
     assert.strictEqual(kept.length, 1, '.membridge marker keeps the session');
   });
 
+  // Adoption: the dashboard's discovered list and the ingestion gate must agree
+  // on what "tracked" means, or it would offer to adopt something already
+  // watched (or hide something that is not). Both now run isTrackedProject.
+  check('adopt: isTrackedProject matches the gate — state key or .membridge-beta marker', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    const A = '/gate/repoA';
+    const M = '/gate/marker-repo';
+    const tracked = new Set([util.normPath(A)]);
+    const noMarker = { hasMembridge: () => false };
+    assert.strictEqual(isTrackedProject(A, tracked, noMarker), true, 'state key is tracked');
+    assert.strictEqual(isTrackedProject('/gate/other', tracked, noMarker), false, 'unknown dir is not tracked');
+    assert.strictEqual(
+      isTrackedProject(M, new Set(), { hasMembridge: d => util.normPath(d) === util.normPath(M) }),
+      true, 'marker dir alone is tracked');
+    // Same inputs, same answer as the gate — the property that keeps them honest.
+    const ev = [{ kind: 'prompt', project: '/gate/other', session: 's1', ts: '2026-07-10T10:00:00.000Z', text: 'go' }];
+    assert.strictEqual(filterTrackedSessions(ev, tracked, noMarker).length, 0, 'gate agrees: dropped');
+  });
+
+  check('adopt: isTrackedProject is defensive — bad input is "not tracked", never a throw', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    const tracked = new Set([util.normPath('/gate/repoA')]);
+    assert.strictEqual(isTrackedProject(null, tracked, { hasMembridge: () => false }), false);
+    assert.strictEqual(isTrackedProject('', tracked, { hasMembridge: () => false }), false);
+    assert.strictEqual(isTrackedProject('/x', tracked, { hasMembridge: () => { throw new Error('disk'); } }), false,
+      'a throwing marker check drops to false');
+  });
+
+  check('adopt: adoptProjects adds untracked, reports already-tracked and bad paths, never throws', () => {
+    const { adoptProjects } = require('../lib/server');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-adopt-'));
+    const good = path.join(base, 'repo-one');
+    const alsoGood = path.join(base, 'repo-two');
+    const notADir = path.join(base, 'a-file.txt');
+    fs.mkdirSync(good); fs.mkdirSync(alsoGood); fs.writeFileSync(notADir, 'x');
+
+    const first = adoptProjects([good, alsoGood]);
+    assert.strictEqual(first.adoptedCount, 2, 'both fresh dirs adopted');
+    assert.deepStrictEqual(first.skipped, [], 'nothing skipped on the happy path');
+
+    // Re-adopting is a no-op, not an error, and one bad path never abandons the rest.
+    const second = adoptProjects([good, notADir, path.join(base, 'repo-three')]);
+    fs.mkdirSync(path.join(base, 'repo-three'));
+    assert.strictEqual(second.adoptedCount, 0, 'already-tracked + non-dir adopt nothing');
+    assert.strictEqual(second.skippedCount, 3, 'every path is accounted for');
+    assert.ok(second.skipped.some(s => s.reason === 'already tracked'), 'repeat is reported, not re-added');
+    assert.ok(second.skipped.some(s => s.reason === 'not a directory'), 'file path is rejected');
+
+    // Non-string members are reported rather than crashing the sweep.
+    const third = adoptProjects([null, 42, '']);
+    assert.strictEqual(third.adoptedCount, 0);
+    assert.strictEqual(third.skippedCount, 3, 'junk input is survivable');
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
   check('gate: defensive — bad events or a throwing resolver drop, never throw', () => {
     const tracked = new Set([util.normPath('/gate/repoA')]);
     assert.deepStrictEqual(filterTrackedSessions(null, tracked, {}), [], 'null events -> []');
