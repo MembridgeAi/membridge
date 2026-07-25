@@ -9691,7 +9691,7 @@ async function main() {
   // Adoption: the dashboard's discovered list and the ingestion gate must agree
   // on what "tracked" means, or it would offer to adopt something already
   // watched (or hide something that is not). Both now run isTrackedProject.
-  check('adopt: isTrackedProject matches the gate — state key or .membridge-beta marker', () => {
+  check('adopt: isTrackedProject matches the gate — state key or .membridge marker', () => {
     const { isTrackedProject } = require('../lib/scan');
     const A = '/gate/repoA';
     const M = '/gate/marker-repo';
