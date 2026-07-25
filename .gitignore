@@ -22,6 +22,9 @@ BUSINESS.md
 # stable MemBridge may also run in this checkout; keep its output out too
 **/.membridge/*
 !**/.membridge/team.json
+# the beta edition may also run in this checkout; keep its output out too
+**/.membridge-beta/*
+!**/.membridge-beta/team.json
 CLAUDE.md
 AGENTS.md
 
