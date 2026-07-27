@@ -1808,7 +1808,7 @@ async function main() {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
       const constSrc = extractConst(embeddedScript, 'MONO');
-      const fnSrc = ['personColor', 'dayCardHtml'].map(n => extractFn(embeddedScript, n)).join('\n');
+      const fnSrc = ['personColor', 'dayRowText', 'dayCardHtml'].map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function('expandedKeys',
         escSrc + '\n' + agoSrc + '\n' + constSrc + '\nvar catchupExpanded = expandedKeys || {};\n' + fnSrc +
         '\nreturn { dayCardHtml: dayCardHtml };'
@@ -1821,7 +1821,10 @@ async function main() {
     const v2Distilled = unitWith({ ts: dayCardsLocalTs(0, 15), repEntry: { headline: 'Shipped the v2 cards' } });
     const v2Live = unitWith({ ts: dayCardsLocalTs(0, 14), live: true, ask: 'Wire the level two view' });
     const v2Stale = unitWith({ ts: dayCardsLocalTs(0, 13), ask: 'Tidy the styles' });
-    const v2MixedCard = evalDayCards([v2Distilled, v2Live, v2Stale])[0];
+    // A second finished run so the checklist still carries a ✓ row once the
+    // headline's own run is dropped from it.
+    const v2Done2 = unitWith({ ts: dayCardsLocalTs(0, 12), repEntry: { headline: 'Tightened the checklist rows' } });
+    const v2MixedCard = evalDayCards([v2Distilled, v2Live, v2Stale, v2Done2])[0];
     check('dayCardHtml v2: header carries the sentence headline and is the data-day-open drill target', () => {
       const h = evalDayCardHtml(v2MixedCard);
       assert.ok(h.indexOf('data-day-open="') !== -1, 'header must be a data-day-open target');
@@ -1829,15 +1832,18 @@ async function main() {
       assert.ok(h.indexOf('data-day-open') < h.indexOf('Shipped the v2 cards'), 'headline lives inside the drill-target header');
       assert.ok(!/data-card-toggle/.test(h), 'v2 header navigates — the v1 in-place toggle contract must be gone');
     });
+    // The headline is picked FROM the checklist, so its row is dropped rather
+    // than printed twice — a 6-run day lists the 5 changes beside its headline.
     check('dayCardHtml v2: first 4 checklist rows visible, rest behind the bottom-right expander, collapsed by default', () => {
       const h = evalDayCardHtml(v2Card6);
       const moreAt = h.indexOf('data-day-more');
       assert.ok(moreAt !== -1, 'hidden-rows container missing');
+      assert.strictEqual((h.match(/Change at 15/g) || []).length, 1, 'the headline run must not repeat as its own row');
       assert.strictEqual((h.slice(0, moreAt).match(/✓/g) || []).length, 4, 'exactly 4 rows before the fold');
-      assert.strictEqual((h.slice(moreAt).match(/✓/g) || []).length, 2, 'rows 5+ live inside the fold');
+      assert.strictEqual((h.slice(moreAt).match(/✓/g) || []).length, 1, 'rows 5+ live inside the fold');
       assert.ok(/<div data-day-more="[^"]*"[^>]*display:none/.test(h), 'fold must start hidden (collapsed by default)');
       assert.ok(/data-day-expand/.test(h), 'expander control missing');
-      assert.ok(h.includes('Show all 6 changes'), 'expander label counts every change');
+      assert.ok(h.includes('Show all 5 changes'), 'expander label counts every listed change');
       assert.ok(h.indexOf('6 sessions') < h.indexOf('data-day-expand'), 'stat row sits left of the expander in the footer');
       assert.ok(!/data-day-expand/.test(evalDayCardHtml(v2Card3)), 'a 4-rows-or-fewer card needs no expander');
     });
@@ -1917,7 +1923,7 @@ async function main() {
       const constSrc = ['MONO', 'STALE_GAP', 'BURST_GAP'].map(n => extractConst(embeddedScript, n)).join('\n');
       const fnSrc = [
         'personColor', 'capLine', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'promptRowsHtml', 'cardCloseHtml', 'shareToggleHtml',
-        'intentRowHtml', 'threadHtml', 'unitHtml', 'dayCardHtml',
+        'intentRowHtml', 'threadHtml', 'unitHtml', 'dayRowText', 'dayCardHtml',
         'feedKey', 'normKeyPart', 'threadKey', 'buildThreads', 'unitKeyOf', 'finalizeUnit', 'buildUnits',
         'homeDayLabel', 'buildDayCards', 'feedDayGroupHtml',
       ].map(n => extractFn(embeddedScript, n)).join('\n');
