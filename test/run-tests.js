@@ -1095,6 +1095,34 @@ async function main() {
       assert.strictEqual(enc.keyAlerts, 0, 'no key alerts expected');
       assert.strictEqual(typeof enc.plaintextOff, 'boolean', 'plaintextOff must be present');
     });
+    // The header's OTHER silent failure. An expired session pauses team push
+    // fail-closed (correct), but the only trace was a line in membridge.log —
+    // so a real user's team received nothing for two days while the pill still
+    // read "Synced · Nh ago". statusPayload must carry the machine-readable
+    // reason next to encryption.paused. Two reasons, not one: only a dead
+    // session is the user's to fix.
+    check('statusPayload surfaces a paused team session for the header pill', () => {
+      const saved = util.loadState();
+      try {
+        util.saveState({
+          ...saved,
+          teamAuthPaused: { reason: 'session-expired', detail: 'JWT expired', since: '2026-07-25T10:00:00.000Z' },
+        });
+        const a = statusPayload().auth;
+        assert.ok(a && typeof a === 'object', 'auth block missing from statusPayload');
+        assert.strictEqual(a.paused, 'session-expired', 'the machine-readable reason must reach the client');
+        assert.strictEqual(a.since, '2026-07-25T10:00:00.000Z',
+          'how long the team has been getting nothing must survive to the UI');
+        assert.ok(/JWT expired/.test(a.detail || ''), 'the underlying reason belongs in the tooltip');
+      } finally {
+        util.saveState(saved);
+      }
+    });
+    check('statusPayload claims no auth pause on a healthy home', () => {
+      const a = statusPayload().auth;
+      assert.ok(a && typeof a === 'object', 'auth block must always be present, not only when broken');
+      assert.strictEqual(a.paused, null, 'a healthy home must never tell the user their session is dead');
+    });
     check('projectsPayload reports lifetime sessions and first activity', () => {
       const rows = projectsPayload();
       assert.ok(Array.isArray(rows) && rows.length, 'fixture projects expected');
@@ -4734,6 +4762,89 @@ async function main() {
     const setPillSrc = src.slice(src.indexOf('var setPill'), src.indexOf('function setE2EBadge'));
     assert.ok(/isSolo/.test(setPillSrc), 'setPill must still be the place the solo label is decided');
   });
+  // The pill is the only always-visible sync signal, and it lied for two days:
+  // an expired session paused team push fail-closed while the header kept
+  // reading "Synced · Nh ago" next to a green ENCRYPTED badge. Sandbox the real
+  // shipped setPill (same technique as the feed-paging tests) and pin the
+  // behavior: a dead session must say so, a network blip must NOT — a pill that
+  // cries wolf on every flaky wifi moment is a pill nobody reads.
+  {
+    const src = require('../lib/dashboard/client')('', '');
+    const setPillSrc = src.slice(src.indexOf('var setPill'), src.indexOf('function setE2EBadge'));
+    const mkPill = () => {
+      const label = { textContent: '' };
+      const pill = { style: {}, title: '' };
+      const s = new Function('pillLabelEl', 'pillEl',
+        'var lastTeamSync = null; var isSolo = false; var authPaused = null;' +
+        '\nvar ago = function () { return "3h ago"; };\n' + setPillSrc +
+        '\nreturn { setPill: setPill,' +
+        ' setSolo: function (v) { isSolo = v; },' +
+        ' setAuth: function (v) { authPaused = v; } };')(label, pill);
+      return { label, pill, api: s };
+    };
+
+    check('sync pill: a dead session stops saying "Synced" and says what to do about it', () => {
+      const { label, pill, api } = mkPill();
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      assert.ok(/Synced/.test(label.textContent),
+        'guard: a healthy shared machine must still read Synced');
+      const healthyColor = pill.style.color;
+
+      api.setAuth('session-expired');
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      assert.ok(!/Synced/.test(label.textContent),
+        'a paused session must never still read "Synced" — that is the whole bug');
+      assert.ok(/paused/i.test(label.textContent), 'the pill must say sync is paused');
+      assert.ok(/sign in/i.test(label.textContent), 'the pill must name the one action that fixes it');
+      assert.ok(pill.style.color && pill.style.color !== healthyColor,
+        'the paused pill must not stay in the healthy accent colour');
+      assert.ok(/amber|warn/i.test(pill.style.color), 'the paused pill must read as a warning');
+    });
+
+    check('sync pill: a transient backend outage never nags the user to sign in', () => {
+      const { label, api } = mkPill();
+      api.setAuth('backend-unreachable');
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      assert.ok(!/sign in/i.test(label.textContent),
+        'an unreachable backend is not the user\'s fault and resolves itself — do not nag');
+      assert.ok(/Synced/.test(label.textContent),
+        'a transient failure leaves the pill exactly as it was');
+    });
+
+    check('sync pill: recovery clears the warning, and a solo machine never shows it', () => {
+      const { label, pill, api } = mkPill();
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      const healthyColor = pill.style.color;
+      api.setAuth('session-expired');
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      api.setAuth(null);
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      assert.ok(/Synced/.test(label.textContent), 'a recovered session must go back to Synced');
+      assert.strictEqual(pill.style.color, healthyColor,
+        'recovery must restore the healthy colour, not leave the pill amber forever');
+
+      api.setAuth('session-expired');
+      api.setSolo(true);
+      api.setPill(true, '2026-07-27T01:00:00.000Z');
+      assert.strictEqual(label.textContent, 'Local only',
+        'a solo machine has no team sync to pause — solo still wins');
+
+      const { label: l2, api: a2 } = mkPill();
+      a2.setAuth('session-expired');
+      a2.setPill(false);
+      assert.strictEqual(l2.textContent, 'Offline',
+        'a live fetch failure is the more immediate truth and still wins');
+    });
+
+    check('sync pill: the status poll is what arms the paused pill', () => {
+      const fn = src.slice(src.indexOf('function refreshStatus'), src.indexOf('function pollSyncHealth'));
+      assert.ok(/s\.auth/.test(fn), 'refreshStatus must read the auth block from /api/status');
+      assert.ok(/authPaused\s*=/.test(fn),
+        'refreshStatus must record the paused reason — setPill has no other way to learn it');
+      assert.ok(fn.indexOf('authPaused =') < fn.indexOf('applySoloChrome('),
+        'authPaused must be assigned BEFORE the applySoloChrome call, which repaints the pill');
+    });
+  }
   // Solo is about whether anyone else is actually there, not whether a team
   // row exists. Creating a team of one is the normal first step of the upgrade
   // flow, and it must not flip the whole header to "shared" before a single
@@ -7228,8 +7339,9 @@ async function main() {
       // — this home sets no encrypt flag at all) and crypto unavailable,
       // NOTHING may leave in plaintext. The pass pauses, records why, and a
       // later pass with working crypto pushes the held entries encrypted.
-      let syncErr = null, syncRes = null, syncRes2 = null, logDelta = '';
+      let syncErr = null, syncRes = null, syncRes2 = null, syncRes3 = null, syncRes4 = null, logDelta = '';
       let pushedWhileUnavailable = -1, pausedFlag = null, pausedFlag2 = null;
+      let authFlag3 = null, authFlag4 = 'unset', pushedBeforeAuthFail = -1, pushedAfterAuthFail = -2;
       try {
         await teamsync.signup(util.getConfig(), 'enc@test.dev', 'pw-e', 'Enc');
         const teamE = await teamsync.createTeam(util.getConfig(), 'EncTeam');
@@ -7265,6 +7377,25 @@ async function main() {
           },
         });
         pausedFlag2 = util.loadState().teamCryptoPaused || null;
+        // The live wiring, not just the helper. A pass whose identity upload is
+        // rejected with a dead JWT must leave the reason in the SAVED state:
+        // syncTeams saves its own in-memory state copy at the end of the pass,
+        // so a helper that wrote state independently would be clobbered by it.
+        const kcAuth = { available: () => true, load: a => kcMem.get(a) || null, store: (a, s) => { kcMem.set(a, s); return true; }, remove: a => kcMem.delete(a) };
+        pushedBeforeAuthFail = mockE.entries.length;
+        syncRes3 = await teamsync.syncTeams({
+          project: projE,
+          cryptoDeps: {
+            keychain: kcAuth,
+            teamcrypto: tcReal,
+            uploadPubkey: async () => { throw Object.assign(new Error('JWT expired'), { status: 401 }); },
+          },
+        });
+        authFlag3 = util.loadState().teamAuthPaused || null;
+        pushedAfterAuthFail = mockE.entries.length;
+        // Recovery: the session is good again, so the header must stop warning.
+        syncRes4 = await teamsync.syncTeams({ project: projE, cryptoDeps: { keychain: kcAuth, teamcrypto: tcReal } });
+        authFlag4 = util.loadState().teamAuthPaused || null;
       } catch (e) { syncErr = e; } finally {
         const raw = util.loadUserConfig();
         raw.team = { ...(raw.team || {}), encrypt: false }; // restore the legacy-home hatch
@@ -7288,6 +7419,109 @@ async function main() {
         assert.ok(mockE.entries.every(r => r.ciphertext && r.nonce && r.key_epoch === 1),
           'recovered rows must carry ciphertext/nonce/key_epoch');
         assert.strictEqual(pausedFlag2, null, 'teamCryptoPaused must clear after a successful pass');
+      });
+      check('teamsync: a pass with a dead session records the auth pause in SAVED state and pushes nothing', () => {
+        assert.ok(!syncErr, `syncTeams threw: ${syncErr && syncErr.message}`);
+        assert.ok(authFlag3, 'state.teamAuthPaused must survive the pass\'s own saveState');
+        assert.strictEqual(authFlag3.reason, 'session-expired',
+          'a 401 on the identity upload is a dead session, not a missing key store');
+        assert.strictEqual(pushedAfterAuthFail, pushedBeforeAuthFail,
+          'fail-closed must not change: a dead session pushes nothing');
+      });
+      check('teamsync: the auth pause clears on the next healthy pass', () => {
+        assert.ok(!syncErr, `syncTeams threw: ${syncErr && syncErr.message}`);
+        assert.strictEqual(authFlag4, null,
+          'a recovered session must clear the header warning, or it goes stale and lies the other way');
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // Surfacing a paused team session. The identity bootstrap is where an
+    // expired JWT actually bites: it fails, team push pauses fail-closed
+    // (correct), and until now the only trace was a line in membridge.log.
+    // buildCryptoContext must record a reason the dashboard can act on, and
+    // must tell a dead session (sign in — nothing resumes on its own) apart
+    // from an unreachable backend (transient, not the user's fault).
+    // ------------------------------------------------------------------
+    check('teamsync: auth failures classify into "sign in" vs "transient", and nothing else does', () => {
+      const c = teamsync.classifyAuthFailure;
+      const withStatus = (msg, status) => Object.assign(new Error(msg), { status });
+      assert.strictEqual(c(withStatus('JWT expired', 401)), 'session-expired', 'a 401 is a dead session');
+      assert.strictEqual(c(new Error('JWT expired')), 'session-expired',
+        'PostgREST puts the reason in the body and drops the status — the message alone must be enough');
+      assert.strictEqual(c(new Error('Invalid Refresh Token: Refresh Token Not Found')), 'session-expired',
+        'a rejected refresh token is the same dead session, reported by the auth endpoint');
+      assert.strictEqual(c(Object.assign(new Error('fetch failed'), { code: 'ECONNREFUSED' })), 'backend-unreachable');
+      assert.strictEqual(c(new Error('fetch failed')), 'backend-unreachable',
+        'undici reports a dead network as a bare "fetch failed"');
+      assert.strictEqual(c(withStatus('internal server error', 500)), null,
+        'a backend fault is neither — telling the user to sign in would be a lie');
+      assert.strictEqual(c(withStatus('permission denied for table team_feed', 403)), null,
+        'an RLS refusal is a membership problem, not an expired session');
+      assert.strictEqual(c(null), null, 'a missing error must never be read as a dead session');
+    });
+
+    {
+      const kcAuthMem = new Map();
+      const kcAuth = {
+        available: () => true,
+        load: a => kcAuthMem.get(a) || null,
+        store: (a, s) => { kcAuthMem.set(a, s); return true; },
+        remove: a => kcAuthMem.delete(a),
+      };
+      const CFG = { team: {} };
+      const CREDS = { userId: 'u-auth-1', accessToken: 'dead-token' };
+      const throwing = err => ({ keychain: kcAuth, teamcrypto: tcReal, uploadPubkey: async () => { throw err; } });
+      const dead = () => Object.assign(new Error('JWT expired'), { status: 401 });
+      const st = { projects: {} };
+      let ctxDead = 'unset', ctxNet = 'unset', ctxOk = 'unset';
+      let pausedDead = null, pausedNet = null, pausedOk = 'unset', sinceKept = null, authErr = null;
+      try {
+        ctxDead = await teamsync.buildCryptoContext(CFG, CREDS, { state: st, cryptoDeps: throwing(dead()) });
+        pausedDead = st.teamAuthPaused ? { ...st.teamAuthPaused } : null;
+        // A pass that keeps failing must not keep resetting the clock — how
+        // long the team has been getting nothing is the actionable part.
+        st.teamAuthPaused = { reason: 'session-expired', detail: 'JWT expired', since: '2026-07-20T00:00:00.000Z' };
+        await teamsync.buildCryptoContext(CFG, CREDS, { state: st, cryptoDeps: throwing(dead()) });
+        sinceKept = st.teamAuthPaused && st.teamAuthPaused.since;
+
+        ctxNet = await teamsync.buildCryptoContext(CFG, CREDS, {
+          state: st,
+          cryptoDeps: throwing(Object.assign(new Error('fetch failed'), { code: 'ECONNREFUSED' })),
+        });
+        pausedNet = st.teamAuthPaused ? { ...st.teamAuthPaused } : null;
+
+        ctxOk = await teamsync.buildCryptoContext(CFG, CREDS, {
+          state: st,
+          cryptoDeps: { keychain: kcAuth, teamcrypto: tcReal, uploadPubkey: async () => {} },
+        });
+        pausedOk = st.teamAuthPaused || null;
+      } catch (e) { authErr = e; }
+
+      check('teamsync: an expired session records a machine-readable pause and still fails closed', () => {
+        assert.ok(!authErr, `buildCryptoContext threw: ${authErr && authErr.message}`);
+        assert.strictEqual(ctxDead, null, 'fail-closed must not change — no context, no push');
+        assert.ok(pausedDead, 'state.teamAuthPaused must record the pause');
+        assert.strictEqual(pausedDead.reason, 'session-expired');
+        assert.ok(/JWT expired/.test(pausedDead.detail || ''),
+          'the underlying reason must survive for the tooltip and the log');
+        assert.ok(!isNaN(Date.parse(pausedDead.since)), 'since must be a parseable timestamp');
+      });
+      check('teamsync: a repeated failure keeps the original "since" instead of restarting the clock', () => {
+        assert.ok(!authErr, `buildCryptoContext threw: ${authErr && authErr.message}`);
+        assert.strictEqual(sinceKept, '2026-07-20T00:00:00.000Z');
+      });
+      check('teamsync: an unreachable backend is recorded as transient, never as "sign in"', () => {
+        assert.ok(!authErr, `buildCryptoContext threw: ${authErr && authErr.message}`);
+        assert.strictEqual(ctxNet, null, 'still fail-closed');
+        assert.ok(pausedNet, 'a transient failure is still worth recording');
+        assert.strictEqual(pausedNet.reason, 'backend-unreachable',
+          'a network blip must never tell the user to sign in');
+      });
+      check('teamsync: the next successful bootstrap clears the pause so it cannot go stale', () => {
+        assert.ok(!authErr, `buildCryptoContext threw: ${authErr && authErr.message}`);
+        assert.ok(ctxOk && ctxOk.identity, 'a working pass must return a real crypto context');
+        assert.strictEqual(pausedOk, null, 'teamAuthPaused must be gone after a successful bootstrap');
       });
     }
   }
