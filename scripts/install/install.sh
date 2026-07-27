@@ -1,8 +1,8 @@
 #!/bin/sh
 # MemBridge macOS installer — installs the app + `membridge` CLI, no Gatekeeper warning.
 # Pinned to one release (version + SHA-256) by scripts/install/gen-install.js.
-#   curl -fsSL https://membridge.me/install.sh | sh
-#   curl -fsSL https://membridge.me/install.sh | sh -s -- --dry-run
+#   curl -fsSL https://membridge.app/install.sh | sh
+#   curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run
 set -eu
 
 VERSION="0.1.2"

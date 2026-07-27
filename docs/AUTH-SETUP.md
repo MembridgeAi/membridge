@@ -13,7 +13,7 @@ provider account and a DNS record, so budget a little longer for that part.
 1. **Create the GitHub OAuth app** — github.com → Settings → Developer
    settings → OAuth Apps → *New OAuth App*:
    - Application name: `MemBridge`
-   - Homepage URL: `https://membridge.me`
+   - Homepage URL: `https://membridge.app`
    - Authorization callback URL (exactly):
      `https://mefgbiecvoszjorwzkfz.supabase.co/auth/v1/callback`
 
@@ -74,11 +74,11 @@ Until custom SMTP is configured, the mail still arrives from
 genuinely come *from MemBridge*:
 
 1. Sign up with a transactional email provider (Resend and Postmark both have
-   free tiers that cover this) and verify the `membridge.me` domain there
+   free tiers that cover this) and verify the `membridge.app` domain there
    (they'll give you a couple of DNS records to add).
 2. Dashboard → *Authentication* → *Emails* → *SMTP Settings*: enable custom
    SMTP with the provider's host/port/username/password, sender address
-   `noreply@membridge.me`, sender name `MemBridge`.
+   `noreply@membridge.app`, sender name `MemBridge`.
 
 Bonus: Supabase's built-in mailer is rate-limited to a handful of emails per
 hour — custom SMTP also removes that cap, which matters the day a whole team

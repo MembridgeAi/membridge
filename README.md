@@ -15,7 +15,7 @@ each one into a small per-project memory, and injects it into the context
 files every agent reads at startup.
 
 ```sh
-curl -fsSL https://membridge.me/install.sh | sh
+curl -fsSL https://membridge.app/install.sh | sh
 ```
 
 <p align="center"><sub><code>local-first · no account · no API keys</code></sub></p>
@@ -24,7 +24,7 @@ The one-liner is macOS (Apple Silicon). Everywhere else:
 `npm install -g @membridgeai/membridge && membridge start`. Every install option, the
 full CLI, configuration, and the FAQ live in **[the guide](docs/guide.md)** —
 and this page has an animated twin at
-**[docs/readme.html](docs/readme.html)** ([membridge.me](https://membridge.me)).
+**[docs/readme.html](docs/readme.html)** ([membridge.app](https://membridge.app)).
 
 ## One session ends. Every agent remembers.
 
@@ -77,4 +77,4 @@ development docs.
 
 ---
 
-<p align="center"><sub><code>source-available · free core, zero runtime dependencies · <a href="https://membridge.me">membridge.me</a></code></sub></p>
+<p align="center"><sub><code>source-available · free core, zero runtime dependencies · <a href="https://membridge.app">membridge.app</a></code></sub></p>

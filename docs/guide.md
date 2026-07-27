@@ -34,13 +34,13 @@ to connect a team.
 macOS (Apple Silicon), one command:
 
 ```sh
-curl -fsSL https://membridge.me/install.sh | sh
+curl -fsSL https://membridge.app/install.sh | sh
 ```
 
 This installs `MemBridge Beta.app` to `/Applications` and the `membridge` CLI to
 `/usr/local/bin` (that step may ask for your password once), verifies the
 download's SHA-256, and launches without a Gatekeeper warning. Want to read
-it first? `curl -fsSL https://membridge.me/install.sh -o install.sh`.
+it first? `curl -fsSL https://membridge.app/install.sh -o install.sh`.
 
 On Intel Macs, Linux, Windows, or servers, use the CLI instead:
 

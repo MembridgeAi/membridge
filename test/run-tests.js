@@ -10742,7 +10742,7 @@ async function main() {
     });
 
     check('update-check: updateCommand matches install kind', () => {
-      assert.strictEqual(uc.updateCommand('app'), 'curl -fsSL https://membridge.me/install.sh | sh');
+      assert.strictEqual(uc.updateCommand('app'), 'curl -fsSL https://membridge.app/install.sh | sh');
       assert.strictEqual(uc.updateCommand('npm'), 'npm install -g @membridgeai/membridge');
     });
   }
@@ -10972,7 +10972,7 @@ async function main() {
         cap(); prompts.maybeFirstRun(util.getConfig()); uncap();
         const first = printed();
         assert.ok(/MemBridge is running/.test(first), 'message A not printed');
-        assert.ok(/membridge\.me\/feedback\?ref=cli/.test(first), 'message A missing the feedback link');
+        assert.ok(/membridge\.app\/feedback\?ref=cli/.test(first), 'message A missing the feedback link');
         assert.ok(/MembridgeAi\/membridge/.test(first) && !/andrewb-eng/.test(first), 'links must use MembridgeAi/membridge only');
         cap(); prompts.maybeFirstRun(util.getConfig()); uncap();
         assert.strictEqual(printed(), '', 'message A must not print a second time');
