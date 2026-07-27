@@ -20,8 +20,8 @@ die() { printf '\033[1;31mmembridge error\033[0m %s\n' "$1" >&2; exit 1; }
 run() { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else eval "$@"; fi; }
 
 # 1. Preflight
-[ "$(uname -s)" = "Darwin" ] || die "macOS only. On Linux/Windows: npm i -g membridge"
-[ "$(uname -m)" = "arm64" ] || die "No prebuilt app for $(uname -m) yet. On Intel Macs: npm i -g membridge"
+[ "$(uname -s)" = "Darwin" ] || die "macOS only. On Linux/Windows: npm i -g @membridgeai/membridge"
+[ "$(uname -m)" = "arm64" ] || die "No prebuilt app for $(uname -m) yet. On Intel Macs: npm i -g @membridgeai/membridge"
 command -v curl   >/dev/null 2>&1 || die "curl is required."
 command -v shasum >/dev/null 2>&1 || die "shasum is required."
 
