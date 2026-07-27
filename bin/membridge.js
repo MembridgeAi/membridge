@@ -11,6 +11,9 @@ if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3]
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+// The published package name, single-sourced: anything that installs or names
+// this package must read it from here, never re-type it (see cmdUpdate).
+const PKG_NAME = require('../package.json').name;
 const util = require('../lib/util');
 const { scanAll, syncOnce, getAdapters, findProjectKey } = require('../lib/scan');
 const digest = require('../lib/digest');
@@ -348,7 +351,12 @@ async function cmdUpdate() {
     return;
   }
   console.log(`Updating via: ${command}\n`);
-  const res = spawnSync('npm', ['install', '-g', 'membridge'], { stdio: 'inherit' });
+  // SECURITY: never write the package name out by hand here. This ran the BARE
+  // name `membridge`, which is unclaimed on the registry and squattable — the
+  // printed command above was the correct scoped one, and that divergence is
+  // exactly what hid the bug. Derive both from package.json so they cannot
+  // drift apart again.
+  const res = spawnSync('npm', ['install', '-g', PKG_NAME], { stdio: 'inherit' });
   if (res.status !== 0) {
     die(`Update failed (exit ${res.status}). Run it manually:\n  ${command}`);
   }
