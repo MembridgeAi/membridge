@@ -1807,8 +1807,8 @@ async function main() {
     function evalDayCardHtml(card, opts, expandedKeys) {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
-      const constSrc = extractConst(embeddedScript, 'MONO');
-      const fnSrc = ['personColor', 'dayRowText', 'dayCardHtml'].map(n => extractFn(embeddedScript, n)).join('\n');
+      const constSrc = ['MONO', 'DISTILLED_SOURCE'].map(n => extractConst(embeddedScript, n)).join('\n');
+      const fnSrc = ['personColor', 'dayRowText', 'daySources', 'dayTools', 'dayIsDistilled', 'dayCardHtml'].map(n => extractFn(embeddedScript, n)).join('\n');
       const sandbox = new Function('expandedKeys',
         escSrc + '\n' + agoSrc + '\n' + constSrc + '\nvar catchupExpanded = expandedKeys || {};\n' + fnSrc +
         '\nreturn { dayCardHtml: dayCardHtml };'
@@ -1867,6 +1867,18 @@ async function main() {
       const single = evalDayCardHtml(evalDayCards([unitWith({ ts: dayCardsLocalTs(0, 14), source: 'Codex' })])[0]);
       assert.ok(/Codex/.test(single) && !/Claude Code/.test(single), 'a single-tool day shows only its one badge');
     });
+    // Distilled says HOW the summary was written, not what the work was written
+    // in, so it renders as its own green mark instead of a tool chip.
+    check('dayCardHtml: Distilled renders as its own mark, never as a tool badge', () => {
+      const claude = unitWith({ ts: dayCardsLocalTs(0, 14), source: 'Claude Code' });
+      const distilled = unitWith({ ts: dayCardsLocalTs(0, 10), source: 'Distilled', repEntry: { headline: 'D' } });
+      const h = evalDayCardHtml(evalDayCards([claude, distilled])[0]);
+      assert.strictEqual((h.match(/Distilled/g) || []).length, 1, 'Distilled must appear exactly once');
+      assert.ok(/var\(--green\)[^>]*>Distilled</.test(h), 'Distilled must carry the green mark styling, not the tool-chip styling');
+      assert.ok(/border:1px solid var\(--border\)[^>]*>Claude Code</.test(h), 'a real tool keeps the plain tool-chip styling');
+      const toolsOnly = evalDayCardHtml(evalDayCards([claude])[0]);
+      assert.ok(!/Distilled/.test(toolsOnly), 'a day with no distilled summary shows no mark');
+    });
     check('dayCardHtml v2: stat row sums sessions · prompts · files over the day', () => {
       const su1 = unitWith({ ts: dayCardsLocalTs(0, 15), agentCount: 2, promptCount: 5 });
       su1.runs[0].entries[0].files = ['lib/x.js', 'lib/y.js'];
@@ -1920,10 +1932,10 @@ async function main() {
     function evalFeedDayGroupHtml() {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const agoSrc = extractVarFn(embeddedScript, 'ago') || '';
-      const constSrc = ['MONO', 'STALE_GAP', 'BURST_GAP'].map(n => extractConst(embeddedScript, n)).join('\n');
+      const constSrc = ['MONO', 'STALE_GAP', 'BURST_GAP', 'DISTILLED_SOURCE'].map(n => extractConst(embeddedScript, n)).join('\n');
       const fnSrc = [
         'personColor', 'capLine', 'firstSentence', 'askHeadline', 'runHeadline', 'promptCellText', 'promptRowsHtml', 'cardCloseHtml', 'shareToggleHtml',
-        'intentRowHtml', 'threadHtml', 'unitHtml', 'dayRowText', 'dayCardHtml',
+        'intentRowHtml', 'threadHtml', 'unitHtml', 'dayRowText', 'daySources', 'dayTools', 'dayIsDistilled', 'dayCardHtml',
         'feedKey', 'normKeyPart', 'threadKey', 'buildThreads', 'unitKeyOf', 'finalizeUnit', 'buildUnits',
         'homeDayLabel', 'buildDayCards', 'feedDayGroupHtml',
       ].map(n => extractFn(embeddedScript, n)).join('\n');
