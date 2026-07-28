@@ -5878,6 +5878,35 @@ async function main() {
     assert.deepStrictEqual(led.reads, oracle,
       'incremental tiering across sequential in-order windows must match the batch oracle exactly');
   });
+
+  check('skeleton-strip: keeps signatures, drops bodies, refuses minified input', () => {
+    const { strip } = require('../lib/skeleton-strip');
+    const src = [
+      "'use strict';",
+      "const fs = require('fs');",
+      'function outer(a, b) {',
+      '  const x = a + b;',
+      '  if (x) {',
+      '    deep();',
+      '  }',
+      '  return x;',
+      '}',
+      'module.exports = { outer };',
+    ].join('\n');
+    const out = strip(src, '.js');
+    assert.ok(out.ok);
+    assert.ok(out.text.includes('function outer(a, b) {'), 'signature survives');
+    assert.ok(out.text.includes("const fs = require('fs');"), 'imports survive');
+    assert.ok(!out.text.includes('deep()'), 'nested body dropped');
+    assert.ok(out.text.split('\n').length < src.split('\n').length, 'smaller');
+    // python: indentation depth, no braces
+    const py = ['import os', 'def f(a):', '    x = a', '    return x', 'class C:', '    def m(self):', '        pass'].join('\n');
+    const pout = strip(py, '.py');
+    assert.ok(pout.ok && pout.text.includes('def f(a):') && !pout.text.includes('x = a'));
+    // minified refusal
+    assert.strictEqual(strip('x'.repeat(3000), '.js').ok, false);
+  });
+
   check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'ledger-atomic-proj');
