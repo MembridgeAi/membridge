@@ -5962,6 +5962,179 @@ async function main() {
     assert.strictEqual(n2, 0, 'unchanged content is skipped on re-warm');
   });
 
+  check('recall: serve policy — tiers, floors, holdout, rejection learning', () => {
+    const crypto = require('crypto');
+    const recall = require('../lib/recall');
+
+    assert.strictEqual(recall.MIN_CALL_TOKENS, 400);
+    assert.strictEqual(recall.MIN_COMPRESSION, 2.25);
+    assert.strictEqual(recall.HOLDOUT_PCT, 10);
+    assert.strictEqual(recall.HOLDOUT_DAYS, 14);
+    assert.strictEqual(recall.ANNOUNCE_TOKENS, 1000);
+    assert.strictEqual(recall.REJECTION_LIMIT, 3);
+
+    // Deterministic holdout bucket, matching recall.js's own algorithm
+    // exactly: first 4 bytes of sha1(sessionId + relPath), as a uint32, % 100.
+    // Scanned rather than hardcoded, per the brief -- a hardcoded pair would
+    // silently stop testing anything if the hash algorithm ever shifted.
+    const bucketFor = (sid, relPath) =>
+      crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+    let holdoutSid = null;
+    for (let i = 0; i < 100000; i++) {
+      const candidate = `holdout-session-${i}`;
+      if (bucketFor(candidate, 'src/holdout.js') < 10) { holdoutSid = candidate; break; }
+    }
+    assert.ok(holdoutSid, 'must find a (sessionId, path) pair landing in the 10% holdout bucket');
+    const holdoutPath = 'src/holdout.js';
+
+    const DAY = 24 * 60 * 60 * 1000;
+    const base = overrides => Object.assign({
+      projectPath: '/proj',
+      relPath: 'src/file.js',
+      absPath: '/proj/src/file.js',
+      sessionId: 'session-x',
+      toolName: 'Read',
+      offset: null,
+      limit: null,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: {} },
+      storeEntry: null,
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      // Outside the 14-day holdout window by default, so only the two
+      // holdout-specific cases below need to think about it at all.
+      projectCreatedAt: new Date(Date.now() - 30 * DAY).toISOString(),
+    }, overrides);
+
+    // 1. Holdout hit: recent project, deterministic bucket < 10 -> never served.
+    const holdoutHit = recall.decide({
+      projectPath: '/proj', relPath: holdoutPath, absPath: `/proj/${holdoutPath}`,
+      sessionId: holdoutSid, toolName: 'Read', offset: null, limit: 100,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { [holdoutPath]: { sessions: [holdoutSid], reads: 1, lastTs: 't', firstTs: 't', firstSession: holdoutSid } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      projectCreatedAt: new Date(Date.now() - 1 * DAY).toISOString(),
+    });
+    assert.strictEqual(holdoutHit.serve, false);
+    assert.strictEqual(holdoutHit.reason, 'holdout');
+
+    // 2. Same pair, but the project is well past the 14-day holdout window --
+    // the read must proceed to serve (tier A: same session, matching hash).
+    const holdoutExpired = recall.decide({
+      projectPath: '/proj', relPath: holdoutPath, absPath: `/proj/${holdoutPath}`,
+      sessionId: holdoutSid, toolName: 'Read', offset: null, limit: 100,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { [holdoutPath]: { sessions: [holdoutSid], reads: 1, lastTs: 't', firstTs: 't', firstSession: holdoutSid } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      projectCreatedAt: new Date(Date.now() - 30 * DAY).toISOString(),
+    });
+    assert.strictEqual(holdoutExpired.serve, true, 'holdout switches off after 14 days');
+    assert.strictEqual(holdoutExpired.tier, 'A');
+
+    // 3. Tier A: same session already read it, hash matches -> pointer serve.
+    const tierA = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(tierA.serve, true);
+    assert.strictEqual(tierA.tier, 'A');
+    assert.ok(tierA.body.includes('src/file.js') && tierA.body.includes('HASH1'));
+    assert.ok(tierA.savedTokens > 0 && tierA.pct > 0);
+
+    // 4. Tier A refused: same session read it, but the file changed since.
+    const tierAMismatch = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH-OLD', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH-NEW' },
+    }));
+    assert.strictEqual(tierAMismatch.serve, false);
+
+    // 5. Tier B: a DIFFERENT session read it before, skeleton fresh, and this
+    // call clears 2.25x compression (1200 / 400 = 3x).
+    const tierB = recall.decide(base({
+      sessionId: 'session-y',
+      limit: 100, // callTokens = 1200
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(tierB.serve, true);
+    assert.strictEqual(tierB.tier, 'B');
+    assert.strictEqual(tierB.savedTokens, 1200 - 400);
+    assert.strictEqual(tierB.pct, Math.round((100 * (1200 - 400)) / 1200));
+
+    // 6. Tier B refused: same shape, but compression falls below 2.25x
+    // (1200 / 700 ≈ 1.71x).
+    const tierBBelowFloor = recall.decide(base({
+      sessionId: 'session-y',
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 700, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(tierBBelowFloor.serve, false);
+    assert.strictEqual(tierBBelowFloor.reason, 'below-compression-floor');
+
+    // 7. Refused: the call itself is under the 400-token floor.
+    const underFloor = recall.decide(base({
+      limit: 10, // 10 * 12 = 120 tokens
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(underFloor.serve, false);
+    assert.strictEqual(underFloor.reason, 'below-min-tokens');
+
+    // 8. Refused: this path was already served earlier in the session.
+    const alreadyServed = recall.decide(base({
+      limit: 100,
+      sessionState: { served: { 'src/file.js': 'HASH1' }, interceptions: 1 },
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(alreadyServed.serve, false);
+    assert.strictEqual(alreadyServed.reason, 'already-served');
+
+    // 9. Refused: rejections already at the limit.
+    const rejectionLimited = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 3 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(rejectionLimited.serve, false);
+    assert.strictEqual(rejectionLimited.reason, 'rejection-limit');
+
+    // 10. Tier C: dark by default (first-ever read, no config flag)...
+    const tierCDark = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: {} },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+      config: {},
+    }));
+    assert.strictEqual(tierCDark.serve, false);
+    assert.strictEqual(tierCDark.reason, 'no-tier');
+    // ...and lit once config.recall.tierC is explicitly set.
+    const tierCLit = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: {} },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+      config: { recall: { tierC: true } },
+    }));
+    assert.strictEqual(tierCLit.serve, true);
+    assert.strictEqual(tierCLit.tier, 'C');
+  });
+
   await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
     const { skeletonize } = require('../lib/skeleton');
     // 30 identical helper functions (elided bodies) mixed with 5 identical
