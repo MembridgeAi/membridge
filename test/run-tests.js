@@ -5437,6 +5437,22 @@ async function main() {
     assert.deepStrictEqual(out.epochs[0], [0, 2]);
     assert.deepStrictEqual(out.epochs[1], [3, 4]);
   });
+  check('redundancy: classifies reads as first, same-session repeat, or cross-session repeat', () => {
+    const redundancy = require('../lib/redundancy');
+    const reads = [
+      { kind: 'read', ts: 't1', session: 'a', file: '/r/x.js' },  // first ever
+      { kind: 'read', ts: 't2', session: 'a', file: '/r/x.js' },  // same session again
+      { kind: 'read', ts: 't3', session: 'b', file: '/r/x.js' },  // different session
+      { kind: 'read', ts: 't4', session: 'b', file: '/r/y.js' },  // first ever
+    ];
+    const out = redundancy.classifyReads(reads, []);
+    assert.deepStrictEqual(out.map(r => r.tier),
+      ['first', 'same-session', 'cross-session', 'first']);
+    const t = redundancy.tally(out);
+    assert.strictEqual(t.first, 2);
+    assert.strictEqual(t.sameSession, 1);
+    assert.strictEqual(t.crossSession, 1);
+  });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
