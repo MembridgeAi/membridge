@@ -5453,6 +5453,95 @@ async function main() {
     assert.strictEqual(t.sameSession, 1);
     assert.strictEqual(t.crossSession, 1);
   });
+  check('redundancy: reads with no session at all pin to same-session (scan.js backfill reliance)', () => {
+    const redundancy = require('../lib/redundancy');
+    const reads = [
+      { kind: 'read', ts: 't1', file: '/r/z.js' },  // no session field
+      { kind: 'read', ts: 't2', file: '/r/z.js' },  // still no session field
+    ];
+    const out = redundancy.classifyReads(reads, []);
+    assert.deepStrictEqual(out.map(r => r.tier), ['first', 'same-session']);
+  });
+  check('codex adapter: two token_count events with the same timestamp get distinct messageIds; both survive buildRequests', () => {
+    const ledger = require('../lib/ledger');
+    const entries = [
+      { type: 'session_meta', timestamp: '2026-07-28T09:59:00Z', payload: { cwd: '/repo' } },
+      { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+        payload: { type: 'token_count', info: {
+          last_token_usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 },
+        } } },
+      // same millisecond -- turn_id absent in both, as observed in real Codex transcripts
+      { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+        payload: { type: 'token_count', info: {
+          last_token_usage: { input_tokens: 200, cached_input_tokens: 0, output_tokens: 20 },
+        } } },
+    ];
+    const events = codexAdapter.extractEvents(entries, {});
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 2);
+    assert.notStrictEqual(usage[0].messageId, usage[1].messageId, 'same-ms fallback ids must be distinct');
+    const reqs = ledger.buildRequests(usage.map(u => Object.assign({}, u, { session: 's1' })));
+    assert.strictEqual(reqs.length, 2, 'both requests must survive dedupe, not collapse into one');
+  });
+  check('ledger: buildRequests keeps requests from different sessions even when the fallback messageId collides', () => {
+    const ledger = require('../lib/ledger');
+    const events = [
+      { kind: 'usage', ts: 't1', session: 'session-a', model: 'gpt-5',
+        usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 5 } },
+      { kind: 'usage', ts: 't1', session: 'session-b', model: 'gpt-5',
+        usage: { input_tokens: 200, cached_input_tokens: 0, output_tokens: 5 } },
+    ];
+    const reqs = ledger.buildRequests(events);
+    assert.strictEqual(reqs.length, 2, 'identical fallback id from two different sessions must not collide');
+  });
+  check('ledger: sessionVolume epoch-splits each sidechain stream independently of the main stream', () => {
+    const ledger = require('../lib/ledger');
+    const mk = (ts, ctx, out, sidechain) => ({ ts, ctx, out, inCost: 0, outCost: 0, session: 's1', sidechain: !!sidechain });
+    // non-sidechain context grows steadily: 1000 -> 2000 -> 3000, no reset.
+    // A sidechain request (small ctx 100) lands chronologically between the
+    // 2000 and 3000 non-sidechain requests -- it must not look like a
+    // compaction/reset in the MAIN stream.
+    const reqs = [
+      mk('t1', 1000, 0, false),
+      mk('t2', 2000, 0, false),
+      mk('t3', 100, 0, true),
+      mk('t4', 3000, 0, false),
+    ];
+    const out = ledger.sessionVolume(reqs);
+    assert.strictEqual(out.nRequests, 4);
+    assert.strictEqual(out.volume, 1000 + 2000 + 100 + 3000, 'volume sums context over everything');
+    assert.strictEqual(out.epochs.length, 2, 'one epoch for the non-sidechain stream, one for the sidechain stream');
+    assert.deepStrictEqual(out.epochs[0], [0, 3], 'non-sidechain stream: no split, spans its own indices 0 and 3');
+    assert.deepStrictEqual(out.epochs[1], [2, 2], 'sidechain stream: single request, its own epoch');
+  });
+  check('ledger: sessionVolume single-stream output is unchanged (regression guard for the epoch fix)', () => {
+    const ledger = require('../lib/ledger');
+    const mk = (ts, ctx, out) => ({ ts, ctx, out, inCost: 0, outCost: 0, session: 's1', sidechain: false });
+    const reqs = [
+      mk('t1', 1000, 100), mk('t2', 2000, 100), mk('t3', 3000, 100),
+      mk('t4', 400, 100), mk('t5', 900, 100),
+    ];
+    const out = ledger.sessionVolume(reqs);
+    assert.strictEqual(out.epochs.length, 2);
+    assert.deepStrictEqual(out.epochs[0], [0, 2]);
+    assert.deepStrictEqual(out.epochs[1], [3, 4]);
+  });
+  check('ordering: mixed-precision ISO timestamps sort chronologically, not lexicographically', () => {
+    const ledger = require('../lib/ledger');
+    // Inserted in reverse-of-chronological order: the millisecond-bearing
+    // stamp first, the whole-second stamp second. String comparison would
+    // keep them in THAT order ("." sorts before "Z"); byTs must correct it.
+    const events = [
+      { kind: 'usage', ts: '2026-07-28T10:00:00.500Z', session: 's1', messageId: 'later',
+        model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } },
+      { kind: 'usage', ts: '2026-07-28T10:00:00Z', session: 's1', messageId: 'earlier',
+        model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } },
+    ];
+    const reqs = ledger.buildRequests(events);
+    assert.strictEqual(reqs.length, 2);
+    assert.strictEqual(reqs[0].messageId, 'earlier');
+    assert.strictEqual(reqs[1].messageId, 'later', 'the .500Z stamp must sort second, not first');
+  });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
