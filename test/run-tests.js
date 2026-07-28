@@ -5422,6 +5422,21 @@ async function main() {
     assert.strictEqual(mixed[0].provider, 'anthropic');
     assert.strictEqual(mixed[1].provider, 'openai');
   });
+  check('ledger: volume sums context per request and splits epochs on context reset', () => {
+    const ledger = require('../lib/ledger');
+    const mk = (ts, ctx, out) => ({ ts, ctx, out, inCost: 0, outCost: 0, session: 's1', sidechain: false });
+    // context grows, then drops hard (compaction) and grows again
+    const reqs = [
+      mk('t1', 1000, 100), mk('t2', 2000, 100), mk('t3', 3000, 100),
+      mk('t4', 400, 100), mk('t5', 900, 100),
+    ];
+    const out = ledger.sessionVolume(reqs);
+    assert.strictEqual(out.nRequests, 5);
+    assert.strictEqual(out.volume, 1000 + 2000 + 3000 + 400 + 900, 'volume is the sum of per-request context');
+    assert.strictEqual(out.epochs.length, 2, 'the drop at t4 starts a new epoch');
+    assert.deepStrictEqual(out.epochs[0], [0, 2]);
+    assert.deepStrictEqual(out.epochs[1], [3, 4]);
+  });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
