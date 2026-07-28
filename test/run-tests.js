@@ -5696,6 +5696,200 @@ async function main() {
     assert.strictEqual(hot.readers, L.READERS_PER_PATH_CAP, 'reader sessions per path are bounded');
     assert.strictEqual(led2.hotPaths.length, L.HOT_PATH_CAP, 'the hot set is bounded');
   });
+  check('ledger-fold: keyHorizonFor scales 2.5x the plumbing cap, floored at the old 5000 bound', () => {
+    const fold = require('../lib/ledger-fold');
+    assert.strictEqual(fold.keyHorizonFor(2000), 5000, 'the default plumbing cap keeps the old fixed horizon exactly');
+    assert.strictEqual(fold.keyHorizonFor(8000), 20000, '2.5x scaling once the window is raised past the old bound');
+    assert.strictEqual(fold.keyHorizonFor(100), 5000, 'small windows are floored at 5000, never shrink below it');
+    assert.strictEqual(fold.keyHorizonFor(undefined), 5000, 'an unknown cap falls back to the default-config horizon');
+  });
+  // BLOCKING 1. SEEN_KEY_CAP/READ_KEY_CAP used to be a hard-coded 5000 while
+  // config.maxPlumbingEvents (the window that feeds this fold) is
+  // user-configurable and unclamped. Raise the window above the fixed
+  // horizon and a re-fold of the SAME window evicts its own dedupe keys
+  // before the repeat, double-counting every request and read in it,
+  // permanently and compounding every sync (measured: window 8000 against
+  // the old fixed 5000-key horizon, folded twice, inflated totals by 38%).
+  // The horizon must scale with the effective window instead.
+  check('ledger-fold: BLOCKING 1 -- a window bigger than the old fixed cap folds twice without double-counting', () => {
+    const store = require('../lib/ledger-store');
+    const fold = require('../lib/ledger-fold');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const plumbingCap = 8000;
+    const n = 6000; // bigger than the pre-fix fixed 5000-key horizon
+    assert.ok(n > fold.LIMITS.SEEN_KEY_CAP, 'the scenario must exceed the pre-fix fixed cap to reproduce the bug');
+    const window = [];
+    for (let i = 0; i < n; i++) {
+      const ts = new Date(T0 + i * 1000).toISOString();
+      window.push({ kind: 'usage', ts, session: 's' + i, messageId: 'm' + i, model: 'claude-opus-4-6', usage: u });
+      window.push({ kind: 'read', ts, session: 's' + i, toolUseId: 'tu' + i, file: '/r/f' + i + '.js' });
+    }
+
+    const first = store.foldProjectLedger(null, window, plumbingCap);
+    assert.strictEqual(first.requests, n, 'every request in the window is counted the first pass');
+    assert.strictEqual(first.reads.first, n, 'every read in the window is counted the first pass');
+
+    // Re-folding the SAME window (a re-sync before anything new happened) is
+    // exactly the failure the reviewer measured with the old fixed horizon.
+    const second = store.foldProjectLedger(first, window, plumbingCap);
+    assert.strictEqual(second.requests, n, 'requests must not double-count on a repeat fold of a raised window');
+    assert.strictEqual(second.volume, first.volume, 'volume must not double-count on a repeat fold of a raised window');
+    assert.deepStrictEqual(second.reads, first.reads, 'reads must not double-count on a repeat fold of a raised window');
+  });
+  // BLOCKING 2. Pre-fix ledger.json files on real machines have nonzero
+  // totals but empty seenKeys/readKeys (dedupe evidence was never
+  // persisted before this fix) and no version field. Folding onto one of
+  // those re-adds the whole current window on top of the old total --
+  // measured +100% one-time over-count, permanent because it's baked into
+  // the persisted number. Such a ledger must be discarded and rebuilt from
+  // zero, not folded onto.
+  check('ledger-fold: BLOCKING 2 -- an un-versioned ledger with totals but no seenKeys resets to zero', () => {
+    const store = require('../lib/ledger-store');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const window = [];
+    for (let i = 0; i < 10; i++) {
+      window.push({ kind: 'usage', ts: new Date(T0 + i * 1000).toISOString(), session: 's' + i,
+        messageId: 'm' + i, model: 'claude-opus-4-6', usage: u });
+    }
+    // Exactly the shape a real pre-fix ledger.json has: nonzero totals from
+    // real usage, but no version field and no dedupe evidence.
+    const preFix = {
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sessions: 4, requests: 500, volume: 900000, inCost: 1.2, outCost: 0.4,
+      reads: { first: 50, sameSession: 20, crossSession: 5 },
+      hotPaths: [], seenKeys: [], readKeys: [], sessionIds: [], fileReaders: {},
+    };
+    const migrated = store.foldProjectLedger(preFix, window);
+    const fresh = store.foldProjectLedger(null, window);
+    assert.deepStrictEqual(migrated, Object.assign({}, fresh, { updatedAt: migrated.updatedAt }),
+      'an un-versioned ledger with totals but no evidence must fold exactly like a fresh (null) ledger');
+    assert.strictEqual(migrated.requests, window.length, 'the old poisoned totals are discarded, not carried forward');
+    assert.strictEqual(migrated.version, 2, 'the reset ledger is stamped with the current version');
+  });
+  check('ledger-fold: BLOCKING 2 -- a v2 ledger round-trips untouched (no reset)', () => {
+    const store = require('../lib/ledger-store');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const window = [
+      { kind: 'usage', ts: new Date(T0).toISOString(), session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+    ];
+    const built = store.foldProjectLedger(null, window);
+    assert.strictEqual(built.version, 2, 'every fold stamps the current version');
+    // Round-trip through JSON (as it would through disk) and fold the SAME
+    // window again: real dedupe evidence plus version:2 must dedupe, not
+    // reset, unlike the unmigrated case above.
+    const reloaded = JSON.parse(JSON.stringify(built));
+    const refolded = store.foldProjectLedger(reloaded, window);
+    assert.strictEqual(refolded.requests, 1, 'a versioned ledger with real evidence dedupes instead of resetting');
+    assert.strictEqual(refolded.version, 2);
+  });
+  // MINOR A. Incremental tiering processes reads pass-by-pass; a path's
+  // reads can arrive across passes with INVERTED timestamps (an earlier
+  // read folded in a later pass than a later read from another session).
+  check('ledger-fold: MINOR A -- ordering guard bounds (but does not eliminate) crossSession inflation', () => {
+    const store = require('../lib/ledger-store');
+    const { classifyReads, tally } = require('../lib/redundancy');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const file = '/r/shared.js';
+    const tA1 = new Date(T0 + 5000).toISOString();  // A's earliest read
+    const tA2 = new Date(T0 + 10000).toISOString(); // A's second read
+    const tB = new Date(T0 + 20000).toISOString();  // B's read, latest ts
+
+    // Chronological order (what a batch classifier sorts on): A@tA1, A@tA2, B@tB.
+    // Process order (what actually happens: B's pass is folded first):
+    //   pass 1: B@tB
+    //   pass 2: A@tA1, A@tA2
+    const passB = [{ kind: 'read', ts: tB, session: 'B', toolUseId: 'b1', file }];
+    const passA = [
+      { kind: 'read', ts: tA1, session: 'A', toolUseId: 'a1', file },
+      { kind: 'read', ts: tA2, session: 'A', toolUseId: 'a2', file },
+    ];
+
+    // Oracle: A@tA1 -> first (nobody has read `file` yet); A@tA2 -> same-session
+    // (only A so far); B@tB -> cross-session (A already has).
+    const oracle = tally(classifyReads(passA.concat(passB), []));
+    assert.deepStrictEqual(oracle, { first: 1, sameSession: 1, crossSession: 1 },
+      'sanity: confirms the oracle answer this scenario is built around');
+
+    const afterB = store.foldProjectLedger(null, passB);
+    assert.deepStrictEqual(afterB.reads, { first: 1, sameSession: 0, crossSession: 0 },
+      'B is the only reader seen so far -- tiers as first');
+
+    const afterA = store.foldProjectLedger(afterB, passA);
+    // Pre-fix (no ordering guard), both A reads would tier against a reader
+    // set that already contained B, giving {first 1, sameSession 0,
+    // crossSession 2} overall -- double the oracle's crossSession. With the
+    // fix: A@tA1 precedes B's recorded firstTs, so it re-tiers as 'first'
+    // (moving firstTs/firstSession back to A@tA1); A@tA2 is not earlier than
+    // the now-updated firstTs, and B is already a recorded reader, so it
+    // still tiers 'crossSession'. Net incremental answer:
+    // { first: 2, sameSession: 0, crossSession: 1 } -- still not the oracle's
+    // { first: 1, sameSession: 1, crossSession: 1 } (the fix trades a
+    // 'sameSession' miscount for a 'first' miscount), but crossSession --
+    // the metric the bug actually inflated -- now matches the oracle exactly
+    // instead of doubling it.
+    assert.deepStrictEqual(afterA.reads, { first: 2, sameSession: 0, crossSession: 1 },
+      'the ordering guard produces the improved-but-imperfect incremental answer');
+    assert.notStrictEqual(afterA.reads.crossSession, 2,
+      'crossSession must no longer be inflated to double the oracle value');
+  });
+  // MINOR C. Differential guard: nothing previously cross-checked this
+  // incremental classifier against the batch oracle in lib/redundancy.js.
+  check('ledger-fold: MINOR C -- differential guard, incremental tiering matches the batch oracle over in-order windows', () => {
+    const store = require('../lib/ledger-store');
+    const { classifyReads, tally } = require('../lib/redundancy');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const paths = ['/p/a.js', '/p/b.js', '/p/c.js', '/p/d.js', '/p/e.js', '/p/f.js'];
+    // Deterministic session-per-block sequence (no randomness): block 0
+    // establishes 'first' for every path, block 1 repeats the SAME session
+    // ('sameSession'), and blocks 2+ bring in other sessions ('crossSession').
+    const blockSessions = ['s1', 's1', 's2', 's3', 's2', 's1', 's3'];
+    const N = 40;
+    const events = [];
+    for (let i = 0; i < N; i++) {
+      const block = Math.floor(i / paths.length);
+      events.push({
+        kind: 'read',
+        ts: new Date(T0 + i * 1000).toISOString(),
+        session: blockSessions[block % blockSessions.length],
+        toolUseId: 'tu' + i,
+        file: paths[i % paths.length],
+      });
+    }
+
+    // Oracle: one batch classification over every event.
+    const oracle = tally(classifyReads(events, []));
+    assert.ok(oracle.first > 0 && oracle.sameSession > 0 && oracle.crossSession > 0,
+      'the fixture must exercise all three tiers for the differential check to be meaningful');
+
+    // Incremental: the SAME events, split into 4 sequential (chronologically
+    // non-overlapping, in-order) windows, folded one after another -- this
+    // is what real scanning does: each dirty pass folds whatever the
+    // sliding window currently holds.
+    const WINDOWS = 4;
+    const perWindow = N / WINDOWS;
+    let led = null;
+    for (let w = 0; w < WINDOWS; w++) {
+      led = store.foldProjectLedger(led, events.slice(w * perWindow, (w + 1) * perWindow));
+    }
+
+    assert.deepStrictEqual(led.reads, oracle,
+      'incremental tiering across sequential in-order windows must match the batch oracle exactly');
+  });
+  check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-atomic-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const built = store.buildProjectLedger([]);
+    const p = store.writeLedger(proj, built);
+    assert.ok(fs.existsSync(p), 'ledger.json is written');
+    assert.strictEqual(store.readLedger(proj).version, 2, 'the write round-trips through the same path readLedger uses');
+    const dir = path.dirname(p);
+    const leftovers = fs.readdirSync(dir).filter(f => f.startsWith('.ledger.json.') && f.endsWith('.tmp'));
+    assert.deepStrictEqual(leftovers, [], 'no temp file survives a successful write');
+  });
   check('api: /api/savings reports per-project ledgers and totals', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'savings-proj');
