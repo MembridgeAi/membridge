@@ -130,15 +130,15 @@ Skeleton plus an explicit header: this is a structural summary, the full file is
 
 If the agent reads the file anyway after being served, increment `rejections` and stop intercepting that path for the rest of the session. Persisted across sessions with decay, so files that consistently need full content stop being intercepted at all.
 
-## 5.5 The existing injected block
+## 5.5 The existing injected block — unchanged (decided)
 
-Carried from the CEO memo §4.2 and **not yet separately confirmed** — flagged for Marco in §13.
+An earlier draft proposed shrinking the `CLAUDE.md` block to a sub-200-token index once recall could serve content on demand. **Rejected, deliberately.**
 
-Today's `CLAUDE.md` block (~1,400 tokens) is loaded before request one and billed on every request after, costing **0.9% of all spend** whether or not the session benefits. Once recall serves content on demand, the block no longer needs to carry content at all. It shrinks to an **index under 200 tokens**: what MemBridge knows about this project, and how to ask.
+The block is not a cache of things recall would replace. It carries **cross-tool, cross-teammate narrative memory** — what a teammate's Codex session decided, which agent owns what — and recall serves *file structure*, an entirely different thing. The block is also the only channel that reaches tools with no hook or MCP support.
 
-Effect: the standing tax drops from 0.9% to ~0.3%, and the share of sessions where the block is net-positive rises from 60% to ~69%.
+Shrinking it would trade the product's existing, visible value for roughly 0.6 percentage points of token saving. The block stays exactly as it is.
 
-This matters because it is the only part of the design that helps the **29% of sessions with no recoverable waste** — they stop paying for a benefit they never receive.
+**Consequence, accepted:** the ~0.9% standing cost of the block remains, and the 29% of sessions with no recoverable waste keep paying it. The ledger will measure that cost per project (§8.2), so the trade is visible rather than assumed — but MemBridge does not act on it unilaterally.
 
 ## 6. Terminal output
 
@@ -283,7 +283,6 @@ Suite stays offline.
 
 ## 14. Needs Marco's confirmation before implementation
 
-Two items in this spec were not explicitly approved during the design session:
-
 1. **Minimum-size floor of 400 tokens (§5.2).** An earlier draft said ~1,000. The read-size data shows that would skip more than half of all candidate reads. 400 is my recommendation; the number is a judgement call and should be Marco's.
-2. **Shrinking the injected `CLAUDE.md` block to a <200-token index (§5.5).** Carried from the approved CEO memo but not separately discussed. It is the only part of the design that helps sessions with no recoverable waste, and it halves the standing tax — but it changes what every agent sees at startup, which is a bigger behavioural change than anything else here.
+
+_(Resolved 2026-07-28: shrinking the injected `CLAUDE.md` block is rejected — see §5.5.)_

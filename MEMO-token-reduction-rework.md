@@ -88,7 +88,7 @@ That's a **file-level knowledge store**, not an activity feed. The activity feed
 
 Push-everything-to-everyone is what makes the 29% pay for nothing. The fix has a shape MCP already gives us:
 
-- **Always-on block shrinks to an index, not content.** Target **under 200 tokens**: "MemBridge has file-level notes on 40 files in this project. Query `membridge/recall` before reading a file." At 200 tokens the tax drops to **0.3% and is net-positive in ~69% of sessions**, versus 60% today.
+- **The always-on block stays as it is.** An earlier draft of this memo proposed shrinking it to a sub-200-token index. That is now rejected: the block carries cross-tool, cross-teammate *narrative* memory — what a teammate's Codex decided — which file-structure recall does not replace, and it is the only channel reaching tools without hook or MCP support. Trading that for ~0.6pp of token saving is a bad deal. The ~0.9% standing cost stays, measured and visible rather than assumed.
 - **The content moves behind an MCP tool** the agent calls when it's about to read something. Sessions that need nothing fetch nothing and pay nothing.
 - The prize: a `recall(path)` that returns 300 tokens instead of the agent reading a 4,000-token file. That's where an 8% saving actually comes from.
 
@@ -119,7 +119,7 @@ That turns MemBridge from "shared memory, sounds nice" into "here is $264 a year
 | **R0** | **Ledger engine.** Port the parser: per-request usage → residence-weighted ledger → orientation and redundant-read share, per project. Local only. | Everything else needs a scoreboard. Ship this first even if nothing else changes — it is independently valuable and immediately demoable. |
 | **R1** | **Savings panel.** Surface R0 in the dashboard: spend, waste, what we saved, this week. | This is the demo. It's also the honest test of whether we help. |
 | **R2** | **File-level knowledge store.** Build the per-path record (exports, invariants, dependencies, churn, recent decisions) from the session logs and git we already read. | The payload change. Without it, R3 has nothing worth serving. |
-| **R3** | **`recall(path)` MCP tool + shrink the injected block to a <200-token index.** | The delivery change. This is where the money actually moves. |
+| **R3** | **PreToolUse hook + `recall(path)` MCP tool.** | The delivery change. This is where the money actually moves. |
 | **R4** | **Team-wide recall.** Cross-developer, not just cross-session. | Our redundancy figure already counts *other people's* earlier reads. Team sync is where the number gets big. |
 | **R5** | **Adaptive injection.** Use R0 to decide per project whether to inject at all, and how much. | Kills the residual tax on the 29% who never benefit. |
 
