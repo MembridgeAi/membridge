@@ -121,7 +121,7 @@ That turns MemBridge from "shared memory, sounds nice" into "here is $264 a year
 | **R2** | **File-level knowledge store.** Build the per-path record (exports, invariants, dependencies, churn, recent decisions) from the session logs and git we already read. | The payload change. Without it, R3 has nothing worth serving. |
 | **R3** | **PreToolUse hook + `recall(path)` MCP tool.** | The delivery change. This is where the money actually moves. |
 | **R4** | **Team-wide recall.** Cross-developer, not just cross-session. | Our redundancy figure already counts *other people's* earlier reads. Team sync is where the number gets big. |
-| **R5** | **Adaptive injection.** Use R0 to decide per project whether to inject at all, and how much. | Kills the residual tax on the 29% who never benefit. |
+| **R5** | **Surface the block's cost per project.** Use R0 to show what the injected memory costs and whether it earned out. | Makes the trade visible so the *user* can decide. We do not suppress their memory block for them. |
 
 R0 and R1 are the ones I'd start Monday. They're small, they're honest, and they give us a number to sell.
 
