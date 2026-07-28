@@ -5778,7 +5778,7 @@ async function main() {
     assert.deepStrictEqual(migrated, Object.assign({}, fresh, { updatedAt: migrated.updatedAt }),
       'an un-versioned ledger with totals but no evidence must fold exactly like a fresh (null) ledger');
     assert.strictEqual(migrated.requests, window.length, 'the old poisoned totals are discarded, not carried forward');
-    assert.strictEqual(migrated.version, 3, 'the reset ledger is stamped with the current version');
+    assert.strictEqual(migrated.version, 4, 'the reset ledger is stamped with the current version');
   });
   check('ledger-fold: BLOCKING 2 -- a current-version ledger round-trips untouched (no reset)', () => {
     const store = require('../lib/ledger-store');
@@ -5788,14 +5788,14 @@ async function main() {
       { kind: 'usage', ts: new Date(T0).toISOString(), session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
     ];
     const built = store.foldProjectLedger(null, window);
-    assert.strictEqual(built.version, 3, 'every fold stamps the current version');
+    assert.strictEqual(built.version, 4, 'every fold stamps the current version');
     // Round-trip through JSON (as it would through disk) and fold the SAME
     // window again: real dedupe evidence plus the current version must
     // dedupe, not reset, unlike the unmigrated case above.
     const reloaded = JSON.parse(JSON.stringify(built));
     const refolded = store.foldProjectLedger(reloaded, window);
     assert.strictEqual(refolded.requests, 1, 'a versioned ledger with real evidence dedupes instead of resetting');
-    assert.strictEqual(refolded.version, 3);
+    assert.strictEqual(refolded.version, 4);
   });
   // H1 (BLOCKER, fix round 1). The producer (this fold, fed by
   // lib/adapters/claude-code.js) used to key fileReaders/hotPaths by the read
@@ -5845,7 +5845,7 @@ async function main() {
       { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
     ];
     const next = store.foldProjectLedger(prev, events, undefined, proj);
-    assert.strictEqual(next.version, 3, 'the key-shape change gets its own schema version');
+    assert.strictEqual(next.version, 4, 'the key-shape change gets its own schema version');
     assert.deepStrictEqual(Object.keys(next.fileReaders), ['src/x.js'], 'no absolute key may survive alongside the new relative ones');
     // MEDIUM (fix round 3): this used to reset requests/volume/cost to zero
     // right alongside the key-shaped fields -- exactly the regression the
@@ -5886,7 +5886,7 @@ async function main() {
     // No events at all this pass -- isolates the migration itself from any
     // newly-folded activity.
     const next = store.foldProjectLedger(prev, []);
-    assert.strictEqual(next.version, 3, 'stamped with the current version');
+    assert.strictEqual(next.version, 4, 'stamped with the current version');
     assert.strictEqual(next.requests, 900, 'requests must not be zeroed by the key-shape migration');
     assert.strictEqual(next.volume, 54000000, 'volume must not be zeroed by the key-shape migration');
     assert.strictEqual(next.inCost, 12.5, 'inCost must not be zeroed by the key-shape migration');
@@ -7166,6 +7166,175 @@ async function main() {
     assert.strictEqual(result.attempts, 1, 'init is attempted exactly once across both calls -- proves the false branch is memoized, not retried');
   });
 
+  // --- Task 6: settling avoided tokens into the ledger (spec §7.1/§7.3) ---
+  // net = callTokens - (skeletonTokens + followTokens). Pins the three
+  // outcomes named in the design doc's worked example plus the earlier
+  // rule's exact mistake (a targeted follow-up counting as a rejection).
+  {
+    const ledgerStoreT6 = require('../lib/ledger-store');
+    const ledgerFoldRecall = require('../lib/ledger-fold-recall');
+    const recallStoreT6 = require('../lib/recall-store');
+
+    const seedT6Project = name => {
+      const proj = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(path.join(proj, 'src'), { recursive: true });
+      fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [proj]: { events: [] } } });
+      return proj;
+    };
+    // Writes exactly the two-row shape lib/hooks-recall.js's appendEvent
+    // produces for a committed serve: a pending row (full detail) followed
+    // by its confirmation (same ts/sessionId/relPath).
+    const writeServeRows = (proj, ts, sessionId, relPath, tier, callTokens, skeletonTokens) => {
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj)), { recursive: true });
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(proj), jsonl([
+        { ts, sessionId, relPath, tier, callTokens, skeletonTokens, holdout: false, committed: false },
+        { ts, sessionId, relPath, committed: true },
+      ]));
+    };
+
+    // (1) No follow-up -> full avoidance. net = 4210 - 380 = 3830.
+    const proj1T6 = seedT6Project('t6-full-avoidance');
+    const rel1 = 'src/a.js';
+    recallStoreT6.put(proj1T6, rel1, { contentHash: 'h1', skeleton: 'SKEL1', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    writeServeRows(proj1T6, '2026-07-28T10:00:00.000Z', 'sess-1', rel1, 'B', 4210, 380);
+    const led1 = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig());
+    check('ledger-fold-recall: no follow-up nets the full callTokens - skeletonTokens, no rejection', () => {
+      assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(proj1T6, rel1).rejections, 0, 'a full avoidance must never bump rejections');
+    });
+    check('ledger-fold-recall: a successful fold truncates the queue (it is a queue, the ledger is the durable record)', () => {
+      assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj1T6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj1T6), 'utf8') === '',
+        'events.jsonl must be empty (or removed) after a successful fold');
+    });
+    check('ledger-fold-recall: folding twice is idempotent -- the truncated queue has nothing left to settle', () => {
+      const led1Again = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig());
+      assert.deepStrictEqual(led1Again.avoided, led1.avoided, 're-folding an already-truncated queue must not change the totals');
+    });
+
+    // (2) A targeted follow-up (limit 50 -> 600 tokens) -- the case the OLD
+    // rule got wrong. net = 4210 - (380 + 600) = 3230, a PARTIAL WIN, and
+    // bumpRejection must NEVER fire for a positive net.
+    const proj2T6 = seedT6Project('t6-partial-win');
+    const rel2 = 'src/b.js';
+    recallStoreT6.put(proj2T6, rel2, { contentHash: 'h2', skeleton: 'SKEL2', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    writeServeRows(proj2T6, '2026-07-28T10:00:00.000Z', 'sess-2', rel2, 'B', 4210, 380);
+    const followUp2 = {
+      kind: 'read', ts: '2026-07-28T10:05:00.000Z', session: 'sess-2', toolUseId: 'fu-2',
+      file: path.join(proj2T6, rel2), tool: 'Read', limit: 50, offset: null,
+    };
+    const led2 = ledgerStoreT6.updateLedger(proj2T6, [followUp2], util.getConfig());
+    check('ledger-fold-recall: a smaller targeted follow-up (600 tokens) nets +3230 as a PARTIAL WIN, not a rejection', () => {
+      assert.deepStrictEqual(led2.avoided, { tokens: 3230, serves: 1, tierA: 0, tierB: 1, partialWins: 1, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(proj2T6, rel2).rejections, 0,
+        'bumpRejection must NOT be called for a positive net -- that is precisely the earlier rule\'s mistake');
+    });
+
+    // (3) A full re-read (no limit) claws back the whole skeleton and then
+    // some. net = 4210 - (380 + 4210) = -380, a NET NEGATIVE, and
+    // bumpRejection must fire exactly once.
+    const proj3T6 = seedT6Project('t6-net-negative');
+    const rel3 = 'src/c.js';
+    // followTokens for a no-limit follow-up prices off the file's CURRENT
+    // byte size (mirroring recall.js's own estimateCallTokens for a full
+    // read) -- 16840 bytes / 4 = 4210 tokens, matching the original call
+    // exactly.
+    fs.writeFileSync(path.join(proj3T6, rel3), 'x'.repeat(16840));
+    recallStoreT6.put(proj3T6, rel3, { contentHash: 'h3', skeleton: 'SKEL3', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    writeServeRows(proj3T6, '2026-07-28T10:00:00.000Z', 'sess-3', rel3, 'B', 4210, 380);
+    const followUp3 = {
+      kind: 'read', ts: '2026-07-28T10:05:00.000Z', session: 'sess-3', toolUseId: 'fu-3',
+      file: path.join(proj3T6, rel3), tool: 'Read', limit: null, offset: null,
+    };
+    const led3 = ledgerStoreT6.updateLedger(proj3T6, [followUp3], util.getConfig());
+    check('ledger-fold-recall: a full re-read nets -380 as a NET NEGATIVE, bumpRejection called exactly once', () => {
+      assert.deepStrictEqual(led3.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 });
+      assert.strictEqual(recallStoreT6.get(proj3T6, rel3).rejections, 1, 'bumpRejection must fire exactly once for a net loss');
+    });
+
+    // Holdout rows (spec §7.2) must accumulate ONLY into `holdout`, and must
+    // never touch `avoided` -- the two are strictly separate arms.
+    const proj4T6 = seedT6Project('t6-holdout-isolated');
+    const rel4 = 'src/d.js';
+    fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj4T6)), { recursive: true });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj4T6), jsonl([
+      { ts: '2026-07-28T10:00:00.000Z', sessionId: 'sess-4', relPath: rel4, holdout: true, wouldServe: 'B', callTokens: 1200 },
+    ]));
+    const led4 = ledgerStoreT6.updateLedger(proj4T6, [], util.getConfig());
+    check('ledger-fold-recall: a holdout row accumulates only into `holdout`, never `avoided`', () => {
+      assert.deepStrictEqual(led4.holdout, { skips: 1, callTokens: 1200 });
+      assert.deepStrictEqual(led4.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+    });
+
+    // A pending row whose session-state commit failed never gets a
+    // confirmation row (see lib/hooks-recall.js's own "fix round 3" test) --
+    // it must settle as though the serve never happened: not a serve, no
+    // tokens, no rejection.
+    const proj5T6 = seedT6Project('t6-phantom-pending');
+    const rel5 = 'src/e.js';
+    recallStoreT6.put(proj5T6, rel5, { contentHash: 'h5', skeleton: 'SKEL5', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj5T6)), { recursive: true });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([
+      { ts: '2026-07-28T10:00:00.000Z', sessionId: 'sess-5', relPath: rel5, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      // no confirmation row -- the state write failed
+    ]));
+    const led5 = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig());
+    check('ledger-fold-recall: an uncommitted pending row (no confirmation) never counts as a serve', () => {
+      assert.deepStrictEqual(led5.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(proj5T6, rel5).rejections, 0);
+    });
+
+    // Tier A pointer serves count toward tierA, not tierB.
+    const proj6T6 = seedT6Project('t6-tier-a');
+    const rel6 = 'src/f.js';
+    recallStoreT6.put(proj6T6, rel6, { contentHash: 'h6', skeleton: '', skeletonTokens: 20, fileTokens: 4210, rejections: 0 });
+    writeServeRows(proj6T6, '2026-07-28T10:00:00.000Z', 'sess-6', rel6, 'A', 500, 20);
+    const led6 = ledgerStoreT6.updateLedger(proj6T6, [], util.getConfig());
+    check('ledger-fold-recall: a tier A serve is tallied under tierA, not tierB', () => {
+      assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, partialWins: 0, netNegatives: 0 });
+    });
+
+    // Bounded read: at most MAX_FOLD_LINES rows are consumed per fold pass --
+    // anything past that stays queued (not dropped) for the next pass.
+    check('ledger-fold-recall: readQueue bounds itself at MAX_FOLD_LINES, leaving the remainder queued', () => {
+      const projBound = seedT6Project('t6-bounded-read');
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(projBound)), { recursive: true });
+      const extraRows = 25;
+      const rows = [];
+      for (let i = 0; i < ledgerFoldRecall.MAX_FOLD_LINES + extraRows; i++) {
+        rows.push({ ts: `2026-07-28T10:00:${String(i % 60).padStart(2, '0')}.000Z`, sessionId: 'noise', relPath: `src/noise${i}.js`, holdout: true, wouldServe: 'B', callTokens: 1 });
+      }
+      fs.writeFileSync(ledgerFoldRecall.eventsPath(projBound), jsonl(rows));
+      const ledBound = ledgerStoreT6.updateLedger(projBound, [], util.getConfig());
+      assert.strictEqual(ledBound.holdout.skips, ledgerFoldRecall.MAX_FOLD_LINES, 'exactly one fold pass worth of rows must be consumed');
+      const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(projBound), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remaining.length, extraRows, 'rows past the bound stay queued, never dropped');
+      const ledBound2 = ledgerStoreT6.updateLedger(projBound, [], util.getConfig());
+      assert.strictEqual(ledBound2.holdout.skips, ledgerFoldRecall.MAX_FOLD_LINES + extraRows, 'a second pass finishes off the remainder');
+    });
+  }
+
+  // Task 6: warm() finally gets called somewhere -- wired into syncOnce right
+  // after the ledger write, off the FRESH ledger's own hot set.
+  check('scan: syncOnce warms the recall store after the ledger write, off the fresh ledger\'s hot set', () => {
+    const recallStoreForWarm = require('../lib/recall-store');
+    const originalWarm = recallStoreForWarm.warm;
+    let calledWith = null;
+    recallStoreForWarm.warm = (projectPath, hotPaths, config) => {
+      calledWith = { projectPath, hotPaths, config };
+      return Promise.resolve(0);
+    };
+    try {
+      syncOnce({ project: proj1 });
+    } finally {
+      recallStoreForWarm.warm = originalWarm;
+    }
+    assert.ok(calledWith, 'recallStore.warm was never called from syncOnce');
+    assert.strictEqual(calledWith.projectPath, proj1);
+    assert.ok(Array.isArray(calledWith.hotPaths), 'warm must be handed the fresh ledger\'s hotPaths array');
+  });
+
   check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'ledger-atomic-proj');
@@ -7173,7 +7342,7 @@ async function main() {
     const built = store.buildProjectLedger([]);
     const p = store.writeLedger(proj, built);
     assert.ok(fs.existsSync(p), 'ledger.json is written');
-    assert.strictEqual(store.readLedger(proj).version, 3, 'the write round-trips through the same path readLedger uses');
+    assert.strictEqual(store.readLedger(proj).version, 4, 'the write round-trips through the same path readLedger uses');
     const dir = path.dirname(p);
     const leftovers = fs.readdirSync(dir).filter(f => f.startsWith('.ledger.json.') && f.endsWith('.tmp'));
     assert.deepStrictEqual(leftovers, [], 'no temp file survives a successful write');
@@ -7187,6 +7356,11 @@ async function main() {
       inCost: 0.5, outCost: 0.1,
       reads: { first: 3, sameSession: 2, crossSession: 5 },
       hotPaths: [{ file: '/r/x.js', readers: 2, reads: 4 }],
+      // Direct avoidance / holdout (Task 6): a real, nonzero fixture so the
+      // wire projection is proven to actually carry the ledger's numbers,
+      // not just default them to zero.
+      avoided: { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+      holdout: { skips: 2, callTokens: 900 },
       // Accumulation bookkeeping: durable on disk, never on the wire.
       seenKeys: ['0|s1|m1'], readKeys: ['s1|tu1|/r/x.js'], sessionIds: ['s1'],
       fileReaders: { '/r/x.js': { sessions: ['s1', 's2'], reads: 4, lastTs: 't1' } },
@@ -7212,13 +7386,27 @@ async function main() {
       assert.strictEqual(payload.projects[0].outCost, undefined, 'the ledger must never serve a dollar figure');
       assert.strictEqual(payload.totals.inCost, undefined, 'totals must never carry a dollar figure');
       assert.strictEqual(payload.totals.outCost, undefined, 'totals must never carry a dollar figure');
+      // Task 6 (spec §7.1/§7.2/§8.2): avoided/holdout ride onto the wire
+      // too, tokens only -- the fixture's real numbers must survive the
+      // projection (and its sum into totals), never silently drop to zero.
+      assert.deepStrictEqual(payload.projects[0].avoided,
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(payload.projects[0].holdout, { skips: 2, callTokens: 900 });
+      assert.deepStrictEqual(payload.totals.avoided,
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(payload.totals.holdout, { skips: 2, callTokens: 900 });
+      assert.deepStrictEqual(Object.keys(payload.projects[0].avoided).sort(),
+        ['netNegatives', 'partialWins', 'serves', 'tierA', 'tierB', 'tokens'],
+        'avoided must carry tokens only -- no dollar/cost field');
+      assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
+        'holdout must carry tokens only -- no dollar/cost field');
       // Whitelist: the payload is an explicit projection, so accumulation
       // bookkeeping (dedupe keys, per-path reader sets) can never leak onto
       // the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'holdout', 'hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
-      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['reads', 'requests', 'volume'],
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['avoided', 'holdout', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
