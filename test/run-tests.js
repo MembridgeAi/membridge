@@ -6385,8 +6385,8 @@ async function main() {
 
     assert.strictEqual(recall.MIN_CALL_TOKENS, 400);
     assert.strictEqual(recall.MIN_COMPRESSION, 2.25);
-    assert.strictEqual(recall.HOLDOUT_PCT, 10);
-    assert.strictEqual(recall.HOLDOUT_DAYS, 14);
+    assert.strictEqual(recall.HOLDOUT_PCT, 3);
+    assert.strictEqual(recall.HOLDOUT_DAYS, undefined, 'the 14-day holdout window is gone -- holdout is now continuous');
     assert.strictEqual(recall.ANNOUNCE_TOKENS, 1000);
     assert.strictEqual(recall.REJECTION_LIMIT, 3);
 
@@ -6399,12 +6399,11 @@ async function main() {
     let holdoutSid = null;
     for (let i = 0; i < 100000; i++) {
       const candidate = `holdout-session-${i}`;
-      if (bucketFor(candidate, 'src/holdout.js') < 10) { holdoutSid = candidate; break; }
+      if (bucketFor(candidate, 'src/holdout.js') < recall.HOLDOUT_PCT) { holdoutSid = candidate; break; }
     }
-    assert.ok(holdoutSid, 'must find a (sessionId, path) pair landing in the 10% holdout bucket');
+    assert.ok(holdoutSid, 'must find a (sessionId, path) pair landing in the 3% holdout bucket');
     const holdoutPath = 'src/holdout.js';
 
-    const DAY = 24 * 60 * 60 * 1000;
     const base = overrides => Object.assign({
       projectPath: '/proj',
       relPath: 'src/file.js',
@@ -6418,9 +6417,6 @@ async function main() {
       storeEntry: null,
       fileStat: { size: 4000, hash: 'HASH1' },
       config: {},
-      // Outside the 14-day holdout window by default, so only the two
-      // holdout-specific cases below need to think about it at all.
-      projectCreatedAt: new Date(Date.now() - 30 * DAY).toISOString(),
       // FIX ROUND 1, FINDING 2: tracked must be the explicit literal `true`
       // for decide() to ever consider serving -- every fixture in THIS
       // block represents a genuinely tracked, unpaused project, so it opts
@@ -6428,7 +6424,9 @@ async function main() {
       tracked: true,
     }, overrides);
 
-    // 1. Holdout hit: recent project, deterministic bucket < 10 -> never served.
+    // 1. Holdout hit: deterministic bucket < 3 -> never served. No
+    // projectCreatedAt/date field is passed at all -- decide() no longer
+    // accepts one, and the holdout has no notion of a project's age.
     const holdoutHit = recall.decide({
       projectPath: '/proj', relPath: holdoutPath, absPath: `/proj/${holdoutPath}`,
       sessionId: holdoutSid, toolName: 'Read', offset: null, limit: 100,
@@ -6437,15 +6435,18 @@ async function main() {
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
       config: {},
-      projectCreatedAt: new Date(Date.now() - 1 * DAY).toISOString(),
       tracked: true,
     });
     assert.strictEqual(holdoutHit.serve, false);
     assert.strictEqual(holdoutHit.reason, 'holdout');
 
-    // 2. Same pair, but the project is well past the 14-day holdout window --
-    // the read must proceed to serve (tier A: same session, matching hash).
-    const holdoutExpired = recall.decide({
+    // 2. PIN (rewrite 2026-07-28): the SAME (sessionId, path) pair, still
+    // refused, no matter what a caller claims about the project's age. The
+    // holdout used to switch off after 14 days (projectCreatedAt tracked
+    // that); it is now continuous, so even a caller passing a stale-looking
+    // `projectCreatedAt` (a field decide() no longer reads at all) must stay
+    // held out -- there is no escape hatch left.
+    const holdoutStillHeldOutRegardlessOfAge = recall.decide({
       projectPath: '/proj', relPath: holdoutPath, absPath: `/proj/${holdoutPath}`,
       sessionId: holdoutSid, toolName: 'Read', offset: null, limit: 100,
       sessionState: { served: {}, interceptions: 0 },
@@ -6453,11 +6454,13 @@ async function main() {
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
       config: {},
-      projectCreatedAt: new Date(Date.now() - 30 * DAY).toISOString(),
+      // Stale field, deliberately still supplied: proves decide() ignores it
+      // rather than merely never being handed it.
+      projectCreatedAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
       tracked: true,
     });
-    assert.strictEqual(holdoutExpired.serve, true, 'holdout switches off after 14 days');
-    assert.strictEqual(holdoutExpired.tier, 'A');
+    assert.strictEqual(holdoutStillHeldOutRegardlessOfAge.serve, false, 'holdout must never expire -- it is continuous, not a 14-day window');
+    assert.strictEqual(holdoutStillHeldOutRegardlessOfAge.reason, 'holdout');
 
     // 3. Tier A: same session already read it, hash matches -> pointer serve.
     const tierA = recall.decide(base({
@@ -6469,7 +6472,14 @@ async function main() {
     assert.strictEqual(tierA.serve, true);
     assert.strictEqual(tierA.tier, 'A');
     assert.ok(tierA.body.includes('src/file.js') && tierA.body.includes('HASH1'));
-    assert.ok(tierA.savedTokens > 0 && tierA.pct > 0);
+    // PIN (attribution realignment): the decision reports the OPTIMISTIC
+    // figure under avoidedTokensOptimistic, alongside the raw callTokens and
+    // skeletonTokens the fold (a later task) needs to settle the real net.
+    // savedTokens must be gone entirely, not just renamed and left behind.
+    assert.ok(tierA.avoidedTokensOptimistic > 0 && tierA.pct > 0);
+    assert.strictEqual(typeof tierA.callTokens, 'number');
+    assert.strictEqual(typeof tierA.skeletonTokens, 'number');
+    assert.strictEqual(tierA.savedTokens, undefined, 'savedTokens must not survive under its old name');
 
     // 4. Tier A refused: same session read it, but the file changed since.
     const tierAMismatch = recall.decide(base({
@@ -6491,8 +6501,11 @@ async function main() {
     }));
     assert.strictEqual(tierB.serve, true);
     assert.strictEqual(tierB.tier, 'B');
-    assert.strictEqual(tierB.savedTokens, 1200 - 400);
+    assert.strictEqual(tierB.callTokens, 1200);
+    assert.strictEqual(tierB.skeletonTokens, 400);
+    assert.strictEqual(tierB.avoidedTokensOptimistic, 1200 - 400);
     assert.strictEqual(tierB.pct, Math.round((100 * (1200 - 400)) / 1200));
+    assert.strictEqual(tierB.savedTokens, undefined, 'savedTokens must not survive under its old name');
 
     // 6. Tier B refused: same shape, but compression falls below 2.25x
     // (1200 / 700 ≈ 1.71x).
@@ -6574,7 +6587,6 @@ async function main() {
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
       config: {},
-      projectCreatedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
     };
     // Every field here would otherwise clear every later gate (tier A serve)
     // -- tracked is the ONLY thing withheld, so a serve:true here would mean
@@ -6616,16 +6628,16 @@ async function main() {
 
     const recallHash = content => crypto.createHash('sha1').update(content).digest('hex');
     const bucketFor = (sid, relPath) => crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
-    // recallProj's .membridge dir was just created (birthtime ~ now), so
-    // every session/path pair starts inside the 14-day calibration holdout
-    // window (lib/recall.js's own default). Scan for session ids that land
-    // OUTSIDE the 10% holdout bucket for the "normal serve" scenarios below —
-    // deterministic, exactly like lib/recall.js's own policy test does, never
-    // a flaky pick.
+    // The holdout is continuous (spec §7.2, rewritten 2026-07-28) -- there is
+    // no age-based window to be inside or outside of any more. Scan for
+    // session ids that land OUTSIDE the 3% holdout bucket for the "normal
+    // serve" scenarios below — deterministic, exactly like lib/recall.js's
+    // own policy test does, never a flaky pick.
+    const recallLib = require('../lib/recall');
     const nonHoldoutSession = (relPath, base) => {
       for (let i = 0; i < 1000; i++) {
         const sid = `${base}-${i}`;
-        if (bucketFor(sid, relPath) >= 10) return sid;
+        if (bucketFor(sid, relPath) >= recallLib.HOLDOUT_PCT) return sid;
       }
       throw new Error(`could not find a non-holdout session id for ${relPath}`);
     };
@@ -6678,7 +6690,8 @@ async function main() {
       assert.strictEqual(hso.hookEventName, 'PreToolUse');
       assert.strictEqual(hso.permissionDecision, 'deny');
       assert.ok(hso.permissionDecisionReason.includes('SKELETON_TEXT_FOR_B'), 'reason lacks the served skeleton');
-      assert.ok(hso.permissionDecisionReason.includes('answered from MemBridge · saved 96% of this read (1150 tokens)'), `reason lacks the terminal line: ${hso.permissionDecisionReason}`);
+      assert.ok(hso.permissionDecisionReason.includes('answered from MemBridge · avoided 96% of this read (1150 tokens)'), `reason lacks the terminal line: ${hso.permissionDecisionReason}`);
+      assert.ok(!hso.permissionDecisionReason.includes('saved'), 'the word "saved" must never appear in user-facing recall output');
       assert.ok(hso.permissionDecisionReason.startsWith('answered from MemBridge'), 'terminal line must be the FIRST line');
     });
 
@@ -6700,9 +6713,14 @@ async function main() {
       const mine = lines.filter(l => l.relPath === relB && l.sessionId === sessB);
       assert.strictEqual(mine.length, 2, 'a serve must leave exactly a pending row and a confirmation row');
       const [pending, confirmed] = mine;
-      assert.deepStrictEqual(Object.keys(pending).sort(), ['committed', 'holdout', 'relPath', 'savedTokens', 'sessionId', 'tier', 'ts']);
+      // callTokens/skeletonTokens replace the old savedTokens field: the
+      // served row must carry both raw figures (spec §7.1) so the fold (a
+      // later task) can apply net = callTokens - (skeletonTokens +
+      // followTokens) instead of the old, all-or-nothing savedTokens.
+      assert.deepStrictEqual(Object.keys(pending).sort(), ['callTokens', 'committed', 'holdout', 'relPath', 'sessionId', 'skeletonTokens', 'tier', 'ts']);
       assert.strictEqual(pending.tier, 'B');
-      assert.strictEqual(pending.savedTokens, 1150);
+      assert.strictEqual(pending.callTokens, 1200);
+      assert.strictEqual(pending.skeletonTokens, 50);
       assert.strictEqual(pending.holdout, false);
       assert.strictEqual(pending.committed, false, 'the first row is a pending claim, not yet a completed serve');
       assert.ok(!Number.isNaN(Date.parse(pending.ts)), 'ts is not a valid timestamp');
@@ -6859,7 +6877,7 @@ async function main() {
     const holdoutSession = (relPath, base) => {
       for (let i = 0; i < 1000; i++) {
         const sid = `${base}-${i}`;
-        if (bucketFor(sid, relPath) < 10) return sid;
+        if (bucketFor(sid, relPath) < recallLib.HOLDOUT_PCT) return sid;
       }
       throw new Error(`could not find a holdout session id for ${relPath}`);
     };
@@ -6946,13 +6964,17 @@ async function main() {
     });
     const sessHo = holdoutSession(hoRel, 'sess-holdout-real');
     const outHo = runRecallHook({ session_id: sessHo, cwd: hoProj, tool_name: 'Read', tool_input: { file_path: path.join(hoProj, hoRel), limit: 100 } });
-    check('recall hook: L6 -- a held-out read that WOULD have served still logs its tier', () => {
+    check('recall hook: L6 -- a held-out read that WOULD have served still logs its tier and callTokens', () => {
       assert.strictEqual(outHo.status, 0, outHo.stderr);
       assert.strictEqual(outHo.stdout, '', 'a held-out read must never serve');
       const rows = fs.readFileSync(hooksRecall.eventsPath(hoProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
       assert.strictEqual(rows.length, 1);
       assert.strictEqual(rows[0].holdout, true);
       assert.strictEqual(rows[0].wouldServe, 'B');
+      // PIN (attribution realignment): the holdout row must also carry
+      // callTokens (limit 100 * 12 tokens/line) so the fold can compare the
+      // held-out arm against the served arm on equal footing.
+      assert.strictEqual(rows[0].callTokens, 1200);
     });
 
     // L6: events.jsonl is append-only and otherwise unbounded. Past the cap it
@@ -6968,7 +6990,7 @@ async function main() {
       fileReaders: { [rotRel]: { sessions: ['other-rot'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-rot' } },
     });
     fs.mkdirSync(hooksRecall.recallDir(rotProj), { recursive: true });
-    const filler = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', savedTokens: 1, holdout: false }) + '\n';
+    const filler = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', callTokens: 401, skeletonTokens: 1, holdout: false }) + '\n';
     fs.writeFileSync(hooksRecall.eventsPath(rotProj), filler.repeat(Math.ceil((2 * 1024 * 1024) / filler.length) + 100));
     const sizeBeforeRotate = fs.statSync(hooksRecall.eventsPath(rotProj)).size;
     const outRot = runRecallHook({ session_id: nonHoldoutSession(rotRel, 'sess-rotate'), cwd: rotProj, tool_name: 'Read', tool_input: { file_path: path.join(rotProj, rotRel), limit: 100 } });
