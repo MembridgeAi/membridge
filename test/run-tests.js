@@ -7194,12 +7194,32 @@ async function main() {
       ]));
     };
 
+    // Bug fix round 1 (Finding 1/2): production settles on whatever queue
+    // state the NEXT syncOnce tick happens to see, which can land before a
+    // same-turn follow-up read has occurred at all -- so these cases are now
+    // driven through TWO separate updateLedger passes with an injected
+    // clock, exactly mirroring that race: pass 1 (age < grace) must settle
+    // NOTHING, then the follow-up read (if any) is handed to a pass 2 whose
+    // injected `now` has cleared RECALL_SETTLE_GRACE_MS. A version of the
+    // fold that settled on first sight (the pre-fix bug) or that hardcoded
+    // followTokens to 0 would make these assertions fail.
+    const GRACE = ledgerFoldRecall.RECALL_SETTLE_GRACE_MS;
+
     // (1) No follow-up -> full avoidance. net = 4210 - 380 = 3830.
     const proj1T6 = seedT6Project('t6-full-avoidance');
     const rel1 = 'src/a.js';
     recallStoreT6.put(proj1T6, rel1, { contentHash: 'h1', skeleton: 'SKEL1', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
-    writeServeRows(proj1T6, '2026-07-28T10:00:00.000Z', 'sess-1', rel1, 'B', 4210, 380);
-    const led1 = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig());
+    const ts1 = '2026-07-28T10:00:00.000Z';
+    const t1 = Date.parse(ts1);
+    writeServeRows(proj1T6, ts1, 'sess-1', rel1, 'B', 4210, 380);
+    const led1Early = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig(), () => t1 + 1000);
+    check('ledger-fold-recall (FINDING 1): a freshly-committed serve does NOT settle before the grace window elapses', () => {
+      assert.deepStrictEqual(led1Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+        'settling on the very next tick (the pre-fix bug) would net the full 3830 here instead of nothing');
+      const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj1T6), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remaining.length, 2, 'the un-aged pending+confirmation rows must stay queued, not be truncated away');
+    });
+    const led1 = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig(), () => t1 + GRACE + 1000);
     check('ledger-fold-recall: no follow-up nets the full callTokens - skeletonTokens, no rejection', () => {
       assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(proj1T6, rel1).rejections, 0, 'a full avoidance must never bump rejections');
@@ -7209,7 +7229,7 @@ async function main() {
         'events.jsonl must be empty (or removed) after a successful fold');
     });
     check('ledger-fold-recall: folding twice is idempotent -- the truncated queue has nothing left to settle', () => {
-      const led1Again = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig());
+      const led1Again = ledgerStoreT6.updateLedger(proj1T6, [], util.getConfig(), () => t1 + GRACE + 2000);
       assert.deepStrictEqual(led1Again.avoided, led1.avoided, 're-folding an already-truncated queue must not change the totals');
     });
 
@@ -7219,16 +7239,36 @@ async function main() {
     const proj2T6 = seedT6Project('t6-partial-win');
     const rel2 = 'src/b.js';
     recallStoreT6.put(proj2T6, rel2, { contentHash: 'h2', skeleton: 'SKEL2', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
-    writeServeRows(proj2T6, '2026-07-28T10:00:00.000Z', 'sess-2', rel2, 'B', 4210, 380);
+    const ts2 = '2026-07-28T10:00:00.000Z';
+    const t2 = Date.parse(ts2);
+    writeServeRows(proj2T6, ts2, 'sess-2', rel2, 'B', 4210, 380);
+    // Pass 1: the tick right after the serve, BEFORE the agent's follow-up
+    // read has happened at all -- production's realistic ordering (spec:
+    // "the hook writes the pending row plus its confirmation synchronously
+    // within milliseconds"). Must settle nothing, leaving the queue row for
+    // the follow-up to eventually land against.
+    const led2Early = ledgerStoreT6.updateLedger(proj2T6, [], util.getConfig(), () => t2 + 1000);
+    check('ledger-fold-recall (FINDING 1): a serve is not settled before its follow-up read had any chance to occur', () => {
+      assert.deepStrictEqual(led2Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+    });
     const followUp2 = {
       kind: 'read', ts: '2026-07-28T10:05:00.000Z', session: 'sess-2', toolUseId: 'fu-2',
       file: path.join(proj2T6, rel2), tool: 'Read', limit: 50, offset: null,
     };
-    const led2 = ledgerStoreT6.updateLedger(proj2T6, [followUp2], util.getConfig());
+    // Pass 2: past the grace window, with the follow-up read now in hand.
+    const led2 = ledgerStoreT6.updateLedger(proj2T6, [followUp2], util.getConfig(), () => t2 + GRACE + 1000);
     check('ledger-fold-recall: a smaller targeted follow-up (600 tokens) nets +3230 as a PARTIAL WIN, not a rejection', () => {
       assert.deepStrictEqual(led2.avoided, { tokens: 3230, serves: 1, tierA: 0, tierB: 1, partialWins: 1, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(proj2T6, rel2).rejections, 0,
         'bumpRejection must NOT be called for a positive net -- that is precisely the earlier rule\'s mistake');
+    });
+    // FINDING 2 regression: a version of settleRows that hardcoded
+    // followTokens to 0 (ignoring the follow-up read entirely) would net the
+    // full 3830 here instead of 3230 -- this assertion fails against that
+    // version even though it still passes case (1) above.
+    check('ledger-fold-recall (FINDING 2 regression): net reflects the real follow-up cost, not a hardcoded 0', () => {
+      assert.strictEqual(led2.avoided.tokens, 3230);
+      assert.notStrictEqual(led2.avoided.tokens, 3830, 'followTokens appears to have been ignored (hardcoded to 0)');
     });
 
     // (3) A full re-read (no limit) claws back the whole skeleton and then
@@ -7242,16 +7282,103 @@ async function main() {
     // exactly.
     fs.writeFileSync(path.join(proj3T6, rel3), 'x'.repeat(16840));
     recallStoreT6.put(proj3T6, rel3, { contentHash: 'h3', skeleton: 'SKEL3', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
-    writeServeRows(proj3T6, '2026-07-28T10:00:00.000Z', 'sess-3', rel3, 'B', 4210, 380);
+    const ts3 = '2026-07-28T10:00:00.000Z';
+    const t3 = Date.parse(ts3);
+    writeServeRows(proj3T6, ts3, 'sess-3', rel3, 'B', 4210, 380);
+    const led3Early = ledgerStoreT6.updateLedger(proj3T6, [], util.getConfig(), () => t3 + 1000);
+    check('ledger-fold-recall (FINDING 1): a net-negative serve is not settled (and no rejection is bumped) before the grace window', () => {
+      assert.deepStrictEqual(led3Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(proj3T6, rel3).rejections, 0);
+    });
     const followUp3 = {
       kind: 'read', ts: '2026-07-28T10:05:00.000Z', session: 'sess-3', toolUseId: 'fu-3',
       file: path.join(proj3T6, rel3), tool: 'Read', limit: null, offset: null,
     };
-    const led3 = ledgerStoreT6.updateLedger(proj3T6, [followUp3], util.getConfig());
+    const led3 = ledgerStoreT6.updateLedger(proj3T6, [followUp3], util.getConfig(), () => t3 + GRACE + 1000);
     check('ledger-fold-recall: a full re-read nets -380 as a NET NEGATIVE, bumpRejection called exactly once', () => {
       assert.deepStrictEqual(led3.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 });
       assert.strictEqual(recallStoreT6.get(proj3T6, rel3).rejections, 1, 'bumpRejection must fire exactly once for a net loss');
     });
+    // FINDING 2 regression: hardcoded followTokens=0 would net +3830 (full
+    // avoidance) here instead of -380 (net negative), and would never bump
+    // rejections at all.
+    check('ledger-fold-recall (FINDING 2 regression): a hardcoded followTokens=0 would misclassify this as a full avoidance', () => {
+      assert.strictEqual(led3.avoided.tokens, -380);
+      assert.strictEqual(led3.avoided.netNegatives, 1);
+    });
+
+    // FINDING 3: bumpRejection must be gated on the queue rewrite actually
+    // landing. Build a pass with ONE net-negative serve old enough to
+    // settle (rel3c) and ONE still-young serve (rel3d, retained) so the
+    // rewrite has real content to write (not the empty-queue rmSync branch),
+    // then force just that write to fail.
+    {
+      const proj3cT6 = seedT6Project('t6-rejection-write-gate');
+      const rel3c = 'src/g.js';
+      const rel3d = 'src/h.js';
+      fs.writeFileSync(path.join(proj3cT6, rel3c), 'x'.repeat(16840));
+      recallStoreT6.put(proj3cT6, rel3c, { contentHash: 'h3c', skeleton: 'SKEL3C', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      recallStoreT6.put(proj3cT6, rel3d, { contentHash: 'h3d', skeleton: 'SKEL3D', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsOld = '2026-07-28T10:00:00.000Z';
+      const tOld = Date.parse(tsOld);
+      const now3c = tOld + GRACE + 1000; // old row is past grace...
+      const tsYoung = new Date(now3c - 1000).toISOString(); // ...young row is not
+      writeServeRows(proj3cT6, tsOld, 'sess-3c', rel3c, 'B', 4210, 380);
+      writeServeRows(proj3cT6, tsYoung, 'sess-3d', rel3d, 'B', 4210, 380);
+      const followUpOld = {
+        kind: 'read', ts: '2026-07-28T10:05:00.000Z', session: 'sess-3c', toolUseId: 'fu-3c',
+        file: path.join(proj3cT6, rel3c), tool: 'Read', limit: null, offset: null,
+      };
+
+      const realWriteFileSync = fs.writeFileSync;
+      const recallDirTag = path.join(memorydb.DIR_NAME, 'recall');
+      let sawQueueWrite = false;
+      fs.writeFileSync = function (p, ...rest) {
+        if (typeof p === 'string' && p.includes(recallDirTag)) {
+          sawQueueWrite = true;
+          throw new Error('simulated queue rewrite failure');
+        }
+        return realWriteFileSync.call(fs, p, ...rest);
+      };
+      let ledFailedWrite;
+      try {
+        ledFailedWrite = ledgerStoreT6.updateLedger(proj3cT6, [followUpOld], util.getConfig(), () => now3c);
+      } finally {
+        fs.writeFileSync = realWriteFileSync;
+      }
+      check('ledger-fold-recall (FINDING 3): a failed queue rewrite still folds the settlement into the ledger', () => {
+        assert.ok(sawQueueWrite, 'test did not actually exercise the queue rewrite path');
+        assert.deepStrictEqual(ledFailedWrite.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 });
+      });
+      check('ledger-fold-recall (FINDING 3): bumpRejection is skipped for a pass whose queue rewrite failed', () => {
+        assert.strictEqual(recallStoreT6.get(proj3cT6, rel3c).rejections, 0,
+          'a failed rewrite must not durably commit a rejection bump -- see commit()\'s residual comment');
+      });
+      check('ledger-fold-recall (FINDING 3): the on-disk queue is untouched after a failed rewrite (old rows all still there)', () => {
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 4, 'both serves\' pending+confirmation rows must survive a failed rewrite untouched');
+      });
+
+      // A later pass whose rewrite SUCCEEDS re-settles the same net-negative
+      // serve (rel3c is still on disk -- the failed pass's ledger delta
+      // already landed, but its queue rewrite never did) and this time
+      // durably bumps the rejection -- proving the gate DELAYS the bump, it
+      // never loses it, and never double-bumps it either despite the
+      // ledger's own accepted over-count (both passes' -380/netNegative
+      // deltas land in the cumulative total; only ONE rejection bump does).
+      const ledRetry = ledgerStoreT6.updateLedger(proj3cT6, [followUpOld], util.getConfig(), () => now3c + 1000);
+      check('ledger-fold-recall (FINDING 3): a subsequent successful rewrite durably applies the rejection bump exactly once', () => {
+        assert.strictEqual(recallStoreT6.get(proj3cT6, rel3c).rejections, 1,
+          'the retried, successful pass must bump rejections exactly once -- never once per over-counted re-fold');
+        assert.strictEqual(ledRetry.avoided.netNegatives, 2,
+          'the accepted over-count residual: rel3c\'s delta landed in pass 1 (ledger write succeeded) AND again in pass 2 (re-read from the un-rewritten queue) -- rejections do not inherit this double-count');
+      });
+      check('ledger-fold-recall (FINDING 3): the still-young serve (rel3d) is untouched by any of this -- never settled, never bumped', () => {
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 2, 'only rel3d\'s still-young pending+confirmation rows should remain queued');
+        assert.strictEqual(recallStoreT6.get(proj3cT6, rel3d).rejections, 0);
+      });
+    }
 
     // Holdout rows (spec §7.2) must accumulate ONLY into `holdout`, and must
     // never touch `avoided` -- the two are strictly separate arms.
@@ -7267,30 +7394,70 @@ async function main() {
       assert.deepStrictEqual(led4.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
     });
 
-    // A pending row whose session-state commit failed never gets a
-    // confirmation row (see lib/hooks-recall.js's own "fix round 3" test) --
-    // it must settle as though the serve never happened: not a serve, no
-    // tokens, no rejection.
+    // FINDING 4: hooks-recall.js writes a serve's pending row and its
+    // committed confirmation as TWO SEPARATE appendFileSync calls. A fold
+    // landing in the gap between them must not treat the still-unconfirmed
+    // pending row as a phantom and drop it -- that would silently
+    // UNDER-count a real serve. A young pending row with no confirmation
+    // YET must stay queued.
     const proj5T6 = seedT6Project('t6-phantom-pending');
     const rel5 = 'src/e.js';
     recallStoreT6.put(proj5T6, rel5, { contentHash: 'h5', skeleton: 'SKEL5', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    const ts5 = '2026-07-28T10:00:00.000Z';
+    const t5 = Date.parse(ts5);
     fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj5T6)), { recursive: true });
     fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([
-      { ts: '2026-07-28T10:00:00.000Z', sessionId: 'sess-5', relPath: rel5, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
-      // no confirmation row -- the state write failed
+      { ts: ts5, sessionId: 'sess-5', relPath: rel5, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      // no confirmation row yet -- it may simply not have been written by
+      // the hook yet (the gap between its two appendFileSync calls), OR the
+      // state write may have genuinely failed. Indistinguishable until the
+      // grace window has elapsed.
     ]));
-    const led5 = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig());
-    check('ledger-fold-recall: an uncommitted pending row (no confirmation) never counts as a serve', () => {
-      assert.deepStrictEqual(led5.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
-      assert.strictEqual(recallStoreT6.get(proj5T6, rel5).rejections, 0);
+    const led5Early = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 1000);
+    check('ledger-fold-recall (FINDING 4): an unconfirmed pending row younger than the grace window is never treated as a phantom', () => {
+      assert.deepStrictEqual(led5Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5T6), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remaining.length, 1, 'the young pending row must stay queued, not be dropped as a phantom');
+    });
+    // The confirmation lands late (mirrors the real race) -- a later fold,
+    // still inside the grace window, must find it and settle a real serve
+    // once past grace, not lose it.
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([{ ts: ts5, sessionId: 'sess-5', relPath: rel5, committed: true }]));
+    const led5Confirmed = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + GRACE + 1000);
+    check('ledger-fold-recall (FINDING 4): a late-arriving confirmation still settles as a real serve once past the grace window', () => {
+      assert.deepStrictEqual(led5Confirmed.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+    });
+
+    // The original phantom case this test covered: a session-state commit
+    // that NEVER gets a confirmation (a genuine, permanent failure) must
+    // still settle as though the serve never happened -- but only once past
+    // the grace window, never dropped prematurely.
+    const proj5bT6 = seedT6Project('t6-phantom-pending-never-confirms');
+    const rel5b = 'src/e2.js';
+    recallStoreT6.put(proj5bT6, rel5b, { contentHash: 'h5b', skeleton: 'SKEL5B', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    const ts5b = '2026-07-28T10:00:00.000Z';
+    const t5b = Date.parse(ts5b);
+    fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj5bT6)), { recursive: true });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5bT6), jsonl([
+      { ts: ts5b, sessionId: 'sess-5b', relPath: rel5b, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      // no confirmation row -- the state write failed, permanently
+    ]));
+    const led5b = ledgerStoreT6.updateLedger(proj5bT6, [], util.getConfig(), () => t5b + GRACE + 1000);
+    check('ledger-fold-recall: an uncommitted pending row that NEVER confirms is dropped as a phantom once past the grace window', () => {
+      assert.deepStrictEqual(led5b.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(proj5bT6, rel5b).rejections, 0);
+      assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj5bT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8') === '',
+        'the permanently-unconfirmed row must eventually be dropped from the queue, not linger forever');
     });
 
     // Tier A pointer serves count toward tierA, not tierB.
     const proj6T6 = seedT6Project('t6-tier-a');
     const rel6 = 'src/f.js';
     recallStoreT6.put(proj6T6, rel6, { contentHash: 'h6', skeleton: '', skeletonTokens: 20, fileTokens: 4210, rejections: 0 });
-    writeServeRows(proj6T6, '2026-07-28T10:00:00.000Z', 'sess-6', rel6, 'A', 500, 20);
-    const led6 = ledgerStoreT6.updateLedger(proj6T6, [], util.getConfig());
+    const ts6 = '2026-07-28T10:00:00.000Z';
+    const t6 = Date.parse(ts6);
+    writeServeRows(proj6T6, ts6, 'sess-6', rel6, 'A', 500, 20);
+    const led6 = ledgerStoreT6.updateLedger(proj6T6, [], util.getConfig(), () => t6 + GRACE + 1000);
     check('ledger-fold-recall: a tier A serve is tallied under tierA, not tierB', () => {
       assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, partialWins: 0, netNegatives: 0 });
     });
