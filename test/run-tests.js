@@ -5388,6 +5388,40 @@ async function main() {
     assert.strictEqual(ev.source, 'Codex');
     assert.strictEqual(ev.distilled, true);
   });
+  check('ledger: folds repeated records for one message id into a single request', () => {
+    const ledger = require('../lib/ledger');
+    const u = { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 20 };
+    const events = [
+      { kind: 'usage', ts: '2026-07-28T10:00:00Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'usage', ts: '2026-07-28T10:00:01Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'usage', ts: '2026-07-28T10:00:02Z', session: 's1', messageId: 'm2', model: 'claude-opus-4-6', usage: u },
+    ];
+    const reqs = ledger.buildRequests(events);
+    assert.strictEqual(reqs.length, 2, 'three records, two real requests');
+    assert.strictEqual(reqs[0].ctx, 1005);
+    assert.strictEqual(reqs[0].out, 20);
+    assert.ok(reqs[0].inCost > 0);
+    // a sidechain request with the same id is a DIFFERENT request stream
+    const withSide = events.concat([
+      { kind: 'usage', ts: '2026-07-28T10:00:03Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u, sidechain: true },
+    ]);
+    assert.strictEqual(ledger.buildRequests(withSide).length, 3);
+
+    // A project can hold both Claude Code and Codex sessions. Each request must
+    // be normalised by ITS OWN provider -- this is where a cross-vendor bug hides.
+    const mixed = ledger.buildRequests([
+      { kind: 'usage', ts: 't1', session: 'a', messageId: 'x', source: 'Claude Code',
+        model: 'claude-opus-4-6',
+        usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 995, output_tokens: 1 } },
+      { kind: 'usage', ts: 't2', session: 'b', messageId: 'y', source: 'Codex',
+        model: 'gpt-5',
+        usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 1 } },
+    ]);
+    assert.strictEqual(mixed[0].ctx, 1000, 'anthropic: fields sum to context');
+    assert.strictEqual(mixed[1].ctx, 1000, 'openai: cached is inside input, not added on top');
+    assert.strictEqual(mixed[0].provider, 'anthropic');
+    assert.strictEqual(mixed[1].provider, 'openai');
+  });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
   const summariesFile = path.join(projR, '.membridge', 'summaries.jsonl');
