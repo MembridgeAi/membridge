@@ -307,6 +307,26 @@ async function main() {
     assert.strictEqual(usage[0].usage.cache_read_input_tokens, 900);
   });
 
+  check('codex adapter: emits usage from last_token_usage, not the cumulative total', () => {
+    const entries = [
+      // A genuine rollout must open with session_meta (isGenuineRollout gate),
+      // and cwd is only ever read from payload.cwd -- both are prerequisites
+      // unrelated to the usage event itself, so they're set up here.
+      { type: 'session_meta', timestamp: '2026-07-28T09:59:00Z', payload: { cwd: '/repo' } },
+      { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+        payload: { type: 'token_count', info: {
+          total_token_usage: { input_tokens: 99999, cached_input_tokens: 0, output_tokens: 9999, total_tokens: 109998 },
+          last_token_usage: { input_tokens: 18093, cached_input_tokens: 1408, output_tokens: 494, reasoning_output_tokens: 23 },
+        } } },
+    ];
+    const events = codexAdapter.extractEvents(entries, {});
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 1);
+    assert.strictEqual(usage[0].usage.input_tokens, 18093, 'must use last_token_usage, not the cumulative total');
+    assert.strictEqual(usage[0].usage.cached_input_tokens, 1408);
+    assert.strictEqual(usage[0].source, 'Codex');
+  });
+
   check('capture: temp/scratchpad edits are dropped; real edits attributed to the repo', () => {
     const repo = path.join(ROOT, 'hygiene-repo');
     fs.mkdirSync(repo, { recursive: true });
