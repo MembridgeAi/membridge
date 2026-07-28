@@ -190,6 +190,29 @@ async function main() {
     assert.strictEqual(a.cacheWrite, 1000);
     assert.strictEqual(a.output, 500);
 
+    // Legacy flat cache_creation_input_tokens maps to the 5m bucket.
+    assert.strictEqual(a.cacheWrite5m, 1000);
+    assert.strictEqual(a.cacheWrite1h, 0);
+
+    // 1h cache writes must not be collapsed into the 5m bucket: they cost
+    // 2x input, not 1.25x, so the split has to survive normalisation.
+    const aSplit = normalizeUsage({
+      input_tokens: 100,
+      cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 700 },
+      cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    assert.strictEqual(aSplit.cacheWrite5m, 300);
+    assert.strictEqual(aSplit.cacheWrite1h, 700);
+    assert.strictEqual(aSplit.cacheWrite, 1000);
+    assert.strictEqual(aSplit.context, 100 + 10000 + 1000, 'context must include the full 5m+1h write');
+
+    // A numeric string must be treated as 0, not string-concatenated into context.
+    const aStringy = normalizeUsage({
+      input_tokens: '100', cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    assert.strictEqual(aStringy.input, 0, 'numeric strings must not pass through uncoerced');
+    assert.strictEqual(aStringy.context, 10000);
+
     // OpenAI/Codex: cached_input_tokens is a SUBSET of input_tokens.
     const o = normalizeUsage({
       input_tokens: 18093, cached_input_tokens: 1408,
@@ -226,6 +249,17 @@ async function main() {
     const expectA = (100 * 5 + 10000 * 0.5 + 1000 * 5 * 1.25) / 1e6;
     assert.strictEqual(Math.round(ac.inCost * 1e9), Math.round(expectA * 1e9));
     assert.strictEqual(Math.round(ac.outCost * 1e9), Math.round((500 * 25 / 1e6) * 1e9));
+
+    // 5m writes are 1.25x input, 1h writes are 2x input -- a single flat
+    // multiplier underbills 1h writes by ~38%.
+    const aSplit = normalizeUsage({
+      input_tokens: 0,
+      cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 700 },
+      cache_read_input_tokens: 0, output_tokens: 0,
+    }, 'anthropic');
+    const acSplit = pricing.requestCostUsd(aSplit, 'claude-opus-4-6', 'anthropic');
+    const expectASplit = (300 * 5 * 1.25 + 700 * 5 * 2.0) / 1e6;
+    assert.strictEqual(Math.round(acSplit.inCost * 1e9), Math.round(expectASplit * 1e9));
 
     // The cache discount is NOT uniform across a vendor: gpt-5 caches at 0.1x
     // input while gpt-4.1 and o1 are far dearer. A provider-wide multiplier
