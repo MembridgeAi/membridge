@@ -307,6 +307,26 @@ async function main() {
     assert.strictEqual(usage[0].usage.cache_read_input_tokens, 900);
   });
 
+  check('adapter: sidechain assistant record emits usage with sidechain:true, no read/edit', () => {
+    const entries = [
+      { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
+        message: { id: 'msg_sc', model: 'claude-opus-4-6',
+          usage: { input_tokens: 3, output_tokens: 7 },
+          content: [
+            { type: 'tool_use', id: 'tu_sc', name: 'Read', input: { file_path: '/repo/sub.js' } },
+            { type: 'tool_use', id: 'tu_sc2', name: 'Edit', input: { file_path: '/repo/sub2.js' } },
+          ] } },
+    ];
+    const events = claudeAdapter.extractEvents(entries, { pendingCreates: {}, tasks: {} });
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 1, 'sidechain assistant record must still emit its usage event');
+    assert.strictEqual(usage[0].sidechain, true, 'sidechain flag must be true for a subagent record');
+    assert.strictEqual(usage[0].messageId, 'msg_sc');
+    assert.strictEqual(usage[0].session, 's1');
+    assert.strictEqual(events.some(e => e.kind === 'read'), false, 'sidechain tool_use must not emit a read event');
+    assert.strictEqual(events.some(e => e.kind === 'edit'), false, 'sidechain tool_use must not emit an edit event');
+  });
+
   check('codex adapter: emits usage from last_token_usage, not the cumulative total', () => {
     const entries = [
       // A genuine rollout must open with session_meta (isGenuineRollout gate),
@@ -5320,6 +5340,42 @@ async function main() {
     const stored = state.projects[key].events.find(e => e.kind === 'summary');
     assert.ok(stored, 'summary event stored');
     assert.strictEqual(stored.headline, 'tight glance line', 'headline dropped by mergeEvents (never reaches buildEntries)');
+  });
+  check('mergeEvents carries usage/read payload fields through and keeps same-ts reads distinct', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'usage-read-merge');
+    const ts = '2026-07-28T10:00:00Z';
+    const events = [
+      { ts, project, source: 'Claude Code', kind: 'usage', session: 's1',
+        messageId: 'msg_u1', model: 'claude-opus-4-6',
+        usage: { input_tokens: 5, output_tokens: 20 } },
+      // Two reads sharing the same ts, same file, different tool_use ids --
+      // must not collide in eventKey and dedupe away the second one.
+      { ts, project, source: 'Claude Code', kind: 'read', session: 's1',
+        file: '/repo/a.js', tool: 'Read', toolUseId: 'tu_1', offset: 10, limit: 50, messageId: 'msg_u1' },
+      { ts, project, source: 'Claude Code', kind: 'read', session: 's1',
+        file: '/repo/a.js', tool: 'Read', toolUseId: 'tu_2', offset: 60, limit: 50, messageId: 'msg_u1' },
+    ];
+    digest.mergeEvents(state, events, {});
+    const key = Object.keys(state.projects)[0];
+    const stored = state.projects[key].events;
+
+    const usage = stored.find(e => e.kind === 'usage');
+    assert.ok(usage, 'usage event not stored');
+    assert.deepStrictEqual(usage.usage, { input_tokens: 5, output_tokens: 20 }, 'usage payload stripped by mergeEvents');
+    assert.strictEqual(usage.messageId, 'msg_u1', 'messageId stripped by mergeEvents');
+    assert.strictEqual(usage.model, 'claude-opus-4-6', 'model stripped by mergeEvents');
+
+    const reads = stored.filter(e => e.kind === 'read');
+    assert.strictEqual(reads.length, 2, 'same-ts reads with different toolUseId must not collide in eventKey');
+    const r1 = reads.find(e => e.toolUseId === 'tu_1');
+    const r2 = reads.find(e => e.toolUseId === 'tu_2');
+    assert.ok(r1 && r2, 'both reads must survive the merge');
+    assert.strictEqual(r1.tool, 'Read');
+    assert.strictEqual(r1.offset, 10);
+    assert.strictEqual(r1.limit, 50);
+    assert.strictEqual(r2.offset, 60);
+    assert.strictEqual(r2.limit, 50);
   });
   check('scanSummaries labels Codex fallback summaries as Codex, not Distilled', () => {
     const proj = path.join(ROOT, 'projects', 'codex-summary-source'); fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
