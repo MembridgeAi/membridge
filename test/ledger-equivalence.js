@@ -17,6 +17,7 @@ if (!REF || !fs.existsSync(path.join(REF, 'ledger_fixed.py'))) {
 
 const adapter = require('../lib/adapters/claude-code');
 const ledger = require('../lib/ledger');
+const { walkFiles } = require('../lib/util');
 
 const root = path.join(os.homedir(), '.claude', 'projects');
 const files = [];
@@ -31,17 +32,19 @@ files.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size);
 const sample = files.slice(0, 20);
 assert.ok(sample.length, 'no local transcripts found');
 
-// Newer Claude Code externalizes subagent turns into sibling files under
+// Newer Claude Code externalizes subagent turns into files under
 // <session-id>/subagents/*.jsonl instead of interleaving them into the parent
-// transcript. Both sides must fold those in or long sessions come in low on
-// this side only -- the reference's main() walks every *.jsonl under the
-// root (parent AND subagent files) and merges by sessionId; a per-file
-// comparison here has to reproduce that fold, not skip it.
+// transcript, and those can nest arbitrarily deeper still (e.g.
+// subagents/workflows/<wf-id>/agent-*.jsonl for sub-agents spawned inside a
+// workflow). Both sides must fold ALL of those in, at any depth, or long
+// sessions come in low on this side only -- the reference's main() walks
+// every *.jsonl under the root (parent AND subagent files, recursively) and
+// merges by sessionId; a per-file comparison here has to reproduce that
+// fold, not a shallow one. Reuses lib/util.js's walkFiles, the same
+// recursive directory walker production scanning (lib/scan.js) relies on.
 function subagentFiles(parentFile) {
   const dir = path.join(path.dirname(parentFile), path.basename(parentFile, '.jsonl'), 'subagents');
-  let names;
-  try { names = fs.readdirSync(dir); } catch { return []; }
-  return names.filter(f => f.endsWith('.jsonl')).map(f => path.join(dir, f));
+  return walkFiles(dir, '.jsonl');
 }
 
 function readEntries(file) {
