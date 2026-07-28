@@ -6076,6 +6076,63 @@ async function main() {
       'no synthetic closing brace is fabricated once the file has a real, unrecoverable mismatch');
   });
 
+  check('skeleton-scan: a bare `#` is never a comment starter (ES2022 private fields must not corrupt brace depth)', () => {
+    // FIX ROUND 1, FINDING 1 (HIGH, confirmed silent corruption): scanLineBraces
+    // used to treat a bare '#' outside strings/comments as a line-comment
+    // starter. That is never correct for any language that actually reaches
+    // it -- this module is only invoked from lib/skeleton-strip.js's
+    // brace-mode path (JS/TS/Go); .py/.yml go through the separate
+    // indentMode branch and never call scanLineBraces at all. For ES2022
+    // private class fields/methods (`#count`, `#increment() {`), the old
+    // rule swallowed the method's own `{` as "inside a comment", so its
+    // depthBefore bookkeeping never saw the open brace, and the method's
+    // real closing `}` popped the CLASS's frame instead -- corrupting depth
+    // for every line after it and leaving a later, unrelated function
+    // permanently unclosed while still reporting ok:true (servable).
+    const { strip } = require('../lib/skeleton-strip');
+    const { createScanState, scanLineBraces } = require('../lib/skeleton-scan');
+
+    const fixture = [
+      'class Counter {',
+      '  #count = 0;',
+      '  #increment() {',
+      '    this.#count++;',
+      '  }',
+      '  get value() {',
+      '    return this.#count;',
+      '  }',
+      '}',
+      'function afterwards() {',
+      '  return 42;',
+      '}',
+    ].join('\n');
+
+    const out = strip(fixture, '.js');
+
+    // Pin via the module's own scanner: re-scanning strip()'s OUTPUT must
+    // find net brace depth 0 and no mismatch -- i.e. the skeleton itself is
+    // structurally balanced, not just "the same number of { and } chars".
+    let state = createScanState();
+    let depth = 0;
+    let mismatch = false;
+    for (const line of out.text.split('\n')) {
+      const r = scanLineBraces(line, state);
+      state = r.state;
+      depth += r.opens - r.closes;
+      if (r.mismatch) mismatch = true;
+    }
+    assert.strictEqual(mismatch, false, `skeleton output has a real brace mismatch:\n${out.text}`);
+    assert.strictEqual(depth, 0, `skeleton output nets to non-zero brace depth:\n${out.text}`);
+
+    // And the concrete regression: 'function afterwards()' must survive with
+    // its own closing brace, not be swallowed or left permanently unclosed.
+    const lines = out.text.split('\n');
+    const afterIdx = lines.findIndex(l => /^function afterwards\(\)/.test(l));
+    assert.ok(afterIdx !== -1, "'function afterwards()' must appear in the output");
+    assert.ok(lines.slice(afterIdx).some(l => l.trim() === '}'),
+      "'function afterwards()' must get its own closing brace, not run unclosed to EOF");
+  });
+
   await check('skeleton: skeletonize compresses source and reports its engine', async () => {
     const { skeletonize, estimateTokens } = require('../lib/skeleton');
     const src = 'export function add(a: number, b: number): number {\n  const s = a + b;\n  return s;\n}\n' +
@@ -6092,12 +6149,35 @@ async function main() {
   await check('recall-store: round-trips entries, redacts secrets, warms the hot set', async () => {
     const store = require('../lib/recall-store');
     const proj = path.join(ROOT, 'recall-proj'); fs.mkdirSync(proj, { recursive: true });
-    // Secret shape matches lib/redact.js's openai-key pattern
-    // (/\bsk-[A-Za-z0-9]{20,}/) exactly -- a dash inside the run (as in
-    // "sk-live-...") breaks that match AND falls just under the entropy
-    // backstop's 4.5 bits/char floor, so it must stay dash-free here to
-    // actually exercise the redaction default() already provides.
-    fs.writeFileSync(path.join(proj, 'a.js'), 'const KEY = "sk-live1234567890abcdef1234567890";\nfunction f() {\n  body();\n}\n');
+    // FIX ROUND 1, FINDING 5: realistic dash-bearing key shape (sk-live-...,
+    // matching how real OpenAI keys like sk-proj-... actually look).
+    // lib/redact.js's openai-key pattern now allows internal dashes/
+    // underscores specifically so this realistic shape is caught -- this
+    // fixture was previously swapped for a dash-free variant that only
+    // exercised the OLD, narrower pattern; restored now that the gap is
+    // fixed. Three small functions (not just one) so the skeleton clears
+    // skeletonize()'s own compression floor (FIX ROUND 1, FINDING 3 now
+    // enforces that warm() only stores when ok:true) -- a single
+    // one-liner body compresses too little on its own to pass that floor.
+    fs.writeFileSync(path.join(proj, 'a.js'), [
+      'const KEY = "sk-live-1234567890abcdef";',
+      'function f() {',
+      '  body();',
+      '  moreBody();',
+      '  evenMoreBody();',
+      '}',
+      'function g() {',
+      '  helper();',
+      '  helper();',
+      '  helper();',
+      '}',
+      'function h() {',
+      '  doStuff();',
+      '  doStuff();',
+      '  doStuff();',
+      '}',
+      '',
+    ].join('\n'));
     const n = await store.warm(proj, [{ file: 'a.js' }], util.getConfig());
     assert.strictEqual(n, 1);
     const e = store.get(proj, 'a.js');
@@ -6110,6 +6190,50 @@ async function main() {
     // re-write) -- the whole point of the content-hash check.
     const n2 = await store.warm(proj, [{ file: 'a.js' }], util.getConfig());
     assert.strictEqual(n2, 0, 'unchanged content is skipped on re-warm');
+  });
+
+  await check('recall-store: warm() skips a file skeletonize() refuses (ok:false), never stores the raw content', async () => {
+    // FIX ROUND 1, FINDING 3 (HIGH): lib/skeleton-strip.js returns
+    // { text: <ORIGINAL UNMODIFIED CONTENT>, ok:false } for degenerate/
+    // binary/minified/poorly-compressing input. warm() used to ignore `ok`
+    // and store that text anyway -- writing whole raw minified/binary files
+    // into .membridge/recall/, a strictly worse exposure surface than a
+    // skeleton. A single very long line trips looksLikeDegenerate's
+    // MAX_LINE_LEN guard, giving ok:false deterministically.
+    const store = require('../lib/recall-store');
+    const proj = path.join(ROOT, 'recall-degenerate-proj'); fs.mkdirSync(proj, { recursive: true });
+    const minified = 'x'.repeat(3000); // single line over MAX_LINE_LEN -> looksDegenerate -> ok:false
+    fs.writeFileSync(path.join(proj, 'bundle.min.js'), minified);
+    const n = await store.warm(proj, [{ file: 'bundle.min.js' }], util.getConfig());
+    assert.strictEqual(n, 0, 'a file skeletonize() refuses must not count as warmed');
+    assert.strictEqual(store.get(proj, 'bundle.min.js'), null, 'nothing is stored for a refused file');
+    // Nothing was ever written for this project at all -- index.json itself
+    // is never created (readIndex() fails open to {} but nothing triggers a
+    // write), which is itself proof no stub entry was left behind.
+    assert.ok(!fs.existsSync(store.indexPath(proj)), 'no index.json is written when every candidate is refused');
+  });
+
+  await check('recall-store: warm() keeps processing the rest of the hot set when one path\'s write fails', async () => {
+    // FIX ROUND 1, FINDING 4 (MEDIUM): readFileSync and skeletonize are each
+    // wrapped in try/catch-continue so one bad file can never abort the
+    // whole warm pass -- but the put() call after them used to be
+    // unguarded, so a write failure (disk full, permissions, a path
+    // collision) rejected warm()'s whole promise and abandoned every
+    // remaining hot path. Simulated here by pre-creating a DIRECTORY at the
+    // exact path put() will try to rename its temp file onto -- the rename
+    // then fails (EISDIR/ENOTDIR), reliably reproducing a write failure
+    // without relying on chmod/root-permission quirks.
+    const store = require('../lib/recall-store');
+    const proj = path.join(ROOT, 'recall-write-fail-proj'); fs.mkdirSync(proj, { recursive: true });
+    fs.writeFileSync(path.join(proj, 'good.js'), 'function good() {\n  doGoodThing();\n}\n');
+    fs.writeFileSync(path.join(proj, 'bad.js'), 'function bad() {\n  doBadThing();\n}\n');
+    // Pre-create a directory at bad.js's computed entry path so put()'s
+    // atomic rename onto it fails.
+    fs.mkdirSync(store.entryPath(proj, 'bad.js'), { recursive: true });
+    const n = await store.warm(proj, [{ file: 'good.js' }, { file: 'bad.js' }], util.getConfig());
+    assert.strictEqual(n, 1, 'only the successful write counts, but the pass did not abort');
+    assert.ok(store.get(proj, 'good.js'), 'the path after the failing one is still processed and stored');
+    assert.strictEqual(store.get(proj, 'bad.js'), null, 'the failed write itself never lands a readable entry');
   });
 
   check('recall: serve policy — tiers, floors, holdout, rejection learning', () => {
@@ -6154,6 +6278,11 @@ async function main() {
       // Outside the 14-day holdout window by default, so only the two
       // holdout-specific cases below need to think about it at all.
       projectCreatedAt: new Date(Date.now() - 30 * DAY).toISOString(),
+      // FIX ROUND 1, FINDING 2: tracked must be the explicit literal `true`
+      // for decide() to ever consider serving -- every fixture in THIS
+      // block represents a genuinely tracked, unpaused project, so it opts
+      // in explicitly rather than relying on any default.
+      tracked: true,
     }, overrides);
 
     // 1. Holdout hit: recent project, deterministic bucket < 10 -> never served.
@@ -6166,6 +6295,7 @@ async function main() {
       fileStat: { size: 4000, hash: 'HASH1' },
       config: {},
       projectCreatedAt: new Date(Date.now() - 1 * DAY).toISOString(),
+      tracked: true,
     });
     assert.strictEqual(holdoutHit.serve, false);
     assert.strictEqual(holdoutHit.reason, 'holdout');
@@ -6181,6 +6311,7 @@ async function main() {
       fileStat: { size: 4000, hash: 'HASH1' },
       config: {},
       projectCreatedAt: new Date(Date.now() - 30 * DAY).toISOString(),
+      tracked: true,
     });
     assert.strictEqual(holdoutExpired.serve, true, 'holdout switches off after 14 days');
     assert.strictEqual(holdoutExpired.tier, 'A');
@@ -6283,6 +6414,42 @@ async function main() {
     }));
     assert.strictEqual(tierCLit.serve, true);
     assert.strictEqual(tierCLit.tier, 'C');
+  });
+
+  check('recall: decide() refuses unless tracked is the explicit literal true (fail-closed, never intercepts untracked/paused)', () => {
+    // FIX ROUND 1, FINDING 2 (HIGH): the old gate only refused on an
+    // EXPLICIT `tracked === false`, so an omitted/undefined `tracked` fell
+    // through toward serving. The Global Constraints require recall to
+    // never intercept an untracked or paused project -- the gate must
+    // default toward NOT serving, requiring an explicit affirmative.
+    const recall = require('../lib/recall');
+    const wellFormed = {
+      projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
+      sessionId: 'session-x', toolName: 'Read', offset: null, limit: 100,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      projectCreatedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    // Every field here would otherwise clear every later gate (tier A serve)
+    // -- tracked is the ONLY thing withheld, so a serve:true here would mean
+    // the gate is not doing its job.
+    const omitted = recall.decide(wellFormed);
+    assert.strictEqual(omitted.serve, false, 'tracked omitted must never serve');
+    assert.strictEqual(omitted.reason, 'untracked-or-paused');
+
+    const explicitFalse = recall.decide(Object.assign({}, wellFormed, { tracked: false }));
+    assert.strictEqual(explicitFalse.serve, false, 'tracked:false must never serve');
+    assert.strictEqual(explicitFalse.reason, 'untracked-or-paused');
+
+    const truthyButNotTrue = recall.decide(Object.assign({}, wellFormed, { tracked: 1 }));
+    assert.strictEqual(truthyButNotTrue.serve, false, 'a truthy non-boolean tracked must still refuse -- only literal true opts in');
+    assert.strictEqual(truthyButNotTrue.reason, 'untracked-or-paused');
+
+    const explicitTrue = recall.decide(Object.assign({}, wellFormed, { tracked: true }));
+    assert.strictEqual(explicitTrue.serve, true, 'tracked:true with every other gate clear must serve');
   });
 
   await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
@@ -8129,6 +8296,11 @@ async function main() {
   const GH_TOKEN = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const SLACK_TOKEN = 'xox' + 'b-9999999999-ABCDEFGHIJKLMNOP';
   const ANTHROPIC_KEY = 'sk-ant-api03-ABCDEFGHIJKLMNOP1234567890';
+  // FIX ROUND 1, FINDING 5: real OpenAI keys are dash-bearing (sk-proj-...,
+  // sk-live-...) -- the old pattern (/\bsk-[A-Za-z0-9]{20,}/) disallowed
+  // internal dashes and missed this shape entirely, a genuine gap since
+  // skeletons derive from raw source where such keys actually appear.
+  const OPENAI_KEY = 'sk-live-' + '1234567890abcdef1234567890';
   const GOOGLE_KEY = 'AIza' + 'B1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2'; // AIza + 35
   const AWS_KEY = 'AKIA1234567890ABCDEF';
   const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N';
@@ -8150,6 +8322,7 @@ async function main() {
     ['google-api-key', `key ${GOOGLE_KEY} end`, GOOGLE_KEY],
     ['slack-token', `slack ${SLACK_TOKEN} end`, SLACK_TOKEN],
     ['anthropic-key', `key ${ANTHROPIC_KEY} tail`, ANTHROPIC_KEY],
+    ['openai-key', `key ${OPENAI_KEY} tail`, OPENAI_KEY],
     ['jwt', `token ${JWT} done`, JWT],
     ['private-key', '-----BEGIN RSA PRIVATE KEY-----\nMIIBhaha+notreal/xyz==\n-----END RSA PRIVATE KEY-----', 'MIIBhaha'],
     ['credentials', `DB ${PG_URI} yo`, 'hunter2secret'],
@@ -9274,6 +9447,11 @@ async function main() {
       'getUserAuthenticationTokenFromLocalCache is called on every request',
       'the config keys checkpointEvery and summaries.jsonl are documented',
       'a b c d camelCaseWord PascalCaseWord snake_case_word kebab-case-word',
+      // FIX ROUND 1, FINDING 5 negative: the openai-key pattern now allows
+      // internal dashes/underscores after 'sk-', so ordinary prose using
+      // 'sk-' as a word fragment must still survive -- real sentences break
+      // the run with spaces long before the 20-char floor the pattern needs.
+      'We use sk-prefixed identifiers like sk-8 and sk-42 for test fixtures, not credentials.',
     ];
     for (const s of survivors) {
       assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s}`);
