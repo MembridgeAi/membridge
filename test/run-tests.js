@@ -7562,6 +7562,41 @@ async function main() {
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], 'remove-hooks deleted a Stop hook that was never ours');
   });
+  // Fix round 4 (anchoring). isOwnStopHook's primary branch matched on
+  // cmd.includes(HOOK_SCRIPT) plus an UNANCHORED regex that only required the
+  // command to END with the literal characters "membridge-hook.js" -- no
+  // path-separator or word-boundary before it, unlike the legacy PATH-form
+  // fallback on the next line which already anchors with (^|[\s"'/]). Any
+  // command whose last path segment merely ENDS in those characters (a
+  // user's own "notmembridge-hook.js", "custom-membridge-hook.js",
+  // "backup_membridge-hook.js", or "my-membridge-hook.js stop") was falsely
+  // claimed as MemBridge's own, then overwritten by setup-hooks and deleted
+  // by remove-hooks -- the exact destructive failure this predicate exists to
+  // prevent, reached through a different filename. Each command below must
+  // survive both operations byte-identical.
+  for (const falsePositiveCmd of [
+    '/usr/bin/notmembridge-hook.js',
+    '/Users/x/scripts/custom-membridge-hook.js',
+    'node /Users/marco/tools/backup_membridge-hook.js',
+    '/Users/marco/Documents/Membridge/lib/my-membridge-hook.js stop',
+  ]) {
+    check(`stop: anchoring -- a user Stop hook command that merely ENDS with "membridge-hook.js" (${falsePositiveCmd}) survives setup-hooks and remove-hooks`, () => {
+      const f = path.join(ROOT, `claude-settings-stop-fp-${count(falsePositiveCmd, ' ')}-${falsePositiveCmd.length}.json`);
+      const userEntry = { hooks: [{ type: 'command', command: falsePositiveCmd }] };
+      fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [userEntry] } }, null, 2));
+      const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const after = JSON.parse(read(f));
+      assert.deepStrictEqual(after.hooks.Stop[0], userEntry, `setup-hooks rewrote the user's own Stop hook command: ${falsePositiveCmd}`);
+      assert.strictEqual(after.hooks.Stop.length, 2, `the MemBridge Stop entry was not appended alongside the false-positive user entry: ${falsePositiveCmd}`);
+      assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
+      const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(rm.status, 0, rm.stderr);
+      const afterRm = JSON.parse(read(f));
+      assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], `remove-hooks deleted a Stop hook that was never ours: ${falsePositiveCmd}`);
+    });
+  }
   // The real-world install shape has NO subcommand at all (membridge-hook.js
   // falls through to runStop() when argv is empty). isOwnStopHook must
   // recognize this exact shape or setup-hooks would append a duplicate Stop
@@ -7691,6 +7726,29 @@ async function main() {
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a hook that was never ours');
+  });
+  // Fix round 4 (anchoring), recall sibling of the Stop-hook anchoring fix
+  // above. isOwnRecallHook's primary branch was `cmd.includes(HOOK_SCRIPT) ||
+  // <legacy regex>` -- once the command ended with " recall", a bare
+  // substring test with NO filename anchoring at all decided ownership, so a
+  // user's own "notmembridge-hook.js" (last path segment merely ENDING in
+  // "membridge-hook.js") followed by " recall" was falsely claimed as ours.
+  check('recall: anchoring -- a user PreToolUse hook command that merely ENDS with "membridge-hook.js" before " recall" survives setup-hooks and remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-fp-anchor.json');
+    const userEntry = { matcher: 'Read', hooks: [{ type: 'command', command: '"/usr/bin/notmembridge-hook.js" recall' }] };
+    fs.writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [userEntry] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own false-positive recall-shaped hook");
+    assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the false-positive user entry');
+    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'the recall hook must register on reads, not inherit the false-positive matcher');
+    assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a false-positive recall-shaped hook that was never ours');
   });
   // H3. doRunRecall() is fully synchronous (it blocks on a stdin read), so a
   // JS timer can never fire to bound it -- the settings-level per-hook timeout
