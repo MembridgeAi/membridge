@@ -5377,6 +5377,122 @@ async function main() {
     assert.strictEqual(r2.offset, 60);
     assert.strictEqual(r2.limit, 50);
   });
+  // FINDING C1. Usage/read events are ~87% of everything the adapters emit, so
+  // a SINGLE flat cap over the whole event array lets plumbing evict the
+  // narrative (prompt/edit/summary/todos) that memory.md, team sync and
+  // provenance are built from. Narrative retention must be exactly what it was
+  // before the ledger branch existed, no matter how much plumbing arrives.
+  check('mergeEvents: plumbing events never evict narrative history', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'per-kind-cap');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const events = [];
+    for (let i = 0; i < 300; i++) {
+      events.push({ ts: at(i * 2), project, source: 'Claude Code', kind: 'usage', session: 's1',
+        messageId: 'm' + i, model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } });
+    }
+    for (let j = 0; j < 30; j++) {
+      events.push({ ts: at(j * 20 + 1), project, source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask ' + j });
+    }
+    digest.mergeEvents(state, events, { maxStoredEvents: 100 });
+    const stored = state.projects[path.resolve(project)].events;
+    const prompts = stored.filter(e => e.kind === 'prompt');
+    assert.strictEqual(prompts.length, 30,
+      '300 usage events overflowed a 100 cap and evicted the narrative the product is made of');
+    assert.strictEqual(stored.filter(e => e.kind === 'usage').length, 300,
+      'usage rides its own (much larger) plumbing cap, not maxStoredEvents');
+    const tss = stored.map(e => e.ts);
+    assert.deepStrictEqual(tss, tss.slice().sort(),
+      'the two capped partitions must be re-interleaved in ts order, not concatenated');
+
+    // Narrative keeps EXACTLY the pre-branch cap semantics: newest N survive.
+    const state2 = { projects: {} };
+    const proj2Path = path.join(ROOT, 'projects', 'per-kind-cap-narrative');
+    const many = [];
+    for (let j = 0; j < 150; j++) {
+      many.push({ ts: at(j), project: proj2Path, source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask ' + j });
+    }
+    digest.mergeEvents(state2, many, { maxStoredEvents: 100 });
+    const kept = state2.projects[path.resolve(proj2Path)].events;
+    assert.strictEqual(kept.length, 100, 'narrative cap must still be maxStoredEvents');
+    assert.strictEqual(kept[0].text, 'ask 50', 'narrative cap must still slice from the tail (newest kept)');
+
+    // ...and plumbing is bounded too, on its own budget.
+    const state3 = { projects: {} };
+    const proj3Path = path.join(ROOT, 'projects', 'per-kind-cap-plumbing');
+    digest.mergeEvents(state3, events.map(e => Object.assign({}, e, { project: proj3Path })),
+      { maxStoredEvents: 100, maxPlumbingEvents: 50 });
+    const kept3 = state3.projects[path.resolve(proj3Path)].events;
+    assert.strictEqual(kept3.filter(e => e.kind === 'usage').length, 50, 'plumbing honours its own cap');
+    assert.strictEqual(kept3.filter(e => e.kind === 'prompt').length, 30, 'narrative untouched by the plumbing cap');
+  });
+  // FINDING I3. One API request is written to the transcript as several sibling
+  // records (same message id, different ts). 57% of persisted usage rows were
+  // those duplicates. Dropping them at persistence is lossless for the ledger,
+  // which folds on message id anyway.
+  check('mergeEvents: sibling usage records for one message id store a single row', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'usage-sibling-dedupe');
+    const key = path.resolve(project);
+    const u = { input_tokens: 5, cache_read_input_tokens: 900, output_tokens: 20 };
+    const base = { project, source: 'Claude Code', kind: 'usage', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u };
+    digest.mergeEvents(state, [
+      Object.assign({}, base, { ts: '2026-07-28T10:00:00.000Z' }),
+      Object.assign({}, base, { ts: '2026-07-28T10:00:00.500Z' }),
+    ], {});
+    const usageRows = () => state.projects[key].events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usageRows().length, 1, 'two records of one request must persist as one row');
+
+    // The index has to be seeded from what is already on disk, or the dedupe
+    // only works within a single sync pass.
+    digest.mergeEvents(state, [Object.assign({}, base, { ts: '2026-07-28T10:00:01.000Z' })], {});
+    assert.strictEqual(usageRows().length, 1, 'dedupe must survive across sync passes');
+
+    // A sidechain request with the same id is a DIFFERENT request stream, and
+    // so is the same fallback id seen in another session -- both must survive.
+    digest.mergeEvents(state, [
+      Object.assign({}, base, { ts: '2026-07-28T10:00:02.000Z', sidechain: true }),
+      Object.assign({}, base, { ts: '2026-07-28T10:00:03.000Z', session: 's2' }),
+    ], {});
+    assert.strictEqual(usageRows().length, 3, 'sidechain and cross-session siblings are distinct requests');
+
+    // A usage event with no message id has nothing but its ts to tell it
+    // apart, so it must never be collapsed.
+    digest.mergeEvents(state, [
+      { project, source: 'Codex', kind: 'usage', session: 's3', ts: '2026-07-28T10:00:04.000Z', usage: u },
+      { project, source: 'Codex', kind: 'usage', session: 's3', ts: '2026-07-28T10:00:05.000Z', usage: u },
+    ], {});
+    assert.strictEqual(usageRows().length, 5, 'id-less usage events must not be collapsed onto each other');
+  });
+  // MINOR 5. "Sessions" and "events" are user-facing counts of WORK. Token
+  // plumbing outnumbers real activity ~7:1, so counting it here would inflate
+  // every discovery/adoption number the dashboard shows.
+  check('scanPayload: sessionCount counts narrative events only, never token plumbing', () => {
+    const { scanPayload } = require('../lib/server');
+    const project = path.join(ROOT, 'projects', 'narrative-count');
+    fs.mkdirSync(project, { recursive: true });
+    const dir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-narrative-count');
+    fs.mkdirSync(dir, { recursive: true });
+    const usage = { input_tokens: 5, cache_read_input_tokens: 900, output_tokens: 20 };
+    const assistant = (id, ts, tool, toolId, file) => ({
+      type: 'assistant', cwd: project, timestamp: ts, sessionId: 'sN',
+      message: { role: 'assistant', id, model: 'claude-opus-4-6', usage,
+        content: [{ type: 'tool_use', id: toolId, name: tool, input: { file_path: file } }] },
+    });
+    fs.writeFileSync(path.join(dir, 'sessN.jsonl'), jsonl([
+      { type: 'user', message: { role: 'user', content: 'First ask' }, cwd: project, timestamp: '2026-07-28T10:00:00.000Z', sessionId: 'sN' },
+      assistant('ma1', '2026-07-28T10:00:01.000Z', 'Read', 'tu1', path.join(project, 'a.js')),
+      assistant('ma2', '2026-07-28T10:00:02.000Z', 'Edit', 'tu2', path.join(project, 'a.js')),
+      { type: 'user', message: { role: 'user', content: 'Second ask' }, cwd: project, timestamp: '2026-07-28T10:00:03.000Z', sessionId: 'sN' },
+      assistant('ma3', '2026-07-28T10:00:04.000Z', 'Read', 'tu3', path.join(project, 'b.js')),
+    ]));
+    const row = scanPayload().projects.find(p => p.path.toLowerCase() === project.toLowerCase());
+    assert.ok(row, 'fixture project missing from discovery');
+    const total = Object.values(row.bySource).reduce((a, b) => a + b, 0);
+    assert.strictEqual(total, 8, 'fixture emits 2 prompts + 1 edit + 3 usage + 2 reads');
+    assert.strictEqual(row.sessionCount, 3, 'sessionCount must count narrative events only');
+  });
   check('scanSummaries labels Codex fallback summaries as Codex, not Distilled', () => {
     const proj = path.join(ROOT, 'projects', 'codex-summary-source'); fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
     fs.writeFileSync(path.join(proj, '.membridge', 'summaries.jsonl'),
