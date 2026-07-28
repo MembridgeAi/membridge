@@ -17,136 +17,245 @@
 - **Tests stay offline.** No network. Fixtures under the temp `ROOT` in `test/run-tests.js`.
 - **Never modify** `token-spend-analysis/ledger_fixed.py` or `classify2.py` — they are the reference oracle for Task 8.
 - **Dedupe on `message.id` is mandatory.** One API request is written as several transcript records, each repeating the same `usage`. Missing this inflates request counts and volume by roughly 2x.
-- **Context size of a request** is always `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. Output tokens are never part of it.
-- **Prices live in exactly one place** (`lib/pricing.js`). No cost arithmetic anywhere else.
+- **Context size is provider-specific and must go through `normalizeUsage`.** Anthropic's three input fields are disjoint and sum to context; OpenAI's and Google's cached counts are *subsets* of their input count. Never sum fields directly. Output tokens are never part of context on any provider.
+- **Prices live in exactly one place** (`lib/pricing.js`), keyed by provider. No cost arithmetic anywhere else.
+- **Token figures are the product; dollar figures are optional.** The UI shows tokens by default (spec §8.1), so an unverified rate can never mislead a user.
 - Files stay focused; none of the new modules should exceed ~250 lines.
 
 ---
 
-### Task 1: Pricing module
+### Task 1: Provider-agnostic usage normalisation and pricing
 
 **Files:**
+- Create: `lib/usage-normalize.js`
 - Create: `lib/pricing.js`
 - Test: `test/run-tests.js`
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: `priceOf(model) → {inPerMTok, outPerMTok}`, `requestCostUsd(usage, model) → {inCost, outCost}`, `contextOf(usage) → number`
+- Produces: `normalizeUsage(raw, provider) → {input, cacheRead, cacheWrite, output, context}` and `providerOf(source, model) → 'anthropic'|'openai'|'google'|'unknown'`; `priceOf(model, provider) → {inPerMTok, outPerMTok, cacheReadMult, cacheWriteMult}`, `requestCostUsd(norm, model, provider) → {inCost, outCost}`
+
+**This is the task that keeps the whole ledger honest across vendors.** The three providers disagree about what `input_tokens` means:
+
+| provider | context size is | cached tokens are |
+|---|---|---|
+| Anthropic | `input + cache_creation + cache_read` | **separate fields**, added on |
+| OpenAI / Codex | `input_tokens` alone | `cached_input_tokens`, **already inside** `input_tokens` |
+| Google / Gemini | `promptTokenCount` alone | `cachedContentTokenCount`, **already inside** it |
+
+Summing the fields uniformly would double-count every cached token on OpenAI and Google — silently, and worst on exactly the long sessions we care about most.
 
 - [ ] **Step 1: Write the failing test**
 
 Add to `test/run-tests.js`, after the existing `util.isTempPath` check:
 
 ```js
-check('pricing: context excludes output; cache read is 0.1x and cache write 1.25x', () => {
+check('usage: provider shapes normalise to one context figure without double counting', () => {
+  const { normalizeUsage, providerOf } = require('../lib/usage-normalize');
+
+  // Anthropic: the three input fields are disjoint and sum to context.
+  const a = normalizeUsage({
+    input_tokens: 100, cache_creation_input_tokens: 1000,
+    cache_read_input_tokens: 10000, output_tokens: 500,
+  }, 'anthropic');
+  assert.strictEqual(a.context, 11100);
+  assert.strictEqual(a.cacheRead, 10000);
+  assert.strictEqual(a.cacheWrite, 1000);
+  assert.strictEqual(a.output, 500);
+
+  // OpenAI/Codex: cached_input_tokens is a SUBSET of input_tokens.
+  const o = normalizeUsage({
+    input_tokens: 18093, cached_input_tokens: 1408,
+    output_tokens: 494, reasoning_output_tokens: 23,
+  }, 'openai');
+  assert.strictEqual(o.context, 18093, 'must not add cached on top of input');
+  assert.strictEqual(o.cacheRead, 1408);
+  assert.strictEqual(o.cacheWrite, 0, 'OpenAI has no cache-write concept');
+  assert.strictEqual(o.output, 494 + 23, 'reasoning tokens are billed output');
+
+  // Google/Gemini: same subset semantics, different names.
+  const g = normalizeUsage({
+    promptTokenCount: 8000, cachedContentTokenCount: 2000, candidatesTokenCount: 300,
+  }, 'google');
+  assert.strictEqual(g.context, 8000);
+  assert.strictEqual(g.cacheRead, 2000);
+  assert.strictEqual(g.output, 300);
+
+  assert.strictEqual(providerOf('Claude Code', 'claude-opus-4-6'), 'anthropic');
+  assert.strictEqual(providerOf('Codex', 'gpt-5'), 'openai');
+  assert.strictEqual(providerOf('Gemini CLI', 'gemini-3-pro'), 'google');
+});
+
+check('pricing: cache multipliers are per-provider, not global', () => {
   const pricing = require('../lib/pricing');
-  const usage = {
-    input_tokens: 100,
-    cache_creation_input_tokens: 1000,
-    cache_read_input_tokens: 10000,
-    output_tokens: 500,
-  };
-  assert.strictEqual(pricing.contextOf(usage), 11100, 'context must exclude output tokens');
+  const { normalizeUsage } = require('../lib/usage-normalize');
 
-  const { inCost, outCost } = pricing.requestCostUsd(usage, 'claude-opus-4-6');
-  // opus: $5/MTok in, $25/MTok out. 100*1 + 1000*1.25 + 10000*0.1 = 2350 billable in-units
-  assert.strictEqual(Math.round(inCost * 1e6) / 1e6, Math.round((2350 * 5 / 1e6) * 1e6) / 1e6);
-  assert.strictEqual(Math.round(outCost * 1e6) / 1e6, Math.round((500 * 25 / 1e6) * 1e6) / 1e6);
+  const a = normalizeUsage({
+    input_tokens: 100, cache_creation_input_tokens: 1000,
+    cache_read_input_tokens: 10000, output_tokens: 500,
+  }, 'anthropic');
+  const ac = pricing.requestCostUsd(a, 'claude-opus-4-6', 'anthropic');
+  // 100*1 + 1000*1.25 + 10000*0.1 = 2350 billable units at $5/MTok
+  assert.strictEqual(Math.round(ac.inCost * 1e9), Math.round((2350 * 5 / 1e6) * 1e9));
+  assert.strictEqual(Math.round(ac.outCost * 1e9), Math.round((500 * 25 / 1e6) * 1e9));
 
-  // unknown models fall back rather than throwing
-  assert.ok(pricing.priceOf('some-future-model').inPerMTok > 0);
-  assert.strictEqual(pricing.priceOf('claude-haiku-4-5').inPerMTok, 1.0);
+  // OpenAI: uncached portion at full rate, cached portion discounted, no write cost.
+  const o = normalizeUsage({ input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 100 }, 'openai');
+  const p = pricing.priceOf('gpt-5', 'openai');
+  const expectIn = ((10000 - 8000) + 8000 * p.cacheReadMult) * p.inPerMTok / 1e6;
+  assert.strictEqual(Math.round(pricing.requestCostUsd(o, 'gpt-5', 'openai').inCost * 1e9),
+    Math.round(expectIn * 1e9));
+
+  // Unknown models never throw and never price at zero.
+  assert.ok(pricing.priceOf('some-future-model', 'unknown').inPerMTok > 0);
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm test 2>&1 | grep -A3 "pricing:"`
-Expected: FAIL with `Cannot find module '../lib/pricing'`
+Run: `npm test 2>&1 | grep -A3 "provider shapes normalise"`
+Expected: FAIL with `Cannot find module '../lib/usage-normalize'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write the normaliser**
+
+Create `lib/usage-normalize.js`:
+
+```js
+'use strict';
+// Every vendor reports token usage in its own shape, and they disagree about
+// whether cached tokens are INSIDE the input count or beside it. Getting this
+// wrong double-counts cache on OpenAI and Google -- silently, and worst on the
+// long sessions that matter most. Normalise once, here, and let the rest of
+// the ledger be vendor-blind.
+
+function providerOf(source, model) {
+  const s = String(source || '').toLowerCase();
+  const m = String(model || '').toLowerCase();
+  if (s.includes('claude') || m.startsWith('claude')) return 'anthropic';
+  if (s.includes('codex') || s.includes('openai') || /^(gpt|o\d)/.test(m)) return 'openai';
+  if (s.includes('gemini') || s.includes('google') || m.startsWith('gemini')) return 'google';
+  return 'unknown';
+}
+
+function normalizeUsage(raw, provider) {
+  const u = raw || {};
+  let input = 0, cacheRead = 0, cacheWrite = 0, output = 0, context = 0;
+
+  if (provider === 'openai') {
+    // cached_input_tokens is a SUBSET of input_tokens -- never added on top.
+    const details = u.prompt_tokens_details || {};
+    context = u.input_tokens || u.prompt_tokens || 0;
+    cacheRead = u.cached_input_tokens || details.cached_tokens || 0;
+    input = Math.max(0, context - cacheRead);
+    output = (u.output_tokens || u.completion_tokens || 0) + (u.reasoning_output_tokens || 0);
+  } else if (provider === 'google') {
+    // cachedContentTokenCount is likewise a subset of promptTokenCount.
+    context = u.promptTokenCount || 0;
+    cacheRead = u.cachedContentTokenCount || 0;
+    input = Math.max(0, context - cacheRead);
+    output = u.candidatesTokenCount || 0;
+  } else {
+    // Anthropic and anything unknown: the three input fields are disjoint.
+    input = u.input_tokens || 0;
+    cacheRead = u.cache_read_input_tokens || 0;
+    const cc = u.cache_creation || {};
+    cacheWrite = (cc.ephemeral_5m_input_tokens || 0) + (cc.ephemeral_1h_input_tokens || 0)
+      || (u.cache_creation_input_tokens || 0);
+    output = u.output_tokens || 0;
+    context = input + cacheRead + cacheWrite;
+  }
+
+  return { input, cacheRead, cacheWrite, output, context, raw: u };
+}
+
+module.exports = { providerOf, normalizeUsage };
+```
+
+- [ ] **Step 4: Write the pricing table**
 
 Create `lib/pricing.js`:
 
 ```js
 'use strict';
-// Single source of truth for token pricing. Every dollar figure in MemBridge
-// derives from this table -- if rates move, change them here and nowhere else.
+// Single source of truth for token pricing. Cache multipliers are per-PROVIDER
+// because the billing models genuinely differ: Anthropic charges a premium to
+// write cache and a tenth to read it, while OpenAI and Google charge nothing
+// to write and a discount to read.
+//
+// RATES MUST BE VERIFIED BEFORE ANY DOLLAR FIGURE IS SHOWN TO A USER. The UI
+// reports tokens by default precisely so that stale rates here cannot mislead
+// anyone (see spec section 8.1).
 
-const PRICES = {
-  'claude-fable-5': [10.0, 50.0],
-  'claude-opus-5': [5.0, 25.0],
-  'claude-opus-4-8': [5.0, 25.0],
-  'claude-opus-4-7': [5.0, 25.0],
-  'claude-opus-4-6': [5.0, 25.0],
-  'claude-opus-4-5': [5.0, 25.0],
-  'claude-sonnet-5': [3.0, 15.0],
-  'claude-sonnet-4-6': [3.0, 15.0],
-  'claude-sonnet-4-5': [3.0, 15.0],
-  'claude-haiku-4-5': [1.0, 5.0],
+const TABLE = {
+  anthropic: {
+    cacheReadMult: 0.10, cacheWriteMult: 1.25,
+    models: {
+      'claude-fable-5': [10.0, 50.0],
+      'claude-opus-5': [5.0, 25.0], 'claude-opus-4-8': [5.0, 25.0],
+      'claude-opus-4-7': [5.0, 25.0], 'claude-opus-4-6': [5.0, 25.0],
+      'claude-opus-4-5': [5.0, 25.0],
+      'claude-sonnet-5': [3.0, 15.0], 'claude-sonnet-4-6': [3.0, 15.0],
+      'claude-sonnet-4-5': [3.0, 15.0],
+      'claude-haiku-4-5': [1.0, 5.0],
+    },
+    fallback: [5.0, 25.0],
+  },
+  openai: {
+    cacheReadMult: 0.25, cacheWriteMult: 0,
+    models: {},              // populate with verified rates before display
+    fallback: [1.25, 10.0],
+  },
+  google: {
+    cacheReadMult: 0.25, cacheWriteMult: 0,
+    models: {},              // populate with verified rates before display
+    fallback: [1.25, 10.0],
+  },
+  unknown: {
+    cacheReadMult: 0.25, cacheWriteMult: 0,
+    models: {},
+    fallback: [1.25, 10.0],
+  },
 };
-const DEFAULT = PRICES['claude-opus-5'];
 
-const CACHE_READ_MULT = 0.10;
-const CACHE_WRITE_5M_MULT = 1.25;
-const CACHE_WRITE_1H_MULT = 2.00;
-
-function priceOf(model) {
+function priceOf(model, provider) {
+  const p = TABLE[provider] || TABLE.unknown;
   const m = String(model || '').split('[')[0].trim();
-  let hit = PRICES[m];
+  let hit = p.models[m];
   if (!hit) {
-    for (const key of Object.keys(PRICES)) {
-      if (m.startsWith(key)) { hit = PRICES[key]; break; }
+    for (const key of Object.keys(p.models)) {
+      if (m.startsWith(key)) { hit = p.models[key]; break; }
     }
   }
-  if (!hit) {
-    if (m.includes('haiku')) hit = PRICES['claude-haiku-4-5'];
-    else if (m.includes('sonnet')) hit = PRICES['claude-sonnet-5'];
-    else if (m.includes('fable')) hit = PRICES['claude-fable-5'];
-  }
-  const [inPerMTok, outPerMTok] = hit || DEFAULT;
-  return { inPerMTok, outPerMTok };
+  const [inPerMTok, outPerMTok] = hit || p.fallback;
+  return { inPerMTok, outPerMTok, cacheReadMult: p.cacheReadMult, cacheWriteMult: p.cacheWriteMult };
 }
 
-// The exact context size the API billed for this request. Output is NOT part
-// of context -- it is priced separately and does not persist as input.
-function contextOf(usage) {
-  const u = usage || {};
-  return (u.input_tokens || 0)
-    + (u.cache_creation_input_tokens || 0)
-    + (u.cache_read_input_tokens || 0);
-}
-
-function requestCostUsd(usage, model) {
-  const u = usage || {};
-  const { inPerMTok, outPerMTok } = priceOf(model);
-  const cc = u.cache_creation || {};
-  let cc5 = cc.ephemeral_5m_input_tokens || 0;
-  const cc1 = cc.ephemeral_1h_input_tokens || 0;
-  if (!cc5 && !cc1) cc5 = u.cache_creation_input_tokens || 0;
-  const billableIn = (u.input_tokens || 0)
-    + (u.cache_read_input_tokens || 0) * CACHE_READ_MULT
-    + cc5 * CACHE_WRITE_5M_MULT
-    + cc1 * CACHE_WRITE_1H_MULT;
+// Takes a NORMALISED usage object from usage-normalize.js, never a raw one.
+function requestCostUsd(norm, model, provider) {
+  const n = norm || {};
+  const p = priceOf(model, provider);
+  const billableIn = (n.input || 0)
+    + (n.cacheRead || 0) * p.cacheReadMult
+    + (n.cacheWrite || 0) * p.cacheWriteMult;
   return {
-    inCost: billableIn * inPerMTok / 1e6,
-    outCost: (u.output_tokens || 0) * outPerMTok / 1e6,
+    inCost: billableIn * p.inPerMTok / 1e6,
+    outCost: (n.output || 0) * p.outPerMTok / 1e6,
   };
 }
 
-module.exports = { priceOf, contextOf, requestCostUsd, PRICES };
+module.exports = { priceOf, requestCostUsd, TABLE };
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run tests to verify they pass**
 
-Run: `npm test 2>&1 | grep -A3 "pricing:"`
-Expected: PASS
+Run: `npm test 2>&1 | grep -A3 -E "provider shapes normalise|cache multipliers are per-provider"`
+Expected: both PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add lib/pricing.js test/run-tests.js
-git commit -m "feat(ledger): pricing module with exact cache multipliers"
+git add lib/usage-normalize.js lib/pricing.js test/run-tests.js
+git commit -m "feat(ledger): provider-agnostic usage normalisation and pricing"
 ```
 
 ---
@@ -158,8 +267,8 @@ git commit -m "feat(ledger): pricing module with exact cache multipliers"
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `pricing.contextOf` (Task 1)
-- Produces: events shaped `{ ts, project, source, kind: 'usage', session, messageId, model, usage }` where `usage` is the raw usage object
+- Consumes: nothing (the adapter emits raw usage; normalisation happens in the ledger)
+- Produces: events shaped `{ ts, project, source, kind: 'usage', session, messageId, model, usage, sidechain }` where `usage` is the **raw, unnormalised** vendor object
 
 - [ ] **Step 1: Write the failing test**
 
@@ -221,6 +330,75 @@ Expected: PASS
 ```bash
 git add lib/adapters/claude-code.js test/run-tests.js
 git commit -m "feat(adapter): emit per-request usage events"
+```
+
+---
+
+### Task 2b: Codex adapter emits `usage` events
+
+**Files:**
+- Modify: `lib/adapters/codex.js` (the `event_msg` branch)
+- Test: `test/run-tests.js`
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: the same `kind: 'usage'` event shape as Task 2, with `source: 'Codex'` so `providerOf` routes it to OpenAI semantics
+
+Codex writes a `token_count` event carrying both a cumulative `total_token_usage` and a per-request `last_token_usage`. **Only `last_token_usage` is per-request** — using the cumulative one would make volume grow quadratically across a session.
+
+- [ ] **Step 1: Write the failing test**
+
+```js
+check('codex adapter: emits usage from last_token_usage, not the cumulative total', () => {
+  const entries = [
+    { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+      payload: { type: 'token_count', info: {
+        total_token_usage: { input_tokens: 99999, cached_input_tokens: 0, output_tokens: 9999, total_tokens: 109998 },
+        last_token_usage: { input_tokens: 18093, cached_input_tokens: 1408, output_tokens: 494, reasoning_output_tokens: 23 },
+      } } },
+  ];
+  const events = codexAdapter.extractEvents(entries, {});
+  const usage = events.filter(e => e.kind === 'usage');
+  assert.strictEqual(usage.length, 1);
+  assert.strictEqual(usage[0].usage.input_tokens, 18093, 'must use last_token_usage, not the cumulative total');
+  assert.strictEqual(usage[0].usage.cached_input_tokens, 1408);
+  assert.strictEqual(usage[0].source, 'Codex');
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npm test 2>&1 | grep -A3 "emits usage from last_token_usage"`
+Expected: FAIL — `usage.length` is 0
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `lib/adapters/codex.js`, inside the loop over entries where `e.type === 'event_msg'`, add a branch:
+
+```js
+      } else if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
+        // last_token_usage is the delta for THIS request. total_token_usage is
+        // cumulative and would make session volume grow quadratically.
+        events.push({
+          ts: e.timestamp, project: e.cwd, source: this.displayName,
+          kind: 'usage', session,
+          messageId: p.turn_id || e.timestamp,
+          model: p.info.model || null,
+          usage: p.info.last_token_usage,
+          sidechain: false,
+        });
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `npm test 2>&1 | grep -A3 "emits usage from last_token_usage"`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add lib/adapters/codex.js test/run-tests.js
+git commit -m "feat(adapter): emit per-request usage events from Codex logs"
 ```
 
 ---
@@ -314,8 +492,8 @@ git commit -m "feat(adapter): emit read events for Read/Grep/Glob"
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `pricing.contextOf`, `pricing.requestCostUsd` (Task 1); `usage` events (Task 2)
-- Produces: `buildRequests(events) → [{ messageId, ts, session, model, ctx, out, inCost, outCost, sidechain }]`, ordered by `ts`, one entry per unique `(sidechain, messageId)`
+- Consumes: `normalizeUsage`, `providerOf` (Task 1); `pricing.requestCostUsd` (Task 1); `usage` events (Tasks 2, 2b)
+- Produces: `buildRequests(events) → [{ messageId, ts, session, model, provider, ctx, out, inCost, outCost, sidechain }]`, ordered by `ts`, one entry per unique `(sidechain, messageId)`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -338,6 +516,21 @@ check('ledger: folds repeated records for one message id into a single request',
     { kind: 'usage', ts: '2026-07-28T10:00:03Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u, sidechain: true },
   ]);
   assert.strictEqual(ledger.buildRequests(withSide).length, 3);
+
+  // A project can hold both Claude Code and Codex sessions. Each request must
+  // be normalised by ITS OWN provider -- this is where a cross-vendor bug hides.
+  const mixed = ledger.buildRequests([
+    { kind: 'usage', ts: 't1', session: 'a', messageId: 'x', source: 'Claude Code',
+      model: 'claude-opus-4-6',
+      usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 995, output_tokens: 1 } },
+    { kind: 'usage', ts: 't2', session: 'b', messageId: 'y', source: 'Codex',
+      model: 'gpt-5',
+      usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 1 } },
+  ]);
+  assert.strictEqual(mixed[0].ctx, 1000, 'anthropic: fields sum to context');
+  assert.strictEqual(mixed[1].ctx, 1000, 'openai: cached is inside input, not added on top');
+  assert.strictEqual(mixed[0].provider, 'anthropic');
+  assert.strictEqual(mixed[1].provider, 'openai');
 });
 ```
 
@@ -356,6 +549,7 @@ Create `lib/ledger.js`:
 // token-spend-analysis/ledger_fixed.py, which is the oracle for the
 // equivalence test in the suite.
 const pricing = require('./pricing');
+const { normalizeUsage, providerOf } = require('./usage-normalize');
 
 // One API request is written to the transcript as several records -- one per
 // content block -- each repeating the SAME usage object. Fold them back into a
@@ -367,14 +561,17 @@ function buildRequests(events) {
     if (!e || e.kind !== 'usage' || !e.usage) continue;
     const key = `${e.sidechain ? 1 : 0}|${e.messageId || e.ts}`;
     if (byKey.has(key)) continue;
-    const { inCost, outCost } = pricing.requestCostUsd(e.usage, e.model);
+    const provider = providerOf(e.source, e.model);
+    const norm = normalizeUsage(e.usage, provider);
+    const { inCost, outCost } = pricing.requestCostUsd(norm, e.model, provider);
     byKey.set(key, {
       messageId: e.messageId || null,
       ts: e.ts,
       session: e.session || null,
       model: e.model || null,
-      ctx: pricing.contextOf(e.usage),
-      out: e.usage.output_tokens || 0,
+      provider,
+      ctx: norm.context,
+      out: norm.output,
       inCost,
       outCost,
       sidechain: !!e.sidechain,
