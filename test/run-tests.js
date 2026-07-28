@@ -7868,6 +7868,76 @@ async function main() {
     const after = JSON.parse(read(staleFile));
     assert.deepStrictEqual(after.permissions.allow.filter(r => /membridge/i.test(r)), [hooks.appendAllowRule()], 'stale rule not rewritten to current form');
   });
+  // Fix round 5 (allow-rule anchoring). isOwnAppendRule was a bare substring
+  // test -- v.toLowerCase().includes(HOOK_SCRIPT) && v.includes(' append') --
+  // with no boundary anchoring and no ordering requirement, unlike its two
+  // siblings isOwnStopHook / isOwnRecallHook (anchored in 66c17a0). A user's
+  // own Bash allow-rule mentioning a similarly-named script (last path
+  // segment merely ENDING in "membridge-hook.js", e.g.
+  // /usr/bin/notmembridge-hook.js), or any rule containing both the
+  // substring "membridge-hook.js" and the substring " append" anywhere in any
+  // order, was falsely claimed as MemBridge's own and silently dropped by
+  // remove-hooks -- unrecoverable, degrading the user's permission setup
+  // without warning. Fixed the same way as its siblings: the script
+  // reference must sit at a path boundary (^|[\s"'/\\]) and the append
+  // subcommand must immediately follow it, not merely appear somewhere in
+  // the string.
+  check('distill: anchoring -- the real generated append allow-rule is still recognized and removed by remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-real.json');
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: ['Bash(npm run test:*)'] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.ok(after.permissions.allow.includes(hooks.appendAllowRule()), 'the real append allow rule was not installed/recognized');
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    const allowRm = ((afterRm.permissions || {}).allow) || [];
+    assert.ok(!allowRm.includes(hooks.appendAllowRule()), 'the real append allow rule was not removed by remove-hooks');
+    assert.ok(allowRm.includes('Bash(npm run test:*)'), 'unrelated user rule lost');
+  });
+  check('distill: anchoring -- a user allow-rule for a similarly-named script (notmembridge-hook.js append) survives remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-fp1.json');
+    const userRule = '/usr/bin/notmembridge-hook.js append foo';
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [userRule, 'Bash(npm run test:*)'] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
+    assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule that was never ours (unanchored notmembridge-hook.js false positive)');
+  });
+  check('distill: anchoring -- a user allow-rule containing both substrings out of order survives remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-fp2.json');
+    const userRule = 'Bash(my append tool: /opt/notmembridge-hook.js)';
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [userRule] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
+    assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule whose substrings merely appear out of order');
+  });
+  check('distill: anchoring -- setup-hooks/remove-hooks leave unrelated allow rules untouched and preserve ordering', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-order.json');
+    const rules = ['Bash(npm run test:*)', 'Bash(git status:*)', 'Bash(echo hi:*)'];
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [...rules] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    // Unrelated rules keep their original relative order, with our rule
+    // appended after them.
+    assert.deepStrictEqual(after.permissions.allow.slice(0, rules.length), rules, 'unrelated rule order changed');
+    assert.strictEqual(after.permissions.allow[rules.length], hooks.appendAllowRule(), 'our rule not appended after the user rules');
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.permissions.allow, rules, 'unrelated rules changed or reordered by remove-hooks');
+  });
   check('distill: setup-hooks refuses a settings file whose permissions shape is malformed', () => {
     const badFile = path.join(ROOT, 'claude-settings-badperm.json');
     const badBody = JSON.stringify({ permissions: [] });
