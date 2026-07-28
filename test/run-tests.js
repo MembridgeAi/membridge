@@ -5603,6 +5603,99 @@ async function main() {
     assert.strictEqual(back.volume, built.volume);
     assert.strictEqual(store.readLedger(path.join(ROOT, 'nope')), null);
   });
+  // FINDING C2. proj.events is a SLIDING window, so a ledger rebuilt from it
+  // each pass reports a shrinking slice of history -- /api/savings showed
+  // ~6.6% of the real total and volume could go DOWN after more work. The
+  // fold must accumulate: idempotent on a repeat, strictly increasing on new
+  // work, and never regressing when old events fall out of the window.
+  check('ledger-store: the ledger accumulates durably and never regresses as the window slides', () => {
+    const store = require('../lib/ledger-store');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const batch = (n, session, from) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const ts = new Date(T0 + (from + i) * 1000).toISOString();
+        out.push({ kind: 'usage', ts, session, messageId: `${session}-m${from + i}`, model: 'claude-opus-4-6', usage: u });
+        out.push({ kind: 'read', ts, session, toolUseId: `${session}-t${from + i}`, file: '/r/x.js' });
+      }
+      return out;
+    };
+    const b1 = batch(3, 'a', 0);
+    const b2 = batch(2, 'b', 10);
+
+    const one = store.foldProjectLedger(null, b1);
+    assert.strictEqual(one.requests, 3);
+    assert.strictEqual(one.volume, 3000);
+    assert.strictEqual(one.sessions, 1);
+    assert.deepStrictEqual(one.reads, { first: 1, sameSession: 2, crossSession: 0 });
+
+    // Same window again: every request and read is already accounted for.
+    const twice = store.foldProjectLedger(one, b1);
+    assert.strictEqual(twice.requests, 3, 're-syncing the same window must not double-count requests');
+    assert.strictEqual(twice.volume, 3000, 're-syncing the same window must not double-count volume');
+    assert.deepStrictEqual(twice.reads, one.reads, 're-syncing the same window must not double-count reads');
+
+    // New work arrives alongside the old window: totals strictly increase.
+    const three = store.foldProjectLedger(twice, b1.concat(b2));
+    assert.strictEqual(three.requests, 5);
+    assert.strictEqual(three.volume, 5000);
+    assert.strictEqual(three.sessions, 2);
+    assert.deepStrictEqual(three.reads, { first: 1, sameSession: 2, crossSession: 2 });
+
+    // Eviction: batch 1 has aged out of the stored window entirely.
+    const four = store.foldProjectLedger(three, b2);
+    assert.strictEqual(four.requests, 5, 'a slid window must never shrink the request count');
+    assert.strictEqual(four.volume, 5000, 'a slid window must never shrink volume');
+    assert.strictEqual(four.sessions, 2, 'a slid window must never shrink the session count');
+    assert.deepStrictEqual(four.reads, three.reads, 'a slid window must never shrink the read tally');
+    assert.strictEqual(four.hotPaths.length, 1);
+    assert.strictEqual(four.hotPaths[0].file, '/r/x.js');
+    assert.strictEqual(four.hotPaths[0].readers, 2, 'both sessions stay in the hot set after eviction');
+    assert.strictEqual(four.hotPaths[0].reads, 5, 'per-path read counts accumulate too');
+    assert.ok(!isNaN(Date.parse(four.updatedAt)), 'updatedAt must be a real timestamp');
+
+    // The accumulation evidence survives a JSON round-trip -- it lives on disk,
+    // so a fold onto what readLedger returns must behave like a fold onto the
+    // in-memory object.
+    const roundTripped = store.foldProjectLedger(JSON.parse(JSON.stringify(four)), b2);
+    assert.strictEqual(roundTripped.requests, 5, 'dedupe evidence must survive serialization');
+  });
+  check('ledger-store: every accumulated list is bounded', () => {
+    const store = require('../lib/ledger-store');
+    const L = store.LIMITS;
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const events = [];
+    const n = L.SEEN_KEY_CAP + 500;
+    for (let i = 0; i < n; i++) {
+      events.push({ kind: 'usage', ts: new Date(T0 + i * 1000).toISOString(), session: 's' + i,
+        messageId: 'm' + i, model: 'claude-opus-4-6', usage: u });
+    }
+    const led = store.foldProjectLedger(null, events);
+    assert.strictEqual(led.requests, n, 'every request is still counted');
+    assert.strictEqual(led.seenKeys.length, L.SEEN_KEY_CAP, 'the dedupe horizon is bounded');
+    assert.strictEqual(led.sessionIds.length, L.SESSION_ID_CAP, 'the session-id list is bounded');
+    assert.strictEqual(led.sessions, n, 'the session COUNT survives ids ageing out of the list');
+
+    // Readers per path and the hot set are bounded too.
+    const reads = [];
+    for (let i = 0; i < L.READERS_PER_PATH_CAP + 20; i++) {
+      reads.push({ kind: 'read', ts: new Date(T0 + i * 1000).toISOString(), session: 'r' + i,
+        toolUseId: 'tu' + i, file: '/r/hot.js' });
+    }
+    for (let f = 0; f < L.HOT_PATH_CAP + 40; f++) {
+      for (const s of ['p', 'q']) {
+        reads.push({ kind: 'read', ts: new Date(T0 + (f * 2 + (s === 'q' ? 1 : 0)) * 1000).toISOString(),
+          session: s, toolUseId: `${s}-${f}`, file: `/r/f${f}.js` });
+      }
+    }
+    const led2 = store.foldProjectLedger(null, reads);
+    const hot = led2.hotPaths.find(h => h.file === '/r/hot.js');
+    assert.ok(hot, 'the many-reader path is in the hot set');
+    assert.strictEqual(hot.readers, L.READERS_PER_PATH_CAP, 'reader sessions per path are bounded');
+    assert.strictEqual(led2.hotPaths.length, L.HOT_PATH_CAP, 'the hot set is bounded');
+  });
   check('api: /api/savings reports per-project ledgers and totals', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'savings-proj');
@@ -5612,6 +5705,9 @@ async function main() {
       inCost: 0.5, outCost: 0.1,
       reads: { first: 3, sameSession: 2, crossSession: 5 },
       hotPaths: [{ file: '/r/x.js', readers: 2, reads: 4 }],
+      // Accumulation bookkeeping: durable on disk, never on the wire.
+      seenKeys: ['0|s1|m1'], readKeys: ['s1|tu1|/r/x.js'], sessionIds: ['s1'],
+      fileReaders: { '/r/x.js': { sessions: ['s1', 's2'], reads: 4, lastTs: 't1' } },
     });
     // savingsPayload takes no argument -- like every other payload builder in
     // lib/server.js it reads state via util.loadState() itself, not from a
@@ -5626,6 +5722,22 @@ async function main() {
       assert.strictEqual(payload.totals.volume, 5000);
       assert.strictEqual(payload.totals.reads.crossSession, 5);
       assert.strictEqual(payload.projects[0].hotPaths, 1);
+      // FINDING I4. MemBridge prices at list-price API rates while many users
+      // are on flat subscription plans, so a dollar figure here would be a
+      // number the user can disprove -- and it would discredit every honest
+      // token figure next to it. Costs are computed and stored, never served.
+      assert.strictEqual(payload.projects[0].inCost, undefined, 'the ledger must never serve a dollar figure');
+      assert.strictEqual(payload.projects[0].outCost, undefined, 'the ledger must never serve a dollar figure');
+      assert.strictEqual(payload.totals.inCost, undefined, 'totals must never carry a dollar figure');
+      assert.strictEqual(payload.totals.outCost, undefined, 'totals must never carry a dollar figure');
+      // Whitelist: the payload is an explicit projection, so accumulation
+      // bookkeeping (dedupe keys, per-path reader sets) can never leak onto
+      // the wire just because it was added to ledger.json.
+      assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
+        ['hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        'the /api/savings project shape must stay exactly this set');
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['reads', 'requests', 'volume'],
+        'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
     }
