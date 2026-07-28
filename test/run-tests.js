@@ -7395,6 +7395,89 @@ async function main() {
     const again = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.ok(/already installed/.test(again.stdout), `upgrade not idempotent: ${again.stdout}`);
   });
+  // Stop-hook twin of the H2 recall fix above: reconcileStopHook used to claim
+  // ownership of any hook whose JSON merely CONTAINS "membridge", which is true
+  // of any hook script a user keeps under a directory named Membridge. Left
+  // unfixed, setup-hooks would OVERWRITE that command with ours, and
+  // remove-hooks would then DELETE it outright -- unrecoverably, since the
+  // user's own command is gone the moment setup-hooks runs. Ownership must be
+  // isOwnStopHook (mirrors isOwnAppendRule / isOwnRecallHook), not the broad
+  // mentionsMembridge.
+  check('stop: H2-twin -- a user Stop hook whose command merely contains "membridge" survives setup-hooks and remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-user-membridge.json');
+    const userEntry = { matcher: '', hooks: [{ type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mylint.js' }] };
+    fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [userEntry] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.deepStrictEqual(after.hooks.Stop[0], userEntry, "setup-hooks rewrote the user's own Stop hook");
+    assert.strictEqual(after.hooks.Stop.length, 2, 'the MemBridge Stop entry was not appended alongside the user entry');
+    assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], 'remove-hooks deleted a Stop hook that was never ours');
+  });
+  // The real-world install shape has NO subcommand at all (membridge-hook.js
+  // falls through to runStop() when argv is empty). isOwnStopHook must
+  // recognize this exact shape or setup-hooks would append a duplicate Stop
+  // entry on every currently-installed machine.
+  check('stop: a real-shape entry (node + membridge-hook.js, no subcommand) is recognized as owned; a stale path is upgraded in place', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-realshape.json');
+    const staleCommand = '"/opt/homebrew/Cellar/node/25.7.0/bin/node" "/Users/marco/Documents/Membridge/lib/membridge-hook.js"';
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: staleCommand, timeout: 10 }] }] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.ok(/Updated the MemBridge Stop hook command/.test(out.stdout), `real-shape entry not recognized as owned: ${out.stdout}`);
+    const after = JSON.parse(read(f));
+    assert.strictEqual(after.hooks.Stop.length, 1, 'setup-hooks appended a duplicate instead of recognizing the real-shape entry');
+    assert.strictEqual(after.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'stale real-shape command not upgraded to the current install path');
+    assert.strictEqual(after.hooks.Stop[0].hooks[0].timeout, 10, 'sibling fields lost in upgrade');
+  });
+  // The Electron-launched app prefixes the command with ELECTRON_RUN_AS_NODE=1
+  // so its bundled binary behaves as plain node; that prefix sits before the
+  // part isOwnStopHook inspects and must not defeat recognition.
+  check('stop: the Electron-prefixed variant (ELECTRON_RUN_AS_NODE=1 ...) is recognized as owned', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-electron.json');
+    const electronCommand = 'ELECTRON_RUN_AS_NODE=1 "/Applications/MemBridge.app/Contents/MacOS/MemBridge" "/Applications/MemBridge.app/Contents/Resources/app.asar/lib/membridge-hook.js"';
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: electronCommand, timeout: 10 }] }] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.strictEqual(after.hooks.Stop.length, 1, 'setup-hooks duplicated the Electron-prefixed entry instead of recognizing it as owned');
+  });
+  // Second bug, same fix round: Marco's real settings.json accumulated THREE
+  // byte-identical Stop entries. setup-hooks must converge to exactly one
+  // owned entry regardless of how many piled up, leaving any unrelated user
+  // Stop hook untouched, and a second run must be a true no-op.
+  check('stop: setup-hooks converges three duplicate owned Stop entries to one; a second run is a no-op; the user hook survives', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-triplicate.json');
+    const ownedEntry = { hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] };
+    const userEntry = { hooks: [{ type: 'command', command: 'echo user-stop-triplicate' }] };
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [ownedEntry, ownedEntry, ownedEntry, userEntry] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    const ownedCount = after.hooks.Stop.filter(e => e && Array.isArray(e.hooks) && e.hooks.some(h => h.command === hooks.hookCommand())).length;
+    assert.strictEqual(ownedCount, 1, `expected exactly one owned Stop entry after convergence, found ${ownedCount}`);
+    assert.strictEqual(after.hooks.Stop.length, 2, 'user Stop hook lost, or leftover duplicate entries remain');
+    assert.ok(after.hooks.Stop.some(e => JSON.stringify(e) === JSON.stringify(userEntry)), "user's Stop hook not preserved byte-for-byte");
+    const before2 = read(f);
+    const out2 = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out2.status, 0, out2.stderr);
+    assert.ok(/already installed/.test(out2.stdout), `second run after convergence was not a no-op: ${out2.stdout}`);
+    assert.strictEqual(read(f), before2, 'second setup-hooks run rewrote the file after convergence');
+  });
   check('recall: reconcileRecallHook installs on Read|Grep|Glob into a settings file with no PreToolUse key at all', () => {
     const f = path.join(ROOT, 'claude-settings-recall-fresh.json');
     fs.writeFileSync(f, JSON.stringify({ model: 'opus' }, null, 2));
