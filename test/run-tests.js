@@ -327,6 +327,27 @@ async function main() {
     assert.strictEqual(usage[0].source, 'Codex');
   });
 
+  check('adapter: Read/Grep/Glob emit read events with tool id and bounded-read params', () => {
+    const entries = [
+      { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1',
+        message: { id: 'msg_b', model: 'claude-opus-4-6', usage: { input_tokens: 1 }, content: [
+          { type: 'tool_use', id: 'tu_r', name: 'Read', input: { file_path: '/repo/a.js', offset: 10, limit: 50 } },
+          { type: 'tool_use', id: 'tu_g', name: 'Grep', input: { pattern: 'x', path: '/repo/lib' } },
+          { type: 'tool_use', id: 'tu_e', name: 'Edit', input: { file_path: '/repo/b.js' } },
+        ] } },
+    ];
+    const events = claudeAdapter.extractEvents(entries, { pendingCreates: {}, tasks: {} });
+    const reads = events.filter(e => e.kind === 'read');
+    assert.strictEqual(reads.length, 2, 'Read and Grep produce reads; Edit does not');
+    const r = reads.find(e => e.tool === 'Read');
+    assert.strictEqual(r.file, '/repo/a.js');
+    assert.strictEqual(r.toolUseId, 'tu_r');
+    assert.strictEqual(r.offset, 10);
+    assert.strictEqual(r.limit, 50);
+    assert.strictEqual(r.messageId, 'msg_b');
+    assert.ok(events.some(e => e.kind === 'edit' && e.file === '/repo/b.js'), 'edit events still emitted');
+  });
+
   check('capture: temp/scratchpad edits are dropped; real edits attributed to the repo', () => {
     const repo = path.join(ROOT, 'hygiene-repo');
     fs.mkdirSync(repo, { recursive: true });
