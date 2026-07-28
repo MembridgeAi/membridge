@@ -286,6 +286,27 @@ async function main() {
     assert.ok(pricing.priceOf('some-future-model', 'unknown').inPerMTok > 0);
   });
 
+  check('adapter: emits one usage event per assistant record, carrying message id', () => {
+    const entries = [
+      { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1',
+        message: { id: 'msg_a', model: 'claude-opus-4-6',
+          usage: { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 20 },
+          content: [{ type: 'text', text: 'hi' }] } },
+      // same request, second content block -- SAME message id, repeated usage
+      { type: 'assistant', timestamp: '2026-07-28T10:00:01Z', cwd: '/repo', sessionId: 's1',
+        message: { id: 'msg_a', model: 'claude-opus-4-6',
+          usage: { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 20 },
+          content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/repo/a.js' } }] } },
+    ];
+    const events = claudeAdapter.extractEvents(entries, { pendingCreates: {}, tasks: {} });
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 2, 'adapter emits per record; ledger dedupes on messageId');
+    assert.strictEqual(usage[0].messageId, 'msg_a');
+    assert.strictEqual(usage[0].session, 's1');
+    assert.strictEqual(usage[0].model, 'claude-opus-4-6');
+    assert.strictEqual(usage[0].usage.cache_read_input_tokens, 900);
+  });
+
   check('capture: temp/scratchpad edits are dropped; real edits attributed to the repo', () => {
     const repo = path.join(ROOT, 'hygiene-repo');
     fs.mkdirSync(repo, { recursive: true });
