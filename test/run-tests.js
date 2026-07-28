@@ -5778,9 +5778,9 @@ async function main() {
     assert.deepStrictEqual(migrated, Object.assign({}, fresh, { updatedAt: migrated.updatedAt }),
       'an un-versioned ledger with totals but no evidence must fold exactly like a fresh (null) ledger');
     assert.strictEqual(migrated.requests, window.length, 'the old poisoned totals are discarded, not carried forward');
-    assert.strictEqual(migrated.version, 2, 'the reset ledger is stamped with the current version');
+    assert.strictEqual(migrated.version, 3, 'the reset ledger is stamped with the current version');
   });
-  check('ledger-fold: BLOCKING 2 -- a v2 ledger round-trips untouched (no reset)', () => {
+  check('ledger-fold: BLOCKING 2 -- a current-version ledger round-trips untouched (no reset)', () => {
     const store = require('../lib/ledger-store');
     const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
     const T0 = Date.parse('2026-07-28T10:00:00.000Z');
@@ -5788,14 +5788,66 @@ async function main() {
       { kind: 'usage', ts: new Date(T0).toISOString(), session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
     ];
     const built = store.foldProjectLedger(null, window);
-    assert.strictEqual(built.version, 2, 'every fold stamps the current version');
+    assert.strictEqual(built.version, 3, 'every fold stamps the current version');
     // Round-trip through JSON (as it would through disk) and fold the SAME
-    // window again: real dedupe evidence plus version:2 must dedupe, not
-    // reset, unlike the unmigrated case above.
+    // window again: real dedupe evidence plus the current version must
+    // dedupe, not reset, unlike the unmigrated case above.
     const reloaded = JSON.parse(JSON.stringify(built));
     const refolded = store.foldProjectLedger(reloaded, window);
     assert.strictEqual(refolded.requests, 1, 'a versioned ledger with real evidence dedupes instead of resetting');
-    assert.strictEqual(refolded.version, 2);
+    assert.strictEqual(refolded.version, 3);
+  });
+  // H1 (BLOCKER, fix round 1). The producer (this fold, fed by
+  // lib/adapters/claude-code.js) used to key fileReaders/hotPaths by the read
+  // event's VERBATIM file -- an ABSOLUTE path -- while every consumer looks
+  // the path up REPO-RELATIVE (lib/recall.js's tiering via the PreToolUse
+  // hook, lib/recall-store.js's warm() joining projectPath + hp.file). The
+  // two sides never agreed, so tierFor() returned null for every real read
+  // and the whole recall layer was inert on real data. Normalization happens
+  // HERE, on the producer side, and only at the per-project ledger write
+  // boundary -- the events themselves keep their absolute paths.
+  check('ledger-fold: H1 -- an absolute-path read event keys fileReaders repo-relative', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-relkey-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const T = t => new Date(Date.parse('2026-07-28T10:00:00.000Z') + t * 1000).toISOString();
+    // Exactly the shape lib/adapters/claude-code.js emits for a Read.
+    const events = [
+      { kind: 'read', ts: T(0), session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
+      { kind: 'read', ts: T(1), session: 'b', toolUseId: 'tu2', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
+      // Outside the project entirely: never a key, never counted.
+      { kind: 'read', ts: T(2), session: 'a', toolUseId: 'tu3', file: path.join(ROOT, 'elsewhere', 'y.js'), tool: 'Read' },
+    ];
+    const led = store.foldProjectLedger(null, events, undefined, proj);
+    assert.deepStrictEqual(Object.keys(led.fileReaders), ['src/x.js'], 'fileReaders must be keyed repo-relative, and only for in-project files');
+    assert.strictEqual(led.hotPaths[0].file, 'src/x.js', 'the hot set carries the same relative key warm() will join onto projectPath');
+    assert.deepStrictEqual(led.reads, { first: 1, sameSession: 0, crossSession: 1 }, 'the out-of-project read is ignored entirely');
+    // updateLedger is the production entry point and already knows the
+    // project path -- it must thread it through on its own.
+    store.updateLedger(proj, events, {});
+    assert.deepStrictEqual(Object.keys(store.readLedger(proj).fileReaders), ['src/x.js'], 'updateLedger did not thread projectPath into the fold');
+  });
+  check('ledger-fold: H1 -- a pre-v3 ledger keyed by absolute paths resets instead of mixing key shapes', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-v2-mix-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    // A v2 ledger with REAL dedupe evidence (so the pre-existing unmigrated
+    // rule would happily fold onto it) but absolute fileReaders keys.
+    const prev = {
+      version: 2, updatedAt: '2026-01-01T00:00:00.000Z',
+      sessions: 2, requests: 10, volume: 1000, inCost: 0, outCost: 0,
+      reads: { first: 3, sameSession: 1, crossSession: 1 },
+      hotPaths: [{ file: '/abs/src/x.js', readers: 2, reads: 4 }],
+      seenKeys: ['k1'], readKeys: ['r1'], sessionIds: ['a'],
+      fileReaders: { '/abs/src/x.js': { sessions: ['a', 'b'], reads: 4, lastTs: 't', firstTs: 't', firstSession: 'a' } },
+    };
+    const events = [
+      { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
+    ];
+    const next = store.foldProjectLedger(prev, events, undefined, proj);
+    assert.strictEqual(next.version, 3, 'the key-shape change gets its own schema version');
+    assert.deepStrictEqual(Object.keys(next.fileReaders), ['src/x.js'], 'no absolute key may survive alongside the new relative ones');
+    assert.strictEqual(next.requests, 0, 'a pre-v3 ledger is discarded rather than folded onto');
   });
   // MINOR A. Incremental tiering processes reads pass-by-pass; a path's
   // reads can arrive across passes with INVERTED timestamps (an earlier
@@ -6688,7 +6740,182 @@ async function main() {
       assert.strictEqual(outForced.stdout, '', 'a forced failure must never leak to stdout');
       assert.strictEqual(outForced.stderr, '', 'a forced failure must never leak to stderr either');
     });
+
+    // --- fix round 1 pins -------------------------------------------------
+    // A tracked, .membridge-carrying project with a fresh store entry, ready
+    // to be driven end to end. Every scenario below gets its own so one
+    // ledger/events file can never bleed into another.
+    const seedRecallProject = (name, relPath, content) => {
+      const proj = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(path.join(proj, path.dirname(relPath)), { recursive: true });
+      fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [proj]: { events: [] } } });
+      fs.writeFileSync(path.join(proj, relPath), content);
+      return proj;
+    };
+    const holdoutSession = (relPath, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        if (bucketFor(sid, relPath) < 10) return sid;
+      }
+      throw new Error(`could not find a holdout session id for ${relPath}`);
+    };
+    const bodyContent = name => [
+      `function ${name}One() {`, '  work();', '  work();', '  work();', '}',
+      `function ${name}Two() {`, '  work();', '  work();', '  work();', '}', '',
+    ].join('\n');
+
+    // H1 (BLOCKER): end-to-end producer/consumer agreement. The ledger here is
+    // built the way PRODUCTION builds it -- ledgerStore.updateLedger() over
+    // adapter-shaped read events carrying ABSOLUTE paths -- and the hook must
+    // then serve. Before the fix the fold keyed those events by their absolute
+    // path while the hook looked up 'src/agree.js', so tierFor() returned null
+    // and the recall layer never served a single real read.
+    const e2eRel = 'src/agree.js';
+    const e2eContent = bodyContent('agree');
+    const e2eProj = seedRecallProject('recall-e2e-proj', e2eRel, e2eContent);
+    const e2eFile = path.join(e2eProj, e2eRel);
+    recallStoreLib.put(e2eProj, e2eRel, {
+      contentHash: recallHash(e2eContent), skeleton: 'SKELETON_E2E', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.updateLedger(e2eProj, [
+      { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'other-e2e-1', toolUseId: 'e1', file: e2eFile, tool: 'Read' },
+      { kind: 'read', ts: '2026-07-28T10:00:01.000Z', session: 'other-e2e-2', toolUseId: 'e2', file: e2eFile, tool: 'Read' },
+    ], util.getConfig());
+    const sessE2E = nonHoldoutSession(e2eRel, 'sess-e2e');
+    const outE2E = runRecallHook({ session_id: sessE2E, cwd: e2eProj, tool_name: 'Read', tool_input: { file_path: e2eFile, limit: 100 } });
+    check('recall hook: H1 -- serves a read whose ledger was built from ABSOLUTE-path events (producer and consumer agree)', () => {
+      assert.strictEqual(outE2E.status, 0, outE2E.stderr);
+      assert.ok(outE2E.stdout, 'the hook stepped aside: the ledger the fold wrote does not agree with the path the hook looks up');
+      const reason = JSON.parse(outE2E.stdout).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(reason.includes('SKELETON_E2E'), `expected the cached skeleton in the served body: ${reason}`);
+    });
+
+    // M5: recallStore.get() must be consulted BEFORE the target file is read
+    // and sha1'd -- on a store miss (the common case) that hash is pure waste
+    // (measured 74ms on a 22MB file). Pinned by making the file's CONTENT
+    // unreadable while stat() still succeeds: hashing it would throw and land
+    // a 'hook recall error' line in the log, returning early never touches it.
+    // (A root-run test suite cannot enforce chmod, so this pins on any normal
+    // developer/CI account and passes vacuously as root.)
+    const missRel = 'src/nostore.js';
+    const missProj = seedRecallProject('recall-store-miss-proj', missRel, bodyContent('miss'));
+    const missFile = path.join(missProj, missRel);
+    fs.chmodSync(missFile, 0o000);
+    const logBefore = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
+    const outMiss = runRecallHook({ session_id: nonHoldoutSession(missRel, 'sess-miss'), cwd: missProj, tool_name: 'Read', tool_input: { file_path: missFile, limit: 100 } });
+    const logAfterMiss = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
+    fs.chmodSync(missFile, 0o644);
+    check('recall hook: M5 -- a store miss returns before hashing the target file', () => {
+      assert.strictEqual(outMiss.status, 0, outMiss.stderr);
+      assert.strictEqual(outMiss.stdout, '', 'a store miss must never serve');
+      assert.ok(!logAfterMiss.slice(logBefore.length).includes('hook recall error'),
+        'the hook hashed the file before checking the store: an unreadable file threw instead of being a cheap miss');
+    });
+
+    // L6: a held-out read with NOTHING cached used to append a holdout row
+    // anyway (wouldServe null), biasing the held-out arm with reads that could
+    // never have been served and growing events.jsonl unbounded.
+    const noiseRel = 'src/holdout-noise.js';
+    const noiseProj = seedRecallProject('recall-holdout-noise-proj', noiseRel, bodyContent('noise'));
+    const outNoise = runRecallHook({
+      session_id: holdoutSession(noiseRel, 'sess-holdout-noise'), cwd: noiseProj,
+      tool_name: 'Read', tool_input: { file_path: path.join(noiseProj, noiseRel), limit: 100 },
+    });
+    check('recall hook: L6 -- a held-out read with no cache entry logs nothing at all', () => {
+      assert.strictEqual(outNoise.status, 0, outNoise.stderr);
+      assert.strictEqual(outNoise.stdout, '');
+      assert.ok(!fs.existsSync(hooksRecall.eventsPath(noiseProj)),
+        'a read that could never have been served must not land in the holdout arm');
+    });
+
+    // ...but a held-out read that WOULD have served still logs, with the tier
+    // it would have used -- that comparison is the whole point of the arm.
+    const hoRel = 'src/holdout-real.js';
+    const hoContent = bodyContent('held');
+    const hoProj = seedRecallProject('recall-holdout-real-proj', hoRel, hoContent);
+    recallStoreLib.put(hoProj, hoRel, {
+      contentHash: recallHash(hoContent), skeleton: 'SKEL_HELD', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(hoProj, {
+      version: 3,
+      fileReaders: { [hoRel]: { sessions: ['other-held'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-held' } },
+    });
+    const sessHo = holdoutSession(hoRel, 'sess-holdout-real');
+    const outHo = runRecallHook({ session_id: sessHo, cwd: hoProj, tool_name: 'Read', tool_input: { file_path: path.join(hoProj, hoRel), limit: 100 } });
+    check('recall hook: L6 -- a held-out read that WOULD have served still logs its tier', () => {
+      assert.strictEqual(outHo.status, 0, outHo.stderr);
+      assert.strictEqual(outHo.stdout, '', 'a held-out read must never serve');
+      const rows = fs.readFileSync(hooksRecall.eventsPath(hoProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      assert.strictEqual(rows.length, 1);
+      assert.strictEqual(rows[0].holdout, true);
+      assert.strictEqual(rows[0].wouldServe, 'B');
+    });
+
+    // L6: events.jsonl is append-only and otherwise unbounded. Past the cap it
+    // rotates to its most recent half, on a line boundary.
+    const rotRel = 'src/rotate.js';
+    const rotContent = bodyContent('rot');
+    const rotProj = seedRecallProject('recall-rotate-proj', rotRel, rotContent);
+    recallStoreLib.put(rotProj, rotRel, {
+      contentHash: recallHash(rotContent), skeleton: 'SKEL_ROT', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(rotProj, {
+      version: 3,
+      fileReaders: { [rotRel]: { sessions: ['other-rot'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-rot' } },
+    });
+    fs.mkdirSync(hooksRecall.recallDir(rotProj), { recursive: true });
+    const filler = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', savedTokens: 1, holdout: false }) + '\n';
+    fs.writeFileSync(hooksRecall.eventsPath(rotProj), filler.repeat(Math.ceil((2 * 1024 * 1024) / filler.length) + 100));
+    const sizeBeforeRotate = fs.statSync(hooksRecall.eventsPath(rotProj)).size;
+    const outRot = runRecallHook({ session_id: nonHoldoutSession(rotRel, 'sess-rotate'), cwd: rotProj, tool_name: 'Read', tool_input: { file_path: path.join(rotProj, rotRel), limit: 100 } });
+    check('recall hook: L6 -- an oversized events.jsonl rotates to its most recent half instead of growing forever', () => {
+      assert.strictEqual(outRot.status, 0, outRot.stderr);
+      assert.ok(outRot.stdout, 'the serve itself must still happen');
+      const after = fs.readFileSync(hooksRecall.eventsPath(rotProj), 'utf8');
+      assert.ok(after.length < sizeBeforeRotate * 0.75, `events.jsonl did not rotate (${sizeBeforeRotate} -> ${after.length})`);
+      const rows = after.trim().split('\n');
+      rows.forEach(l => JSON.parse(l)); // every surviving line is whole -- rotation cut on a newline
+      assert.strictEqual(JSON.parse(rows[rows.length - 1]).relPath, rotRel, 'the new row is missing after rotation');
+    });
+
+    // L7: saveSessionState used to commit BEFORE the event write, so an
+    // events.jsonl failure marked the path served and burned an interception
+    // for a serve the agent never received -- locking that path out for the
+    // whole session. Reproduced by pre-creating a DIRECTORY at events.jsonl.
+    const l7Rel = 'src/order.js';
+    const l7Content = bodyContent('order');
+    const l7Proj = seedRecallProject('recall-write-order-proj', l7Rel, l7Content);
+    recallStoreLib.put(l7Proj, l7Rel, {
+      contentHash: recallHash(l7Content), skeleton: 'SKEL_ORDER', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(l7Proj, {
+      version: 3,
+      fileReaders: { [l7Rel]: { sessions: ['other-order'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-order' } },
+    });
+    fs.mkdirSync(hooksRecall.eventsPath(l7Proj), { recursive: true }); // appendFileSync -> EISDIR
+    const sessL7 = nonHoldoutSession(l7Rel, 'sess-order');
+    const outL7 = runRecallHook({ session_id: sessL7, cwd: l7Proj, tool_name: 'Read', tool_input: { file_path: path.join(l7Proj, l7Rel), limit: 100 } });
+    check('recall hook: L7 -- a failed event write never marks the path served', () => {
+      assert.strictEqual(outL7.status, 0, outL7.stderr);
+      assert.strictEqual(outL7.stdout, '', 'nothing may be printed when the bookkeeping failed');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(l7Proj, sessL7)),
+        'the path was marked served (and locked out for the session) for a serve the agent never got');
+    });
   }
+
+  // L8: the hook is the hot path -- it must never pull a parser into the
+  // process. It used to require all of lib/skeleton.js just for
+  // estimateTokens, leaving that invariant resting on lazy-require luck with
+  // nothing pinning it.
+  check('recall: L8 -- requiring the PreToolUse hook never pulls tree-sitter into the require cache', () => {
+    const script = `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'hooks-recall.js'))});
+      console.log(JSON.stringify(Object.keys(require.cache).filter(k => /tree-sitter/.test(k))));`;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env } });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.deepStrictEqual(JSON.parse(out.stdout.trim()), [], 'the recall hot path loaded a parser at require time');
+  });
 
   await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
     const { skeletonize } = require('../lib/skeleton');
@@ -6781,7 +7008,7 @@ async function main() {
     const built = store.buildProjectLedger([]);
     const p = store.writeLedger(proj, built);
     assert.ok(fs.existsSync(p), 'ledger.json is written');
-    assert.strictEqual(store.readLedger(proj).version, 2, 'the write round-trips through the same path readLedger uses');
+    assert.strictEqual(store.readLedger(proj).version, 3, 'the write round-trips through the same path readLedger uses');
     const dir = path.dirname(p);
     const leftovers = fs.readdirSync(dir).filter(f => f.startsWith('.ledger.json.') && f.endsWith('.tmp'));
     assert.deepStrictEqual(leftovers, [], 'no temp file survives a successful write');
@@ -7209,6 +7436,75 @@ async function main() {
       assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost in upgrade');
       const r2 = hooks.reconcileRecallHook();
       assert.strictEqual(r2.wrote, false, 'upgrade not idempotent');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  // H2 (HIGH, fix round 1). The PreToolUse reconcile used to claim ownership
+  // of any hook whose JSON merely CONTAINS "membridge" -- which is true of any
+  // hook script the user happens to keep under a directory named Membridge.
+  // Verified damage: the user's own hook had its command OVERWRITTEN with the
+  // recall command, the recall hook inherited that entry's "Write" matcher (so
+  // it never fired on reads), and remove-hooks then deleted the user's hook
+  // outright. Ownership must be established by the command actually being
+  // ours, in the spirit of isOwnAppendRule.
+  check('recall: H2 -- a user hook whose command merely contains "membridge" survives setup-hooks and remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-user-membridge-hook.json');
+    const userEntry = { matcher: 'Write', hooks: [{ type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mylint.js' }] };
+    const seed = { hooks: { PreToolUse: [userEntry] } };
+    fs.writeFileSync(f, JSON.stringify(seed, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own hook");
+    assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the user entry');
+    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'the recall hook must register on reads, not inherit a foreign matcher');
+    assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a hook that was never ours');
+  });
+  // H3. doRunRecall() is fully synchronous (it blocks on a stdin read), so a
+  // JS timer can never fire to bound it -- the settings-level per-hook timeout
+  // is the only real bound that exists.
+  check('recall: H3 -- the installed PreToolUse entry carries a low settings-level timeout', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-timeout.json');
+    fs.writeFileSync(f, JSON.stringify({}, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      hooks.reconcileRecallHook();
+      const h = JSON.parse(read(f)).hooks.PreToolUse[0].hooks[0];
+      assert.strictEqual(typeof h.timeout, 'number', 'the recall entry has no timeout at all');
+      assert.ok(h.timeout > 0 && h.timeout <= 5, `recall timeout must be 5s or lower, got ${h.timeout}`);
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  // M4. The upgrade path rewrote h.command but never entry.matcher, so an
+  // entry narrowed to "Read" left Grep/Glob unregistered forever and any
+  // future RECALL_MATCHER change could never propagate.
+  check('recall: M4 -- an owned entry narrowed to another matcher is reconciled back to Read|Grep|Glob', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-matcher.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] },
+        { matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] },
+      ] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const r = hooks.reconcileRecallHook();
+      assert.strictEqual(r.wrote, true, 'a narrowed matcher must be reconciled');
+      const after = JSON.parse(read(f));
+      assert.strictEqual(after.hooks.PreToolUse.length, 2, 'reconciling the matcher must not add or drop entries');
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, 'unrelated matcher touched');
+      assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'the owned entry kept its narrowed matcher');
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost while reconciling the matcher');
+      assert.strictEqual(hooks.reconcileRecallHook().wrote, false, 'matcher reconcile is not idempotent');
     } finally {
       process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
