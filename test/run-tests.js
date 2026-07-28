@@ -7960,6 +7960,87 @@ async function main() {
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.permissions.allow, rules, 'unrelated rules changed or reordered by remove-hooks');
   });
+  // Fix round 6 (post-commit anchoring), fourth and last instance of the
+  // ownership-predicate defect fixed in isOwnStopHook / isOwnRecallHook /
+  // isOwnAppendRule above. isOurPostCommitLine was two INDEPENDENT substring
+  // tests -- l.includes('membridge-hook.js') && l.includes('post-commit') --
+  // with no path-boundary anchor and no ordering/adjacency requirement. That
+  // let a user's own similarly-named script (a last path segment merely
+  // ENDING in "membridge-hook.js") or a line mentioning both substrings
+  // anywhere, in any order, be falsely claimed as MemBridge's own. Unlike its
+  // three siblings, this predicate feeds removePostCommitHooks, which can
+  // delete a LINE from -- or delete outright -- a user's per-repo
+  // .git/hooks/post-commit file, with no undo. Each pinned case below uses a
+  // real temp git repo under ROOT (isolated by MEMBRIDGE_HOME, never real
+  // state) and calls hooks.installPostCommitHooks() / removePostCommitHooks()
+  // directly, exactly as the auto-register post-commit sweep test above does.
+  {
+    const pcAnchorRepo = path.join(ROOT, 'postcommit-anchor-repo');
+    fs.mkdirSync(path.join(pcAnchorRepo, '.git', 'hooks'), { recursive: true });
+    {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [pcAnchorRepo]: { events: [] } } });
+    }
+    const pcAnchorFile = path.join(pcAnchorRepo, '.git', 'hooks', 'post-commit');
+
+    check('post-commit: anchoring -- a real MemBridge-generated line is recognized and removed exactly, nothing else', () => {
+      fs.writeFileSync(pcAnchorFile, '');
+      const installResult = hooks.installPostCommitHooks();
+      assert.strictEqual(installResult.failed, 0, 'install reported a failure');
+      const body = read(pcAnchorFile);
+      assert.ok(body.startsWith('#!/bin/sh'), 'fresh hook file needs a shebang');
+      const cmdLine = hooks.postCommitCommand();
+      assert.strictEqual(body, `#!/bin/sh\n${cmdLine}\n`, `unexpected hook body: ${body}`);
+      const removed = hooks.removePostCommitHooks();
+      assert.ok(removed >= 1, 'removePostCommitHooks reported nothing removed');
+      assert.ok(!fs.existsSync(pcAnchorFile), 'a post-commit file that was only our scaffolding + our line must be deleted');
+    });
+
+    check('post-commit: anchoring -- a user line referencing /opt/notmembridge-hook.js with post-commit survives byte-identical', () => {
+      const userLine = '#!/bin/sh\n/opt/notmembridge-hook.js post-commit\n';
+      fs.writeFileSync(pcAnchorFile, userLine);
+      hooks.installPostCommitHooks(); // must APPEND our real line, never touch this one
+      const removed = hooks.removePostCommitHooks();
+      const body = read(pcAnchorFile);
+      assert.ok(body.startsWith(userLine), `false-positive match mutated the user's own line; body: ${body}`);
+      assert.ok(removed >= 1, 'our own appended line should still have been removed');
+      fs.unlinkSync(pcAnchorFile);
+    });
+
+    check('post-commit: anchoring -- a line with both substrings out of order survives byte-identical', () => {
+      const userLine = '#!/bin/sh\n# post-commit: see notes about membridge-hook.js\n';
+      fs.writeFileSync(pcAnchorFile, userLine);
+      hooks.installPostCommitHooks();
+      hooks.removePostCommitHooks();
+      const body = read(pcAnchorFile);
+      assert.ok(body.startsWith(userLine), `false-positive match mutated the user's comment line; body: ${body}`);
+      fs.unlinkSync(pcAnchorFile);
+    });
+
+    check('post-commit: a shebang plus one user command plus our line keeps the shebang and user command, file survives', () => {
+      const userCmd = 'echo user-post-commit-hook';
+      fs.writeFileSync(pcAnchorFile, `#!/bin/sh\n${userCmd}\n`);
+      hooks.installPostCommitHooks();
+      const beforeRemove = read(pcAnchorFile);
+      assert.ok(beforeRemove.includes(userCmd) && beforeRemove.includes('membridge-hook.js'), 'setup did not append alongside the user command');
+      hooks.removePostCommitHooks();
+      assert.ok(fs.existsSync(pcAnchorFile), 'a file with real user content must never be deleted');
+      const afterRemove = read(pcAnchorFile);
+      assert.ok(afterRemove.startsWith('#!/bin/sh'), 'shebang lost after removal');
+      assert.ok(afterRemove.includes(userCmd), 'the user command line was lost after removal');
+      assert.ok(!afterRemove.includes('membridge-hook.js'), 'our line was not actually removed');
+      fs.unlinkSync(pcAnchorFile);
+    });
+
+    check('post-commit: install is idempotent -- installing twice does not duplicate the line', () => {
+      fs.writeFileSync(pcAnchorFile, '');
+      hooks.installPostCommitHooks();
+      hooks.installPostCommitHooks();
+      const body = read(pcAnchorFile);
+      assert.strictEqual(count(body, 'membridge-hook.js'), 1, `line duplicated across two installs: ${body}`);
+      hooks.removePostCommitHooks();
+    });
+  }
   check('distill: setup-hooks refuses a settings file whose permissions shape is malformed', () => {
     const badFile = path.join(ROOT, 'claude-settings-badperm.json');
     const badBody = JSON.stringify({ permissions: [] });
