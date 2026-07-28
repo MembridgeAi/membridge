@@ -6452,6 +6452,244 @@ async function main() {
     assert.strictEqual(explicitTrue.serve, true, 'tracked:true with every other gate clear must serve');
   });
 
+  // --- Task 5: the PreToolUse recall hook (lib/hooks-recall.js) ---
+  // Driven exactly like the Stop hook's own tests: spawn membridge-hook.js as
+  // a child process and feed the payload on stdin (see the `distill:
+  // membridge-hook.js entry behaves like...` test above for the precedent).
+  {
+    const crypto = require('crypto');
+    const recallStoreLib = require('../lib/recall-store');
+    const ledgerStoreLib = require('../lib/ledger-store');
+    const hooksRecall = require('../lib/hooks-recall');
+    const RECALL_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+
+    const recallProj = path.join(ROOT, 'projects', 'recall-hook-proj');
+    fs.mkdirSync(path.join(recallProj, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(recallProj, '.membridge'), { recursive: true });
+    {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [recallProj]: { events: [] } } });
+    }
+
+    const recallHash = content => crypto.createHash('sha1').update(content).digest('hex');
+    const bucketFor = (sid, relPath) => crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+    // recallProj's .membridge dir was just created (birthtime ~ now), so
+    // every session/path pair starts inside the 14-day calibration holdout
+    // window (lib/recall.js's own default). Scan for session ids that land
+    // OUTSIDE the 10% holdout bucket for the "normal serve" scenarios below —
+    // deterministic, exactly like lib/recall.js's own policy test does, never
+    // a flaky pick.
+    const nonHoldoutSession = (relPath, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        if (bucketFor(sid, relPath) >= 10) return sid;
+      }
+      throw new Error(`could not find a non-holdout session id for ${relPath}`);
+    };
+
+    const runRecallHook = (payload, env) => spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], {
+      input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const recallPayload = (session, filePath, extra) => ({
+      session_id: session, cwd: recallProj, tool_name: 'Read',
+      tool_input: { file_path: filePath, ...extra },
+    });
+
+    // (a) Tier B serve: a DIFFERENT session already read this path (per the
+    // ledger), the store's skeleton is fresh, and this call clears both the
+    // 400-token and 2.25x floors comfortably.
+    const fileB = path.join(recallProj, 'src', 'shared.js');
+    const contentB = [
+      'const KEY = 1;',
+      'function helperOne() {',
+      '  doWorkOne();',
+      '  doWorkOne();',
+      '  doWorkOne();',
+      '}',
+      'function helperTwo() {',
+      '  doWorkTwo();',
+      '  doWorkTwo();',
+      '  doWorkTwo();',
+      '}',
+      '',
+    ].join('\n');
+    fs.writeFileSync(fileB, contentB);
+    const relB = 'src/shared.js';
+    const hashB = recallHash(contentB);
+    recallStoreLib.put(recallProj, relB, {
+      contentHash: hashB, skeleton: 'SKELETON_TEXT_FOR_B', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(recallProj, {
+      fileReaders: { [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' } },
+    });
+    const sessB = nonHoldoutSession(relB, 'sess-tierb');
+    const outB = runRecallHook(recallPayload(sessB, fileB, { limit: 100 })); // callTokens = 1200
+
+    check('recall hook: tier B serve prints valid deny JSON with the skeleton and the first-interception terminal line', () => {
+      assert.strictEqual(outB.status, 0, outB.stderr);
+      assert.strictEqual(outB.stderr, '', 'hook wrote to stderr');
+      const parsed = JSON.parse(outB.stdout);
+      assert.deepStrictEqual(Object.keys(parsed), ['hookSpecificOutput']);
+      const hso = parsed.hookSpecificOutput;
+      assert.deepStrictEqual(Object.keys(hso).sort(), ['hookEventName', 'permissionDecision', 'permissionDecisionReason']);
+      assert.strictEqual(hso.hookEventName, 'PreToolUse');
+      assert.strictEqual(hso.permissionDecision, 'deny');
+      assert.ok(hso.permissionDecisionReason.includes('SKELETON_TEXT_FOR_B'), 'reason lacks the served skeleton');
+      assert.ok(hso.permissionDecisionReason.includes('answered from MemBridge · saved 96% of this read (1150 tokens)'), `reason lacks the terminal line: ${hso.permissionDecisionReason}`);
+      assert.ok(hso.permissionDecisionReason.startsWith('answered from MemBridge'), 'terminal line must be the FIRST line');
+    });
+
+    check('recall hook: after serving, sessionState.served/interceptions are updated on disk', () => {
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
+      assert.deepStrictEqual(raw.served, { [relB]: hashB });
+      assert.strictEqual(raw.interceptions, 1);
+    });
+
+    // (e) events.jsonl carries the served row with the exact documented shape.
+    check('recall hook: a served row lands in events.jsonl with the documented shape', () => {
+      const lines = fs.readFileSync(hooksRecall.eventsPath(recallProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      const row = lines.find(l => l.relPath === relB && l.sessionId === sessB);
+      assert.ok(row, 'served event missing from events.jsonl');
+      assert.deepStrictEqual(Object.keys(row).sort(), ['holdout', 'relPath', 'savedTokens', 'sessionId', 'tier', 'ts']);
+      assert.strictEqual(row.tier, 'B');
+      assert.strictEqual(row.savedTokens, 1150);
+      assert.strictEqual(row.holdout, false);
+      assert.ok(!Number.isNaN(Date.parse(row.ts)), 'ts is not a valid timestamp');
+    });
+
+    // A second, different path served in the SAME session, past the first
+    // interception and with a modest saving, must stay quiet (body only, no
+    // terminal line) — the announce gate's other half.
+    const fileA2 = path.join(recallProj, 'src', 'again.js');
+    const contentA2 = 'function again() {\n  z();\n  z();\n  z();\n}\n';
+    fs.writeFileSync(fileA2, contentA2);
+    const relA2 = 'src/again.js';
+    const hashA2 = recallHash(contentA2);
+    recallStoreLib.put(recallProj, relA2, {
+      contentHash: hashA2, skeleton: 'SKEL_A2', skeletonTokens: 20, fileTokens: 200, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(recallProj, {
+      fileReaders: {
+        [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' },
+        // sessB itself already read relA2, per the ledger's own evidence -> tier A.
+        [relA2]: { sessions: [sessB], reads: 1, lastTs: 't', firstTs: 't', firstSession: sessB },
+      },
+    });
+    const outA2 = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 })); // 34*12 = 408 tokens, just clears the 400 floor
+
+    check('recall hook: tier A serve past the first interception, with a modest saving, omits the terminal line', () => {
+      assert.strictEqual(outA2.status, 0, outA2.stderr);
+      const reason = JSON.parse(outA2.stdout).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(!reason.includes('answered from MemBridge ·'), `terminal line should not appear on a quiet interception: ${reason}`);
+      assert.ok(reason.startsWith('MemBridge: this session already read'), 'tier A pointer body missing');
+      assert.ok(reason.includes(relA2) && reason.includes(hashA2.slice(0, 8)), 'tier A body lacks path/hash');
+    });
+
+    // (b) The SAME path served earlier this session must never be intercepted twice.
+    const outBAgain = runRecallHook(recallPayload(sessB, fileB, { limit: 100 }));
+    check('recall hook: a path already served this session steps aside on the next identical call', () => {
+      assert.strictEqual(outBAgain.status, 0, outBAgain.stderr);
+      assert.strictEqual(outBAgain.stdout, '', 'already-served path must not be re-intercepted');
+      assert.strictEqual(outBAgain.stderr, '');
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
+      assert.strictEqual(raw.interceptions, 2, 'interceptions should only have grown from the tier A serve above, not this no-op');
+    });
+
+    // (c) Corrupted store entry -> a cache miss, never a crash; step aside.
+    const fileC = path.join(recallProj, 'src', 'corrupt-store.js');
+    fs.writeFileSync(fileC, 'function corrupt() {\n  c();\n  c();\n  c();\n}\n');
+    const relC = 'src/corrupt-store.js';
+    fs.mkdirSync(path.dirname(recallStoreLib.entryPath(recallProj, relC)), { recursive: true });
+    fs.writeFileSync(recallStoreLib.entryPath(recallProj, relC), 'this is { not json');
+    const sessC = nonHoldoutSession(relC, 'sess-corrupt-store');
+    const outC = runRecallHook(recallPayload(sessC, fileC, { limit: 100 }));
+    check('recall hook: a corrupted store entry is a silent step-aside, exit 0', () => {
+      assert.strictEqual(outC.status, 0, outC.stderr);
+      assert.strictEqual(outC.stdout, '');
+      assert.strictEqual(outC.stderr, '');
+    });
+
+    // (c) Target file gone -> nothing to hash, step aside.
+    const missingFile = path.join(recallProj, 'src', 'does-not-exist.js');
+    const sessMissing = nonHoldoutSession('src/does-not-exist.js', 'sess-missing-file');
+    const outMissing = runRecallHook(recallPayload(sessMissing, missingFile, { limit: 100 }));
+    check('recall hook: a target file that no longer exists is a silent step-aside, exit 0', () => {
+      assert.strictEqual(outMissing.status, 0, outMissing.stderr);
+      assert.strictEqual(outMissing.stdout, '');
+      assert.strictEqual(outMissing.stderr, '');
+    });
+
+    // (d) MEMBRIDGE_NO_RECALL=1 steps aside even for a read that would otherwise serve.
+    const sessD = nonHoldoutSession(relB, 'sess-no-recall');
+    const outD = runRecallHook(recallPayload(sessD, fileB, { limit: 100 }), { MEMBRIDGE_NO_RECALL: '1' });
+    check('recall hook: MEMBRIDGE_NO_RECALL=1 steps aside unconditionally', () => {
+      assert.strictEqual(outD.status, 0, outD.stderr);
+      assert.strictEqual(outD.stdout, '');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(recallProj, sessD)), 'no session state should be written under the kill switch');
+    });
+
+    // (f) The file changed on disk since the store's skeleton was built ->
+    // the freshness check must refuse to serve stale content.
+    const fileF = path.join(recallProj, 'src', 'stale.js');
+    const contentFOld = 'function old() {\n  a();\n  a();\n  a();\n}\n';
+    fs.writeFileSync(fileF, contentFOld);
+    const relF = 'src/stale.js';
+    recallStoreLib.put(recallProj, relF, {
+      contentHash: recallHash(contentFOld), skeleton: 'STALE_SKELETON', skeletonTokens: 40, fileTokens: 800, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(recallProj, {
+      fileReaders: {
+        [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' },
+        [relA2]: { sessions: [sessB], reads: 1, lastTs: 't', firstTs: 't', firstSession: sessB },
+        [relF]: { sessions: ['other-session-f'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-f' },
+      },
+    });
+    // The file changes AFTER the store entry was built -- contentHash goes stale.
+    fs.writeFileSync(fileF, 'function fresh() {\n  b();\n  b();\n  b();\n}\nextra();\n');
+    const sessF = nonHoldoutSession(relF, 'sess-stale-hash');
+    const outF = runRecallHook(recallPayload(sessF, fileF, { limit: 100 }));
+    check('recall hook: a stale store entry (file changed since) is never served, even though the tier would otherwise apply', () => {
+      assert.strictEqual(outF.status, 0, outF.stderr);
+      assert.strictEqual(outF.stdout, '', 'a hash mismatch must never serve stale content');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(recallProj, sessF)), 'no session state written for a refused serve');
+    });
+
+    // An untracked project (no state.projects entry, no .membridge) must
+    // never be intercepted, matching the existing isTrackedProject gate.
+    const untrackedDir = path.join(ROOT, 'projects', 'recall-untracked');
+    fs.mkdirSync(untrackedDir, { recursive: true });
+    const untrackedFile = path.join(untrackedDir, 'x.js');
+    fs.writeFileSync(untrackedFile, 'function x() {\n  a();\n  a();\n  a();\n}\n');
+    const outUntracked = runRecallHook({
+      session_id: 'sess-untracked', cwd: untrackedDir, tool_name: 'Read',
+      tool_input: { file_path: untrackedFile, limit: 100 },
+    });
+    check('recall hook: an untracked project is never intercepted', () => {
+      assert.strictEqual(outUntracked.status, 0, outUntracked.stderr);
+      assert.strictEqual(outUntracked.stdout, '');
+    });
+
+    check('recall hook: fails open on garbage/empty/malformed stdin', () => {
+      for (const input of ['not json at all', '', '42', JSON.stringify({ session_id: 'x' }), JSON.stringify([1, 2, 3])]) {
+        const out = spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], { input, encoding: 'utf8', env: { ...process.env } });
+        assert.strictEqual(out.status, 0, `input ${JSON.stringify(input)}: exit ${out.status} (${out.stderr})`);
+        assert.strictEqual(out.stdout, '', `input ${JSON.stringify(input)}: wrote to stdout`);
+        assert.strictEqual(out.stderr, '', `input ${JSON.stringify(input)}: wrote to stderr`);
+      }
+    });
+
+    // The top-level fail-open contract: an injected real exception (mirroring
+    // lib/skeleton.js's MEMBRIDGE_FORCE_ENGINE_FAIL test hook) must still exit
+    // 0 with no output at all -- the outer try/catch in runRecall() is the
+    // last line of defense the Global Constraints require.
+    const outForced = runRecallHook(recallPayload('sess-force-fail', fileB, { limit: 100 }), { MEMBRIDGE_RECALL_FORCE_FAIL: '1' });
+    check('recall hook: an injected internal exception still exits 0 with no stdout/stderr (fail-open contract)', () => {
+      assert.strictEqual(outForced.status, 0, outForced.stderr);
+      assert.strictEqual(outForced.stdout, '', 'a forced failure must never leak to stdout');
+      assert.strictEqual(outForced.stderr, '', 'a forced failure must never leak to stderr either');
+    });
+  }
+
   await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
     const { skeletonize } = require('../lib/skeleton');
     // 30 identical helper functions (elided bodies) mixed with 5 identical
@@ -6838,11 +7076,17 @@ async function main() {
     assert.strictEqual(afterSetup.hooks.Stop.length, 2, 'membridge entry not appended');
     assert.strictEqual(JSON.stringify(afterSetup.hooks.Stop[0]), JSON.stringify(seedSettings.hooks.Stop[0]), 'user Stop hook changed');
     assert.strictEqual(afterSetup.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved absolute form');
-    assert.deepStrictEqual(afterSetup.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
+    // PreToolUse: the user's own Bash-matcher entry survives untouched, and
+    // the recall hook is appended as its own entry alongside it (Task 5).
+    assert.strictEqual(afterSetup.hooks.PreToolUse.length, 2, 'recall entry not appended');
+    assert.deepStrictEqual(afterSetup.hooks.PreToolUse[0], seedSettings.hooks.PreToolUse[0], 'unrelated PreToolUse hook changed');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'recall hook matcher missing/wrong');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'recall command missing or not the resolved absolute form');
     assert.strictEqual(afterSetup.model, 'opus');
     assert.deepStrictEqual(afterSetup.feedbackSurveyState, seedSettings.feedbackSurveyState, 'unknown keys lost');
     assert.ok(/already installed/.test(setup2.stdout), `second run said: ${setup2.stdout}`);
-    assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the entry');
+    assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the Stop entry');
+    assert.strictEqual(afterSetup2.hooks.PreToolUse.length, 2, 'setup-hooks duplicated the recall entry');
   });
   check('distill: hook command is absolute and needs no PATH', () => {
     const cmd = hooks.hookCommand();
@@ -6874,10 +7118,17 @@ async function main() {
       const after1 = JSON.parse(read(arFile));
       assert.strictEqual(after1.hooks.Stop.length, 1, 'Stop hook not auto-registered');
       assert.strictEqual(after1.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'auto-registered command is not the resolved form');
+      // Task 5: ensureInstalled registers the recall PreToolUse hook the same
+      // way, on the same every-launch path, from a settings file that starts
+      // with no PreToolUse key at all.
+      assert.strictEqual(after1.hooks.PreToolUse.length, 1, 'recall hook not auto-registered');
+      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read|Grep|Glob', 'recall hook matcher missing/wrong');
+      assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand(), 'auto-registered recall command is not the resolved form');
       assert.strictEqual(after1.model, 'opus', 'unrelated settings key lost');
       hooks.ensureInstalled();
       const after2 = JSON.parse(read(arFile));
       assert.strictEqual(after2.hooks.Stop.length, 1, 'ensureInstalled duplicated the Stop entry');
+      assert.strictEqual(after2.hooks.PreToolUse.length, 1, 'ensureInstalled duplicated the recall entry');
     } finally {
       process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
@@ -6917,6 +7168,51 @@ async function main() {
     const again = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.ok(/already installed/.test(again.stdout), `upgrade not idempotent: ${again.stdout}`);
   });
+  check('recall: reconcileRecallHook installs on Read|Grep|Glob into a settings file with no PreToolUse key at all', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-fresh.json');
+    fs.writeFileSync(f, JSON.stringify({ model: 'opus' }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const r1 = hooks.reconcileRecallHook();
+      assert.strictEqual(r1.wrote, true, 'first reconcile should write');
+      const after1 = JSON.parse(read(f));
+      assert.strictEqual(after1.hooks.PreToolUse.length, 1);
+      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read|Grep|Glob');
+      assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand());
+      assert.strictEqual(after1.model, 'opus', 'unrelated key lost');
+      const r2 = hooks.reconcileRecallHook();
+      assert.strictEqual(r2.wrote, false, 'second reconcile must be a no-op');
+      const after2 = JSON.parse(read(f));
+      assert.strictEqual(after2.hooks.PreToolUse.length, 1, 'reconcile duplicated the entry');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('recall: reconcileRecallHook upgrades a stale command in place, leaves an unrelated PreToolUse matcher alone', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-stale.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] },
+        { matcher: 'Read|Grep|Glob', hooks: [{ type: 'command', command: '/old/node /old/lib/membridge-hook.js recall', timeout: 5 }] },
+      ] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const r = hooks.reconcileRecallHook();
+      assert.strictEqual(r.upgraded, 1);
+      const after = JSON.parse(read(f));
+      assert.strictEqual(after.hooks.PreToolUse.length, 2, 'entry count changed');
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, 'unrelated matcher touched');
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'stale recall command not upgraded');
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost in upgrade');
+      const r2 = hooks.reconcileRecallHook();
+      assert.strictEqual(r2.wrote, false, 'upgrade not idempotent');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
   check('distill: isHookInstalled is false when the hook executable does not resolve', () => {
     const deadFile = path.join(ROOT, 'claude-settings-dead.json');
     fs.writeFileSync(deadFile, JSON.stringify({
@@ -6945,8 +7241,10 @@ async function main() {
   const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
   const afterRemove = JSON.parse(read(claudeSettings));
   check('distill: remove-hooks strips only membridge entries', () => {
-    assert.ok(/Removed the MemBridge Stop hook/.test(removeOut.stdout), removeOut.stdout);
+    assert.ok(/Removed the MemBridge hooks/.test(removeOut.stdout), removeOut.stdout);
     assert.deepStrictEqual(afterRemove.hooks.Stop, seedSettings.hooks.Stop, 'user Stop hooks not intact');
+    // The recall PreToolUse entry (added by setup-hooks above) is gone; the
+    // user's own Bash-matcher entry is back to exactly what it started as.
     assert.deepStrictEqual(afterRemove.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
     assert.strictEqual(afterRemove.model, 'opus');
   });
