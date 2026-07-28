@@ -5827,7 +5827,7 @@ async function main() {
     store.updateLedger(proj, events, {});
     assert.deepStrictEqual(Object.keys(store.readLedger(proj).fileReaders), ['src/x.js'], 'updateLedger did not thread projectPath into the fold');
   });
-  check('ledger-fold: H1 -- a pre-v3 ledger keyed by absolute paths resets instead of mixing key shapes', () => {
+  check('ledger-fold: H1 -- a pre-v3 ledger keyed by absolute paths drops the old keys without mixing shapes', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'ledger-v2-mix-proj');
     fs.mkdirSync(proj, { recursive: true });
@@ -5847,7 +5847,81 @@ async function main() {
     const next = store.foldProjectLedger(prev, events, undefined, proj);
     assert.strictEqual(next.version, 3, 'the key-shape change gets its own schema version');
     assert.deepStrictEqual(Object.keys(next.fileReaders), ['src/x.js'], 'no absolute key may survive alongside the new relative ones');
-    assert.strictEqual(next.requests, 0, 'a pre-v3 ledger is discarded rather than folded onto');
+    // MEDIUM (fix round 3): this used to reset requests/volume/cost to zero
+    // right alongside the key-shaped fields -- exactly the regression the
+    // module header warns against ("volume can go DOWN after more work").
+    // Only fileReaders/readKeys are key-shaped; requests/volume/etc. are
+    // real evidence-backed totals (this ledger has seenKeys) and must
+    // survive untouched. No new request event is in this fold's window, so
+    // requests stays exactly the old total.
+    assert.strictEqual(next.requests, 10, 'a v2->v3 migration preserves totals, it does not discard them');
+    assert.strictEqual(next.volume, 1000, 'volume must survive the key-shape migration');
+    assert.strictEqual(next.sessions, 2, 'the session total must survive the key-shape migration');
+  });
+  // MEDIUM (fix round 3). isPreRelativeKeys used to trigger a FULL reset
+  // (p = {}) of the entire accumulator -- not just the read-shaped fields
+  // whose key format actually changed. Measured on a real v2 ledger: 900
+  // requests / 54M volume / accumulated cost zeroed by an upgrade that
+  // touched nothing but the fileReaders key shape. That is exactly the
+  // failure this module's own header exists to prevent. Fix: only
+  // fileReaders/hotPaths/readKeys (the fields keyed by the old absolute
+  // path shape, or existing purely to dedupe against them) are cleared;
+  // requests/volume/inCost/outCost/sessions/sessionIds/seenKeys, AND
+  // reads.first/sameSession/crossSession, are preserved -- the counters are
+  // cumulative totals under the exact same never-goes-backwards invariant
+  // as requests/volume, so zeroing them would be the identical regression
+  // for a different field.
+  check('ledger-fold: MEDIUM -- a v2 ledger with real evidence migrates to v3 with totals intact and read-shaped fields empty', () => {
+    const store = require('../lib/ledger-store');
+    const prev = {
+      version: 2, updatedAt: '2026-01-01T00:00:00.000Z',
+      sessions: 4, requests: 900, volume: 54000000, inCost: 12.5, outCost: 3.1,
+      reads: { first: 300, sameSession: 400, crossSession: 200 },
+      hotPaths: [{ file: '/abs/src/hot.js', readers: 3, reads: 50 }],
+      seenKeys: ['k1', 'k2'], readKeys: ['r1', 'r2'], sessionIds: ['a', 'b'],
+      fileReaders: {
+        '/abs/src/hot.js': { sessions: ['a', 'b', 'c'], reads: 50, lastTs: 't', firstTs: 't', firstSession: 'a' },
+      },
+    };
+    // No events at all this pass -- isolates the migration itself from any
+    // newly-folded activity.
+    const next = store.foldProjectLedger(prev, []);
+    assert.strictEqual(next.version, 3, 'stamped with the current version');
+    assert.strictEqual(next.requests, 900, 'requests must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.volume, 54000000, 'volume must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.inCost, 12.5, 'inCost must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.outCost, 3.1, 'outCost must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.sessions, 4, 'the session total must not be zeroed by the key-shape migration');
+    assert.deepStrictEqual(next.sessionIds, ['a', 'b'], 'sessionIds evidence must survive the key-shape migration');
+    assert.deepStrictEqual(next.reads, { first: 300, sameSession: 400, crossSession: 200 },
+      'read TALLIES are cumulative totals, not key-shaped evidence -- they must survive intact');
+    assert.deepStrictEqual(next.fileReaders, {}, 'fileReaders is key-shaped (absolute under v2) and must be cleared');
+    assert.deepStrictEqual(next.hotPaths, [], 'hotPaths is derived from fileReaders and must be empty too');
+  });
+  // A pre-v2 ledger (no seenKeys at all -- isUnmigrated) must still fully
+  // reset: unlike the v2 case above, there is no dedupe evidence to trust,
+  // so the existing totals could already double-count the current window.
+  // (Covered end-to-end by the "BLOCKING 2" un-versioned-ledger test above;
+  // this check pins the same rule specifically alongside the new partial
+  // migration, so the two paths can never silently converge.)
+  check('ledger-fold: MEDIUM -- a pre-v2 ledger (no seenKeys) still fully resets, unlike a real v2 ledger', () => {
+    const store = require('../lib/ledger-store');
+    const prev = {
+      // No version field at all -- exactly like the real pre-fix ledgers on
+      // disk (see BLOCKING 2 above).
+      sessions: 4, requests: 900, volume: 54000000, inCost: 12.5, outCost: 3.1,
+      reads: { first: 300, sameSession: 400, crossSession: 200 },
+      hotPaths: [{ file: '/abs/src/hot.js', readers: 3, reads: 50 }],
+      seenKeys: [], readKeys: [], sessionIds: ['a', 'b'],
+      fileReaders: {
+        '/abs/src/hot.js': { sessions: ['a', 'b', 'c'], reads: 50, lastTs: 't', firstTs: 't', firstSession: 'a' },
+      },
+    };
+    const next = store.foldProjectLedger(prev, []);
+    assert.strictEqual(next.requests, 0, 'no dedupe evidence at all -- totals are not trustworthy, must fully reset');
+    assert.strictEqual(next.volume, 0);
+    assert.strictEqual(next.sessions, 0);
+    assert.deepStrictEqual(next.reads, { first: 0, sameSession: 0, crossSession: 0 });
   });
   // MINOR A. Incremental tiering processes reads pass-by-pass; a path's
   // reads can arrive across passes with INVERTED timestamps (an earlier
@@ -5905,6 +5979,7 @@ async function main() {
     const store = require('../lib/ledger-store');
     const { classifyReads, tally } = require('../lib/redundancy');
     const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const projectPath = '/p';
     const paths = ['/p/a.js', '/p/b.js', '/p/c.js', '/p/d.js', '/p/e.js', '/p/f.js'];
     // Deterministic session-per-block sequence (no randomness): block 0
     // establishes 'first' for every path, block 1 repeats the SAME session
@@ -5922,25 +5997,41 @@ async function main() {
         file: paths[i % paths.length],
       });
     }
+    // FINDING 4 (fix round 3): lib/ledger-fold.js's incremental fold drops
+    // out-of-project reads entirely (readKeyFor returns null for them), but
+    // lib/redundancy.js's batch classifier used to count every read
+    // regardless of project membership -- the two sides could only ever
+    // agree on fixtures that happened to be all in-project, like this one
+    // was before this line. An out-of-project read, scoped against the same
+    // projectPath, must now be dropped identically on both sides.
+    const outOfProjectEvent = {
+      kind: 'read', ts: new Date(T0 + N * 1000).toISOString(),
+      session: 's1', toolUseId: 'tu-outside', file: '/elsewhere/z.js',
+    };
+    events.push(outOfProjectEvent);
 
-    // Oracle: one batch classification over every event.
-    const oracle = tally(classifyReads(events, []));
+    // Oracle: one batch classification over every event, scoped to the same
+    // project the incremental fold is scoped to.
+    const oracle = tally(classifyReads(events, [], projectPath));
     assert.ok(oracle.first > 0 && oracle.sameSession > 0 && oracle.crossSession > 0,
       'the fixture must exercise all three tiers for the differential check to be meaningful');
 
     // Incremental: the SAME events, split into 4 sequential (chronologically
     // non-overlapping, in-order) windows, folded one after another -- this
     // is what real scanning does: each dirty pass folds whatever the
-    // sliding window currently holds.
+    // sliding window currently holds. The out-of-project read lands in the
+    // last window, in order, same as the oracle sees it.
     const WINDOWS = 4;
     const perWindow = N / WINDOWS;
     let led = null;
     for (let w = 0; w < WINDOWS; w++) {
-      led = store.foldProjectLedger(led, events.slice(w * perWindow, (w + 1) * perWindow));
+      const slice = events.slice(w * perWindow, (w + 1) * perWindow);
+      const window = w === WINDOWS - 1 ? slice.concat(outOfProjectEvent) : slice;
+      led = store.foldProjectLedger(led, window, undefined, projectPath);
     }
 
     assert.deepStrictEqual(led.reads, oracle,
-      'incremental tiering across sequential in-order windows must match the batch oracle exactly');
+      'incremental tiering across sequential in-order windows must match the batch oracle exactly, including agreement on the out-of-project read');
   });
 
   check('skeleton-strip: keeps signatures, drops bodies, refuses minified input', () => {
@@ -6598,15 +6689,26 @@ async function main() {
     });
 
     // (e) events.jsonl carries the served row with the exact documented shape.
-    check('recall hook: a served row lands in events.jsonl with the documented shape', () => {
+    // Fix round 3 (Finding 3): a serve now lands TWO rows -- a pending row
+    // (committed:false) written before the session-state commit, and a
+    // confirmation row (committed:true) written after it succeeds -- so a
+    // state-write failure leaves a detectably-uncommitted row instead of a
+    // phantom one that looks exactly like a real serve (see the
+    // "fix round 3" hook test further down for the failure case itself).
+    check('recall hook: a served pair lands in events.jsonl with the documented shape (pending, then confirmed)', () => {
       const lines = fs.readFileSync(hooksRecall.eventsPath(recallProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
-      const row = lines.find(l => l.relPath === relB && l.sessionId === sessB);
-      assert.ok(row, 'served event missing from events.jsonl');
-      assert.deepStrictEqual(Object.keys(row).sort(), ['holdout', 'relPath', 'savedTokens', 'sessionId', 'tier', 'ts']);
-      assert.strictEqual(row.tier, 'B');
-      assert.strictEqual(row.savedTokens, 1150);
-      assert.strictEqual(row.holdout, false);
-      assert.ok(!Number.isNaN(Date.parse(row.ts)), 'ts is not a valid timestamp');
+      const mine = lines.filter(l => l.relPath === relB && l.sessionId === sessB);
+      assert.strictEqual(mine.length, 2, 'a serve must leave exactly a pending row and a confirmation row');
+      const [pending, confirmed] = mine;
+      assert.deepStrictEqual(Object.keys(pending).sort(), ['committed', 'holdout', 'relPath', 'savedTokens', 'sessionId', 'tier', 'ts']);
+      assert.strictEqual(pending.tier, 'B');
+      assert.strictEqual(pending.savedTokens, 1150);
+      assert.strictEqual(pending.holdout, false);
+      assert.strictEqual(pending.committed, false, 'the first row is a pending claim, not yet a completed serve');
+      assert.ok(!Number.isNaN(Date.parse(pending.ts)), 'ts is not a valid timestamp');
+      assert.deepStrictEqual(Object.keys(confirmed).sort(), ['committed', 'relPath', 'sessionId', 'ts']);
+      assert.strictEqual(confirmed.committed, true, 'the second row confirms the session-state commit actually succeeded');
+      assert.strictEqual(confirmed.ts, pending.ts, 'the confirmation correlates back to the same attempt');
     });
 
     // A second, different path served in the SAME session, past the first
@@ -6902,6 +7004,47 @@ async function main() {
       assert.strictEqual(outL7.stdout, '', 'nothing may be printed when the bookkeeping failed');
       assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(l7Proj, sessL7)),
         'the path was marked served (and locked out for the session) for a serve the agent never got');
+    });
+
+    // FIX ROUND 3, FINDING 3: the reverse ordering failure from L7. An
+    // events.jsonl write that SUCCEEDS followed by a session-state write
+    // that FAILS used to leave a phantom `holdout:false, savedTokens:N` row
+    // in events.jsonl for a serve the agent never received (stdout is still
+    // correctly suppressed -- the failure is purely in the measurement
+    // data lying about what happened). Reproduced by pre-creating a FILE
+    // (not a directory) at the sessions/ directory path, so
+    // saveSessionState's own fs.mkdirSync(dir, {recursive:true}) throws.
+    const l9Rel = 'src/state-fail.js';
+    const l9Content = bodyContent('statefail');
+    const l9Proj = seedRecallProject('recall-state-write-fail-proj', l9Rel, l9Content);
+    recallStoreLib.put(l9Proj, l9Rel, {
+      contentHash: recallHash(l9Content), skeleton: 'SKEL_STATEFAIL', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(l9Proj, {
+      version: 3,
+      fileReaders: { [l9Rel]: { sessions: ['other-statefail'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-statefail' } },
+    });
+    fs.mkdirSync(hooksRecall.recallDir(l9Proj), { recursive: true });
+    fs.writeFileSync(hooksRecall.sessionsDir(l9Proj), 'not a directory'); // mkdirSync(dir) -> EEXIST
+    const sessL9 = nonHoldoutSession(l9Rel, 'sess-statefail');
+    const outL9 = runRecallHook({ session_id: sessL9, cwd: l9Proj, tool_name: 'Read', tool_input: { file_path: path.join(l9Proj, l9Rel), limit: 100 } });
+    check('recall hook: fix round 3 -- a failed session-state write never leaves a phantom committed-looking event row', () => {
+      assert.strictEqual(outL9.status, 0, outL9.stderr);
+      assert.strictEqual(outL9.stdout, '', 'nothing may be printed when the session-state commit failed');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(l9Proj, sessL9)),
+        'the session state write failed -- no state file should exist');
+      const rows = fs.existsSync(hooksRecall.eventsPath(l9Proj))
+        ? fs.readFileSync(hooksRecall.eventsPath(l9Proj), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+        : [];
+      const mine = rows.filter(r => r.relPath === l9Rel && r.sessionId === sessL9);
+      assert.ok(mine.length > 0, 'the attempted serve must still leave SOME trace in events.jsonl');
+      const confirmed = mine.filter(r => r.committed === true);
+      assert.strictEqual(confirmed.length, 0,
+        'a failed session-state commit must never produce a row that looks like a completed, committed serve');
+      for (const row of mine) {
+        assert.notStrictEqual(row.committed, undefined,
+          'every row for a serve attempt must explicitly say whether it committed -- an unmarked row is indistinguishable from a real serve');
+      }
     });
   }
 
