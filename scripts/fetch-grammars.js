@@ -35,6 +35,17 @@ const GRAMMARS = [
   ] },
 ];
 
+// Candidate LICENSE file names, in the order npm packages commonly use them.
+const LICENSE_NAMES = ['LICENSE', 'LICENSE.md', 'LICENSE.txt', 'License', 'license'];
+
+function findLicense(extractDir) {
+  for (const name of LICENSE_NAMES) {
+    const p = path.join(extractDir, 'package', name);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 function fetchOne(grammar, scratchDir) {
   const spec = `${grammar.pkg}@${grammar.version}`;
   console.log(`fetching ${spec}...`);
@@ -60,6 +71,24 @@ function fetchOne(grammar, scratchDir) {
     console.log(`  vendored ${w.dest} (${(size / 1024).toFixed(1)} KB)`);
     found.push(w.dest);
   }
+
+  // Every vendored .wasm ships with no licence text of its own, so carry the
+  // source package's LICENSE along too — one copy per grammar name (not per
+  // package), since tree-sitter-typescript's single package/licence covers
+  // both the typescript and tsx grammars it vendors.
+  const licenseSrc = findLicense(extractDir);
+  if (!licenseSrc) {
+    console.warn(`  MISSING ${grammar.pkg}: no LICENSE file in the published tarball — skipping licence vendoring`);
+  } else {
+    for (const w of grammar.wasm) {
+      if (!found.includes(w.dest)) continue; // only for grammars actually vendored above
+      const grammarName = w.dest.replace(/^tree-sitter-/, '').replace(/\.wasm$/, '');
+      const licenseDest = path.join(VENDOR_DIR, `LICENSE-${grammarName}.txt`);
+      fs.copyFileSync(licenseSrc, licenseDest);
+      console.log(`  vendored LICENSE-${grammarName}.txt`);
+    }
+  }
+
   return found;
 }
 

@@ -5911,6 +5911,13 @@ async function main() {
     assert.ok(out.text.includes("const fs = require('fs');"), 'imports survive');
     assert.ok(!out.text.includes('deep()'), 'nested body dropped');
     assert.ok(out.text.split('\n').length < src.split('\n').length, 'smaller');
+    // Elided brace blocks must stay balanced -- the marker replaces the
+    // body, but the block's own closing brace still has to appear
+    // somewhere in the output, or every skeletonized function looks like
+    // "function f() {  ..." with no matching "}".
+    const opens = (out.text.match(/\{/g) || []).length;
+    const closes = (out.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens, closes, 'braces stay balanced after eliding a block');
     // python: indentation depth, no braces
     const py = ['import os', 'def f(a):', '    x = a', '    return x', 'class C:', '    def m(self):', '        pass'].join('\n');
     const pout = strip(py, '.py');
@@ -5930,6 +5937,52 @@ async function main() {
     assert.ok(!out.text.includes('inner();'), 'bodies gone');
     assert.ok(out.tokens < estimateTokens(src) / 2.25, 'clears the compression floor on this fixture');
     assert.strictEqual(estimateTokens('abcd'.repeat(100)), 100);
+  });
+
+  await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    // 30 identical helper functions (elided bodies) mixed with 5 identical
+    // plain top-level calls in the SAME file, so a single skeletonize()
+    // call exercises both sides: the elided-body run must still collapse
+    // (proving dedup still does its job), while the plain duplicate
+    // statements -- never elided -- must all survive individually, not
+    // get folded away just because they happen to be byte-identical.
+    const src = 'function helper() {\n  inner();\n}\n'.repeat(30) + 'doThing();\n'.repeat(5);
+    const out = await skeletonize('/repo/dup.ts', src);
+    assert.strictEqual(out.engine, 'tree-sitter', 'fixture must exercise real tree-sitter parsing for this to be meaningful');
+    assert.ok(out.text.includes('(×29 more identical)'), 'the 30 identical elided-body helpers still collapse');
+    const callOccurrences = (out.text.match(/doThing\(\);/g) || []).length;
+    assert.strictEqual(callOccurrences, 5, 'all 5 identical top-level calls survive individually via tree-sitter');
+    assert.ok(!out.text.includes('(×4 more identical)'), 'no dedup marker for the plain duplicate calls');
+  });
+
+  await check('skeleton: a wasm-less MEMBRIDGE_GRAMMAR_DIR permanently falls back to strip, init attempted exactly once', () => {
+    // Real permanent-fallback contract test: point MEMBRIDGE_GRAMMAR_DIR at
+    // an empty temp dir so every grammar load fails, then confirm (a) both
+    // calls report engine 'strip' and (b) initEngine's actual init work
+    // (require('web-tree-sitter') + Parser.init()) only runs once across
+    // both calls -- never retried. Spawned as a child process because
+    // MEMBRIDGE_GRAMMAR_DIR is read once at require time (a fixed vendoring
+    // location for the process lifetime), so it must be set before
+    // lib/skeleton.js is first required in a fresh process.
+    const emptyGrammarDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-empty-grammars-'));
+    const skeletonPath = path.join(__dirname, '..', 'lib', 'skeleton.js');
+    const script = `
+      process.env.MEMBRIDGE_GRAMMAR_DIR = ${JSON.stringify(emptyGrammarDir)};
+      const skeletonMod = require(${JSON.stringify(skeletonPath)});
+      (async () => {
+        const src = 'function f() {\\n  return 1;\\n}\\n';
+        const a = await skeletonMod.skeletonize('/repo/a.ts', src);
+        const b = await skeletonMod.skeletonize('/repo/b.ts', src);
+        console.log(JSON.stringify({ aEngine: a.engine, bEngine: b.engine, attempts: skeletonMod._initAttempts }));
+      })();
+    `;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, `child process failed: ${out.stderr}`);
+    const result = JSON.parse(out.stdout.trim());
+    assert.strictEqual(result.aEngine, 'strip', 'first call falls back to strip when no grammar wasm can be found');
+    assert.strictEqual(result.bEngine, 'strip', 'second call stays on strip -- the fallback is permanent');
+    assert.strictEqual(result.attempts, 1, 'init is attempted exactly once across both calls');
   });
 
   check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {
