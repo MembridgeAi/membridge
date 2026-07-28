@@ -19,7 +19,7 @@ delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not 
 const util = require('../lib/util');
 const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('../lib/scan');
 const digest = require('../lib/digest');
-const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload } = require('../lib/server');
+const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload, savingsPayload } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
 const { createMockSupabase } = require('./mock-supabase');
 const advisorLib = require('../lib/advisor');
@@ -5486,6 +5486,33 @@ async function main() {
     const back = store.readLedger(proj);
     assert.strictEqual(back.volume, built.volume);
     assert.strictEqual(store.readLedger(path.join(ROOT, 'nope')), null);
+  });
+  check('api: /api/savings reports per-project ledgers and totals', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'savings-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    store.writeLedger(proj, {
+      updatedAt: new Date().toISOString(), sessions: 2, requests: 10, volume: 5000,
+      inCost: 0.5, outCost: 0.1,
+      reads: { first: 3, sameSession: 2, crossSession: 5 },
+      hotPaths: [{ file: '/r/x.js', readers: 2, reads: 4 }],
+    });
+    // savingsPayload takes no argument -- like every other payload builder in
+    // lib/server.js it reads state via util.loadState() itself, not from a
+    // passed-in shape. Swap in an isolated state.projects (just this one
+    // fixture) for the call, then restore the suite's real accumulated state,
+    // or every other project's own ledger.json (written by syncOnce's ledger
+    // wiring over the course of the suite) would inflate these totals.
+    const savedState = read(util.statePath());
+    try {
+      util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [proj]: { name: 'savings-proj', events: [] } } });
+      const payload = savingsPayload();
+      assert.strictEqual(payload.totals.volume, 5000);
+      assert.strictEqual(payload.totals.reads.crossSession, 5);
+      assert.strictEqual(payload.projects[0].hotPaths, 1);
+    } finally {
+      fs.writeFileSync(util.statePath(), savedState);
+    }
   });
   check('codex adapter: two token_count events with the same timestamp get distinct messageIds; both survive buildRequests', () => {
     const ledger = require('../lib/ledger');
