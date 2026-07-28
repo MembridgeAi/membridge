@@ -5939,6 +5939,29 @@ async function main() {
     assert.strictEqual(estimateTokens('abcd'.repeat(100)), 100);
   });
 
+  await check('recall-store: round-trips entries, redacts secrets, warms the hot set', async () => {
+    const store = require('../lib/recall-store');
+    const proj = path.join(ROOT, 'recall-proj'); fs.mkdirSync(proj, { recursive: true });
+    // Secret shape matches lib/redact.js's openai-key pattern
+    // (/\bsk-[A-Za-z0-9]{20,}/) exactly -- a dash inside the run (as in
+    // "sk-live-...") breaks that match AND falls just under the entropy
+    // backstop's 4.5 bits/char floor, so it must stay dash-free here to
+    // actually exercise the redaction default() already provides.
+    fs.writeFileSync(path.join(proj, 'a.js'), 'const KEY = "sk-live1234567890abcdef1234567890";\nfunction f() {\n  body();\n}\n');
+    const n = await store.warm(proj, [{ file: 'a.js' }], util.getConfig());
+    assert.strictEqual(n, 1);
+    const e = store.get(proj, 'a.js');
+    assert.ok(e && e.contentHash && e.skeletonTokens > 0);
+    assert.ok(!e.skeleton.includes('sk-live'), 'secret redacted from stored skeleton');
+    assert.strictEqual(store.get(proj, 'missing.js'), null);
+    store.bumpRejection(proj, 'a.js');
+    assert.strictEqual(store.get(proj, 'a.js').rejections, 1);
+    // A second warm() with unchanged content must be a no-op (skip, not
+    // re-write) -- the whole point of the content-hash check.
+    const n2 = await store.warm(proj, [{ file: 'a.js' }], util.getConfig());
+    assert.strictEqual(n2, 0, 'unchanged content is skipped on re-warm');
+  });
+
   await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
     const { skeletonize } = require('../lib/skeleton');
     // 30 identical helper functions (elided bodies) mixed with 5 identical
