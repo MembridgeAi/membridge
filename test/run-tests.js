@@ -177,6 +177,81 @@ async function main() {
     assert.strictEqual(util.isTempPath(''), false);
   });
 
+  check('usage: provider shapes normalise to one context figure without double counting', () => {
+    const { normalizeUsage, providerOf } = require('../lib/usage-normalize');
+
+    // Anthropic: the three input fields are disjoint and sum to context.
+    const a = normalizeUsage({
+      input_tokens: 100, cache_creation_input_tokens: 1000,
+      cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    assert.strictEqual(a.context, 11100);
+    assert.strictEqual(a.cacheRead, 10000);
+    assert.strictEqual(a.cacheWrite, 1000);
+    assert.strictEqual(a.output, 500);
+
+    // OpenAI/Codex: cached_input_tokens is a SUBSET of input_tokens.
+    const o = normalizeUsage({
+      input_tokens: 18093, cached_input_tokens: 1408,
+      output_tokens: 494, reasoning_output_tokens: 23,
+    }, 'openai');
+    assert.strictEqual(o.context, 18093, 'must not add cached on top of input');
+    assert.strictEqual(o.cacheRead, 1408);
+    assert.strictEqual(o.cacheWrite, 0, 'OpenAI has no cache-write concept');
+    assert.strictEqual(o.output, 494 + 23, 'reasoning tokens are billed output');
+
+    // Google/Gemini: same subset semantics, different names.
+    const g = normalizeUsage({
+      promptTokenCount: 8000, cachedContentTokenCount: 2000, candidatesTokenCount: 300,
+    }, 'google');
+    assert.strictEqual(g.context, 8000);
+    assert.strictEqual(g.cacheRead, 2000);
+    assert.strictEqual(g.output, 300);
+
+    assert.strictEqual(providerOf('Claude Code', 'claude-opus-4-6'), 'anthropic');
+    assert.strictEqual(providerOf('Codex', 'gpt-5'), 'openai');
+    assert.strictEqual(providerOf('Gemini CLI', 'gemini-3-pro'), 'google');
+  });
+
+  check('pricing: cached-input rates are per-model, and prefix matching is longest-first', () => {
+    const pricing = require('../lib/pricing');
+    const { normalizeUsage } = require('../lib/usage-normalize');
+
+    const a = normalizeUsage({
+      input_tokens: 100, cache_creation_input_tokens: 1000,
+      cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    const ac = pricing.requestCostUsd(a, 'claude-opus-4-6', 'anthropic');
+    // 100 @ $5 + 10000 @ $0.50 + 1000 write @ 5*1.25 = $6.75/MTok-equivalent
+    const expectA = (100 * 5 + 10000 * 0.5 + 1000 * 5 * 1.25) / 1e6;
+    assert.strictEqual(Math.round(ac.inCost * 1e9), Math.round(expectA * 1e9));
+    assert.strictEqual(Math.round(ac.outCost * 1e9), Math.round((500 * 25 / 1e6) * 1e9));
+
+    // The cache discount is NOT uniform across a vendor: gpt-5 caches at 0.1x
+    // input while gpt-4.1 and o1 are far dearer. A provider-wide multiplier
+    // would misprice most of the lineup.
+    assert.strictEqual(pricing.priceOf('gpt-5', 'openai').cachedInPerMTok, 0.125);
+    assert.strictEqual(pricing.priceOf('gpt-4.1', 'openai').cachedInPerMTok, 0.5);
+    assert.strictEqual(pricing.priceOf('o1', 'openai').cachedInPerMTok, 7.5);
+
+    // Longest-prefix matching: gpt-5-mini must not resolve to gpt-5.
+    assert.strictEqual(pricing.priceOf('gpt-5-mini', 'openai').inPerMTok, 0.25);
+    assert.strictEqual(pricing.priceOf('gpt-5', 'openai').inPerMTok, 1.25);
+
+    // OpenAI: uncached portion at full rate, cached portion at the cached rate,
+    // and no write cost at all.
+    const o = normalizeUsage({ input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 100 }, 'openai');
+    const expectO = (2000 * 1.25 + 8000 * 0.125) / 1e6;
+    assert.strictEqual(Math.round(pricing.requestCostUsd(o, 'gpt-5', 'openai').inCost * 1e9),
+      Math.round(expectO * 1e9));
+
+    // Google caches at 0.1x across the range.
+    assert.strictEqual(pricing.priceOf('gemini-2.5-pro', 'google').cachedInPerMTok, 0.125);
+
+    // Unknown models never throw and never price at zero.
+    assert.ok(pricing.priceOf('some-future-model', 'unknown').inPerMTok > 0);
+  });
+
   check('capture: temp/scratchpad edits are dropped; real edits attributed to the repo', () => {
     const repo = path.join(ROOT, 'hygiene-repo');
     fs.mkdirSync(repo, { recursive: true });
