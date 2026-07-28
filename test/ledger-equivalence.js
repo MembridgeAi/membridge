@@ -89,4 +89,15 @@ print(json.dumps({"n": n, "v": v}))
   assert.ok(dVol <= 0.02, `${path.basename(file)}: volume ${mine.volume} vs ${ref.v}`);
   checked++;
 }
+// Comparing nothing is not a pass. Every transcript can be skipped (`!ref.n`)
+// when the reference parser reads none of them -- a wrong MEMBRIDGE_REF, a
+// changed transcript layout, a broken parse_unit -- and the loop would then
+// fall through to a cheerful "0 transcripts" line with exit 0. Fail loudly
+// instead: a guard that cannot fail is not a guard.
+if (checked === 0) {
+  console.error(`ledger equivalence: FAILED -- 0 of ${sample.length} transcripts were compared. ` +
+    'The reference implementation returned no requests for any of them, so nothing was verified. ' +
+    'Check MEMBRIDGE_REF points at a working token-spend-analysis checkout.');
+  process.exit(1);
+}
 console.log(`ledger equivalence: ${checked} transcripts, worst drift ${(worst * 100).toFixed(3)}%`);
