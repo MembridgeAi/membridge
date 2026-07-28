@@ -4,6 +4,7 @@ node_modules/
 dist/
 app/lib/
 app/bin/
+app/vendor/
 
 # web app (Next.js) build + local env
 web/.next/

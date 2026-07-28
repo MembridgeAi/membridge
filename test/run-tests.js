@@ -436,6 +436,18 @@ async function main() {
       assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', name, 'package.json')),
         `app/node_modules/${name} missing — the packaged app cannot require it`);
     }
+    // Same incident class as libsodium, for lib/skeleton.js's tree-sitter
+    // engine: web-tree-sitter must be in the closure (it's a root dependency,
+    // covered by the loop above) AND the vendored grammar wasm files must
+    // ride along too — they aren't an npm dependency, so prepare-app.js has
+    // to copy them explicitly. Missing either means the packaged app can
+    // only ever fall back to lib/skeleton-strip.js.
+    assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', 'web-tree-sitter', 'package.json')),
+      'app/node_modules/web-tree-sitter missing — the packaged app cannot require it');
+    assert.ok(fs.existsSync(path.join(appRoot, 'app', 'vendor', 'grammars')),
+      'app/vendor/grammars missing — the packaged app cannot load any tree-sitter grammar');
+    const vendoredWasm = fs.readdirSync(path.join(appRoot, 'app', 'vendor', 'grammars')).filter(f => f.endsWith('.wasm'));
+    assert.ok(vendoredWasm.length >= 4, `expected at least 4 vendored grammar wasm files, found ${vendoredWasm.length}`);
   });
 
   check('gen-install: sha256File hashes file contents', () => {
@@ -5905,6 +5917,19 @@ async function main() {
     assert.ok(pout.ok && pout.text.includes('def f(a):') && !pout.text.includes('x = a'));
     // minified refusal
     assert.strictEqual(strip('x'.repeat(3000), '.js').ok, false);
+  });
+
+  await check('skeleton: skeletonize compresses source and reports its engine', async () => {
+    const { skeletonize, estimateTokens } = require('../lib/skeleton');
+    const src = 'export function add(a: number, b: number): number {\n  const s = a + b;\n  return s;\n}\n' +
+      'export interface Row { id: string; }\n' + 'function helper() {\n  inner();\n}\n'.repeat(20);
+    const out = await skeletonize('/repo/x.ts', src);
+    assert.ok(out.ok);
+    assert.ok(['tree-sitter', 'strip'].includes(out.engine));
+    assert.ok(out.text.includes('add(a: number, b: number)'), 'signature survives');
+    assert.ok(!out.text.includes('inner();'), 'bodies gone');
+    assert.ok(out.tokens < estimateTokens(src) / 2.25, 'clears the compression floor on this fixture');
+    assert.strictEqual(estimateTokens('abcd'.repeat(100)), 100);
   });
 
   check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {

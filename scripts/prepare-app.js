@@ -44,6 +44,23 @@ while (queue.length) {
   queue.push(...Object.keys(pkg.dependencies || {}));
 }
 console.log(`app/node_modules refreshed (${[...bundled].sort().join(', ')})`);
+
+// Copies vendor/grammars (the tree-sitter wasm files fetched by
+// scripts/fetch-grammars.js and committed to the repo) into the app bundle.
+// lib/skeleton.js resolves these relative to its own location at runtime, so
+// the packaged asar needs them alongside app/node_modules/web-tree-sitter —
+// same rationale as the libsodium closure above: missing here means the
+// packaged app can only ever fall back to lib/skeleton-strip.js.
+const vendorSrc = path.join(root, 'vendor', 'grammars');
+const vendorDest = path.join(root, 'app', 'vendor', 'grammars');
+fs.rmSync(path.join(root, 'app', 'vendor'), { recursive: true, force: true });
+if (fs.existsSync(vendorSrc)) {
+  fs.cpSync(vendorSrc, vendorDest, { recursive: true });
+  console.log('app/vendor/grammars refreshed from vendor/grammars/');
+} else {
+  console.warn('vendor/grammars missing — packaged app will fall back to lib/skeleton-strip.js for every file');
+}
+
 const appPkgPath = path.join(root, 'app', 'package.json');
 const appPkg = JSON.parse(fs.readFileSync(appPkgPath, 'utf8'));
 if (appPkg.version !== rootPkg.version) {
