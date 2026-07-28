@@ -5462,6 +5462,31 @@ async function main() {
     const out = redundancy.classifyReads(reads, []);
     assert.deepStrictEqual(out.map(r => r.tier), ['first', 'same-session']);
   });
+  check('ledger-store: builds and round-trips a project ledger with a hot set', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const events = [
+      { kind: 'usage', ts: 't1', session: 'a', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'usage', ts: 't2', session: 'b', messageId: 'm2', model: 'claude-opus-4-6', usage: u },
+      { kind: 'read', ts: 't1', session: 'a', file: '/r/x.js' },
+      { kind: 'read', ts: 't2', session: 'b', file: '/r/x.js' },
+      { kind: 'read', ts: 't3', session: 'b', file: '/r/y.js' },
+    ];
+    const built = store.buildProjectLedger(events);
+    assert.strictEqual(built.requests, 2);
+    assert.strictEqual(built.volume, 2000);
+    assert.strictEqual(built.sessions, 2);
+    assert.strictEqual(built.reads.crossSession, 1);
+    assert.strictEqual(built.hotPaths[0].file, '/r/x.js', 'x.js is read by 2 sessions so it leads the hot set');
+    assert.strictEqual(built.hotPaths.length, 1, 'single-reader files are not hot');
+
+    store.writeLedger(proj, built);
+    const back = store.readLedger(proj);
+    assert.strictEqual(back.volume, built.volume);
+    assert.strictEqual(store.readLedger(path.join(ROOT, 'nope')), null);
+  });
   check('codex adapter: two token_count events with the same timestamp get distinct messageIds; both survive buildRequests', () => {
     const ledger = require('../lib/ledger');
     const entries = [
