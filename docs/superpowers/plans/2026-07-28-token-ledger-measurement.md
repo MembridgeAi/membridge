@@ -86,7 +86,7 @@ check('usage: provider shapes normalise to one context figure without double cou
   assert.strictEqual(providerOf('Gemini CLI', 'gemini-3-pro'), 'google');
 });
 
-check('pricing: cache multipliers are per-provider, not global', () => {
+check('pricing: cached-input rates are per-model, and prefix matching is longest-first', () => {
   const pricing = require('../lib/pricing');
   const { normalizeUsage } = require('../lib/usage-normalize');
 
@@ -95,16 +95,31 @@ check('pricing: cache multipliers are per-provider, not global', () => {
     cache_read_input_tokens: 10000, output_tokens: 500,
   }, 'anthropic');
   const ac = pricing.requestCostUsd(a, 'claude-opus-4-6', 'anthropic');
-  // 100*1 + 1000*1.25 + 10000*0.1 = 2350 billable units at $5/MTok
-  assert.strictEqual(Math.round(ac.inCost * 1e9), Math.round((2350 * 5 / 1e6) * 1e9));
+  // 100 @ $5 + 10000 @ $0.50 + 1000 write @ 5*1.25 = $6.75/MTok-equivalent
+  const expectA = (100 * 5 + 10000 * 0.5 + 1000 * 5 * 1.25) / 1e6;
+  assert.strictEqual(Math.round(ac.inCost * 1e9), Math.round(expectA * 1e9));
   assert.strictEqual(Math.round(ac.outCost * 1e9), Math.round((500 * 25 / 1e6) * 1e9));
 
-  // OpenAI: uncached portion at full rate, cached portion discounted, no write cost.
+  // The cache discount is NOT uniform across a vendor: gpt-5 caches at 0.1x
+  // input while gpt-4.1 and o1 are far dearer. A provider-wide multiplier
+  // would misprice most of the lineup.
+  assert.strictEqual(pricing.priceOf('gpt-5', 'openai').cachedInPerMTok, 0.125);
+  assert.strictEqual(pricing.priceOf('gpt-4.1', 'openai').cachedInPerMTok, 0.5);
+  assert.strictEqual(pricing.priceOf('o1', 'openai').cachedInPerMTok, 7.5);
+
+  // Longest-prefix matching: gpt-5-mini must not resolve to gpt-5.
+  assert.strictEqual(pricing.priceOf('gpt-5-mini', 'openai').inPerMTok, 0.25);
+  assert.strictEqual(pricing.priceOf('gpt-5', 'openai').inPerMTok, 1.25);
+
+  // OpenAI: uncached portion at full rate, cached portion at the cached rate,
+  // and no write cost at all.
   const o = normalizeUsage({ input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 100 }, 'openai');
-  const p = pricing.priceOf('gpt-5', 'openai');
-  const expectIn = ((10000 - 8000) + 8000 * p.cacheReadMult) * p.inPerMTok / 1e6;
+  const expectO = (2000 * 1.25 + 8000 * 0.125) / 1e6;
   assert.strictEqual(Math.round(pricing.requestCostUsd(o, 'gpt-5', 'openai').inCost * 1e9),
-    Math.round(expectIn * 1e9));
+    Math.round(expectO * 1e9));
+
+  // Google caches at 0.1x across the range.
+  assert.strictEqual(pricing.priceOf('gemini-2.5-pro', 'google').cachedInPerMTok, 0.125);
 
   // Unknown models never throw and never price at zero.
   assert.ok(pricing.priceOf('some-future-model', 'unknown').inPerMTok > 0);
@@ -177,70 +192,106 @@ Create `lib/pricing.js`:
 
 ```js
 'use strict';
-// Single source of truth for token pricing. Cache multipliers are per-PROVIDER
-// because the billing models genuinely differ: Anthropic charges a premium to
-// write cache and a tenth to read it, while OpenAI and Google charge nothing
-// to write and a discount to read.
+// Single source of truth for token pricing, in USD per 1M tokens as
+// [input, cachedInput, output].
 //
-// RATES MUST BE VERIFIED BEFORE ANY DOLLAR FIGURE IS SHOWN TO A USER. The UI
-// reports tokens by default precisely so that stale rates here cannot mislead
-// anyone (see spec section 8.1).
+// The cached-input price is stored EXPLICITLY rather than as a multiplier,
+// because the discount is per-MODEL, not per-provider: OpenAI's GPT-5 family
+// caches at 0.1x input, GPT-4.1 and o3 at 0.25x, and o1/o3-mini at 0.5x. A
+// single provider-wide multiplier would misprice most of the lineup.
+//
+// Cache WRITE is separate and provider-level: only Anthropic charges to
+// populate the cache (1.25x input for the 5-minute TTL, 2x for the hour).
+// OpenAI and Google cache implicitly at no write cost.
+//
+// Rates verified 2026-07-28 from developers.openai.com/api/docs/pricing and
+// ai.google.dev/gemini-api/docs/pricing. THEY GO STALE. The UI reports tokens
+// by default (spec section 8.1) precisely so a stale rate here cannot mislead
+// anyone; a dollar figure is only ever shown when the user supplies their own
+// rate or explicitly opts in.
 
 const TABLE = {
   anthropic: {
-    cacheReadMult: 0.10, cacheWriteMult: 1.25,
+    cacheWriteMult: 1.25,
     models: {
-      'claude-fable-5': [10.0, 50.0],
-      'claude-opus-5': [5.0, 25.0], 'claude-opus-4-8': [5.0, 25.0],
-      'claude-opus-4-7': [5.0, 25.0], 'claude-opus-4-6': [5.0, 25.0],
-      'claude-opus-4-5': [5.0, 25.0],
-      'claude-sonnet-5': [3.0, 15.0], 'claude-sonnet-4-6': [3.0, 15.0],
-      'claude-sonnet-4-5': [3.0, 15.0],
-      'claude-haiku-4-5': [1.0, 5.0],
+      'claude-fable-5': [10.0, 1.0, 50.0],
+      'claude-opus-5': [5.0, 0.5, 25.0],
+      'claude-opus-4-8': [5.0, 0.5, 25.0],
+      'claude-opus-4-7': [5.0, 0.5, 25.0],
+      'claude-opus-4-6': [5.0, 0.5, 25.0],
+      'claude-opus-4-5': [5.0, 0.5, 25.0],
+      'claude-sonnet-5': [3.0, 0.3, 15.0],
+      'claude-sonnet-4-6': [3.0, 0.3, 15.0],
+      'claude-sonnet-4-5': [3.0, 0.3, 15.0],
+      'claude-haiku-4-5': [1.0, 0.1, 5.0],
     },
-    fallback: [5.0, 25.0],
+    fallback: [5.0, 0.5, 25.0],
   },
   openai: {
-    cacheReadMult: 0.25, cacheWriteMult: 0,
-    models: {},              // populate with verified rates before display
-    fallback: [1.25, 10.0],
+    cacheWriteMult: 0,
+    models: {
+      'gpt-5.6-sol': [5.0, 0.5, 30.0],
+      'gpt-5.6-terra': [2.5, 0.25, 15.0],
+      'gpt-5.6-luna': [1.0, 0.1, 6.0],
+      'gpt-5.5': [5.0, 0.5, 30.0],
+      'gpt-5.4': [2.5, 0.25, 15.0],
+      'gpt-5.4-mini': [0.75, 0.075, 4.5],
+      'gpt-5.4-nano': [0.2, 0.02, 1.25],
+      'gpt-5.2': [1.75, 0.175, 14.0],
+      'gpt-5.1': [1.25, 0.125, 10.0],
+      'gpt-5-mini': [0.25, 0.025, 2.0],
+      'gpt-5-nano': [0.05, 0.005, 0.4],
+      'gpt-5': [1.25, 0.125, 10.0],
+      'gpt-4.1-mini': [0.4, 0.1, 1.6],
+      'gpt-4.1-nano': [0.1, 0.025, 0.4],
+      'gpt-4.1': [2.0, 0.5, 8.0],
+      'o4-mini': [1.1, 0.275, 4.4],
+      'o3-mini': [1.1, 0.55, 4.4],
+      'o3': [2.0, 0.5, 8.0],
+      'o1-mini': [1.1, 0.55, 4.4],
+      'o1': [15.0, 7.5, 60.0],
+    },
+    fallback: [1.25, 0.125, 10.0],
   },
   google: {
-    cacheReadMult: 0.25, cacheWriteMult: 0,
-    models: {},              // populate with verified rates before display
-    fallback: [1.25, 10.0],
+    cacheWriteMult: 0,
+    models: {
+      'gemini-3.6-flash': [1.5, 0.15, 7.5],
+      'gemini-3.5-flash-lite': [0.3, 0.03, 2.5],
+      'gemini-3.5-flash': [1.5, 0.15, 9.0],
+      'gemini-3.1-flash-lite': [0.25, 0.025, 1.5],
+      'gemini-2.5-pro': [1.25, 0.125, 10.0],
+      'gemini-2.5-flash-lite': [0.1, 0.01, 0.4],
+      'gemini-2.5-flash': [0.3, 0.03, 2.5],
+    },
+    fallback: [1.25, 0.125, 10.0],
   },
-  unknown: {
-    cacheReadMult: 0.25, cacheWriteMult: 0,
-    models: {},
-    fallback: [1.25, 10.0],
-  },
+  unknown: { cacheWriteMult: 0, models: {}, fallback: [1.25, 0.125, 10.0] },
 };
 
 function priceOf(model, provider) {
   const p = TABLE[provider] || TABLE.unknown;
-  const m = String(model || '').split('[')[0].trim();
+  const m = String(model || '').split('[')[0].trim().toLowerCase();
   let hit = p.models[m];
   if (!hit) {
-    for (const key of Object.keys(p.models)) {
+    // Longest key first, so 'gpt-5-mini' is not shadowed by 'gpt-5'.
+    const keys = Object.keys(p.models).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
       if (m.startsWith(key)) { hit = p.models[key]; break; }
     }
   }
-  const [inPerMTok, outPerMTok] = hit || p.fallback;
-  return { inPerMTok, outPerMTok, cacheReadMult: p.cacheReadMult, cacheWriteMult: p.cacheWriteMult };
+  const [inPerMTok, cachedInPerMTok, outPerMTok] = hit || p.fallback;
+  return { inPerMTok, cachedInPerMTok, outPerMTok, cacheWriteMult: p.cacheWriteMult };
 }
 
 // Takes a NORMALISED usage object from usage-normalize.js, never a raw one.
 function requestCostUsd(norm, model, provider) {
   const n = norm || {};
   const p = priceOf(model, provider);
-  const billableIn = (n.input || 0)
-    + (n.cacheRead || 0) * p.cacheReadMult
-    + (n.cacheWrite || 0) * p.cacheWriteMult;
-  return {
-    inCost: billableIn * p.inPerMTok / 1e6,
-    outCost: (n.output || 0) * p.outPerMTok / 1e6,
-  };
+  const inCost = ((n.input || 0) * p.inPerMTok
+    + (n.cacheRead || 0) * p.cachedInPerMTok
+    + (n.cacheWrite || 0) * p.inPerMTok * p.cacheWriteMult) / 1e6;
+  return { inCost, outCost: (n.output || 0) * p.outPerMTok / 1e6 };
 }
 
 module.exports = { priceOf, requestCostUsd, TABLE };

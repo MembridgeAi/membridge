@@ -146,15 +146,17 @@ On an answered read:
 
 ```
 ● Read(checkout/validate.ts)
-  ⎿ answered from MemBridge · 380 tokens instead of 4,210
+  ⎿ answered from MemBridge · saved 91% of this read (3,830 tokens)
     structure only — read the file directly for bodies
 ```
+
+**The line leads with the percentage** — it is the figure a developer grasps at a glance mid-task — with the absolute in parentheses so the magnitude is still visible. (The dashboard is the opposite way round: it reports tokens, never percentages of spend. See §8.1.)
 
 **Shown when the saving exceeds 1,000 tokens, and always on the first interception of a session** (so the user learns what happened once, then it goes quiet unless material).
 
 Measured: median 9 interceptions per session (p75 19, p90 39). A >1,000-token rule fires on ~25% of them — about two lines in a median session.
 
-**The threshold is absolute, not a percentage, deliberately.** With a 2.25× floor every answered read already saves ≥55.6%, so a percentage threshold is either inert or filters on compression *ratio* rather than benefit — it would hide a 60%-saving read on an 8,000-token file (4,800 tokens) while showing a 90%-saving read on a 300-token file (270 tokens).
+**Critically, the percentage is presentation only — the threshold stays absolute.** With a 2.25× floor every answered read already saves ≥55.6%, so gating *display* on a percentage would be either inert or actively wrong: it would hide a 60%-saving read on an 8,000-token file (4,800 tokens) while showing a 90%-saving read on a 300-token file (270 tokens). Show the ratio; decide on the tokens.
 
 ## 7. Attribution — how savings are established
 
