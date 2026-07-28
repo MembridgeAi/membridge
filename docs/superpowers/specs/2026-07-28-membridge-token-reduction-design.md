@@ -160,26 +160,47 @@ Measured: median 9 interceptions per session (p75 19, p90 39). A >1,000-token ru
 
 ## 7. Attribution — how savings are established
 
-Three layers, each with a different job. **The distinction matters: once we intervene, the counterfactual is unobservable, so per-read credit is an assumption unless bounded.**
+Three layers. The headline number is directly observed; nothing in it is modelled.
 
-### 7.1 Calibration holdout — the causal claim
+### 7.1 Direct avoidance — the headline
 
-For a project's first **14 days**, `hash(sessionId + path) % 100 < 10` is **not** intercepted. Those reads are a control group inside the user's own work. Held-out versus served totals give a measured causal estimate. After 14 days the holdout switches off and the project captures 100% of the benefit. Re-runnable on demand.
+When the hook intercepts, it has seen the actual tool call. `Read(path)` with no `limit` means the agent was about to load the whole file; `offset`/`limit` state exactly how much. **That is an observed request, not a counterfactual.**
 
-Deterministic hashing, so the same session and path always land the same side — no flakiness, reproducible in tests.
+For each interception, with `followTokens` = any follow-up read of that path in the same session (0 if none):
 
-### 7.2 Tool-input pricing — the per-read credit
+```
+net = callTokens − (skeletonTokens + followTokens)
+```
 
-Credit is priced from the intercepted call's actual `offset`/`limit`, never file size. Agents frequently read part of a file; crediting the whole file would overstate by an order of magnitude.
+| outcome | net |
+|---|---|
+| no follow-up read | full saving |
+| smaller, targeted follow-up | partial saving — the skeleton did its job |
+| full re-read | loss of the skeleton's tokens |
 
-### 7.3 Acceptance rate — the diagnostic
+Worked: a 4,210-token call answered with a 380-token skeleton, followed by a targeted 600-token read, nets **+3,230**. The same call followed by a full re-read nets **−380**. The earlier rule was this formula with `followTokens` hardcoded to the whole file.
 
-Interception followed by a full read of the same path is recorded as a **loss** of the skeleton's tokens. Acceptance rate is the fast signal for whether skeleton quality is the bottleneck, and is the evidence loop for whether the tree-sitter investment is paying off.
+This supports a mechanism claim: *"answered 118 reads that would have loaded 1.6M tokens, using 190k instead."* Every figure is observed. Available from the first interception, covering 100% of them.
 
-### 7.4 Known inflation risks, explicitly not modelled away
+### 7.2 Holdout — a divergence check, not the headline
 
-- **Induced reads** — a skeleton listing imports may send the agent to files it would never have opened. Caught by holdout totals, not by per-read accounting.
-- **Abandoned reads** — the agent may have opened the file and moved on after a screen. Same.
+**3%** of eligible reads are not intercepted, chosen deterministically by `hash(sessionId + path)`. Runs **continuously** rather than for a fixed window.
+
+Its job is narrow: catch cases where direct avoidance and total session cost disagree badly, which is the signature of second-order effects eating the gains. Pooled across installs via the diagnostics channel (§8.5); surfaces to a user only when the divergence is large.
+
+It is deliberately **not** the quoted number. At a median of 9 interceptions per session, a 10% holdout yields roughly one held-out read per session — against per-developer spend that varies 4.7× between quartiles, no single project accumulates enough signal to produce a usable causal estimate in any reasonable window. **A holdout is the right instrument for a population, the wrong one for an individual.**
+
+### 7.3 Rejection learning
+
+A follow-up read only counts against us when **`net < 0`**. A smaller, targeted follow-up is a success and must never trip the rejection counter — otherwise we stop serving precisely the files where skeletons work best. Three net-negative outcomes on a path stop interception for it.
+
+### 7.4 What this cannot claim
+
+Direct avoidance measures **tokens not loaded**. It cannot see **induced reads** (a skeleton's import list sending the agent to files it would not have opened) or **trajectory changes** (more turns, each re-billing the whole context through the cache).
+
+Therefore: *"avoided 1.4M tokens of file reading"* is defensible. *"Your spend fell 6%"* is not, from this data alone. Every user-facing surface states the first. The gap between them is what §7.2 exists to detect.
+
+It also cannot tell you whether the agent would have made that targeted follow-up read anyway, without our skeleton. That question is unanswerable per-read — which is precisely what the holdout is for. This formula makes the diagnostic honest; the holdout remains the number you would actually quote about causation.
 
 ## 8. UI
 
@@ -191,8 +212,10 @@ A dollar estimate exists behind "set your rate", **off by default**.
 
 ### 8.2 Placement
 
-- **Home** — roll-up: `4.1M saved · 6.1% of context loaded`, plus per-project contributions. The Home number is arithmetically the sum of the project numbers.
-- **Project → Savings tab** — context loaded, reads answered, tokens saved, then the per-file breakdown.
+- **Home** — roll-up: `1.4M tokens of file reading avoided · 6.1% of context loaded`, plus per-project contributions. The Home number is arithmetically the sum of the project numbers.
+- **Project → Savings tab** — context loaded, reads answered, tokens avoided, then the per-file breakdown.
+
+**The verb is load-bearing.** "Avoided" is what §7.1 measures — tokens not loaded. "Saved" implies the bill fell, which this data cannot support (§7.4). No user-facing surface may say "saved".
 
 One click from claim to evidence.
 

@@ -4,7 +4,7 @@
 
 **Goal:** Make MemBridge actually save tokens: intercept file reads an agent is about to repeat and answer them with a pointer or a structural skeleton, measured honestly by the ledger built in the previous plan.
 
-**Architecture:** A `PreToolUse` hook on Read/Grep/Glob (mirroring the existing Stop-hook machinery in `lib/hooks.js`) asks a serve policy (`lib/recall.js`) whether to answer. Tier A (same-session repeat, file unchanged) answers with a ~50-token pointer. Tier B (cross-session repeat) answers with a cached skeleton built by the daemon's hot-set warmer (`lib/skeleton.js`, web-tree-sitter with a dependency-free fallback). The hook serves only from cache and hashes the file at serve time, so it stays inside a 150 ms budget and can never serve stale content. Every serve/rejection/holdout outcome folds into the existing ledger; `/api/savings` and the dashboard gain saved-token figures; MCP gains `recall`.
+**Architecture:** A `PreToolUse` hook on Read/Grep/Glob (mirroring the existing Stop-hook machinery in `lib/hooks.js`) asks a serve policy (`lib/recall.js`) whether to answer. Tier A (same-session repeat, file unchanged) answers with a ~50-token pointer. Tier B (cross-session repeat) answers with a cached skeleton built by the daemon's hot-set warmer (`lib/skeleton.js`, web-tree-sitter with a dependency-free fallback). The hook serves only from cache and hashes the file at serve time, so it stays inside a 150 ms budget and can never serve stale content. Every serve/holdout outcome folds into the existing ledger, settled by the spec §7.1 formula; `/api/savings` and the dashboard report tokens of file reading AVOIDED; MCP gains `recall`.
 
 **Tech Stack:** Node ≥18, CommonJS. New runtime deps (approved in spec §9): `web-tree-sitter` + grammar wasm for TS/JS/Python/Go. Tests are `check()` blocks in `test/run-tests.js`.
 
@@ -15,7 +15,7 @@
 - **Fail-open, always** (spec §10): any exception, missing store, parse error, oversized latency → the read proceeds untouched. The hook's outermost layer catches everything and exits 0 with no output.
 - **~150 ms hook budget**: the hook serves only pre-built cache entries; it never parses source or loads wasm.
 - **Serve conditions** (spec §5.2, all must hold): tier A/B applies (C is built but flag-gated off); the call would pull **≥400 tokens** (from actual offset/limit, never file size); **≥2.25× compression** against that call; path not already served this session; not held out.
-- **Holdout** (spec §7.1): during a project's first 14 days, `hash(sessionId + path) % 100 < 10` is never intercepted; deterministic; switches off after.
+- **Holdout** (spec §7.2): **3%** of eligible reads, chosen deterministically by `hash(sessionId + path)`, are never intercepted. **Continuous — no 14-day window.** It is a divergence check pooled across installs, never the quoted number.
 - **Terminal line** (spec §6): shown when saving > **1,000 tokens**, plus always the first interception of a session; leads with percentage, absolute in parentheses.
 - **Tokens, never dollars**, in every user-facing surface (spec §8.1). Estimation: 1 token ≈ 4 chars, one place only.
 - **Freshness at serve time**: re-hash the file on disk; mismatch → regenerate (daemon) or step aside (hook). Tier A additionally requires the hash to match what the agent was shown.
@@ -150,15 +150,15 @@ check('recall-store: round-trips entries, redacts secrets, warms the hot set', a
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Produces: `decide(input) → { serve: false, reason } | { serve: true, tier, body, savedTokens, pct }`.
+- Produces: `decide(input) → { serve: false, reason } | { serve: true, tier, body, callTokens, skeletonTokens, avoidedTokensOptimistic, pct }`.
 - `input`: `{ projectPath, relPath, absPath, sessionId, toolName, offset, limit, sessionState, ledger, storeEntry, fileStat, config, projectCreatedAt }` — pure function, no I/O; callers assemble inputs so the policy is table-testable.
 - `sessionState` (per session, JSON under `.membridge/recall/sessions/<sid>.json`, managed by the hook task): `{ served: {relPath: contentHash}, interceptions: n }`.
-- Constants (top of file, names exact): `MIN_CALL_TOKENS = 400`, `MIN_COMPRESSION = 2.25`, `HOLDOUT_PCT = 10`, `HOLDOUT_DAYS = 14`, `ANNOUNCE_TOKENS = 1000`, `REJECTION_LIMIT = 3`.
-- Decision order (each failure returns its own `reason` string): kill-switch/config → tracked+unpaused → holdout (`sha1(sessionId + relPath)` first 4 bytes as uint32 % 100 < 10, only when `now - projectCreatedAt < 14d`) → already served this session → rejections ≥ limit → tier: A if `sessionState.served`-adjacent history says this session already read the path (from ledger `fileReaders` + same session) AND `storeEntry.contentHash === current file hash`; B if another session read it (ledger fileReaders) and skeleton cached fresh; C only if `config.recall.tierC` truthy → call size: `limit ? limit*12 : fileStat.size/4` estimated tokens ≥ 400 (12 ≈ tokens/line, comment why) → compression: tier A body is the pointer (fixed template, ~50 tokens) — always passes; tier B requires `callTokens / skeletonTokens ≥ 2.25`.
+- Constants (top of file, names exact): `MIN_CALL_TOKENS = 400`, `MIN_COMPRESSION = 2.25`, `HOLDOUT_PCT = 3`, `ANNOUNCE_TOKENS = 1000`, `REJECTION_LIMIT = 3`.
+- Decision order (each failure returns its own `reason` string): kill-switch/config → tracked+unpaused → holdout (`sha1(sessionId + relPath)` first 4 bytes as uint32 % 100 < 3; continuous, no date window) → already served this session → rejections ≥ limit → tier: A if `sessionState.served`-adjacent history says this session already read the path (from ledger `fileReaders` + same session) AND `storeEntry.contentHash === current file hash`; B if another session read it (ledger fileReaders) and skeleton cached fresh; C only if `config.recall.tierC` truthy → call size: `limit ? limit*12 : fileStat.size/4` estimated tokens ≥ 400 (12 ≈ tokens/line, comment why) → compression: tier A body is the pointer (fixed template, ~50 tokens) — always passes; tier B requires `callTokens / skeletonTokens ≥ 2.25`.
 - Tier A body: `MemBridge: this session already read <relPath> (unchanged since; hash <8hex>). Re-read only if you need to revisit specific content.`
 - Tier B body: header + skeleton: `MemBridge structural summary of <relPath> (full file unchanged on disk — read it directly for implementation bodies):\n\n<skeleton>`
 
-- [ ] **Step 1: Failing test** — table-driven over: holdout hit (deterministic — compute a (sid,path) pair that hashes into the holdout in the test, by scanning a few candidates), holdout expired after 14 days, tier A serve with matching hash, tier A refusal on hash mismatch, tier B serve clearing 2.25×, tier B refusal below 2.25×, refusal under 400 tokens, refusal when already served, refusal at 3 rejections, tier C dark by default and lit by config flag. Assert `savedTokens`/`pct` arithmetic on a tier B serve: `savedTokens = callTokens - skeletonTokens`, `pct = round(100*savedTokens/callTokens)`.
+- [ ] **Step 1: Failing test** — table-driven over: holdout hit (deterministic — compute a (sid,path) pair that hashes into the holdout in the test, by scanning a few candidates), tier A serve with matching hash, tier A refusal on hash mismatch, tier B serve clearing 2.25×, tier B refusal below 2.25×, refusal under 400 tokens, refusal when already served, refusal at 3 rejections, tier C dark by default and lit by config flag. Assert the decision carries `callTokens` and `skeletonTokens` on a tier B serve, and `pct = round(100*(callTokens-skeletonTokens)/callTokens)`. NOTE (spec §7.1): the DECISION reports the optimistic figure; final net is only known after the session, via `net = callTokens - (skeletonTokens + followTokens)` computed in the fold (Task 6). Do not name a decision field `savedTokens` — call it `avoidedTokensOptimistic` so nothing downstream mistakes it for the settled number.
 - [ ] **Steps 2–4:** FAIL → implement → green.
 - [ ] **Step 5:** Commit `feat(recall): serve policy — tiers, floors, holdout, rejection learning`
 
@@ -174,8 +174,8 @@ check('recall-store: round-trips entries, redacts secrets, warms the hot set', a
 **Interfaces:**
 - Consumes: `recall.decide` (Task 4), `recall-store.get` (Task 3), ledger via `ledger-store.readLedger`.
 - Hook contract (verified against the Stop hook's documented payload style): stdin JSON `{ session_id, cwd, tool_name, tool_input: { file_path|path|pattern, offset, limit } }`. To answer a read, print JSON to stdout: `{ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "<line + body>" } }` and exit 0 — the reason is what the model receives in place of the tool result. To step aside: exit 0 with no output.
-- The reason's first line IS the terminal line (spec §6): `answered from MemBridge · saved <pct>% of this read (<savedTokens> tokens) — structure only, read the file directly for bodies` — included when `savedTokens > ANNOUNCE_TOKENS || sessionState.interceptions === 0`; otherwise the body only.
-- After serving: update sessionState (`served[relPath] = contentHash`, `interceptions++`) and append one line to `.membridge/recall/events.jsonl`: `{ ts, sessionId, relPath, tier, savedTokens, holdout: false }`. On a holdout skip, append `{ ..., holdout: true, wouldServe: tier }` and step aside. These events are the ledger's savings input (Task 6).
+- The reason's first line IS the terminal line (spec §6): `answered from MemBridge · avoided <pct>% of this read (<avoidedTokensOptimistic> tokens) — structure only, read the file directly for bodies` — included when `avoidedTokensOptimistic > ANNOUNCE_TOKENS || sessionState.interceptions === 0`. **"avoided", not "saved"** (spec §8.2), and it is the optimistic figure — a follow-up read may reduce it, which only the fold can settle; otherwise the body only.
+- After serving: update sessionState (`served[relPath] = contentHash`, `interceptions++`) and append one line to `.membridge/recall/events.jsonl`: `{ ts, sessionId, relPath, tier, callTokens, skeletonTokens, holdout: false }`. **`callTokens` is mandatory** — without it the fold cannot apply the §7.1 formula and every outcome collapses back to the old all-or-nothing rule. On a holdout skip, append `{ ..., holdout: true, wouldServe: tier, callTokens }` and step aside. These events are the fold's input (Task 6), which settles them into avoided tokens.
 - **Entire body wrapped in try/catch → step aside.** ~~A watchdog: `setTimeout(150ms)` that force-exits 0 without output (unref'd), in case anything hangs.~~ **Superseded (fix round 1):** the hook body is fully synchronous (it blocks on reading stdin), so the event loop never runs and that timer can never fire — a held-open stdin was measured still alive at 3004ms against the nominal 150ms. The real bound is the per-hook `timeout` (5s) on the PreToolUse settings entry, enforced by Claude Code's hook runner; the inert timer was removed rather than left looking like a budget.
 
 - [ ] **Step 1: Failing test** — drive `runRecall` in-process the way `runStop` is tested (grep how the suite invokes hook fns): feed stdin payloads via a temp file/fd; assert (a) tier B serve prints valid JSON with deny + reason containing the skeleton and the first-interception line; (b) second identical call steps aside (already served); (c) corrupted store/file → silent step-aside, exit 0; (d) `MEMBRIDGE_NO_RECALL=1` steps aside; (e) events.jsonl rows appear with correct shapes; (f) hash mismatch on disk → step aside (no stale serve).
@@ -186,14 +186,27 @@ check('recall-store: round-trips entries, redacts secrets, warms the hot set', a
 
 ### Task 6: Fold savings into the ledger + API
 
+**This task owns the §7.1 formula.** The hook records what it observed; the fold settles it.
+
+```
+net = callTokens − (skeletonTokens + followTokens)
+```
+
+`followTokens` = the tokens any follow-up read of that path in the same session actually pulled, estimated from *its own* `offset`/`limit` with the same estimator the policy used; 0 when there is no follow-up. Positive is avoidance, negative is a loss.
+
 **Files:**
-- Modify: `lib/ledger-fold.js` / `lib/ledger-fold-state.js` (consume `.membridge/recall/events.jsonl`: cumulative `saved: { tokens, serves, tierA, tierB, rejectionsObserved }` and `holdout: { skips, wouldSaveTokens }`; events file truncated after fold — the ledger is the durable record, events are the queue; bounded read of ≤ 10,000 lines per fold)
-- Modify: `lib/scan.js` (a rejection is observable at fold time: a `read` event on a path within the same session AFTER a serve event for it → `bumpRejection` + count it)
-- Modify: `lib/server.js` `savingsPayload` (add `saved` and `holdout` blocks; STILL tokens only)
+- Modify: `lib/ledger-fold.js` / `lib/ledger-fold-state.js` (consume `.membridge/recall/events.jsonl`: cumulative `avoided: { tokens, serves, tierA, tierB, partialWins, netNegatives }` and, kept strictly separate, `holdout: { skips, callTokens }`; events file truncated after fold — the ledger is the durable record, events are the queue; bounded read of ≤ 10,000 lines per fold)
+- Modify: `lib/scan.js` (fold-time settlement: for each serve row, find any later `read` event on the same path in the same session, estimate its tokens, apply the formula, add `net` to the running total. Call `bumpRejection` **only when `net < 0`** — a smaller, targeted follow-up is a success, and counting it would stop us serving exactly the files where skeletons work best)
+- Modify: `lib/server.js` `savingsPayload` (add `avoided` and `holdout` blocks; tokens only, no cost fields; field named `avoided`, never `saved` — spec §8.2)
 - Modify: `lib/recall-store.js` warm() call wired into `syncOnce` after the ledger write (hot set from the fresh ledger)
 - Test: `test/run-tests.js`
 
-- [ ] **Step 1: Failing test** — seed events.jsonl with 2 serves (1400 + 600 tokens) and 1 holdout skip; fold twice; assert `saved.tokens === 2000` after both folds (idempotent via truncation), `saved.serves === 2`, holdout counted separately, `/api/savings` exposes `saved`/`holdout` with no cost fields (extend the existing no-dollars assertions), and a serve followed by a same-session read of the same path increments the store's rejection count and `saved.rejectionsObserved`.
+- [ ] **Step 1: Failing test** — cover all three outcomes of the formula, since the middle one is new and the easiest to regress:
+  - **no follow-up**: serve `callTokens 4210`, `skeletonTokens 380` → net **+3,830**, no rejection.
+  - **targeted follow-up** (the case the old rule got wrong): same serve, then a same-session read of that path pulling `600` → net **+3,230**, counted in `partialWins`, and **`bumpRejection` NOT called**.
+  - **full re-read**: same serve, then a same-session read pulling `4210` → net **−380**, counted in `netNegatives`, `bumpRejection` called once.
+
+  Plus: folding twice is idempotent (truncation); holdout rows accumulate only into `holdout` and never touch `avoided`; `/api/savings` exposes `avoided`/`holdout` with no cost fields (extend the existing no-dollars assertions) and no internal keys.
 - [ ] **Steps 2–4:** FAIL → implement → green. Re-run the equivalence guard (`MEMBRIDGE_REF=... node test/ledger-equivalence.js`) — must stay 0.000% (nothing in buildRequests changes).
 - [ ] **Step 5:** Commit `feat(recall): savings fold into the ledger and /api/savings`
 
@@ -218,7 +231,7 @@ check('recall-store: round-trips entries, redacts secrets, warms the hot set', a
 - Modify: `lib/dashboard-team.js` or the relevant `lib/dashboard/` client file (find where the projects grid renders; **these files are one large template literal — a stray backtick breaks require; smoke-check with `node -e "require('./lib/dashboard/<file>')"` after EVERY edit**)
 - Test: `test/run-tests.js` (payload-level assertions only — the suite has no browser)
 
-Renders from `/api/savings`: Home stat `Tokens saved · <total> (<pct>% of context loaded)`; per-project `saved <n> · <serves> reads answered`; projects with `saved.tokens === 0` show `no repeat reads yet` (spec §8.3 honest zero). No dollars anywhere.
+Renders from `/api/savings`: Home stat `<total> tokens of file reading avoided · <pct>% of context loaded`; per-project `<n> avoided · <serves> reads answered`; projects with `avoided.tokens === 0` show `no repeat reads yet`. **Never the word "saved"** — spec §8.2: avoided is what we measure, saved implies the bill fell (spec §8.3 honest zero). No dollars anywhere.
 
 - [ ] **Steps 1–4:** extend the savings payload check to cover the fields the panel reads; implement; `node -e` smoke-check; suite green.
 - [ ] **Step 5:** Commit `feat(recall): savings panel in the dashboard`
@@ -229,11 +242,11 @@ Renders from `/api/savings`: Home stat `Tokens saved · <total> (<pct>% of conte
 
 **Files:**
 - Create: `lib/diagnostics.js`
-- Modify: `lib/scan.js` (after fold: if `saved.tokens - observed rejection cost < 0` over a project's lifetime AND serves ≥ 20, pause recall for the project (config flag write) and queue one diagnostic)
+- Modify: `lib/scan.js` (after fold: if `avoided.tokens < 0` over a project's lifetime AND serves ≥ 20 (net already accounts for follow-up reads via the §7.1 formula), pause recall for the project (config flag write) and queue one diagnostic)
 - Modify: `lib/server.js` settings payload (expose `diagnostics.enabled`, default true)
 - Test: `test/run-tests.js`
 
-Payload exactly per spec §8.5 (install_id random uuid persisted in `~/.membridge/config.json`, version, net_tokens, acceptance, reads_answered, reject_reasons, languages) — **no code, file names, project names, or account**. POST to `config.diagnosticsUrl` (default the Supabase function URL constant; honour `diagnostics.enabled === false` and `MEMBRIDGE_NO_DIAGNOSTICS=1`). Network send is fire-and-forget with a 5 s timeout; **tests never hit the network** — point `diagnosticsUrl` at the suite's local mock server and assert the payload shape and the privacy fields' absence.
+Payload exactly per spec §8.5 (install_id random uuid persisted in `~/.membridge/config.json`, version, net_tokens, acceptance, reads_answered, reject_reasons, languages) **plus `direct_avoided` and `holdout_divergence`** so the §7.2 divergence check can be pooled across installs — that pooling is the whole reason the holdout exists, and it is impossible without these two fields — **no code, file names, project names, or account**. POST to `config.diagnosticsUrl` (default the Supabase function URL constant; honour `diagnostics.enabled === false` and `MEMBRIDGE_NO_DIAGNOSTICS=1`). Network send is fire-and-forget with a 5 s timeout; **tests never hit the network** — point `diagnosticsUrl` at the suite's local mock server and assert the payload shape and the privacy fields' absence.
 
 - [ ] **Steps 1–4:** failing check (net-negative project → recall paused + one queued payload with exactly the allowed keys, no path-like strings) → implement → green.
 - [ ] **Step 5:** Commit `feat(recall): anonymous net-negative diagnostics with kill switches`
@@ -246,7 +259,7 @@ Payload exactly per spec §8.5 (install_id random uuid persisted in `~/.membridg
 - Create: `test/recall-e2e.js` (opt-in, like ledger-equivalence)
 - Test wiring: none in `npm test`
 
-Simulates a real session against a fixture repo: write files → seed ledger history (two sessions reading the same paths) → warm → drive `runRecall` with realistic payloads → assert served bodies, then fold and assert `/api/savings.saved.tokens > 0` end to end. Prints a human-readable summary: `served N reads, X tokens saved, holdout skipped M`. This is the script Marco runs to SEE it work before dogfooding.
+Simulates a real session against a fixture repo: write files → seed ledger history (two sessions reading the same paths) → warm → drive `runRecall` with realistic payloads → assert served bodies, then fold and assert `/api/savings.avoided.tokens > 0` end to end. **Must assert all three outcomes of the §7.1 formula** — no follow-up, targeted follow-up, and full re-read — because the targeted-follow-up case is new and the most likely to regress silently. Prints a human-readable summary: `answered N reads, X tokens of file reading avoided (P partial wins, Q net-negative), holdout skipped M`. This is the script Marco runs to SEE it work before dogfooding.
 
 - [ ] **Steps 1–4:** write, run, green. **Step 5:** Commit `test(recall): end-to-end serve-and-measure proof`
 
