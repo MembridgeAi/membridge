@@ -5926,6 +5926,156 @@ async function main() {
     assert.strictEqual(strip('x'.repeat(3000), '.js').ok, false);
   });
 
+  check('skeleton-strip: brace counting ignores comments/strings/templates, fails closed on real mismatches', () => {
+    // Regression coverage for the 59be87a incident: braceDelta() used to
+    // count every literal `{`/`}` character in a line, including ones
+    // living inside comments, strings, or template literals. That only cost
+    // compression quality until 59be87a added the openBraces stack -- after
+    // that, a single miscounted line corrupted every synthesized closing
+    // brace after it (a stray `}` landing mid-body, one real function never
+    // getting its own closer). lib/skeleton-scan.js fixes the counting;
+    // strip() also fails closed (no synthesized closers at all) if its
+    // whole-file dry run ever sees a negative depth or a real mismatch.
+    const { strip } = require('../lib/skeleton-strip');
+    const { createScanState, scanLineBraces } = require('../lib/skeleton-scan');
+
+    // Scans SOURCE text (not strip()'s output -- a collapsed/truncated
+    // multi-line comment in the OUTPUT can leave a still-open block-comment
+    // marker, which would make a naive re-scan of the output unreliable).
+    // Used below only as a sanity check that a fixture is ordinary, legal,
+    // balanced code -- i.e. that the fail-closed valve should NOT trip for
+    // it.
+    function realBalance(text) {
+      let state = createScanState();
+      let depth = 0;
+      let mismatch = false;
+      for (const line of text.split('\n')) {
+        const r = scanLineBraces(line, state);
+        state = r.state;
+        depth += r.opens - r.closes;
+        if (r.mismatch) mismatch = true;
+      }
+      return { depth, mismatch };
+    }
+
+    // 1. The exact regression counterexample: a brace-shaped character
+    // living inside a `//` comment. Comments are still kept verbatim in the
+    // output -- the fix is about not MISCOUNTING their contents for depth
+    // bookkeeping, not about deleting characters from them -- so the stray
+    // `{` itself still appears once in the output with no partner; that is
+    // the ONLY imbalance a correct fix can leave behind.
+    const counterexample = [
+      'function outer() {',
+      '  // note: reject inputs starting with {',
+      '  const t = 5;',
+      '  return t;',
+      '}',
+      'function afterwards() {',
+      '  return 42;',
+      '}',
+    ].join('\n');
+    const realCounter = realBalance(counterexample);
+    assert.strictEqual(realCounter.mismatch, false, 'fixture is ordinary balanced code');
+    assert.strictEqual(realCounter.depth, 0, 'fixture is ordinary balanced code');
+    const out1 = strip(counterexample, '.js');
+    const expected1 = [
+      'function outer() {',
+      '  // note: reject inputs starting with {  …',
+      '}',
+      'function afterwards() {  …',
+      '}',
+    ].join('\n');
+    assert.strictEqual(out1.text, expected1,
+      'outer closes cleanly right after the comment run; afterwards is untouched by the miscount');
+    const opens1 = (out1.text.match(/\{/g) || []).length;
+    const closes1 = (out1.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens1 - closes1, 1,
+      'the only unmatched brace is the literal one inside the kept comment text -- both real function bodies are fully balanced');
+    assert.ok(out1.text.split('\n').some(l => /^function afterwards\(\)/.test(l)),
+      "'function afterwards()' survives as its own clean line, not glued to a misplaced brace");
+
+    // 2. A string literal containing a stray `}` must not be mistaken for a
+    // real closing brace.
+    const stringCase = [
+      'function outer() {',
+      '  const s = "abc } def";',
+      '  return s;',
+      '}',
+      'function afterwards() {',
+      '  return 1;',
+      '}',
+    ].join('\n');
+    const out2 = strip(stringCase, '.js');
+    const opens2 = (out2.text.match(/\{/g) || []).length;
+    const closes2 = (out2.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens2, closes2, 'string-literal brace never reaches the counter, both functions balance exactly');
+    assert.ok(!out2.text.includes('abc } def'), 'the string body is still ordinary collapsed body content');
+
+    // 3. A block comment spanning multiple lines, with a brace inside it
+    // that has no partner WITHIN the comment (an evenly-balanced dummy pair
+    // like `{ braces }` would net to zero even under the OLD naive counter,
+    // so it wouldn't actually distinguish old vs. fixed behaviour here --
+    // this one is deliberately lopsided, the same shape as the regression).
+    const blockCommentCase = [
+      'function outer() {',
+      '  /* a comment',
+      '     with a stray {',
+      '     unmatched brace */',
+      '  const t = 1;',
+      '  return t;',
+      '}',
+      'function afterwards() {',
+      '  return 2;',
+      '}',
+    ].join('\n');
+    const out3 = strip(blockCommentCase, '.js');
+    const opens3 = (out3.text.match(/\{/g) || []).length;
+    const closes3 = (out3.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens3, closes3, 'the stray brace inside a multi-line block comment never reaches the counter');
+    assert.ok(!out3.text.includes('unmatched brace'), 'the interior of the block comment is still ordinary collapsed body content');
+
+    // 4. A template literal with `${...}` interpolation -- this codebase's
+    // dashboard files are one giant template literal, so this case matters
+    // in practice. The braces INSIDE the interpolation (a real object
+    // literal) must still count; the `${`/`}` delimiters themselves must
+    // not be mistaken for a brace pair.
+    const templateCase = [
+      'function outer() {',
+      '  const html = `<div>${getValue({a:1})}</div>`;',
+      '  return html;',
+      '}',
+      'function afterwards() {',
+      '  return 3;',
+      '}',
+    ].join('\n');
+    const out4 = strip(templateCase, '.js');
+    const opens4 = (out4.text.match(/\{/g) || []).length;
+    const closes4 = (out4.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens4, closes4, 'template-literal interpolation braces are counted correctly and net to zero');
+
+    // 5. Fail-closed valve: genuinely unbalanced input (a real stray `}`
+    // with nothing open to close) must not produce confidently-wrong
+    // synthesized structure -- strip() falls back to the pre-balancer
+    // behaviour instead (no synthetic `}` insertion at all).
+    const malformed = [
+      'function outer() {',
+      '  return 1;',
+      '}',
+      '}', // stray -- one closing brace too many
+      'function afterwards() {',
+      '  return 2;',
+      '}',
+    ].join('\n');
+    const out5 = strip(malformed, '.js');
+    const expected5 = [
+      'function outer() {  …',
+      '}',
+      'function afterwards() {  …',
+    ].join('\n');
+    assert.strictEqual(out5.text, expected5,
+      'no synthetic closing brace is fabricated once the file has a real, unrecoverable mismatch');
+  });
+
   await check('skeleton: skeletonize compresses source and reports its engine', async () => {
     const { skeletonize, estimateTokens } = require('../lib/skeleton');
     const src = 'export function add(a: number, b: number): number {\n  const s = a + b;\n  return s;\n}\n' +
@@ -6152,15 +6302,20 @@ async function main() {
     assert.ok(!out.text.includes('(×4 more identical)'), 'no dedup marker for the plain duplicate calls');
   });
 
-  await check('skeleton: a wasm-less MEMBRIDGE_GRAMMAR_DIR permanently falls back to strip, init attempted exactly once', () => {
-    // Real permanent-fallback contract test: point MEMBRIDGE_GRAMMAR_DIR at
-    // an empty temp dir so every grammar load fails, then confirm (a) both
-    // calls report engine 'strip' and (b) initEngine's actual init work
-    // (require('web-tree-sitter') + Parser.init()) only runs once across
-    // both calls -- never retried. Spawned as a child process because
-    // MEMBRIDGE_GRAMMAR_DIR is read once at require time (a fixed vendoring
-    // location for the process lifetime), so it must be set before
-    // lib/skeleton.js is first required in a fresh process.
+  await check('skeleton: a wasm-less MEMBRIDGE_GRAMMAR_DIR falls back to strip via per-grammar cache memoization (engine itself still initializes)', () => {
+    // NOTE (fix round 2): this used to be labeled a "permanent-fallback
+    // contract test", implying it exercised initEngine()'s engineState=false
+    // catch branch. It does NOT: web-tree-sitter boots its own bundled
+    // runtime regardless of MEMBRIDGE_GRAMMAR_DIR, so Parser.init() still
+    // succeeds here -- only the later per-grammar Language.load() call fails
+    // (no wasm file at this path), which getParserForGrammar memoizes via
+    // cache.set(grammar, null). That's a real, worth-keeping behaviour (a
+    // missing grammar's wasm doesn't get re-attempted on every call either),
+    // just a DIFFERENT one from the engineState=false path -- see the test
+    // below for that. Spawned as a child process because MEMBRIDGE_GRAMMAR_DIR
+    // is read once at require time (a fixed vendoring location for the
+    // process lifetime), so it must be set before lib/skeleton.js is first
+    // required in a fresh process.
     const emptyGrammarDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-empty-grammars-'));
     const skeletonPath = path.join(__dirname, '..', 'lib', 'skeleton.js');
     const script = `
@@ -6177,8 +6332,41 @@ async function main() {
     assert.strictEqual(out.status, 0, `child process failed: ${out.stderr}`);
     const result = JSON.parse(out.stdout.trim());
     assert.strictEqual(result.aEngine, 'strip', 'first call falls back to strip when no grammar wasm can be found');
-    assert.strictEqual(result.bEngine, 'strip', 'second call stays on strip -- the fallback is permanent');
-    assert.strictEqual(result.attempts, 1, 'init is attempted exactly once across both calls');
+    assert.strictEqual(result.bEngine, 'strip', 'second call stays on strip -- the per-grammar null is cached, not re-attempted');
+    assert.strictEqual(result.attempts, 1, 'initEngine() itself still only runs once (memoized regardless of outcome)');
+  });
+
+  await check('skeleton: MEMBRIDGE_FORCE_ENGINE_FAIL proves the engineState=false permanent-fallback path (not just per-grammar memoization)', () => {
+    // The real binding contract from the module docstring: "Any failure to
+    // initialize ... permanently downgrades every future call in this
+    // process to lib/skeleton-strip.js." MEMBRIDGE_FORCE_ENGINE_FAIL is a
+    // test-only hook (see initEngine() in lib/skeleton.js) that makes
+    // initEngine() throw before doing any real work, landing in the catch
+    // branch and setting engineState=false exactly as a genuine wasm/init
+    // failure would. Two skeletonize() calls both returning engine 'strip'
+    // AND the attempt counter staying at 1 proves engineState=false was set
+    // once and never re-evaluated -- the actual permanence contract, as
+    // opposed to the per-grammar cache.set(grammar, null) memoization the
+    // MEMBRIDGE_GRAMMAR_DIR test above exercises. Spawned as a child process
+    // for the same reason as that test: engineState is a module-level
+    // singleton, so this needs a fresh require in a fresh process.
+    const skeletonPath = path.join(__dirname, '..', 'lib', 'skeleton.js');
+    const script = `
+      process.env.MEMBRIDGE_FORCE_ENGINE_FAIL = '1';
+      const skeletonMod = require(${JSON.stringify(skeletonPath)});
+      (async () => {
+        const src = 'function f() {\\n  return 1;\\n}\\n';
+        const a = await skeletonMod.skeletonize('/repo/a.ts', src);
+        const b = await skeletonMod.skeletonize('/repo/b.ts', src);
+        console.log(JSON.stringify({ aEngine: a.engine, bEngine: b.engine, attempts: skeletonMod._initAttempts }));
+      })();
+    `;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, `child process failed: ${out.stderr}`);
+    const result = JSON.parse(out.stdout.trim());
+    assert.strictEqual(result.aEngine, 'strip', 'first call falls back to strip once engine init is forced to fail');
+    assert.strictEqual(result.bEngine, 'strip', 'second call stays on strip -- engineState=false is permanent for the process');
+    assert.strictEqual(result.attempts, 1, 'init is attempted exactly once across both calls -- proves the false branch is memoized, not retried');
   });
 
   check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {
