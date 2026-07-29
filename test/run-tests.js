@@ -1666,6 +1666,18 @@ async function main() {
       assert.ok(embeddedScript.includes('function loadMoreFeed'), 'View more loader missing');
       assert.ok(embeddedScript.includes("closest('#feedMoreBtn')"), 'View more click delegation missing');
     });
+    // The day and session detail views reconstruct their card from a fresh
+    // /api/feed fetch. That fetch must carry the SAME rolling window as the
+    // list view: the windowed list can hold far more than `limit` entries, so
+    // an unwindowed refetch sees only the newest 100 and a card that is
+    // visibly on screen resolves to the "not in the current feed" state when
+    // clicked.
+    check('dashboard day/session detail: refetch carries the rolling window', () => {
+      const daySrc = extractFn(embeddedScript, 'loadDay') || '';
+      const sessSrc = extractFn(embeddedScript, 'loadSession') || '';
+      assert.ok(daySrc.includes("window=' + FEED_WINDOW_HOURS"), 'loadDay must fetch with the rolling window or visible day cards 404 on click');
+      assert.ok(sessSrc.includes("window=' + FEED_WINDOW_HOURS"), 'loadSession must fetch with the rolling window or visible sessions 404 on click');
+    });
     check('dashboard feedMoreHtml: View more renders only with a cursor', () => {
       const escSrc = extractVarFn(embeddedScript, 'esc') || '';
       const fnSrc = extractFn(embeddedScript, 'feedMoreHtml');
