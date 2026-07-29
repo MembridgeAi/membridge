@@ -18879,6 +18879,34 @@ const repoRoot = require('../lib/repo-root');
       assert.deepStrictEqual(projectDetail(bare).teammateNotes, { fresh: [], total: 0 });
     });
 
+    // The kill switch (spec §10) disables ALL FIVE delivery points, and Task 1
+    // made delivery point 1 this payload. Found by the Task 12 end-to-end
+    // proof: projectDetail read the index unconditionally, so a user who
+    // switched the feature off kept seeing teammate decisions on the project
+    // page for as long as the index sat on disk — which is forever, since the
+    // rebuild only stops writing and never deletes. Every agent surface had
+    // gone quiet; the browser had not.
+    //
+    // The control is what makes this discriminating: the SAME project, the
+    // SAME index, switch on -> the notes are there. So the empty payload below
+    // is the switch working, not an empty fixture.
+    check('notes-dash: the kill switch silences the project payload too', () => {
+      const saved = util.loadUserConfig();
+      try {
+        trackDashProject(dashDir);
+        notesStore.write(dashDir, notes.buildIndex(
+          [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'do not touch validate.ts yet')], null, NOW3));
+        util.saveUserConfig({ ...saved, teammateNotes: { enabled: true } });
+        assert.strictEqual(projectDetail(dashDir).teammateNotes.total, 1,
+          'control failed: nothing to silence, so this check would pass against no gate at all');
+        util.saveUserConfig({ ...saved, teammateNotes: { enabled: false } });
+        assert.deepStrictEqual(projectDetail(dashDir).teammateNotes, { fresh: [], total: 0 },
+          'the dashboard kept serving teammate decisions after the kill switch');
+      } finally {
+        util.saveUserConfig(saved);
+      }
+    });
+
     // The index's own redaction (lib/teammate-notes.js's clean) is
     // DEFAULTS-ONLY. Everything else on this payload — teamEntries' ask,
     // summary, decisions, gotchas — is re-run through the user's configured
