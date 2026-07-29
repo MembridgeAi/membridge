@@ -48,19 +48,32 @@ create table if not exists public.memory_entries (
   ts timestamptz not null,
   source text not null,
   ask text check (char_length(ask) <= 400),
-  files jsonb not null default '[]'::jsonb,
+  -- Nullable by design: a ciphertext-only push (config.team.plaintextOff)
+  -- nulls this column, so NOT NULL here rejects every encrypted push. Was
+  -- fixed by hand on the live backend long before it was recorded; see
+  -- migrations/018 §2.
+  files jsonb default '[]'::jsonb,
   session text,
   created_at timestamptz not null default now(),
   unique (project_id, author_id, ts, source)
 );
 
 -- Rich signals: the agent's final self-report for the entry, redacted and
--- clipped client-side (<=300 chars pushed; the check leaves headroom like
--- ask's). Nullable and added via `alter` so it is backwards-compatible: it
--- applies to already-live backends, and pre-existing clients that push rows
--- without the field keep working.
+-- clipped client-side. Nullable and added via `alter` so it is
+-- backwards-compatible: it applies to already-live backends, and pre-existing
+-- clients that push rows without the field keep working.
+--
+-- The bound MUST stay >= lib/teamsync.js's WIRE_SUMMARY_MAX (4000). It was 400
+-- here while the client pushed 4000, and because upsertEntries POSTs the whole
+-- batch in one request and only recovers from missing-column errors, a single
+-- over-length summary failed the ENTIRE push. Distilled summaries routinely
+-- exceed 400 characters, so substantive sessions silently stopped reaching
+-- teammates. See migrations/018 §1 before changing this number.
+--
+-- `ask` deliberately stays at 400: the verbatim prompt is clipped by policy and
+-- its unclipped twin is machine-local (a pinned invariant). Do not match them.
 alter table public.memory_entries
-  add column if not exists summary text check (char_length(summary) <= 400);
+  add column if not exists summary text check (char_length(summary) <= 4000);
 
 -- Privacy gate (config.team.sharePrompts): verbatim prompts stay on the
 -- author's machine unless they opt in, so clients push ask = null by default.
