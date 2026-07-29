@@ -15974,6 +15974,54 @@ async function main() {
     });
   }
 
+// ---- repo-root path translation (teammate notes, spec §7) ----
+const repoRoot = require('../lib/repo-root');
+
+{
+  const rr = path.join(ROOT, 'projects', 'mono');
+  const api = path.join(rr, 'packages', 'api');
+  fs.mkdirSync(api, { recursive: true });
+  spawnSync('git', ['init', '-q', rr], { encoding: 'utf8' });
+  repoRoot.clearCache();
+
+  check('repo-root: resolves the git top-level from a subdirectory', () => {
+    assert.strictEqual(fs.realpathSync(repoRoot.repoRoot(api)), fs.realpathSync(rr));
+  });
+
+  check('repo-root: offset is empty at the repo root', () => {
+    assert.strictEqual(repoRoot.trackedOffset(rr), '');
+  });
+
+  check('repo-root: offset is the posix prefix for a tracked subdirectory', () => {
+    assert.strictEqual(repoRoot.trackedOffset(api), 'packages/api/');
+  });
+
+  check('repo-root: toWirePath prefixes a tracked-relative path', () => {
+    assert.strictEqual(repoRoot.toWirePath(api, 'src/validate.ts'), 'packages/api/src/validate.ts');
+  });
+
+  check('repo-root: toWirePath is identity at the repo root', () => {
+    assert.strictEqual(repoRoot.toWirePath(rr, 'src/validate.ts'), 'src/validate.ts');
+  });
+
+  check('repo-root: fromWirePath strips the offset', () => {
+    assert.strictEqual(repoRoot.fromWirePath(api, 'packages/api/src/validate.ts'), 'src/validate.ts');
+  });
+
+  check('repo-root: fromWirePath leaves a non-matching path alone (legacy row)', () => {
+    assert.strictEqual(repoRoot.fromWirePath(api, 'src/validate.ts'), 'src/validate.ts');
+  });
+
+  check('repo-root: a non-repo directory yields null root and empty offset', () => {
+    const plain = path.join(ROOT, 'projects', 'not-a-repo');
+    fs.mkdirSync(plain, { recursive: true });
+    repoRoot.clearCache();
+    assert.strictEqual(repoRoot.repoRoot(plain), null);
+    assert.strictEqual(repoRoot.trackedOffset(plain), '');
+    assert.strictEqual(repoRoot.toWirePath(plain, 'a/b.js'), 'a/b.js');
+  });
+}
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
