@@ -1402,7 +1402,51 @@ git commit -m "feat(notes): register teammate-notes hooks and add the kill switc
 
 ---
 
-## Task 8: Delivery points 2 and 3 — the PreToolUse path
+## Task 8: Delivery points 2 and 3 — the PreToolUse path ✅ DONE (`6a1fafc`, merged)
+
+**This task's wiring silently dropped every note on a hot file — the files that
+matter most.** The steps below emit only inside the `if (!storeEntry)` branch.
+When a skeleton *does* exist and `decide()` declines to serve (below the token
+floor, already served this session, holdout arm, stale hash), `notesOut` is
+built, found, and then thrown away: no output, and correctly not marked seen, so
+it is rebuilt and dropped again on every later read. A file with a cached
+skeleton is by definition a file someone works on — precisely where a teammate's
+warning belongs. Shipped fix: one `emitNotes()` helper called in **both** the
+no-skeleton branch and the fall-through after the holdout logging, so the
+"exactly one `allow` in this file" invariant is structural rather than something
+a future edit must remember.
+
+**The plan's tests could not have caught it, or the worktree bug either.** They
+call `buildNotesOutput` directly, which returns `{text, commit}` and cannot see a
+`permissionDecision` — so they proved text was produced, never that the read was
+allowed. And the fixture is a repo at its own root where `relPath` and the wire
+key are the identical string, so nothing could fail if the lookup used the wrong
+one. Worse, the fixture never runs `git init`, so `wireKeyFor` would have
+returned `null` and every file-note assertion would have failed for an unrelated
+reason. The shipped suite adds hook-level tests that spawn the real hook and
+assert on stdout, plus a genuine nested-worktree case that asserts `relPath` and
+the wire key **differ**, so it cannot pass tautologically.
+
+**Fixture timestamps must be live for hook-level tests** — `selectFileNotes`
+applies the 7-day window against the real clock, so a frozen `ts` makes notes
+undeliverable through the actual hook.
+
+### Open product decision, deliberately not made in Task 8
+
+**Disabling recall currently also silences file notes.** The notes lookup sits
+after the hook's recall gates, so `MEMBRIDGE_NO_RECALL=1` and
+`config.recall.enabled === false` both return before it. A user who turns recall
+off — perhaps because the interceptions annoyed them — silently loses every
+teammate warning on file contact, even though `teammateNotes.enabled` is a
+separate switch and the notes path never blocks a read.
+
+**Recommended split, for Task 9 or a follow-up:** `MEMBRIDGE_NO_RECALL=1` is the
+panic button — an env var meaning "stop touching my reads" — and should keep
+silencing everything in this hook, including notes. But
+`config.recall.enabled === false` is a *preference about recall*, and should not
+silence a different feature that has its own switch. Two switches that a user set
+independently should behave independently.
+
 
 The heart of the feature: prose on arrival and file notes on contact, both without denying the read.
 
