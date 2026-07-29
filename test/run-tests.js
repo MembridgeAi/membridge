@@ -42,6 +42,41 @@ const proj1 = path.join(ROOT, 'projects', 'shop-app');
 const proj2 = path.join(ROOT, 'projects', 'excluded-app');
 const proj3 = path.join(ROOT, 'projects', 'marker-app');
 
+
+// ---- test ports: one shifted block per process ----
+// Every mock server here used to bind a hardcoded 179xx port. Two suites at
+// once -- routine now that work is fanned out across worktrees -- then crash
+// each other with EADDRINUSE. The failure SHAPE is what made it dangerous: a
+// collision aborts before the tally line ever prints, so a run that greps for
+// "FAIL" finds none and reads as success, and a measured baseline comes back
+// silently truncated.
+//
+// So the whole block moves together: P(n) = PORT_BASE + n, with PORT_BASE
+// picked per process. The probe below tries successive 100-wide blocks and
+// keeps the first whose endpoints are actually free, which also covers a
+// leaked server from an interrupted earlier run.
+const PORT_BASE = (() => {
+  const net = require('net');
+  const free = port => {
+    try {
+      const s = net.createServer();
+      s.listen(port, '127.0.0.1');
+      const r = s.listening;
+      s.close();
+      return r;
+    } catch { return false; }
+  };
+  const start = 17900 + ((process.pid % 40) * 100);
+  for (let i = 0; i < 40; i++) {
+    const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
+    // 41 and 85 bracket the range actually used; a block free at both ends is
+    // in practice a free block.
+    if (free(base + 41) && free(base + 85)) return base;
+  }
+  return start; // nothing free anywhere: proceed and let the real bind report it
+})();
+const P = n => PORT_BASE + n;
+
 const results = [];
 // Supports both sync and async fn. Sync callers (the vast majority) ignore
 // the return value, exactly as before. Async callers must `await check(...)`
@@ -1286,13 +1321,13 @@ async function main() {
       }
     });
   });
-  await new Promise(r => mockApi.listen(17944, '127.0.0.1', r));
+  await new Promise(r => mockApi.listen(P(44), '127.0.0.1', r));
 
-  const PORT = 17941;
+  const PORT = P(41);
   const apiClaudeSettings = path.join(ROOT, 'claude-settings-api.json');
   const child = spawn(process.execPath, [BIN, 'daemon'], {
     env: {
-      ...process.env, MEMBRIDGE_PORT: String(PORT), MEMBRIDGE_API_BASE: 'http://127.0.0.1:17944',
+      ...process.env, MEMBRIDGE_PORT: String(PORT), MEMBRIDGE_API_BASE: `http://127.0.0.1:${P(44)}`,
       MEMBRIDGE_CLAUDE_SETTINGS: apiClaudeSettings,
     },
     stdio: 'ignore',
@@ -3397,7 +3432,7 @@ async function main() {
       assert.ok(!p.prompts.some(e => e.text.includes('Dropped while deleted')), 'gate-dropped prompt resurfaced');
     });
 
-    process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17944'; // in-process advisor -> the same mock
+    process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(44)}`; // in-process advisor -> the same mock
     const briefNoKey = await advisorLib.generateBriefing('', 'claude-sonnet-5', { since: null, teammates: [] });
     const briefOk = await advisorLib.generateBriefing(GOOD_KEY, 'claude-sonnet-5', {
       since: '2026-07-10T00:00:00.000Z', until: '2026-07-14T00:00:00.000Z',
@@ -3420,7 +3455,7 @@ async function main() {
     });
 
     await check('advisors/anthropic: generate returns text + normalized usage', async () => {
-      process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17944'; // existing Anthropic mock
+      process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(44)}`; // existing Anthropic mock
       const a = advisors.byId('anthropic');
       const r = await a.generate({ apiKey: GOOD_KEY, model: 'claude-sonnet-5', system: 'sys', prompt: 'hi', schema: null, maxTokens: 200 });
       assert.ok(r.text && typeof r.text === 'string', 'no text');
@@ -3430,26 +3465,26 @@ async function main() {
 
     await check('advisors/openai: chat-completions request shape + normalized usage', async () => {
       let seen = null;
-      const srv = await startJsonMock(17960, (req, body, send) => {
+      const srv = await startJsonMock(P(60), (req, body, send) => {
         seen = { url: req.url, body };
         if (req.method === 'GET' && /\/models$/.test(req.url)) return send(200, { data: [{ id: 'gpt-4o' }] });
         send(200, { choices: [{ message: { content: '{"summary":"ok","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
       });
       try {
         const a = advisors.byId('openai');
-        const r = await a.generate({ apiKey: 'sk-x', baseUrl: 'http://127.0.0.1:17960/v1', model: 'gpt-4o', system: 's', prompt: 'p', schema: { type: 'object' }, maxTokens: 300 });
+        const r = await a.generate({ apiKey: 'sk-x', baseUrl: `http://127.0.0.1:${P(60)}/v1`, model: 'gpt-4o', system: 's', prompt: 'p', schema: { type: 'object' }, maxTokens: 300 });
         assert.strictEqual(seen.body.response_format.type, 'json_schema');
         assert.strictEqual(seen.body.messages[0].role, 'system');
         assert.strictEqual(r.usage.input_tokens, 10);
         assert.strictEqual(r.usage.output_tokens, 5);
-        const test = await a.testKey({ apiKey: 'sk-x', baseUrl: 'http://127.0.0.1:17960/v1' });
+        const test = await a.testKey({ apiKey: 'sk-x', baseUrl: `http://127.0.0.1:${P(60)}/v1` });
         assert.strictEqual(test.ok, true);
       } finally { srv.close(); }
     });
 
     await check('advisors/google: generateContent shape + schema sanitized + usage', async () => {
       let seen = null;
-      const srv = await startJsonMock(17961, (req, body, send) => {
+      const srv = await startJsonMock(P(61), (req, body, send) => {
         seen = { url: req.url, body };
         if (req.method === 'GET' && /\/models/.test(req.url)) return send(200, { models: [] });
         send(200, { candidates: [{ content: { parts: [{ text: '{"summary":"ok","phases":[],"risks":[],"questions":[]}' }] } }], usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 7 } });
@@ -3457,7 +3492,7 @@ async function main() {
       try {
         const a = advisors.byId('google');
         const schema = { type: 'object', properties: { x: { type: 'string' } }, required: ['x'], additionalProperties: false };
-        const r = await a.generate({ apiKey: 'g-x', baseUrl: 'http://127.0.0.1:17961', model: 'gemini-2.0-flash', system: 's', prompt: 'p', schema, maxTokens: 300 });
+        const r = await a.generate({ apiKey: 'g-x', baseUrl: `http://127.0.0.1:${P(61)}`, model: 'gemini-2.0-flash', system: 's', prompt: 'p', schema, maxTokens: 300 });
         assert.ok(!JSON.stringify(seen.body.generationConfig.responseSchema).includes('additionalProperties'));
         assert.strictEqual(seen.body.generationConfig.responseMimeType, 'application/json');
         assert.strictEqual(r.usage.input_tokens, 12);
@@ -3484,11 +3519,11 @@ async function main() {
       const noBase = await a.generate({ apiKey: '', baseUrl: '', model: 'llama3.1', system: 's', prompt: 'p', schema: null, maxTokens: 100 });
       assert.ok(noBase.error && /base URL/i.test(noBase.error), 'should demand a base URL');
 
-      const srv = await startJsonMock(17962, (req, body, send) => {
+      const srv = await startJsonMock(P(62), (req, body, send) => {
         send(200, { choices: [{ message: { content: 'here you go {"summary":"ok","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 3, completion_tokens: 4 } });
       });
       try {
-        const r = await a.generate({ apiKey: '', baseUrl: 'http://127.0.0.1:17962/v1', model: 'llama3.1', system: 's', prompt: 'p', schema: null, maxTokens: 100 });
+        const r = await a.generate({ apiKey: '', baseUrl: `http://127.0.0.1:${P(62)}/v1`, model: 'llama3.1', system: 's', prompt: 'p', schema: null, maxTokens: 100 });
         assert.ok(r.text.includes('summary'), 'returns raw text');
         assert.strictEqual(r.usage.input_tokens, 3);
       } finally { srv.close(); }
@@ -3522,12 +3557,12 @@ async function main() {
       assert.strictEqual(a.source, 'config');
     });
     await check('advisor: generatePlan routes to the selected provider', async () => {
-      const srv = await startJsonMock(17963, (req, body, send) => {
+      const srv = await startJsonMock(P(63), (req, body, send) => {
         if (req.method === 'GET') return send(200, { data: [] });
         send(200, { choices: [{ message: { content: '{"summary":"S","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 8, completion_tokens: 9 } });
       });
       try {
-        const r = await advisorLib.generatePlan('sk-oai', 'gpt-4o', { projectName: 'p', goal: 'g', recentAsks: [] }, { provider: 'openai', baseUrl: 'http://127.0.0.1:17963/v1' });
+        const r = await advisorLib.generatePlan('sk-oai', 'gpt-4o', { projectName: 'p', goal: 'g', recentAsks: [] }, { provider: 'openai', baseUrl: `http://127.0.0.1:${P(63)}/v1` });
         assert.strictEqual(r.ok, true);
         assert.strictEqual(r.plan.summary, 'S');
         assert.ok(r.costUsd >= 0);
@@ -3540,7 +3575,7 @@ async function main() {
   await new Promise(r => setTimeout(r, 300));
 
   // --- 6. CLI start/stop lifecycle ---
-  const env2 = { ...process.env, MEMBRIDGE_PORT: '17942' };
+  const env2 = { ...process.env, MEMBRIDGE_PORT: String(P(42)) };
   const startOut = spawnSync(process.execPath, [BIN, 'start'], { env: env2, encoding: 'utf8' });
   await new Promise(r => setTimeout(r, 1500));
   const statusOut = spawnSync(process.execPath, [BIN, 'status'], { env: env2, encoding: 'utf8' });
@@ -3566,7 +3601,7 @@ async function main() {
       const home = path.join(ROOT, 'status-states', name);
       fs.mkdirSync(home, { recursive: true });
       if (over.running) fs.writeFileSync(path.join(home, 'membridge.pid'), String(process.pid));
-      const env = { ...process.env, MEMBRIDGE_HOME: home, MEMBRIDGE_PORT: '17944' };
+      const env = { ...process.env, MEMBRIDGE_HOME: home, MEMBRIDGE_PORT: String(P(44)) };
       if (over.state) fs.writeFileSync(path.join(home, 'state.json'), JSON.stringify(over.state));
       if (over.claudeDir !== undefined) env.MEMBRIDGE_CLAUDE_DIR = over.claudeDir;
       if (over.codexDir !== undefined) env.MEMBRIDGE_CODEX_DIR = over.codexDir;
@@ -3631,7 +3666,7 @@ async function main() {
     fs.writeFileSync(path.join(offHome, 'config.json'), JSON.stringify({
       adapters: { 'claude-code': { enabled: false }, codex: { enabled: false }, custom: [] },
     }));
-    const noAdapters = runStatus({ ...process.env, MEMBRIDGE_HOME: offHome, MEMBRIDGE_PORT: '17944' });
+    const noAdapters = runStatus({ ...process.env, MEMBRIDGE_HOME: offHome, MEMBRIDGE_PORT: String(P(44)) });
     check('status: every adapter disabled is reported as such, not as a missing tool', () => {
       const out = noAdapters.stdout;
       assert.ok(/No session adapters are enabled/.test(out), `silent about a disabled adapter set: ${out}`);
@@ -3675,7 +3710,7 @@ async function main() {
   // A fast stop→start can find the port still held by the dying daemon: the
   // server must retry the bind instead of leaving a daemon with no dashboard.
   {
-    const PORT3 = 17943;
+    const PORT3 = P(43);
     const blocker = net.createServer();
     await new Promise(r => blocker.listen(PORT3, '127.0.0.1', r));
     const srv = startServer(PORT3, { retries: 40, retryDelayMs: 100 });
@@ -3694,8 +3729,8 @@ async function main() {
 
   // --- 8. team sync (mock Supabase: GoTrue + PostgREST + membership checks) ---
   const mock = createMockSupabase();
-  await new Promise(r => mock.server.listen(17945, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17945';
+  await new Promise(r => mock.server.listen(P(45), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(45)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   const HOME_A = process.env.MEMBRIDGE_HOME; // homeDir() reads env per call
   const sameKey = (a, b) => a.toLowerCase() === path.resolve(b).toLowerCase();
@@ -3721,7 +3756,7 @@ async function main() {
 
   check('team: oauthAuthorizeUrl targets the backend with the redirect encoded', () => {
     const u = teamsync.oauthAuthorizeUrl(util.getConfig(), 'http://127.0.0.1:7437/team/oauth/callback');
-    assert.ok(u.startsWith('http://127.0.0.1:17945/auth/v1/authorize?provider=github'), u);
+    assert.ok(u.startsWith(`http://127.0.0.1:${P(45)}/auth/v1/authorize?provider=github`), u);
     assert.ok(u.includes(encodeURIComponent('http://127.0.0.1:7437/team/oauth/callback')), 'redirect not encoded');
   });
 
@@ -3789,7 +3824,7 @@ async function main() {
       // raw RPC columns are preserved for older consumers
       assert.ok('member_count' in t && 'created_at' in t, 'raw RPC columns dropped');
     });
-    const PORT4 = 17946;
+    const PORT4 = P(46);
     const srv4 = startServer(PORT4, { retries: 0 });
     try {
       const base4 = `http://127.0.0.1:${PORT4}`;
@@ -4153,7 +4188,7 @@ async function main() {
     });
 
     // ----- team v2 (002_team_v2.sql): invite links, roles, feed, auto-link -----
-    const MOCK_URL = 'http://127.0.0.1:17945';
+    const MOCK_URL = `http://127.0.0.1:${P(45)}`;
     // Direct RPC helper for endpoints teamsync has no wrapper for (web-only).
     const rpcAs = async (home, fn, args) => {
       const saved = process.env.MEMBRIDGE_HOME;
@@ -4318,7 +4353,7 @@ async function main() {
 
     // The same reads over the local dashboard API (in-process server; the mock
     // backend is async in this process too, so no event-loop deadlock).
-    const HUB_PORT = 17947;
+    const HUB_PORT = P(47);
     const hubSrv = startServer(HUB_PORT, { retries: 0 });
     await waitForHttp(`http://127.0.0.1:${HUB_PORT}/api/status`);
     const hubBase = `http://127.0.0.1:${HUB_PORT}`;
@@ -4520,8 +4555,8 @@ async function main() {
         }));
       });
     });
-    await new Promise(r => briefMock.listen(17948, '127.0.0.1', r));
-    process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17948';
+    await new Promise(r => briefMock.listen(P(48), '127.0.0.1', r));
+    process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(48)}`;
 
     await post(`${hubBase}/api/settings`, { apiKey: '' });
     const briefDegraded = await (await post(`${hubBase}/api/briefing/generate`, {})).json();
@@ -4782,7 +4817,7 @@ async function main() {
     stDana.projects = { ...(stDana.projects || {}), [danaClone]: { events: [] } };
     util.saveState(stDana);
     await teamsync.linkProject(util.getConfig(), danaClone, team.team_id, 'Acme'); // same project row
-    const MEMBER_PORT = 17948;
+    const MEMBER_PORT = P(48);
     const memberSrv = startServer(MEMBER_PORT, { retries: 0 });
     await waitForHttp(`http://127.0.0.1:${MEMBER_PORT}/api/status`);
     const memberDel = await (await fetch(`http://127.0.0.1:${MEMBER_PORT}/api/team/archive-project`, {
@@ -4801,7 +4836,7 @@ async function main() {
     // The owner deletes the shared project over the route: archived for the
     // team AND fully cleaned up locally (team.json gone, project out of state).
     process.env.MEMBRIDGE_HOME = HOME_A;
-    const OWNER_PORT = 17949;
+    const OWNER_PORT = P(49);
     const ownerSrv = startServer(OWNER_PORT, { retries: 0 });
     await waitForHttp(`http://127.0.0.1:${OWNER_PORT}/api/status`);
     const ownerDel = await (await fetch(`http://127.0.0.1:${OWNER_PORT}/api/team/archive-project`, {
@@ -4893,14 +4928,14 @@ async function main() {
     const HOME_CLI = path.join(ROOT, 'home-cli');
     const envT = { ...process.env, MEMBRIDGE_HOME: HOME_CLI };
     const setupOut = spawnSync(process.execPath,
-      [BIN, 'team', 'setup', '--url', 'http://127.0.0.1:17945', '--anon-key', 'anon-test'],
+      [BIN, 'team', 'setup', '--url', `http://127.0.0.1:${P(45)}`, '--anon-key', 'anon-test'],
       { env: envT, encoding: 'utf8' });
     process.env.MEMBRIDGE_HOME = HOME_A;
     const logoutOut = spawnSync(process.execPath, [BIN, 'logout'], { env: { ...process.env }, encoding: 'utf8' });
     check('CLI: team setup persists the backend, logout clears credentials', () => {
       assert.ok(/team backend saved/i.test(setupOut.stdout), `setup said: ${setupOut.stdout} ${setupOut.stderr}`);
       const cfg = JSON.parse(read(path.join(HOME_CLI, 'config.json')));
-      assert.strictEqual(cfg.team.url, 'http://127.0.0.1:17945');
+      assert.strictEqual(cfg.team.url, `http://127.0.0.1:${P(45)}`);
       assert.ok(/Logged out/.test(logoutOut.stdout), `logout said: ${logoutOut.stdout}`);
       assert.ok(!fs.existsSync(teamsync.credentialsPath()), 'credentials survive logout');
     });
@@ -5605,8 +5640,8 @@ async function main() {
 
   // Team push carries the redacted summary (fresh mock: section 8's is gone).
   const mock2 = createMockSupabase();
-  await new Promise(r => mock2.server.listen(17946, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17946';
+  await new Promise(r => mock2.server.listen(P(46), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(46)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'rich@test.dev', 'pw-r', 'Rich');
@@ -9636,8 +9671,8 @@ async function main() {
 
   // Team push: the pushed summary field is the Distilled text, redacted.
   const mock3 = createMockSupabase();
-  await new Promise(r => mock3.server.listen(17947, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17947';
+  await new Promise(r => mock3.server.listen(P(47), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(47)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'distill@test.dev', 'pw-x', 'Distill');
@@ -9676,8 +9711,8 @@ async function main() {
   // change model (buildEntries' e.changes) ships inside the `files` column
   // instead of a plain filename list, when present.
   const mockG = createMockSupabase();
-  await new Promise(r => mockG.server.listen(17949, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  await new Promise(r => mockG.server.listen(P(49), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(49)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     const projG = path.join(ROOT, 'projects', 'goal-app');
@@ -9827,8 +9862,8 @@ async function main() {
   // session's rows with the verbatim prompt forced on (backfill) or off
   // (scrub), overwriting already-synced rows via merge-duplicates.
   const mockRS = createMockSupabase();
-  await new Promise(r => mockRS.server.listen(17955, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17955';
+  await new Promise(r => mockRS.server.listen(P(55), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(55)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     const projRS = path.join(ROOT, 'projects', 'reshare-app');
@@ -9913,8 +9948,8 @@ async function main() {
   {
     const tc = require('../lib/teamcrypto');
     const mockRE = createMockSupabase();
-    await new Promise(r => mockRE.server.listen(17956, '127.0.0.1', r));
-    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17956';
+    await new Promise(r => mockRE.server.listen(P(56), '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(56)}`;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
     try {
       const projRE = path.join(ROOT, 'projects', 'reshare-enc-app');
@@ -10004,8 +10039,8 @@ async function main() {
   // re-pushed on the next cycle.
   {
     const mockWP = createMockSupabase();
-    await new Promise(r => mockWP.server.listen(17959, '127.0.0.1', r));
-    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17959';
+    await new Promise(r => mockWP.server.listen(P(59), '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(59)}`;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
     try {
       const projWP = path.join(ROOT, 'projects', 'wire-parity-app');
@@ -10093,7 +10128,7 @@ async function main() {
   // backfill (share=true) or scrub (share=false) already-synced rows.
   {
     const mockSE = createMockSupabase();
-    const MOCK_PORT_SE = 17958, SRV_PORT_SE = 17957;
+    const MOCK_PORT_SE = P(58), SRV_PORT_SE = P(57);
     await new Promise(r => mockSE.server.listen(MOCK_PORT_SE, '127.0.0.1', r));
     process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_SE;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
@@ -10160,7 +10195,7 @@ async function main() {
   // reads (GET) are never blocked. We assert against /api/projects/add because it
   // 400s on a missing path, so a passed guard is observable as 400 (not a mutation).
   {
-    const CSRF_PORT = 17983;
+    const CSRF_PORT = P(83);
     const srvCsrf = startServer(CSRF_PORT, { retries: 0 });
     try {
       const base = 'http://127.0.0.1:' + CSRF_PORT;
@@ -10230,7 +10265,7 @@ async function main() {
   // directory MemBridge has never seen.
   // =====================================================================
   {
-    const SEC_PORT = 17984, ATTACKER_PORT = 17985;
+    const SEC_PORT = P(84), ATTACKER_PORT = P(85);
     // Stands in for the attacker's collection server. Records every request
     // it receives — URL, headers and body — so a leaked key is observable.
     const captured = [];
@@ -10622,7 +10657,7 @@ async function main() {
   // dashboard must surface a share failure inline, never via the offline pill.
   {
     const mockLV = createMockSupabase();
-    const MOCK_PORT_LV = 17961, SRV_PORT_LV = 17962;
+    const MOCK_PORT_LV = P(61), SRV_PORT_LV = P(62);
     await new Promise(r => mockLV.server.listen(MOCK_PORT_LV, '127.0.0.1', r));
     process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_LV;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
@@ -10737,8 +10772,8 @@ async function main() {
   // Task 8: ship decisions/gotchas to teammates end to end, and pull must
   // survive a backend still missing goal/changes (or any optional column).
   const mockS = createMockSupabase();
-  await new Promise(r => mockS.server.listen(17951, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17951';
+  await new Promise(r => mockS.server.listen(P(51), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(51)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     const projS = path.join(ROOT, 'projects', 'summary-app');
@@ -11104,8 +11139,8 @@ async function main() {
   });
 
   const mock4 = createMockSupabase();
-  await new Promise(r => mock4.server.listen(17948, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17948';
+  await new Promise(r => mock4.server.listen(P(48), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(48)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'seq@test.dev', 'pw-s', 'Seq');
@@ -11179,8 +11214,8 @@ async function main() {
   // Every assertion inspects the rows the mock server actually received: the
   // gate is about what crosses the wire, not what the client believes it sent.
   const mockPg = createMockSupabase();
-  await new Promise(r => mockPg.server.listen(17950, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17950';
+  await new Promise(r => mockPg.server.listen(P(50), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(50)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   const pgTs = sec => new Date(Date.now() - sec * 1000).toISOString();
   const projPg = path.join(ROOT, 'projects', 'prompt-gate-app');
@@ -11856,10 +11891,10 @@ async function main() {
     // before the wiring exists).
     {
       const mockE = createMockSupabase();
-      await new Promise(r => mockE.server.listen(17952, '127.0.0.1', r));
+      await new Promise(r => mockE.server.listen(P(52), '127.0.0.1', r));
       const savedEnvUrl = process.env.MEMBRIDGE_TEAM_URL;
       const savedEnvKey = process.env.MEMBRIDGE_TEAM_ANON_KEY;
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17952';
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(52)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
       const projE = path.join(ROOT, 'projects', 'encrypt-app');
       fs.mkdirSync(projE, { recursive: true });
@@ -12090,8 +12125,8 @@ async function main() {
     const mockE2E = createMockSupabase();
     let e2eErr = null, resAlice = null, resBob = null, bobEntries = null, origRows = null;
     try {
-      await new Promise(r => mockE2E.server.listen(17953, '127.0.0.1', r));
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17953';
+      await new Promise(r => mockE2E.server.listen(P(53), '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(53)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
       // Alice: account, team, linked project.
@@ -12215,8 +12250,8 @@ async function main() {
       let tErr = null, eveEntriesClosed = null, eveEntriesHatch = null, resEveClosed = null, feedEve = null, feedEveStale = null;
       let fpEve = null, trustRes = null, pinsAfterTrust = null, danaId = null, danaNewPub = null;
       try {
-        await new Promise(r => mockT.server.listen(17955, '127.0.0.1', r));
-        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17955';
+        await new Promise(r => mockT.server.listen(P(55), '127.0.0.1', r));
+        process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(55)}`;
         process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
         process.env.MEMBRIDGE_HOME = homeD;
@@ -12387,8 +12422,8 @@ async function main() {
       // would be a brand-new identity that cannot unseal the epoch-1 key.
       const kcCarol = mkMemKeychain();
       try {
-        await new Promise(r => mockPre.server.listen(17954, '127.0.0.1', r));
-        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17954';
+        await new Promise(r => mockPre.server.listen(P(54), '127.0.0.1', r));
+        process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(54)}`;
         process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
         process.env.MEMBRIDGE_HOME = homeCarol;
         setTeamCfg();
@@ -12551,8 +12586,8 @@ async function main() {
   });
 
   const mock5 = createMockSupabase();
-  await new Promise(r => mock5.server.listen(17949, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  await new Promise(r => mock5.server.listen(P(49), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(49)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'red@test.dev', 'pw-r', 'Red');
@@ -15681,8 +15716,8 @@ async function main() {
     let bobStaleDropped = null, bobRecovered = null, rekeyRes = null, rekeyEpoch = null;
     let nonOwnerRekey = null, aliceUserId = null, bobUserId = null;
     try {
-      await new Promise(r => mockR.server.listen(17961, '127.0.0.1', r));
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17961';
+      await new Promise(r => mockR.server.listen(P(61), '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(61)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
       // Alice owns the team; Bob joins and bootstraps his ORIGINAL identity.
@@ -15790,8 +15825,8 @@ async function main() {
     const mockM = createMockSupabase();
     let err = null, bobUserId = null, openEpochs = null, teamId = null;
     try {
-      await new Promise(r => mockM.server.listen(17974, '127.0.0.1', r));
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17974';
+      await new Promise(r => mockM.server.listen(P(74), '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(74)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
       process.env.MEMBRIDGE_HOME = hA; setCfg();
