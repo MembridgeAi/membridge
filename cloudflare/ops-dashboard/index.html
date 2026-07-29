@@ -6,233 +6,310 @@
 <meta name="robots" content="noindex, nofollow">
 <title>MemBridge Ops</title>
 <style>
-  /* Design tokens lifted verbatim from membridge.app so this page reads as the
-     same product, not a bolted-on admin tool. Only --red is an addition: the
-     site has green and orange but no failure colour, and recall states need a
-     third step. It is tuned to sit beside --orange rather than shout over it. */
+  /* Tokens lifted from membridge.app. --red is the only addition: the site has
+     green and orange but no failure colour. */
   :root {
-    --blue: #2F4FE0; --blue-dark: #2440C4;
-    --ink: #10182B; --muted: #5D6B85; --faint: #8A96AC;
-    --bg: #FFFFFF; --bg-alt: #F7F9FE; --tint: #EDF1FD; --tint-border: #D9E2FA;
-    --border: #E6EAF3;
-    --green: #1D8A5F; --orange: #C97A1E; --red: #C0392E;
-    --term-bg: #0E1526; --term-border: #1D2740; --term-text: #D7E0F2;
-    --term-muted: #6B7A99; --term-green: #4ADE9C; --term-blue: #7FA3FF; --term-amber: #F5C97B;
-    --radius: 14px;
-    --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
-    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-    --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    --blue:#2F4FE0; --blue-dark:#2440C4;
+    --ink:#10182B; --muted:#5D6B85; --faint:#8A96AC;
+    --bg:#FFFFFF; --bg-alt:#F7F9FE; --tint:#EDF1FD; --tint-border:#D9E2FA; --border:#E6EAF3;
+    --green:#1D8A5F; --orange:#C97A1E; --red:#C0392E;
+    --term-bg:#0E1526; --term-border:#1D2740; --term-text:#D7E0F2; --term-muted:#6B7A99;
+    --term-green:#4ADE9C; --term-amber:#F5C97B;
+    --radius:14px;
+    --serif:'Iowan Old Style','Palatino Linotype',Palatino,Georgia,'Times New Roman',serif;
+    --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans);
-    padding: 40px 24px 80px; -webkit-font-smoothing: antialiased;
-  }
-  .wrap { max-width: 1040px; margin: 0 auto; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);padding:40px 24px 80px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1060px;margin:0 auto}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font:11.5px/1 var(--mono);letter-spacing:1.38px;text-transform:uppercase;color:var(--blue);background:var(--tint);border:1px solid var(--tint-border);border-radius:999px;padding:9px 16px;margin-bottom:22px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+  .dot.bad{background:var(--red)}
+  h1{font:500 40px/1.15 var(--serif);letter-spacing:-.4px;margin:0 0 12px}
+  h1 em{font-style:italic;color:var(--blue)}
+  .recency{color:var(--muted);font-size:15px;margin:0 0 40px;max-width:62ch}
+  .recency strong{color:var(--ink);font-weight:600}
+  .recency.stale strong{color:var(--red)}
+  h2{font:500 24px/1.25 var(--serif);letter-spacing:-.2px;margin:44px 0 4px}
+  h2 em{font-style:italic;color:var(--blue)}
+  .lede{color:var(--muted);font-size:14px;margin:0 0 16px;max-width:64ch}
+  .panel{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px}
+  .panel.alt{background:var(--bg-alt)}
+  .cols{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 
-  /* --- header ------------------------------------------------------------ */
-  .eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    font: 11.5px/1 var(--mono); letter-spacing: 1.38px; text-transform: uppercase;
-    color: var(--blue); background: var(--tint); border: 1px solid var(--tint-border);
-    border-radius: 999px; padding: 9px 16px; margin-bottom: 22px;
-  }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
-  .dot.live { background: var(--green); }
-  .dot.bad { background: var(--red); }
-  h1 {
-    font: 500 40px/1.15 var(--serif); letter-spacing: -0.4px; margin: 0 0 14px;
-  }
-  h1 em { font-style: italic; color: var(--blue); }
-  .recency { color: var(--muted); font-size: 15px; margin: 0 0 44px; max-width: 60ch; }
-  .recency strong { color: var(--ink); font-weight: 600; }
-  .recency.stale strong { color: var(--red); }
+  /* hero */
+  .hero{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin-bottom:6px}
+  .big{background:var(--bg-alt);border:1px solid var(--border);border-radius:var(--radius);padding:24px}
+  .big .n{font:500 52px/1 var(--serif);letter-spacing:-1px;font-variant-numeric:tabular-nums}
+  .big .k{font:11.5px/1 var(--mono);letter-spacing:1.1px;text-transform:uppercase;color:var(--blue);margin-top:12px}
+  .big .sub{font-size:13px;color:var(--muted);margin-top:8px}
+  .delta{font:12.5px/1 var(--mono);padding:3px 7px;border-radius:999px;margin-left:10px;vertical-align:middle}
+  .delta.up{color:var(--green);background:rgba(29,138,95,.10)}
+  .delta.down{color:var(--red);background:rgba(192,57,46,.10)}
+  .delta.flat{color:var(--muted);background:var(--tint)}
 
-  /* --- sections ---------------------------------------------------------- */
-  h2 { font: 500 24px/1.25 var(--serif); letter-spacing: -0.2px; margin: 46px 0 4px; }
-  h2 em { font-style: italic; color: var(--blue); }
-  .lede { color: var(--muted); font-size: 14px; margin: 0 0 16px; max-width: 62ch; }
+  /* funnel */
+  .step{display:grid;grid-template-columns:190px 1fr 96px;gap:14px;align-items:center;padding:6px 0}
+  .step .lbl{font:13px/1.3 var(--sans);color:var(--ink)}
+  .step .lbl small{display:block;color:var(--faint);font-size:11.5px}
+  .track{background:var(--tint);border-radius:999px;height:14px;overflow:hidden}
+  .fill{display:block;height:100%;background:var(--blue);border-radius:999px}
+  .fill.good{background:var(--green)} .fill.warn{background:var(--orange)} .fill.bad{background:var(--red)}
+  .step .val{font:13px/1 var(--mono);text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .step .val small{color:var(--faint)}
+  .drop{font:11.5px/1 var(--mono);color:var(--red);padding:2px 0 8px 190px}
 
-  .panel { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; }
-  .panel.alt { background: var(--bg-alt); }
+  /* weekly chart */
+  .chart{display:flex;align-items:flex-end;gap:6px;height:110px;margin:6px 0 10px}
+  .bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:5px}
+  .bar i{display:block;width:100%;background:var(--blue);border-radius:5px 5px 0 0;min-height:2px}
+  .bar.now i{background:var(--blue-dark)}
+  .bar span{font:10.5px/1 var(--mono);color:var(--faint)}
+  .barval{font:11px/1 var(--mono);color:var(--muted)}
 
-  /* The engine-room panel borrows the site's terminal styling — same palette
-     the landing page uses for its demo block. */
-  .term {
-    background: var(--term-bg); border: 1px solid var(--term-border);
-    border-radius: var(--radius); padding: 22px 24px; color: var(--term-text);
-  }
-  .term .caption { font: 11.5px/1 var(--mono); letter-spacing: 1.2px; text-transform: uppercase; color: var(--term-muted); margin-bottom: 16px; }
-  .term .row .lbl { color: var(--term-text); }
-  .term .row .val { color: var(--term-muted); }
-  .term .track { background: rgba(255,255,255,.07); }
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{font:11px/1 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--faint);text-align:left;padding:0 10px 10px 0;font-weight:400}
+  td{padding:9px 10px 9px 0;border-top:1px solid var(--border);vertical-align:middle}
+  td.num{font:12.5px var(--mono);font-variant-numeric:tabular-nums;text-align:right;padding-right:0}
+  .name{font-weight:600}
+  .pill{font:10.5px/1 var(--mono);padding:3px 7px;border-radius:999px;text-transform:uppercase;letter-spacing:.6px}
+  .pill.ok{color:var(--green);background:rgba(29,138,95,.10)}
+  .pill.warn{color:var(--orange);background:rgba(201,122,30,.12)}
+  .pill.bad{color:var(--red);background:rgba(192,57,46,.10)}
+  .pill.dead{color:var(--faint);background:var(--tint)}
 
-  /* --- bars -------------------------------------------------------------- */
-  .row { display: grid; grid-template-columns: 148px 1fr 66px; gap: 14px; align-items: center; padding: 7px 0; }
-  .row .lbl { font: 12.5px/1.3 var(--mono); color: var(--ink); }
-  .row .val { font: 12.5px/1 var(--mono); color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
-  .track { background: var(--tint); border-radius: 999px; height: 10px; overflow: hidden; }
-  .fill { display: block; height: 100%; background: var(--blue); border-radius: 999px; }
-  .fill.good { background: var(--green); }
-  .fill.warn { background: var(--orange); }
-  .fill.bad { background: var(--red); }
-  .fill.tgood { background: var(--term-green); }
-  .fill.twarn { background: var(--term-amber); }
-  .fill.tbad { background: #E8776A; }
-  .fill.tblue { background: var(--term-blue); }
+  .call{border-left:3px solid var(--orange);background:var(--bg-alt);border-radius:0 var(--radius) var(--radius) 0;padding:16px 20px;margin-bottom:12px}
+  .call.hot{border-left-color:var(--red)}
+  .call h3{font:600 13px/1.3 var(--sans);margin:0 0 4px}
+  .call p{margin:0;color:var(--muted);font-size:13px}
+  .call ul{margin:8px 0 0;padding-left:18px;font-size:13.5px}
+  .call li{margin:3px 0}
 
-  /* --- stat cards -------------------------------------------------------- */
-  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); }
-  .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-  .card .n { font: 500 34px/1 var(--serif); letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
-  .card .k { font: 11.5px/1 var(--mono); letter-spacing: 1.1px; text-transform: uppercase; color: var(--blue); margin-top: 10px; }
-  .card .sub { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  /* health strip */
+  .strip{background:var(--term-bg);border:1px solid var(--term-border);border-radius:var(--radius);padding:18px 22px;color:var(--term-text);display:flex;flex-wrap:wrap;gap:26px;align-items:center}
+  .strip .m{display:flex;flex-direction:column;gap:5px}
+  .strip .m b{font:500 22px/1 var(--serif);font-variant-numeric:tabular-nums}
+  .strip .m span{font:10.5px/1 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--term-muted)}
+  .strip .m.alert b{color:var(--term-amber)}
+  details{margin-top:12px}
+  summary{font:11.5px/1 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted);cursor:pointer}
+  .row{display:grid;grid-template-columns:150px 1fr 60px;gap:12px;align-items:center;padding:5px 0}
+  .row .lbl{font:12.5px var(--mono)}
+  .row .val{font:12.5px var(--mono);color:var(--muted);text-align:right}
 
-  .cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-
-  .note { color: var(--muted); font-size: 13px; margin: 16px 0 0; max-width: 68ch; }
-  .note b { color: var(--ink); font-weight: 600; }
-  .err { color: var(--red); font-size: 13px; margin-top: 10px; }
-
-  footer { margin-top: 56px; border-top: 1px solid var(--border); padding-top: 22px; color: var(--muted); font-size: 13px; max-width: 74ch; }
-  footer p { margin: 0 0 12px; }
-  footer b { color: var(--ink); font-weight: 600; }
-  code { font: 12px var(--mono); background: var(--tint); color: var(--blue-dark); padding: 2px 6px; border-radius: 6px; }
-
-  @media (max-width: 560px) { .row { grid-template-columns: 108px 1fr 54px; } h1 { font-size: 32px; } }
+  .note{color:var(--muted);font-size:13px;margin:14px 0 0;max-width:70ch}
+  footer{margin-top:52px;border-top:1px solid var(--border);padding-top:20px;color:var(--muted);font-size:12.5px;max-width:76ch}
+  footer p{margin:0 0 10px}
+  footer b{color:var(--ink)}
+  code{font:12px var(--mono);background:var(--tint);color:var(--blue-dark);padding:2px 6px;border-radius:6px}
+  @media(max-width:640px){.step{grid-template-columns:120px 1fr 70px}.drop{padding-left:120px}h1{font-size:32px}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="eyebrow"><span class="dot" id="dot"></span><span id="mode">loading</span></div>
-  <h1>Ops &mdash; <em>is it working?</em></h1>
+  <h1>How are we <em>actually doing?</em></h1>
   <p class="recency" id="recency">&nbsp;</p>
 
-  <h2>The engine <em>room</em></h2>
-  <p class="lede">Anonymous per-install counters. These are the only numbers that say whether recall does its job on real machines.</p>
-  <div class="term">
-    <div class="caption">recall state &middot; last 30 days</div>
-    <div id="recall"></div>
-    <p class="note" id="recallNote" style="color:var(--term-muted)"></p>
-  </div>
+  <div class="hero" id="hero"></div>
+  <p class="note" id="heroNote"></p>
 
-  <div style="height:14px"></div>
+  <h2>Where people <em>fall out</em></h2>
+  <p class="lede">Each step is a subset of the one above. The gap between two rows is the thing to fix.</p>
+  <div class="panel" id="funnel"></div>
+
+  <h2>Who to <em>call today</em></h2>
+  <p class="lede">The list, not the average. At this size these are individual conversations, not a growth strategy.</p>
+  <div id="calls"></div>
+
+  <h2>Eight <em>weeks</em></h2>
   <div class="cols">
-    <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">checkout shape</span><span></span><span></span></div><div id="env"></div></div>
-    <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">hook registration</span><span></span><span></span></div><div id="reg"></div></div>
+    <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">teams active</span><span></span><span></span></div><div id="chartActive"></div></div>
+    <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">new teams</span><span></span><span></span></div><div id="chartNew"></div></div>
   </div>
 
-  <h2>Who is <em>using it</em></h2>
-  <p class="lede">Derived from data the backend already holds for team sync. No new collection, and never joined to the counters above.</p>
-  <div class="grid" id="biz"></div>
+  <h2>Do they <em>come back?</em></h2>
+  <p class="lede">Teams that signed up in a given week, and how many were still pushing 1, 2 and 4 weeks later.</p>
+  <div class="panel" id="cohorts"></div>
 
-  <div style="height:14px"></div>
-  <div class="cols">
-    <div class="panel"><div class="row"><span class="lbl" style="color:var(--muted)">team size</span><span></span><span></span></div><div id="sizes"></div></div>
-    <div class="panel"><div class="row"><span class="lbl" style="color:var(--muted)">tool mix &middot; 30d</span><span></span><span></span></div><div id="tools"></div></div>
-  </div>
+  <h2>Every <em>team</em></h2>
+  <div class="panel" id="teams"></div>
 
-  <div style="height:14px"></div>
-  <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">installs by version</span><span></span><span></span></div><div id="versions"></div></div>
+  <h2>Is the product <em>broken?</em></h2>
+  <p class="lede">Anonymous per-install counters. Collapsed to a single question — the detail is one click away.</p>
+  <div class="strip" id="health"></div>
+  <details><summary>counter detail</summary><div class="panel alt" style="margin-top:10px" id="healthDetail"></div></details>
 
   <footer id="footer"></footer>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const num = n => (n === null || n === undefined ? '—' : Number(n).toLocaleString());
+const DAY = 864e5;
+const daysAgo = ts => ts ? Math.floor((Date.now() - new Date(ts).getTime()) / DAY) : null;
 
-// Bars scale to the largest value in their OWN group, not a global max, so a
-// small group stays legible beside a large one.
-function bars(rows, tone) {
-  if (!rows.length) return '<p class="note">No data yet.</p>';
-  const max = Math.max(...rows.map(r => r.total), 1);
-  return rows.map(r => {
-    const cls = typeof tone === 'function' ? (tone(r.label) || '') : (tone || '');
-    const pct = Math.max(2, Math.round((r.total / max) * 100));
-    return `<div class="row">
-      <span class="lbl">${esc(r.label)}</span>
-      <span class="track"><span class="fill ${cls}" style="width:${pct}%"></span></span>
-      <span class="val">${num(r.total)}</span>
-    </div>`;
-  }).join('');
+function delta(now, prev) {
+  if (prev === null || prev === undefined) return '';
+  const d = now - prev;
+  if (d === 0) return '<span class="delta flat">flat</span>';
+  return `<span class="delta ${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : ''}${d} wow</span>`;
 }
 
-function group(rows, name, dimKey) {
-  const acc = new Map();
-  for (const r of rows) {
-    if (r.name !== name) continue;
-    if (dimKey && r.dim_key !== dimKey) continue;
-    const key = dimKey ? r.dim_value : r.version;
-    acc.set(key, (acc.get(key) || 0) + Number(r.total || 0));
-  }
-  return [...acc.entries()].map(([label, total]) => ({ label, total })).sort((a, b) => b.total - a.total);
+function weekChart(series, key) {
+  if (!series.length) return '<p class="note">No data.</p>';
+  const max = Math.max(...series.map(s => s[key]), 1);
+  return '<div class="chart">' + series.map((s, i) => `
+    <div class="bar ${i === series.length - 1 ? 'now' : ''}">
+      <span class="barval">${s[key]}</span>
+      <i style="height:${Math.max(2, Math.round((s[key] / max) * 78))}px"></i>
+      <span>${s.week.slice(5)}</span>
+    </div>`).join('') + '</div>';
 }
-
-const RECALL_TONE = { serving: 'tgood', ready_unserved: 'twarn', no_hot_paths: 'tbad', empty_store: 'tbad', all_rejected: 'tbad' };
-const REG_TONE = { current: 'good', wrote: '', failed: 'bad' };
 
 function render(data) {
+  const b = data.business || {};
   const rows = (data.counters && data.counters.rows) || [];
-  const biz = data.business || {};
-  const events = rows.reduce((a, r) => a + Number(r.total || 0), 0);
+  const f = b.funnel || {};
+  const series = b.series || [];
+  const teams = b.teams || [];
 
   $('mode').textContent = data.viewer ? `live · ${data.viewer}` : 'live';
-  $('dot').className = 'dot live';
+  $('dot').className = 'dot';
 
-  // Recency leads, deliberately. Every other number on this page looks
-  // identical whether the product is healthy or the pipeline is dead.
-  const gen = biz.generated_at ? new Date(biz.generated_at) : null;
+  const gen = b.generated_at ? new Date(b.generated_at) : null;
   const ageMin = gen ? Math.round((Date.now() - gen.getTime()) / 60000) : null;
   const stale = ageMin === null || ageMin > 120;
   $('recency').className = 'recency' + (stale ? ' stale' : '');
-  $('recency').innerHTML = events === 0
-    ? 'No counters received. <strong>That means nothing is reporting</strong> — not that everything is healthy.'
-    : `Business data generated <strong>${gen ? (ageMin < 1 ? 'just now' : ageMin + ' min ago') : 'never'}</strong>, from ${num(events)} counter events in the last 30 days.`;
+  $('recency').innerHTML = gen
+    ? `Generated <strong>${ageMin < 1 ? 'just now' : ageMin + ' min ago'}</strong>. Small numbers are the point — read the direction, not the magnitude.`
+    : '<strong>No data.</strong> That means the pipeline is down, not that everything is fine.';
 
-  const recall = group(rows, 'recall_state', 'state');
-  $('recall').innerHTML = bars(recall, l => RECALL_TONE[l]);
-  const serving = recall.find(r => r.label === 'serving');
-  const total = recall.reduce((a, r) => a + r.total, 0);
-  $('recallNote').innerHTML = total
-    ? `<b style="color:var(--term-text)">${serving ? Math.round((serving.total / total) * 100) : 0}%</b> of reporting installs have recall actually serving. The failures are not interchangeable: <b style="color:var(--term-text)">no_hot_paths</b> is the file-identity split, <b style="color:var(--term-text)">all_rejected</b> is the skeletonizer refusing every file, <b style="color:var(--term-text)">empty_store</b> is neither.`
-    : 'Nothing reported yet.';
+  // --- hero: the two numbers that decide whether this is a business ---------
+  const last = series[series.length - 1] || {};
+  const prev = series[series.length - 2] || {};
+  $('hero').innerHTML = [
+    { n: last.active_teams, k: 'teams active this week', d: delta(last.active_teams || 0, prev.active_teams),
+      sub: `${num(f.created)} exist in total` },
+    { n: f.multi_member_active, k: 'real teams active', d: '',
+      sub: 'more than one member, pushed this week' },
+    { n: last.active_devs, k: 'developers this week', d: delta(last.active_devs || 0, prev.active_devs),
+      sub: `${num(last.entries)} sessions shared` },
+  ].map(c => `<div class="big"><div class="n">${num(c.n)}${c.d}</div><div class="k">${esc(c.k)}</div><div class="sub">${esc(c.sub)}</div></div>`).join('');
 
-  $('env').innerHTML = bars(group(rows, 'environment', 'shape'), 'tblue'.replace('tblue', ''));
-  $('reg').innerHTML = bars(group(rows, 'hook_registration', 'result'), l => REG_TONE[l]);
-  $('versions').innerHTML = bars(group(rows, 'heartbeat', null));
+  const soloShare = f.created ? Math.round(((f.created - (f.multi_member || 0)) / f.created) * 100) : 0;
+  $('heroNote').innerHTML = `<b>${soloShare}% of accounts are a single person.</b> MemBridge is a team product — a solo user
+    is a weaker, different product with a much lower ceiling. Moving that number down is the business model working.`;
 
-  const t = biz.teams || {}, d = biz.developers || {}, p = biz.projects || {}, e = biz.entries || {};
-  $('biz').innerHTML = [
-    { n: t.total, k: 'teams', sub: `${num(t.created_7d)} created this week` },
-    { n: t.active_7d, k: 'active 7d', sub: `${num(t.dormant_7d)} dormant · ${num(t.never_active)} never used` },
-    { n: d.active_7d, k: 'developers 7d', sub: `${num(d.active_30d)} over 30 days` },
-    { n: p.total, k: 'projects', sub: `${num(p.teams_with_multiple)} teams with more than one` },
-    { n: e.last_7d, k: 'entries this week', sub: `${num(e.total)} all time` },
-  ].map(c => `<div class="card"><div class="n">${num(c.n)}</div><div class="k">${esc(c.k)}</div><div class="sub">${esc(c.sub)}</div></div>`).join('');
+  // --- funnel ---------------------------------------------------------------
+  const steps = [
+    { k: 'created', l: 'Created an account', s: 'the vanity number' },
+    { k: 'synced_once', l: 'Synced at least once', s: 'the product actually ran' },
+    { k: 'returned', l: 'Came back another day', s: 'not just a trial' },
+    { k: 'active_7d', l: 'Active this week', s: 'still alive now' },
+    { k: 'multi_member', l: 'Invited someone', s: 'became a team' },
+  ];
+  const top = f.created || 1;
+  let html = '';
+  steps.forEach((st, i) => {
+    const v = f[st.k] || 0;
+    const pct = Math.round((v / top) * 100);
+    const tone = pct >= 60 ? 'good' : pct >= 30 ? 'warn' : 'bad';
+    html += `<div class="step">
+      <span class="lbl">${esc(st.l)}<small>${esc(st.s)}</small></span>
+      <span class="track"><span class="fill ${tone}" style="width:${Math.max(2, pct)}%"></span></span>
+      <span class="val">${num(v)} <small>${pct}%</small></span></div>`;
+    const nxt = steps[i + 1];
+    if (nxt) {
+      const lost = v - (f[nxt.k] || 0);
+      if (lost > 0) html += `<div class="drop">↓ ${lost} lost here</div>`;
+    }
+  });
+  $('funnel').innerHTML = html;
 
-  const s = biz.team_sizes || {};
-  $('sizes').innerHTML = bars([
-    { label: 'solo', total: s.solo || 0 },
-    { label: '2–3', total: s.two_to_three || 0 },
-    { label: '4–9', total: s.four_to_nine || 0 },
-    { label: '10+', total: s.ten_plus || 0 },
-  ]);
-  $('tools').innerHTML = bars(Object.entries(biz.tool_mix || {}).map(([label, total]) => ({ label, total })).sort((a, b) => b.total - a.total));
+  // --- who to call ----------------------------------------------------------
+  const quiet = teams.filter(t => t.entries_all > 0 && daysAgo(t.last_active) >= 7 && daysAgo(t.last_active) < 60);
+  const stalled = teams.filter(t => !t.last_active);
+  const slowing = teams.filter(t => t.entries_prev_7d >= 5 && t.entries_7d < t.entries_prev_7d / 2);
+  const lists = [
+    { cls: 'hot', h: 'Going quiet', p: 'Used it, then stopped. This is churn happening now — the only stage where a message still works.', items: quiet.map(t => `${t.name} — last active ${daysAgo(t.last_active)}d ago, ${t.entries_all} sessions`) },
+    { cls: '', h: 'Never started', p: 'Signed up and never synced. An activation problem, not a churn problem — usually install or setup.', items: stalled.map(t => `${t.name} — created ${daysAgo(t.created_at)}d ago`) },
+    { cls: '', h: 'Slowing down', p: 'Usage more than halved week over week. Early warning, still recoverable.', items: slowing.map(t => `${t.name} — ${t.entries_prev_7d} → ${t.entries_7d} sessions`) },
+  ].filter(l => l.items.length);
+  $('calls').innerHTML = lists.length
+    ? lists.map(l => `<div class="call ${l.cls}"><h3>${esc(l.h)} · ${l.items.length}</h3><p>${esc(l.p)}</p><ul>${l.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>`).join('')
+    : '<div class="panel"><p class="note" style="margin:0">Nobody is drifting. Either genuinely healthy, or too early to tell.</p></div>';
 
-  const errs = [data.counters && data.counters.error, data.business && data.business.error].filter(Boolean);
-  $('footer').innerHTML =
-    (errs.length ? `<p class="err">Source errors: ${esc(errs.join(' · '))}</p>` : '') +
-    `<p><b>What these numbers cannot tell you.</b> Counters are self-reported, so an install broken enough not to
-      run the daemon reports nothing — this can never measure total install base. Compare against release
-      download counts. They are also forgeable, since the client ships as readable JavaScript, so treat a spike as
-      a question rather than a fact.</p>
-     <p>There is deliberately no tokens-saved figure. The A/B test to date found the effect real but not yet
-      estimable, so any percentage here would be invented. Wording stays <code>avoided</code>, never
-      <code>saved</code>.</p>
-     <p>Anonymous install counters and account data are never joined — they live in separate systems that
-      cannot query each other.</p>`;
+  // --- weeks ---------------------------------------------------------------
+  $('chartActive').innerHTML = weekChart(series, 'active_teams');
+  $('chartNew').innerHTML = weekChart(series, 'new_teams');
+
+  // --- cohorts -------------------------------------------------------------
+  const co = b.cohorts || [];
+  $('cohorts').innerHTML = co.length ? `<table>
+    <tr><th>signed up</th><th>teams</th><th>week 1</th><th>week 2</th><th>week 4</th></tr>
+    ${co.map(c => {
+      const cell = (v, size) => size ? `${v} <small style="color:var(--faint)">${Math.round((v / size) * 100)}%</small>` : '—';
+      return `<tr><td class="name">${esc(c.week)}</td><td class="num">${c.size}</td>
+        <td class="num">${cell(c.wk1, c.size)}</td><td class="num">${cell(c.wk2, c.size)}</td><td class="num">${cell(c.wk4, c.size)}</td></tr>`;
+    }).join('')}</table>
+    <p class="note">With cohorts this small a single team moves a column by double digits. Treat as a direction, not a rate.</p>`
+    : '<p class="note" style="margin:0">Not enough history yet.</p>';
+
+  // --- team list -----------------------------------------------------------
+  $('teams').innerHTML = teams.length ? `<table>
+    <tr><th>team</th><th>people</th><th>status</th><th class="num" style="text-align:right">7d</th><th class="num" style="text-align:right">prev</th><th class="num" style="text-align:right">total</th></tr>
+    ${teams.map(t => {
+      const d = daysAgo(t.last_active);
+      const st = d === null ? ['dead', 'never synced'] : d <= 7 ? ['ok', 'active'] : d <= 30 ? ['warn', `${d}d quiet`] : ['bad', `${d}d gone`];
+      return `<tr>
+        <td class="name">${esc(t.name)}</td>
+        <td class="num">${t.members}${t.members > 1 ? '' : ' <small style="color:var(--faint)">solo</small>'}</td>
+        <td><span class="pill ${st[0]}">${esc(st[1])}</span></td>
+        <td class="num">${num(t.entries_7d)}</td>
+        <td class="num" style="color:var(--faint)">${num(t.entries_prev_7d)}</td>
+        <td class="num">${num(t.entries_all)}</td></tr>`;
+    }).join('')}</table>
+    <p class="note">Names and counts only. No session content is stored server-side in readable form, so none can appear here.</p>`
+    : '<p class="note" style="margin:0">No teams yet.</p>';
+
+  // --- product health, collapsed to one question ---------------------------
+  const st = {};
+  for (const r of rows) if (r.name === 'recall_state' && r.dim_key === 'state') st[r.dim_value] = (st[r.dim_value] || 0) + Number(r.total || 0);
+  const installs = rows.filter(r => r.name === 'heartbeat').reduce((a, r) => a + Number(r.total || 0), 0);
+  const stTotal = Object.values(st).reduce((a, n) => a + n, 0);
+  const working = st.serving || 0;
+  const pct = stTotal ? Math.round((working / stTotal) * 100) : null;
+  const regFailed = rows.filter(r => r.name === 'hook_registration' && r.dim_value === 'failed').reduce((a, r) => a + Number(r.total || 0), 0);
+  $('health').innerHTML = stTotal ? `
+    <div class="m ${pct !== null && pct < 50 ? 'alert' : ''}"><b>${pct}%</b><span>installs where recall works</span></div>
+    <div class="m"><b>${num(installs)}</b><span>installs reporting</span></div>
+    <div class="m ${regFailed ? 'alert' : ''}"><b>${num(regFailed)}</b><span>hook install failures</span></div>
+    <div class="m" style="flex:1;min-width:220px"><span style="line-height:1.5;text-transform:none;letter-spacing:0;font-family:var(--sans);font-size:12.5px">
+      ${pct !== null && pct < 50 ? 'The core feature is not working for most installs. Everything above is happening despite that.' : 'The core feature is working for most installs.'}
+    </span></div>`
+    : '<div class="m"><b>—</b><span>no counters received</span></div><div class="m" style="flex:1"><span style="text-transform:none;letter-spacing:0;font-family:var(--sans);font-size:12.5px">Nothing is reporting. That is not the same as healthy.</span></div>';
+
+  const groups = {};
+  for (const r of rows) {
+    const k = r.dim_key ? `${r.name}: ${r.dim_value}` : `${r.name}: ${r.version}`;
+    groups[k] = (groups[k] || 0) + Number(r.total || 0);
+  }
+  const gmax = Math.max(...Object.values(groups), 1);
+  $('healthDetail').innerHTML = Object.entries(groups).sort((a, b2) => b2[1] - a[1]).map(([k, v]) =>
+    `<div class="row"><span class="lbl">${esc(k)}</span><span class="track" style="height:9px"><span class="fill" style="width:${Math.max(2, Math.round(v / gmax * 100))}%"></span></span><span class="val">${num(v)}</span></div>`).join('');
+
+  const errs = [data.counters && data.counters.error, b.error].filter(Boolean);
+  $('footer').innerHTML = (errs.length ? `<p style="color:var(--red)">Source errors: ${esc(errs.join(' · '))}</p>` : '') +
+    `<p><b>Read direction, not magnitude.</b> At this size one team moves every percentage by double digits. Nothing here is
+      statistically meaningful on its own; it is meaningful as a change from last week.</p>
+     <p><b>Counters are self-reported and forgeable.</b> An install too broken to run the daemon reports nothing, so this cannot
+      measure install base — compare against release downloads. Treat a spike as a question.</p>
+     <p>No tokens-saved figure: the A/B test found the effect real but not yet estimable, so a percentage would be invented.
+      Wording stays <code>avoided</code>, never <code>saved</code>. Anonymous install counters and account data are never joined.</p>`;
 }
 
 (async function () {
@@ -241,8 +318,6 @@ function render(data) {
     if (!res.ok) throw new Error('api ' + res.status);
     render(await res.json());
   } catch (err) {
-    // No sample-data fallback on purpose: a page that invents numbers when its
-    // source is down looks exactly like a healthy product with nothing wrong.
     $('mode').textContent = 'unreachable';
     $('dot').className = 'dot bad';
     $('recency').className = 'recency stale';

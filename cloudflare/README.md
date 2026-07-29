@@ -33,7 +33,7 @@ broken by accident later.
 | `ops-api/` | Read side. Verifies the Cloudflare Access JWT, fans out to Analytics Engine + Supabase. | no, Access only |
 | `ops-dashboard/` | Static page. Ships no secret. | no, Access only |
 | `../lib/counters.js` | Client emission, on the daemon tick. | — |
-| `../supabase/migrations/019_ops_snapshot.sql` | Aggregate business metrics, `service_role` only. | — |
+| `../supabase/migrations/020_ops_snapshot_v2.sql` | Funnel, weekly series, cohorts and the per-team list. `service_role` only. Supersedes 019. | — |
 
 ---
 
@@ -87,7 +87,10 @@ closed rather than leaking somewhere unexpected.
 
 ### 3. Business metrics
 
-Apply `supabase/migrations/019_ops_snapshot.sql` in the Supabase SQL editor.
+Apply `supabase/migrations/019_ops_snapshot.sql` then `020_ops_snapshot_v2.sql` in the
+Supabase SQL editor. 020 replaces 019's function body — 019 is kept rather than
+rewritten because rewriting an already-committed migration is exactly the habit
+that produced the repo/live drift fixed in 018.
 It creates one security-definer function granted to `service_role` only —
 `anon` is the public internet and `authenticated` is every signed-in customer,
 so neither can read aggregate business data.
