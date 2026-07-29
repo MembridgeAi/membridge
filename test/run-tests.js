@@ -14945,6 +14945,234 @@ async function main() {
     }
   }
 
+  // --- Task 9: net-negative diagnostics (spec §7.1/§8.5, lib/diagnostics.js) ---
+  {
+    const diagnosticsLib = require('../lib/diagnostics');
+    const ledgerFoldState = require('../lib/ledger-fold-state');
+    const ledgerStoreLib = require('../lib/ledger-store');
+    const recallStoreLib = require('../lib/recall-store');
+    const hooksRecall = require('../lib/hooks-recall');
+    const RECALL_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+
+    const negLedger = {
+      version: ledgerFoldState.LEDGER_VERSION,
+      avoided: { tokens: -500, serves: 25, tierA: 5, tierB: 20, partialWins: 3, netNegatives: 7 },
+      holdout: { skips: 8, callTokens: 4000 },
+    };
+    const posLedger = {
+      version: ledgerFoldState.LEDGER_VERSION,
+      avoided: { tokens: 500, serves: 50, tierA: 10, tierB: 40, partialWins: 5, netNegatives: 1 },
+      holdout: { skips: 2, callTokens: 400 },
+    };
+
+    // A dummy, never-reachable default so a test that forgets to pass a
+    // fetchImpl still cannot reach a real host (belt-and-suspenders on top
+    // of fetchImpl injection -- see the ABSOLUTE RULE against any test
+    // touching the real network).
+    { const rc = util.loadUserConfig(); rc.diagnosticsUrl = 'http://127.0.0.1:1/unused-in-unit-tests'; util.saveUserConfig(rc); }
+
+    const diagProjA = path.join(ROOT, 'projects', 'diag-unit-proj');
+    fs.mkdirSync(path.join(diagProjA, '.membridge'), { recursive: true });
+
+    check('diagnostics: below the serve floor never triggers (net negative but too few serves)', () => {
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, { avoided: { tokens: -10, serves: 5 }, holdout: {} }, util.getConfig());
+      assert.strictEqual(fired, false);
+      assert.strictEqual(diagnosticsLib.isRecallPausedForProject(diagProjA, util.getConfig()), false);
+    });
+
+    check('diagnostics: net-positive project never triggers, however many serves', () => {
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, posLedger, util.getConfig());
+      assert.strictEqual(fired, false);
+      assert.strictEqual(diagnosticsLib.isRecallPausedForProject(diagProjA, util.getConfig()), false);
+    });
+
+    check('diagnostics: net-negative + serves>=20 pauses recall for the project via a config flag write', () => {
+      assert.strictEqual(diagnosticsLib.isRecallPausedForProject(diagProjA, util.getConfig()), false);
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, negLedger, util.getConfig(), { fetchImpl: async () => ({ ok: true }) });
+      assert.strictEqual(fired, true);
+      assert.ok(util.getConfig().recall.pausedProjects.includes(diagProjA), 'project must be recorded as recall-paused in config.json');
+    });
+
+    check('diagnostics: an already-paused project never fires a second diagnostic (one diagnostic per project, not per pass)', () => {
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, negLedger, util.getConfig(), { fetchImpl });
+      assert.strictEqual(fired, false, 'a project already paused must not re-trigger');
+      assert.strictEqual(calls, 0, 'no network call for an already-paused project');
+    });
+
+    check('diagnostics: MEMBRIDGE_NO_DIAGNOSTICS=1 still pauses but suppresses the network send', () => {
+      const diagProjB = path.join(ROOT, 'projects', 'diag-unit-proj-envkill');
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const prev = process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+      process.env.MEMBRIDGE_NO_DIAGNOSTICS = '1';
+      try {
+        const fired = diagnosticsLib.checkNetNegative(diagProjB, negLedger, util.getConfig(), { fetchImpl });
+        assert.strictEqual(fired, true, 'the pause itself is a local safety behaviour, unaffected by the diagnostics kill switch');
+        assert.ok(diagnosticsLib.isRecallPausedForProject(diagProjB, util.getConfig()));
+      } finally {
+        if (prev === undefined) delete process.env.MEMBRIDGE_NO_DIAGNOSTICS; else process.env.MEMBRIDGE_NO_DIAGNOSTICS = prev;
+      }
+      assert.strictEqual(calls, 0, 'MEMBRIDGE_NO_DIAGNOSTICS=1 must suppress the network send entirely');
+    });
+
+    check('diagnostics: config.diagnostics.enabled === false suppresses the network send, same as the env kill switch', () => {
+      const diagProjC = path.join(ROOT, 'projects', 'diag-unit-proj-cfgkill');
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const cfg = { ...util.getConfig(), diagnostics: { enabled: false } };
+      const fired = diagnosticsLib.checkNetNegative(diagProjC, negLedger, cfg, { fetchImpl });
+      assert.strictEqual(fired, true);
+      assert.strictEqual(calls, 0, 'diagnostics.enabled:false must suppress the network send');
+    });
+
+    check('diagnostics: payload has exactly the allowed keys, tracks the ledger figures, and leaks no path/project-identifying strings', () => {
+      recallStoreLib.put(diagProjA, 'src/app.ts', { contentHash: 'h1', skeleton: 'x', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
+      recallStoreLib.put(diagProjA, 'db/schema.sql', { contentHash: 'h2', skeleton: 'y', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
+      const payload = diagnosticsLib.buildPayload(diagProjA, negLedger, util.getConfig());
+      assert.deepStrictEqual(Object.keys(payload).sort(), [
+        'acceptance', 'direct_avoided', 'holdout_divergence', 'install_id',
+        'languages', 'net_tokens', 'reads_answered', 'reject_reasons', 'version',
+      ]);
+      assert.strictEqual(payload.net_tokens, -500);
+      assert.strictEqual(payload.reads_answered, 25);
+      assert.strictEqual(payload.reject_reasons.read_after_serve, 7);
+      assert.strictEqual(payload.languages.ts, 1);
+      assert.strictEqual(payload.languages.sql, 1);
+      assert.strictEqual(payload.direct_avoided.tokens, -500);
+      assert.ok(/^[0-9a-f-]{36}$/i.test(payload.install_id), 'install_id must be a uuid');
+      assert.strictEqual(typeof payload.version, 'string');
+
+      const projName = path.basename(diagProjA);
+      const walk = v => {
+        if (typeof v === 'string') {
+          assert.ok(!v.includes('/') && !v.includes('\\'), `payload string leaked a path separator: ${JSON.stringify(v)}`);
+          assert.ok(!v.includes(projName), `payload string leaked the project name: ${JSON.stringify(v)}`);
+          assert.ok(!v.includes(diagProjA), `payload string leaked the project path: ${JSON.stringify(v)}`);
+        } else if (v && typeof v === 'object') {
+          for (const val of Object.values(v)) walk(val);
+        }
+      };
+      walk(payload);
+    });
+
+    check('diagnostics: install_id is generated once and stays stable across calls', () => {
+      const first = diagnosticsLib.getOrCreateInstallId();
+      const second = diagnosticsLib.getOrCreateInstallId();
+      assert.strictEqual(first, second);
+      assert.strictEqual(util.loadUserConfig().installId, first, 'install_id must persist to config.json');
+    });
+
+    check('diagnostics: holdout_divergence is null below MIN_HOLDOUT_SKIPS and a number once there is enough signal', () => {
+      const thin = diagnosticsLib.buildPayload(diagProjA, { avoided: negLedger.avoided, holdout: { skips: 1, callTokens: 50 } }, util.getConfig());
+      assert.strictEqual(thin.holdout_divergence, null);
+      const enough = diagnosticsLib.buildPayload(diagProjA, negLedger, util.getConfig());
+      assert.strictEqual(typeof enough.holdout_divergence, 'number');
+    });
+
+    // Task 9's "config flag write" pause must actually stop the PreToolUse
+    // hook from serving -- otherwise a paused project is a lie. Mirrors the
+    // Task 5 recall-hook fixture pattern (tier B: another session already
+    // read the path, a fresh skeleton is cached, the call clears both floors).
+    await check('diagnostics: a recall-paused project is refused by the real PreToolUse hook (tracked gate)', () => {
+      const crypto = require('crypto');
+      const pausedProj = path.join(ROOT, 'projects', 'diag-hook-paused-proj');
+      fs.mkdirSync(path.join(pausedProj, 'src'), { recursive: true });
+      fs.mkdirSync(path.join(pausedProj, '.membridge'), { recursive: true });
+      {
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [pausedProj]: { events: [] } } });
+      }
+      const file = path.join(pausedProj, 'src', 'paused.js');
+      const content = Array(20).fill('function work() { doWork(); doWork(); doWork(); }').join('\n') + '\n';
+      fs.writeFileSync(file, content);
+      const rel = 'src/paused.js';
+      const hash = crypto.createHash('sha1').update(content).digest('hex');
+      recallStoreLib.put(pausedProj, rel, { contentHash: hash, skeleton: 'SKELETON_TEXT_PAUSED', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0 });
+      ledgerStoreLib.writeLedger(pausedProj, { fileReaders: { [rel]: { sessions: ['other-session'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session' } } });
+
+      const bucketFor = (sid, relPath) => crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+      const recallLib = require('../lib/recall');
+      let sid = null;
+      for (let i = 0; i < 1000; i++) {
+        const cand = `sess-paused-${i}`;
+        if (bucketFor(cand, rel) >= recallLib.HOLDOUT_PCT) { sid = cand; break; }
+      }
+      assert.ok(sid, 'could not find a non-holdout session id');
+
+      // Sanity: before the pause, this exact payload WOULD serve.
+      const before = spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], {
+        input: JSON.stringify({ session_id: sid, cwd: pausedProj, tool_name: 'Read', tool_input: { file_path: file, limit: 100 } }),
+        encoding: 'utf8',
+      });
+      assert.strictEqual(before.status, 0, before.stderr);
+      assert.ok(before.stdout.includes('SKELETON_TEXT_PAUSED'), 'sanity check: the unpaused project should have served');
+
+      diagnosticsLib.pauseRecallForProject(pausedProj);
+
+      const after = spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], {
+        input: JSON.stringify({ session_id: `${sid}-2`, cwd: pausedProj, tool_name: 'Read', tool_input: { file_path: file, limit: 100 } }),
+        encoding: 'utf8',
+      });
+      assert.strictEqual(after.status, 0, after.stderr);
+      assert.strictEqual(after.stdout, '', 'a recall-paused project must never serve, even with an otherwise-servable cache entry');
+    });
+
+    // End-to-end through lib/scan.js itself: a project whose PERSISTED ledger
+    // is already net negative gets paused and reported the very next sync
+    // pass, with the diagnostic actually landing on the configured URL (a
+    // local mock server, never the real network -- see the diagnosticsUrl
+    // write below).
+    await check('diagnostics: syncOnce (lib/scan.js) pauses a net-negative project and POSTs one diagnostic to config.diagnosticsUrl', async () => {
+      const scanProj = path.join(ROOT, 'projects', 'diag-scan-proj');
+      fs.mkdirSync(path.join(scanProj, '.membridge'), { recursive: true });
+      ledgerStoreLib.writeLedger(scanProj, negLedger);
+      {
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [scanProj]: { events: [], dirty: true } } });
+      }
+
+      let received = null;
+      const mockSrv = http.createServer((req, res) => {
+        const chunks = [];
+        req.on('data', c => chunks.push(c));
+        req.on('end', () => {
+          try { received = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { received = {}; }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+        });
+      });
+      await new Promise(r => mockSrv.listen(0, '127.0.0.1', r));
+      const { port } = mockSrv.address();
+      { const rc = util.loadUserConfig(); rc.diagnosticsUrl = `http://127.0.0.1:${port}/diagnostics`; util.saveUserConfig(rc); }
+
+      try {
+        assert.strictEqual(diagnosticsLib.isRecallPausedForProject(scanProj, util.getConfig()), false);
+        syncOnce({ project: scanProj });
+        // The POST is fire-and-forget from scan.js's perspective; give the
+        // event loop a couple of turns for the local mock to receive it.
+        for (let i = 0; i < 20 && !received; i++) await new Promise(r => setTimeout(r, 25));
+
+        assert.ok(util.getConfig().recall.pausedProjects.includes(scanProj), 'syncOnce must pause a net-negative project');
+        assert.ok(received, 'the diagnostics mock server never received a POST from syncOnce');
+        assert.deepStrictEqual(Object.keys(received).sort(), [
+          'acceptance', 'direct_avoided', 'holdout_divergence', 'install_id',
+          'languages', 'net_tokens', 'reads_answered', 'reject_reasons', 'version',
+        ]);
+        assert.strictEqual(received.net_tokens, -500);
+      } finally {
+        await new Promise(r => mockSrv.close(r));
+      }
+    });
+
+    check('diagnostics: settingsPayload exposes diagnostics.enabled (default true)', () => {
+      const { settingsPayload } = require('../lib/server');
+      const payload = settingsPayload();
+      assert.strictEqual(payload.diagnostics.enabled, true);
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
