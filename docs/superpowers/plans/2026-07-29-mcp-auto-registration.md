@@ -44,11 +44,51 @@ Tasks 1–5 touch disjoint files and can run fully in parallel. Task 6 composes 
 | 6 The registrar | `lib/mcp-register.js` | 2, 3, 4, 5 |
 | 7 Wiring | `install.sh`, `bin/membridge.js`, `lib/server.js` | 6 |
 
-All tasks append tests to `test/run-tests.js`; parallel branches will conflict there. The resolution is always **keep both blocks** — they are independent appends.
+All tasks append tests to `test/run-tests.js`; parallel branches will conflict
+there. **Do not resolve by concatenating the conflict hunks** — git's regions cut
+across block boundaries and `OURS + THEIRS` can leave a block unclosed
+(observed). Take `--ours`, then splice the incoming `// ---- <name> ----` blocks
+in before the summary, and parse the result before trusting it. Note this carries
+NEW blocks only: an **in-place rewrite** of an existing check is invisible to it
+and must be carried by hand (Task 1 hit exactly this).
+
+**They do not run in parallel at the test level.** `test/run-tests.js` binds
+hardcoded ports (17944/17945/17949/17951/17959…) with no listen-retry, so
+concurrent sibling suites crash each other with `EADDRINUSE` — producing **no
+baseline at all**, not a visible failure. Independently reproduced on a pristine
+tree: three of three runs crashed. Treat "the whole suite is green" as a claim
+needing a clean run, and check any log for `EADDRINUSE` before believing a
+baseline.
 
 ---
 
-## Task 1: Ship the MCP dependencies
+## Task 1: Ship the MCP dependencies ✅ DONE (`8993529`, merged)
+
+**Four things this task's text missed, all fixed in the shipped commit:**
+
+- **It breaks a pre-existing test and never says so.** A check asserted the exact
+  text of `MISSING_DEPS_MESSAGE`; Step 4 deletes that constant, so the check
+  throws on an undefined export. Rewritten in place to the new contract.
+- **Step 5's own grep misses a claim it asks you to fix** — a fourth
+  zero-dependency line in `docs/guide.md` that the supplied pattern does not match.
+- **CI silently defeated the new test.** Four workflow call sites ran
+  `npm install --no-save @modelcontextprotocol/sdk zod`, with comments asserting
+  the packages are "deliberately opt-in". Left in place, CI would stay green even
+  if someone dropped the dependency again — exactly the regression the test
+  exists to catch. Removed; `npm ci --omit=dev` now proves it on three platforms.
+- **`membridge help` carried the most harmful claim of all**, telling users to run
+  an install that is now wrong. The spec's §7 list omitted it.
+
+**Known-weak check:** `mcp-deps: they resolve from a plain install` passes
+vacuously — `require.resolve` only proves something is on disk in this tree, not
+that `package.json` declares it. Replace it with a **lockfile** assertion (root
+prod deps, non-dev, resolved entry present) if you want a local guard with teeth;
+the CI change is what actually protects this now.
+
+**Bonus worth knowing before Task 7:** `scripts/prepare-app.js` copies the
+`dependencies` closure into `app/node_modules`, so the packaged Electron app now
+bundles the SDK — it previously could not have run the MCP server at all.
+
 
 **Files:**
 - Modify: `package.json`, `lib/mcp.js`, `docs/guide.md`
@@ -389,7 +429,33 @@ git commit -m "feat(mcp): resolve each agent's config by authority, never a hard
 
 ---
 
-## Task 3: Codex TOML block surgery
+## Task 3: Codex TOML block surgery ✅ DONE (`9466822`, merged)
+
+**The implementation printed below was BROKEN in two ways. Both are fixed in the
+shipped module; read `lib/mcp-toml.js` rather than the sketch here.**
+
+1. **CRLF — data corruption on Windows.** `split('\n')` leaves a trailing `\r`
+   on every line, and the header regex could not match `[mcp_servers.membridge]\r`.
+   On any Windows config `findBlock` returned `null`, `upsertBlock` took the
+   append path, and we wrote a **second** `[mcp_servers.membridge]` — a duplicate
+   table is a TOML parse error, so we would break the very file we were
+   registering into, and grow it on every run. Windows is explicitly in scope.
+2. **`.replace(/\n{3,}/g, '\n\n')` violated the module's entire purpose.** It ran
+   over the whole result, so a user's double blank line anywhere in the file got
+   silently reflowed and `changed` went true on a no-op. That is precisely the
+   whole-file churn this module rejects a TOML library to avoid, hand-rolled.
+   Removed; `findBlock`'s span already swallows the blank lines after our header.
+
+**Three of the plan's own nine checks survive total input loss** (the
+idempotence, end-of-file and empty-input cases only assert our own bytes are
+present). The mutation step is what exposed that — do not skip it.
+
+Seven checks were added beyond the plan, the load-bearing ones being CRLF
+replace-in-place, blank-line runs elsewhere surviving byte-identically, and a
+next-header carrying a trailing comment (a header we fail to *recognise* is
+swallowed into our span and **deleted** — a data-loss class with no test
+otherwise).
+
 
 **Files:**
 - Create: `lib/mcp-toml.js`
@@ -618,7 +684,29 @@ git commit -m "feat(mcp): targeted TOML block surgery that never rewrites a user
 
 ---
 
-## Task 4: JSON config merge
+## Task 4: JSON config merge ✅ DONE (`29ae736`, merged)
+
+**`readConfig` as sketched below destroys user configs. Read `lib/mcp-json.js`,
+not the sketch.** Its bare `catch` classified *every* read failure as "missing,
+safe to create", so an existing-but-unreadable config (mode 000, or a directory
+in its place) read as `{}` — and since `rename` needs only the **directory**
+writable, the following write destroyed it. Reproduced end to end with a config
+holding a teammate's server. That is the exact "single worst thing this module
+could do" named in the module's own header. Fixed: only `ENOENT` counts as
+missing; everything else is a refusal.
+
+**The same conflation is live in `lib/hooks.js`'s `readSettings`**, which this
+task was told to mirror. It is harmless there today *only* because
+`writeSettings` uses a plain `writeFileSync`, which fails EACCES on a mode-000
+file. Make that writer atomic — the obvious refactor — and it becomes real data
+loss. Fix `readSettings` first if anyone touches it.
+
+**Two more defects in the plan's tests:** the atomicity check passes against a
+plain `writeFileSync` (a non-atomic write never creates a temp file, so "no
+strays" is trivially true), and the `removeServer` test contradicts its own
+fixture — its `isOurs` demands `/membridge/` in `command`, but the entry's
+command is `/usr/bin/node`, so the stated "nine ok lines" was never achievable.
+
 
 For Cursor and any other agent storing `{ "mcpServers": { ... } }`.
 
@@ -825,7 +913,37 @@ Expected: nine `ok` lines, then a clean suite.
 
 ---
 
-## Task 5: Claude binary resolution
+## Task 5: Claude binary resolution ✅ DONE (`e98bd95`, merged)
+
+**Three defects fixed beyond the sketch below:**
+
+1. **A chatty rc file silently defeats the shell query.** `-l` makes it a *login*
+   shell, so `~/.zlogout` / `~/.bash_logout` run **after** the command — trailing
+   noise made `.pop()` return junk and the resolver return `null`. On a machine
+   where `claude` lives under nvm, that means falling to a probe list which
+   cannot see nvm: the feature is quietly off. Fixed by scanning every stdout
+   line and preferring the last that is a real file on disk. (Dropping `-i` is
+   NOT the fix — that skips `~/.zshrc`, where the version managers install their
+   shims.)
+2. **`env.SHELL || '/bin/sh'` is the same bug one level down.** A GUI-launched
+   `.app` — the entire reason this module exists — is not guaranteed `SHELL`, and
+   `/bin/sh -lic` reads `~/.profile` but never `~/.zshrc`, returning the
+   impoverished PATH we were escaping. Now falls back to the **user record**
+   (`os.userInfo().shell`).
+3. **The hang path was untested.** The plan's test injects a `throw`; a real hang
+   returns normally with `.error` set to ETIMEDOUT and `status === null` — a
+   different mode. Now driven against a real `sleep 30` stub shell (measured
+   5002 ms, returns null, does not throw).
+
+**Measured on the author's machine:** `{ source: 'shell' }`, 77–96 ms for the
+shell query, 12 ms for the cached `recorded` path. Fine here, but that is one
+zsh — oh-my-zsh with nvm and pyenv routinely costs 500 ms–2 s against a 5 s
+ceiling. **Task 7 must write the resolved path back to config**; calling
+`resolveClaudeBin` per-reconcile without caching turns a one-off into a
+per-launch tax. And what Task 7 records must come from the **install-time**
+resolution, not a daemon-time `source: 'probe'` hit, or a machine where the probe
+happens to work caches a path that breaks on the next version-manager switch.
+
 
 **Files:**
 - Create: `lib/claude-bin.js`
