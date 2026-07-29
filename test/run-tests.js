@@ -18720,6 +18720,220 @@ const repoRoot = require('../lib/repo-root');
     }
   }
 
+  // ---- teammate notes: SessionStart delivery (spec §3.1, delivery points 4 and 5) ----
+  //
+  // POSTCOMPACT IS NOT A DELIVERY CHANNEL, and the checks below pin that.
+  // Verified against Claude Code 2.1.220 the way the FileChanged spike was: its
+  // hookSpecificOutput schema is a union with no PostCompact member, its
+  // executor runs through executeHooksOutsideREPL (which never reads
+  // additionalContext at all), and it feeds the hook's raw stdout into a
+  // userDisplayMessage shown to the HUMAN. Emitting the plan's JSON there would
+  // fail validation and print an error line to the user after every compaction.
+  // Delivery point 4 rides on SessionStart with source "compact" instead --
+  // that source is real (the compaction path calls the SessionStart executor
+  // with it) and SessionStart does support additionalContext.
+  {
+    const hooksNotes = require('../lib/hooks-notes');
+    const NOTES_HOOK_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+    const runNotesEntry = (sub, input) => spawnSync(process.execPath, [NOTES_HOOK_ENTRY, sub], {
+      input: typeof input === 'string' ? input : JSON.stringify(input),
+      encoding: 'utf8', env: { ...process.env },
+    });
+    const trackNotesProject = dir => {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [dir]: { events: [] } } });
+    };
+
+    const sp = path.join(ROOT, 'projects', 'session-notes-proj');
+    fs.mkdirSync(sp, { recursive: true });
+    const NOW2 = '2026-07-28T10:00:00Z';
+    const FOUR_DAYS = '2026-08-01T10:00:00Z';
+    const VERY_LATER = '2026-08-20T10:00:00Z';
+
+    // Three authors, deliberately. The catch-up header names how many teammates
+    // the backlog came from, and a single-author fixture cannot tell a real
+    // count from a hardcoded 1.
+    const TEAM = ['Andrew', 'Bea', 'Cai'];
+    const manyRows = [];
+    for (let i = 0; i < 9; i++) {
+      manyRows.push({ author_name: TEAM[i % 3], ts: `2026-07-2${i}T09:00:00Z`, decisions: `decision ${i}`, gotchas: '' });
+    }
+    const oneRow = [{ author_name: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'renamed the cap', gotchas: '' }];
+    const seed = rows => notesStore.write(sp, notes.buildIndex(rows, null, NOW2));
+    const session = extra => hooksNotes.buildSessionOutput({
+      projectPath: sp, sessionId: 's1', source: 'startup', now: NOW2, config: {}, ...extra,
+    });
+
+    check('notes-session: delivers unseen prose at session start', () => {
+      seed(oneRow);
+      assert.ok(session().text.includes('renamed the cap'));
+    });
+
+    check('notes-session: shows a catch-up count when over the cap', () => {
+      seed(manyRows);
+      const out = session();
+      // NOT `includes('6')`: the delivered lines read "- Cai: decision 6", so a
+      // bare-digit assertion passes even with no header at all -- vacuous in
+      // exactly the way this plan's global constraints call out. The header and
+      // the remainder line are asserted whole.
+      const lines = out.text.split('\n');
+      assert.strictEqual(lines[0],
+        `While you were away — 9 teammate decisions from 3 teammates. The ${notes.PROSE_CAP} most recent:`);
+      assert.ok(lines.includes(`${9 - notes.PROSE_CAP} more in the MemBridge feed.`), out.text);
+      assert.strictEqual(lines.filter(l => l.startsWith('- ')).length, notes.PROSE_CAP);
+    });
+
+    check('notes-session: at or below the cap there is no catch-up framing', () => {
+      seed(oneRow);
+      const out = session();
+      assert.ok(out.text.includes('renamed the cap'));
+      assert.ok(!/While you were away/.test(out.text), out.text);
+    });
+
+    check('notes-session: nothing is marked seen until commit() runs', () => {
+      seed(oneRow);
+      const first = session();
+      const second = session();
+      assert.ok(second && second.text.includes('renamed the cap'),
+        'the decision was consumed by building the output, before it was ever written');
+      first.commit();
+      assert.strictEqual(session(), null);
+    });
+
+    check('notes-session: nothing unseen returns null', () => {
+      seed(manyRows);
+      for (let i = 0; i < 4; i++) {
+        const more = session();
+        if (more) more.commit();
+      }
+      assert.strictEqual(session(), null);
+    });
+
+    check('notes-session: an old undelivered decision still arrives (vacation)', () => {
+      seed([{ author_name: 'A', ts: '2026-07-01T09:00:00Z', decisions: 'decided long ago', gotchas: '' }]);
+      const out = session({ sessionId: 's2', now: VERY_LATER });
+      assert.ok(out && out.text.includes('decided long ago'));
+    });
+
+    check('notes-session: after a compaction a delivered decision is restated', () => {
+      seed(oneRow);
+      session().commit();
+      const after = session({ source: 'compact' });
+      assert.ok(after && after.text.includes('renamed the cap'),
+        'delivery point 4 is inert: compaction summarised the decision away and nothing put it back');
+      after.commit();
+      assert.ok(session({ source: 'compact' }), 'restating a decision must not consume it');
+    });
+
+    check('notes-session: the cap of 3 covers new and restated together', () => {
+      seed(manyRows);
+      session().commit();
+      session().commit(); // 6 of 9 delivered, 3 still unseen, all 6 restatable
+      const out = session({ source: 'compact' });
+      const bullets = out.text.split('\n').filter(l => l.startsWith('- '));
+      assert.strictEqual(bullets.length, notes.PROSE_CAP,
+        `a compaction must not stack a full new block on a full restated one:\n${out.text}`);
+    });
+
+    check('notes-session: an ordinary session start does not restate what was already delivered', () => {
+      seed(oneRow);
+      session().commit();
+      assert.strictEqual(session({ source: 'startup' }), null);
+      assert.strictEqual(session({ source: 'resume' }), null);
+      assert.strictEqual(session({ source: undefined }), null);
+    });
+
+    check('notes-session: restating stops after the re-fire window', () => {
+      seed(oneRow);
+      session().commit();
+      assert.ok(session({ source: 'compact', now: FOUR_DAYS }));
+      assert.strictEqual(session({ source: 'compact', now: VERY_LATER }), null);
+    });
+
+    check('notes-session: kill switch silences it, on arrival and after compaction', () => {
+      seed(manyRows);
+      const off = { teammateNotes: { enabled: false } };
+      assert.strictEqual(session({ sessionId: 's3', config: off }), null);
+      assert.strictEqual(session({ sessionId: 's3', source: 'compact', config: off }), null);
+    });
+
+    check('notes-session: a corrupt index yields null, never a throw', () => {
+      fs.writeFileSync(notesStore.notesPath(sp), 'nope');
+      assert.doesNotThrow(() => {
+        assert.strictEqual(session({ sessionId: 's4' }), null);
+      });
+    });
+
+    // ---- the same thing through the real hook entry point ----
+    const hookProj = path.join(ROOT, 'projects', 'session-hook-proj');
+    fs.mkdirSync(hookProj, { recursive: true });
+    trackNotesProject(hookProj);
+    const startPayload = (sessionId, cwd, source) => ({
+      session_id: sessionId, transcript_path: '/dev/null', cwd,
+      hook_event_name: 'SessionStart', source: source || 'startup',
+    });
+
+    check('notes-session: resolveTrackedKey needs a FILE path, so the hook must not pass cwd bare', () => {
+      // A load-bearing assumption, pinned rather than trusted. resolveRoot
+      // starts at path.dirname(file), and a session's cwd IS normally the
+      // project root -- passing it bare resolves to the PARENT and every
+      // SessionStart delivery goes silently dead. If this ever starts
+      // returning a hit, the join in lib/hooks-notes.js can be dropped.
+      const st = util.loadState();
+      assert.strictEqual(projectResolve.resolveTrackedKey(st, hookProj), null);
+      const hit = projectResolve.resolveTrackedKey(st, path.join(hookProj, 'x'));
+      assert.ok(hit && hit.key === hookProj);
+    });
+
+    check('notes-session: the SessionStart hook writes additionalContext, and only then marks seen', () => {
+      notesStore.write(hookProj, notes.buildIndex(oneRow, null, NOW2));
+      const r = runNotesEntry('notes-session-start', startPayload('sess-live-1', hookProj));
+      assert.strictEqual(r.status, 0, r.stderr);
+      const hso = JSON.parse(r.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.hookEventName, 'SessionStart');
+      assert.ok(hso.additionalContext.includes('renamed the cap'));
+      // Never a permission decision: SessionStart has none, and this feature
+      // never blocks anything anywhere.
+      assert.ok(!('permissionDecision' in hso), r.stdout);
+      // The marking is proved by what follows it, not by inspecting the file
+      // shape: a second session gets nothing.
+      assert.strictEqual(runNotesEntry('notes-session-start', startPayload('sess-live-2', hookProj)).stdout.trim(), '');
+    });
+
+    check('notes-session: PostCompact stays silent — the event cannot carry additionalContext', () => {
+      notesStore.write(hookProj, notes.buildIndex(oneRow, null, NOW2));
+      const before = fs.readFileSync(notesStore.notesPath(hookProj), 'utf8');
+      const r = runNotesEntry('notes-post-compact', {
+        session_id: 'sess-pc-1', cwd: hookProj, hook_event_name: 'PostCompact',
+        trigger: 'auto', compact_summary: 'a summary',
+      });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout.trim(), '',
+        'PostCompact stdout is echoed to the HUMAN and its hookSpecificOutput fails Claude Code\'s schema');
+      assert.strictEqual(fs.readFileSync(notesStore.notesPath(hookProj), 'utf8'), before,
+        'a hook that delivers nothing must not consume a decision');
+    });
+
+    check('notes-session: an untracked cwd delivers nothing and consumes nothing', () => {
+      const stray = path.join(ROOT, 'projects', 'session-untracked');
+      fs.mkdirSync(stray, { recursive: true });
+      notesStore.write(stray, notes.buildIndex(oneRow, null, NOW2));
+      const r = runNotesEntry('notes-session-start', startPayload('sess-stray', stray));
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout.trim(), '');
+      assert.deepStrictEqual(notesStore.read(stray).seen.prose, {});
+    });
+
+    check('notes-session: a malformed payload is a silent no-op, never a crash', () => {
+      const r = runNotesEntry('notes-session-start', 'not json at all');
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout.trim(), '');
+      const bad = runNotesEntry('notes-session-start', { session_id: 'has spaces', cwd: hookProj });
+      assert.strictEqual(bad.status, 0, bad.stderr);
+      assert.strictEqual(bad.stdout.trim(), '');
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
