@@ -18497,6 +18497,223 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- teammate notes: the human surface (spec §6) ----
+  // Task 1 proved the in-terminal line impossible, so the dashboard IS the
+  // human surface. That makes the wiring the whole point: dashboardPayload
+  // could be flawless and still reach nobody. Three layers, deliberately —
+  // the pure builder, the payload the page actually polls, and the markup a
+  // human actually sees. Only the last two can fail for the reason that
+  // matters.
+  {
+    const dashDir = path.join(ROOT, 'projects', 'dash-notes-proj');
+    fs.mkdirSync(dashDir, { recursive: true });
+    const NOW3 = '2026-07-28T10:00:00Z';
+    const decisionRow = (author, ts, text) => ({ author_name: author, ts, decisions: text, gotchas: '' });
+    const trackDashProject = dir => {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [dir]: { events: [] } } });
+    };
+
+    check('notes-dash: unseen decisions appear on the polled payload', () => {
+      notesStore.write(dashDir, notes.buildIndex(
+        [{ author_name: 'Andrew', ts: '2026-07-28T09:55:00Z', decisions: 'do not touch validate.ts yet', gotchas: '' }],
+        null, NOW3));
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.strictEqual(out.total, 1);
+      assert.strictEqual(out.fresh[0].author, 'Andrew');
+      assert.ok(out.fresh[0].text.includes('validate.ts'));
+    });
+
+    check('notes-dash: an empty index yields an empty payload, not null', () => {
+      notesStore.write(dashDir, notes.emptyIndex());
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.deepStrictEqual(out, { fresh: [], total: 0 });
+    });
+
+    check('notes-dash: a missing index yields an empty payload', () => {
+      assert.deepStrictEqual(notes.dashboardPayload(null, NOW3), { fresh: [], total: 0 });
+    });
+
+    // `ts` is not decoration. This payload has no age filter by design (spec
+    // §5: absence is not a reason to lose information), so a decision from
+    // three months ago can sit at the top of the card — and without a
+    // timestamp it would read as something that just landed. The internal id
+    // and kind stay internal: the browser has no use for them.
+    check('notes-dash: every entry carries author, ts and text, and nothing else', () => {
+      notesStore.write(dashDir, notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'renamed the retry cap')], null, NOW3));
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.deepStrictEqual(Object.keys(out.fresh[0]).sort(), ['author', 'text', 'ts']);
+      assert.strictEqual(out.fresh[0].ts, '2026-07-28T09:55:00Z');
+    });
+
+    check('notes-dash: newest first, capped at PROSE_CAP, with total counting the rest', () => {
+      const many = [];
+      for (let i = 0; i < 6; i++) many.push(decisionRow('Andrew', `2026-07-2${i + 1}T09:00:00Z`, `decision ${i}`));
+      notesStore.write(dashDir, notes.buildIndex(many, null, NOW3));
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.strictEqual(out.fresh.length, notes.PROSE_CAP, 'the card must not grow without bound');
+      assert.strictEqual(out.total, 6);
+      assert.strictEqual(out.fresh[0].text, 'decision 5', 'newest must lead');
+      assert.strictEqual(out.fresh[2].text, 'decision 3');
+    });
+
+    // Spec §6's deliberate separation, asserted in BOTH directions. Being
+    // shown a decision in a browser is not the same event as an agent having
+    // consumed it. Wiring the two together would let a browser visit silently
+    // suppress an agent-side delivery — these two checks are what catches
+    // that if someone later "simplifies" dashboardPayload into selectProse.
+    check('notes-dash: the payload ignores the agent-side seen markers', () => {
+      const built = notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'renamed the retry cap')], null, NOW3);
+      const before = notes.dashboardPayload(built, NOW3);
+      assert.strictEqual(before.total, 1, 'fixture produced no prose — the check would be vacuous');
+      const allSeen = notes.markProseSeen(built, built.prose.map(p => p.id), NOW3);
+      assert.strictEqual(Object.keys(allSeen.seen.prose).length, 1, 'nothing was marked seen — vacuous');
+      assert.strictEqual(notes.selectProse(allSeen, NOW3).items.length, 0,
+        'the agent surface still offers it — the fixture does not exercise the difference');
+      assert.deepStrictEqual(notes.dashboardPayload(allSeen, NOW3), before,
+        'the dashboard hid a decision because an agent had already consumed it');
+    });
+
+    // The same rule at the level where it can actually be broken: the browser
+    // hits projectDetail, not dashboardPayload, so a "mark it read while we
+    // are here" line in the ROUTE would slip past a pure-function check.
+    check('notes-dash: polling the project payload never marks anything seen for the agent', () => {
+      const built = notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'renamed the retry cap')], null, NOW3);
+      trackDashProject(dashDir);
+      notesStore.write(dashDir, built);
+      notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      projectDetail(dashDir);
+      projectDetail(dashDir); // a second poll, as the page does every 5s
+      const onDisk = notesStore.read(dashDir);
+      assert.deepStrictEqual(onDisk.seen, { prose: {}, file: {} }, 'a browser poll wrote seen markers');
+      assert.strictEqual(notes.selectProse(onDisk, NOW3).items.length, 1,
+        'a dashboard poll suppressed the agent-side delivery');
+    });
+
+    // Layer 2: the payload the project page actually polls every 5 seconds.
+    // Without this the three checks above pass against a function nothing
+    // calls.
+    check('notes-dash: /api/project, which the page polls, carries the notes', () => {
+      trackDashProject(dashDir);
+      notesStore.write(dashDir, notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'do not touch validate.ts yet')], null, NOW3));
+      const detail = projectDetail(dashDir);
+      assert.ok(detail, 'fixture project is not tracked — the check would be vacuous');
+      assert.ok(detail.teammateNotes, 'the polled payload does not carry teammateNotes at all');
+      assert.strictEqual(detail.teammateNotes.total, 1);
+      assert.ok(detail.teammateNotes.fresh[0].text.includes('validate.ts'));
+    });
+
+    check('notes-dash: a project with no notes still carries an empty payload, never undefined', () => {
+      const bare = path.join(ROOT, 'projects', 'dash-notes-bare');
+      fs.mkdirSync(bare, { recursive: true });
+      trackDashProject(bare);
+      assert.deepStrictEqual(projectDetail(bare).teammateNotes, { fresh: [], total: 0 });
+    });
+
+    // The index's own redaction (lib/teammate-notes.js's clean) is
+    // DEFAULTS-ONLY. Everything else on this payload — teamEntries' ask,
+    // summary, decisions, gotchas — is re-run through the user's configured
+    // patterns before it crosses the local HTTP boundary. A new surface that
+    // skipped that would quietly exempt itself from a rule the user set.
+    check('notes-dash: a user redaction pattern applies to notes on the way to the browser', () => {
+      const saved = util.loadUserConfig();
+      try {
+        util.saveUserConfig({ ...saved, redactExtra: ['CODENAME-\\w+'] });
+        notesStore.write(dashDir, notes.buildIndex(
+          [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'ship CODENAME-BLUEJAY on Friday')], null, NOW3));
+        const raw = notesStore.read(dashDir).prose[0].text;
+        assert.ok(raw.includes('CODENAME-BLUEJAY'),
+          'the index already stripped it — this check cannot see the boundary it guards');
+        const text = projectDetail(dashDir).teammateNotes.fresh[0].text;
+        assert.ok(!text.includes('CODENAME-BLUEJAY'), `user pattern not applied -> ${text}`);
+        assert.ok(text.includes('[redacted]'));
+      } finally {
+        util.saveUserConfig(saved);
+      }
+    });
+
+    // Layer 3: the markup. A payload nobody draws is not a human surface, so
+    // pull the real card renderer out of the served bundle and run it — the
+    // same sandbox technique the pxFmtTokens / pxHasSummary checks use.
+    {
+      const src = require('../lib/dashboard/client')('', '');
+      const grab = (s, name) => {
+        const start = s.indexOf('function ' + name + '(');
+        if (start === -1) return null;
+        let i = s.indexOf('{', start), depth = 0, end = i;
+        for (; end < s.length; end++) {
+          if (s[end] === '{') depth++;
+          else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+        }
+        return s.slice(start, end);
+      };
+      // esc and ago are var-assigned expressions, not declarations, so slice
+      // them out by their own boundaries and hand the REAL ones to the
+      // sandbox — a stubbed esc would make the escaping check meaningless.
+      const escSrc = src.slice(src.indexOf('var esc = function'), src.indexOf('var ago = function'));
+      const agoSrc = src.slice(src.indexOf('var ago = function'), src.indexOf('// Tool colors'));
+      const cardSrc = grab(src, 'pjTeammateNotesHtml');
+      const render = cardSrc
+        ? new Function(escSrc + agoSrc + 'return (' + cardSrc + ')')()
+        : null;
+      const ANDREW = { author: 'Andrew', ts: '2026-07-28T09:55:00Z', text: 'do not touch validate.ts yet' };
+
+      check('notes-dash: the project page draws each decision as author, text and when', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        const html = render({ fresh: [ANDREW], total: 1 });
+        assert.ok(html.includes('Andrew'), 'no author in the markup');
+        assert.ok(html.includes('do not touch validate.ts yet'), 'no decision text in the markup');
+        // data-ago is the dashboard's own live-relative-time hook, so this is
+        // deterministic AND proves the card keeps ticking over on the poll.
+        assert.ok(html.includes('data-ago="2026-07-28T09:55:00Z"'),
+          'the card never says WHEN — an old decision would read as one that just landed');
+      });
+
+      check('notes-dash: no notes draws nothing at all, and never throws', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        assert.strictEqual(render({ fresh: [], total: 0 }), '', 'an empty card is a row of nothing');
+        assert.strictEqual(render(null), '');
+        assert.strictEqual(render(undefined), '');
+      });
+
+      check('notes-dash: past the cap the card points at the rest instead of hiding them', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        const three = [ANDREW, { ...ANDREW, text: 'second' }, { ...ANDREW, text: 'third' }];
+        assert.ok(!/more/.test(render({ fresh: three, total: 3 })), 'nothing is hidden, so say nothing');
+        assert.ok(/11 more/.test(render({ fresh: three, total: 14 })),
+          'the card silently drops 11 decisions with no pointer to them');
+      });
+
+      check('notes-dash: teammate text is escaped, never injected as markup', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        const html = render({
+          fresh: [{ author: '<img src=x onerror=alert(1)>', ts: '2026-07-28T09:55:00Z', text: '<script>alert(2)</script>' }],
+          total: 1,
+        });
+        // Escaping neutralises the DELIMITERS; the payload's own words survive
+        // as text, so assert on what can form an element, not on substrings.
+        assert.ok(!html.includes('<script>'), 'teammate text lands in the page as live markup');
+        assert.ok(!html.includes('<img'), 'an author name lands in the page as live markup');
+        assert.ok(html.includes('&lt;script&gt;'), 'the text was dropped rather than escaped');
+        assert.ok(html.includes('&lt;img'), 'the author was dropped rather than escaped');
+      });
+
+      // The link that makes every check above non-vacuous.
+      check('notes-dash: renderProject actually draws the card from the polled payload', () => {
+        const body = grab(src, 'renderProject');
+        assert.ok(body, 'renderProject is missing from the client bundle');
+        assert.ok(/pjTeammateNotesHtml\(/.test(body),
+          'the card renderer is never called — the payload reaches nobody');
+        assert.ok(/teammateNotes/.test(body),
+          'renderProject never reads teammateNotes off the polled payload');
+      });
+    }
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
