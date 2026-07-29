@@ -966,6 +966,39 @@ git commit -m "feat(notes): atomic fail-open store for the teammate-notes index"
 
 ## Task 6: Build the index on every team pull ✅ DONE (`feat/notes-task6`)
 
+**Both halves of this task's data source were fabricated, and one of its bugs
+would have silently broken every teammate note.** Read the shipped code, not the
+steps below.
+
+- **`memorydb.readEntries` does not exist**, and `memorydb` holds **local**
+  entries only. `origin` is not stored anywhere — `lib/feed.js` stamps it at
+  render time. The real source is `state.projects[key].teamEntries`, written by
+  `lib/teamsync.js`'s `pullProject`. The plan's `origin === 'team'` filter was
+  also redundant: the pull already excludes self rows server-side.
+
+- **The silent one: every note would have been attributed to "a teammate".** The
+  wire row carries `author_name`, but `pullProject` stores it as `author`.
+  `buildIndex` read only `author_name`, so against real daemon data it fell
+  through to its `'a teammate'` default on every row — and since the author is
+  part of `noteId`, **every id would have differed from the wire-shaped ones**,
+  keying the whole seen/dedupe layer on a shadow set. No test could catch it:
+  every fixture in Task 4 is a hand-written *wire* row. A fallback meant for
+  genuinely anonymous rows would have swallowed a systematic bug.
+
+- **"Fail-open" was untrue for the most likely failure.** `buildIndex(null, …)`
+  does not throw — it returns a valid **empty** index, which then overwrites a
+  good one, so an unreadable state file would quietly erase a project's notes.
+  Now a non-array input changes nothing, while an empty **array** still empties.
+
+- **On the seen-marker test:** it catches dropping `prev` entirely, but **passes**
+  an implementation that keeps `seen.prose` and drops `seen.file` — the worse
+  bug, since every file note then re-fires on every pull.
+
+- **Built under the long-term-first rule:** the rebuild runs on **both** pull
+  paths; the plan wired only the daemon, leaving anyone driving `membridge sync`
+  from cron with a permanently stale index.
+
+
 **Four things this task's text got wrong, all corrected in the shipped code.**
 
 1. **`memorydb.readEntries` does not exist, and neither does `origin === 'team'`
@@ -1156,7 +1189,28 @@ git commit -m "feat(notes): rebuild the teammate-notes index on every team pull"
 
 ---
 
-## Task 7: Kill switch and hook registration
+## Task 7: Kill switch and hook registration ✅ DONE (`9951286`, merged)
+
+**The sketch below silently deleted user hooks.** `isOwnNotesHook(entry, sub)`
+claims a whole **entry**, so the `others` filter discarded any entry containing
+one of our hooks — *including any user hook sitting in the same entry*.
+Reproduced directly: the user's hook is gone. That violates the first line of
+this plan's own Global Constraints. The shipped version walks the array in place
+the way `reconcileStopHook` does.
+
+Also: the `owned.length ? A : B` line is genuinely dead (both branches are
+identical); `withSettings` never existed (both reconcilers inline
+`readSettings` → mutate → `writeSettings`); `readSettings` shape-checks only
+`hooks.Stop`, so the "same refusal to copy" wasn't there to copy; and the plan
+wired only `ensureInstalled`, leaving `membridge setup-hooks` unable to install
+what `remove-hooks` removes.
+
+**The "leaves a foreign entry alone" test was vacuous** — the second reconcile
+converged and wrote nothing, so the assertion merely re-read what the test itself
+had written a line earlier. It passed against a reconciler that dropped every
+foreign hook. Re-seeded with a stale command so the pass actually rewrites the
+file; the mutant now fails.
+
 
 Registering the three new hook entries before the bodies exist keeps Tasks 8–10 to one concern each.
 
