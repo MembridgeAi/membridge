@@ -3,9 +3,11 @@
 // Fast path: the Claude Code Stop hook fires on every session stop and the
 // git post-commit hook on every commit — neither may pay for the full CLI
 // require tree below (server, dashboard, team sync).
-if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3] === 'post-commit')) {
+if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3] === 'post-commit' || process.argv[3] === 'recall')) {
   const hooks = require('../lib/hooks');
-  (process.argv[3] === 'stop' ? hooks.runStop : hooks.runPostCommit)();
+  if (process.argv[3] === 'stop') hooks.runStop();
+  else if (process.argv[3] === 'post-commit') hooks.runPostCommit();
+  else hooks.runRecall();
   return;
 }
 const fs = require('fs');
@@ -805,7 +807,8 @@ function cmdHook() {
   const sub = args[1];
   if (sub === 'stop') return hooks.runStop();
   if (sub === 'post-commit') return hooks.runPostCommit();
-  die('Usage: membridge hook <stop|post-commit>  (invoked by the installed hooks — see `membridge setup-hooks`)');
+  if (sub === 'recall') return hooks.runRecall();
+  die('Usage: membridge hook <stop|post-commit|recall>  (invoked by the installed hooks — see `membridge setup-hooks`)');
 }
 
 function cmdHelp() {
@@ -849,6 +852,8 @@ Distillation (agent-written session summaries — see README):
   remove-hooks        remove the MemBridge hooks (your other hooks are kept)
   hook stop           the Stop hook itself (invoked by Claude Code, not by you)
   hook post-commit    the git hook itself (invoked by git, not by you)
+  hook recall         the PreToolUse recall hook itself (answers a repeat
+                      Read/Grep/Glob from memory; invoked by Claude Code)
 
 MCP (expose project memory, read-only, to MCP-capable clients — Claude
 Desktop, Cursor, Cowork, ...; see README):

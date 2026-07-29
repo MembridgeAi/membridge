@@ -19,7 +19,7 @@ delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not 
 const util = require('../lib/util');
 const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('../lib/scan');
 const digest = require('../lib/digest');
-const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload } = require('../lib/server');
+const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload, savingsPayload } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
 const { createMockSupabase } = require('./mock-supabase');
 const advisorLib = require('../lib/advisor');
@@ -177,6 +177,197 @@ async function main() {
     assert.strictEqual(util.isTempPath(''), false);
   });
 
+  check('usage: provider shapes normalise to one context figure without double counting', () => {
+    const { normalizeUsage, providerOf } = require('../lib/usage-normalize');
+
+    // Anthropic: the three input fields are disjoint and sum to context.
+    const a = normalizeUsage({
+      input_tokens: 100, cache_creation_input_tokens: 1000,
+      cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    assert.strictEqual(a.context, 11100);
+    assert.strictEqual(a.cacheRead, 10000);
+    assert.strictEqual(a.cacheWrite, 1000);
+    assert.strictEqual(a.output, 500);
+
+    // Legacy flat cache_creation_input_tokens maps to the 5m bucket.
+    assert.strictEqual(a.cacheWrite5m, 1000);
+    assert.strictEqual(a.cacheWrite1h, 0);
+
+    // 1h cache writes must not be collapsed into the 5m bucket: they cost
+    // 2x input, not 1.25x, so the split has to survive normalisation.
+    const aSplit = normalizeUsage({
+      input_tokens: 100,
+      cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 700 },
+      cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    assert.strictEqual(aSplit.cacheWrite5m, 300);
+    assert.strictEqual(aSplit.cacheWrite1h, 700);
+    assert.strictEqual(aSplit.cacheWrite, 1000);
+    assert.strictEqual(aSplit.context, 100 + 10000 + 1000, 'context must include the full 5m+1h write');
+
+    // A numeric string must be treated as 0, not string-concatenated into context.
+    const aStringy = normalizeUsage({
+      input_tokens: '100', cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    assert.strictEqual(aStringy.input, 0, 'numeric strings must not pass through uncoerced');
+    assert.strictEqual(aStringy.context, 10000);
+
+    // OpenAI/Codex: cached_input_tokens is a SUBSET of input_tokens.
+    const o = normalizeUsage({
+      input_tokens: 18093, cached_input_tokens: 1408,
+      output_tokens: 494, reasoning_output_tokens: 23,
+    }, 'openai');
+    assert.strictEqual(o.context, 18093, 'must not add cached on top of input');
+    assert.strictEqual(o.cacheRead, 1408);
+    assert.strictEqual(o.cacheWrite, 0, 'OpenAI has no cache-write concept');
+    assert.strictEqual(o.output, 494 + 23, 'reasoning tokens are billed output');
+
+    // Google/Gemini: same subset semantics, different names.
+    const g = normalizeUsage({
+      promptTokenCount: 8000, cachedContentTokenCount: 2000, candidatesTokenCount: 300,
+    }, 'google');
+    assert.strictEqual(g.context, 8000);
+    assert.strictEqual(g.cacheRead, 2000);
+    assert.strictEqual(g.output, 300);
+
+    assert.strictEqual(providerOf('Claude Code', 'claude-opus-4-6'), 'anthropic');
+    assert.strictEqual(providerOf('Codex', 'gpt-5'), 'openai');
+    assert.strictEqual(providerOf('Gemini CLI', 'gemini-3-pro'), 'google');
+  });
+
+  check('pricing: cached-input rates are per-model, and prefix matching is longest-first', () => {
+    const pricing = require('../lib/pricing');
+    const { normalizeUsage } = require('../lib/usage-normalize');
+
+    const a = normalizeUsage({
+      input_tokens: 100, cache_creation_input_tokens: 1000,
+      cache_read_input_tokens: 10000, output_tokens: 500,
+    }, 'anthropic');
+    const ac = pricing.requestCostUsd(a, 'claude-opus-4-6', 'anthropic');
+    // 100 @ $5 + 10000 @ $0.50 + 1000 write @ 5*1.25 = $6.75/MTok-equivalent
+    const expectA = (100 * 5 + 10000 * 0.5 + 1000 * 5 * 1.25) / 1e6;
+    assert.strictEqual(Math.round(ac.inCost * 1e9), Math.round(expectA * 1e9));
+    assert.strictEqual(Math.round(ac.outCost * 1e9), Math.round((500 * 25 / 1e6) * 1e9));
+
+    // 5m writes are 1.25x input, 1h writes are 2x input -- a single flat
+    // multiplier underbills 1h writes by ~38%.
+    const aSplit = normalizeUsage({
+      input_tokens: 0,
+      cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 700 },
+      cache_read_input_tokens: 0, output_tokens: 0,
+    }, 'anthropic');
+    const acSplit = pricing.requestCostUsd(aSplit, 'claude-opus-4-6', 'anthropic');
+    const expectASplit = (300 * 5 * 1.25 + 700 * 5 * 2.0) / 1e6;
+    assert.strictEqual(Math.round(acSplit.inCost * 1e9), Math.round(expectASplit * 1e9));
+
+    // The cache discount is NOT uniform across a vendor: gpt-5 caches at 0.1x
+    // input while gpt-4.1 and o1 are far dearer. A provider-wide multiplier
+    // would misprice most of the lineup.
+    assert.strictEqual(pricing.priceOf('gpt-5', 'openai').cachedInPerMTok, 0.125);
+    assert.strictEqual(pricing.priceOf('gpt-4.1', 'openai').cachedInPerMTok, 0.5);
+    assert.strictEqual(pricing.priceOf('o1', 'openai').cachedInPerMTok, 7.5);
+
+    // Longest-prefix matching: gpt-5-mini must not resolve to gpt-5.
+    assert.strictEqual(pricing.priceOf('gpt-5-mini', 'openai').inPerMTok, 0.25);
+    assert.strictEqual(pricing.priceOf('gpt-5', 'openai').inPerMTok, 1.25);
+
+    // OpenAI: uncached portion at full rate, cached portion at the cached rate,
+    // and no write cost at all.
+    const o = normalizeUsage({ input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 100 }, 'openai');
+    const expectO = (2000 * 1.25 + 8000 * 0.125) / 1e6;
+    assert.strictEqual(Math.round(pricing.requestCostUsd(o, 'gpt-5', 'openai').inCost * 1e9),
+      Math.round(expectO * 1e9));
+
+    // Google caches at 0.1x across the range.
+    assert.strictEqual(pricing.priceOf('gemini-2.5-pro', 'google').cachedInPerMTok, 0.125);
+
+    // Unknown models never throw and never price at zero.
+    assert.ok(pricing.priceOf('some-future-model', 'unknown').inPerMTok > 0);
+  });
+
+  check('adapter: emits one usage event per assistant record, carrying message id', () => {
+    const entries = [
+      { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1',
+        message: { id: 'msg_a', model: 'claude-opus-4-6',
+          usage: { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 20 },
+          content: [{ type: 'text', text: 'hi' }] } },
+      // same request, second content block -- SAME message id, repeated usage
+      { type: 'assistant', timestamp: '2026-07-28T10:00:01Z', cwd: '/repo', sessionId: 's1',
+        message: { id: 'msg_a', model: 'claude-opus-4-6',
+          usage: { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 20 },
+          content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/repo/a.js' } }] } },
+    ];
+    const events = claudeAdapter.extractEvents(entries, { pendingCreates: {}, tasks: {} });
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 2, 'adapter emits per record; ledger dedupes on messageId');
+    assert.strictEqual(usage[0].messageId, 'msg_a');
+    assert.strictEqual(usage[0].session, 's1');
+    assert.strictEqual(usage[0].model, 'claude-opus-4-6');
+    assert.strictEqual(usage[0].usage.cache_read_input_tokens, 900);
+  });
+
+  check('adapter: sidechain assistant record emits usage with sidechain:true, no read/edit', () => {
+    const entries = [
+      { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
+        message: { id: 'msg_sc', model: 'claude-opus-4-6',
+          usage: { input_tokens: 3, output_tokens: 7 },
+          content: [
+            { type: 'tool_use', id: 'tu_sc', name: 'Read', input: { file_path: '/repo/sub.js' } },
+            { type: 'tool_use', id: 'tu_sc2', name: 'Edit', input: { file_path: '/repo/sub2.js' } },
+          ] } },
+    ];
+    const events = claudeAdapter.extractEvents(entries, { pendingCreates: {}, tasks: {} });
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 1, 'sidechain assistant record must still emit its usage event');
+    assert.strictEqual(usage[0].sidechain, true, 'sidechain flag must be true for a subagent record');
+    assert.strictEqual(usage[0].messageId, 'msg_sc');
+    assert.strictEqual(usage[0].session, 's1');
+    assert.strictEqual(events.some(e => e.kind === 'read'), false, 'sidechain tool_use must not emit a read event');
+    assert.strictEqual(events.some(e => e.kind === 'edit'), false, 'sidechain tool_use must not emit an edit event');
+  });
+
+  check('codex adapter: emits usage from last_token_usage, not the cumulative total', () => {
+    const entries = [
+      // A genuine rollout must open with session_meta (isGenuineRollout gate),
+      // and cwd is only ever read from payload.cwd -- both are prerequisites
+      // unrelated to the usage event itself, so they're set up here.
+      { type: 'session_meta', timestamp: '2026-07-28T09:59:00Z', payload: { cwd: '/repo' } },
+      { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+        payload: { type: 'token_count', info: {
+          total_token_usage: { input_tokens: 99999, cached_input_tokens: 0, output_tokens: 9999, total_tokens: 109998 },
+          last_token_usage: { input_tokens: 18093, cached_input_tokens: 1408, output_tokens: 494, reasoning_output_tokens: 23 },
+        } } },
+    ];
+    const events = codexAdapter.extractEvents(entries, {});
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 1);
+    assert.strictEqual(usage[0].usage.input_tokens, 18093, 'must use last_token_usage, not the cumulative total');
+    assert.strictEqual(usage[0].usage.cached_input_tokens, 1408);
+    assert.strictEqual(usage[0].source, 'Codex');
+  });
+
+  check('adapter: Read/Grep/Glob emit read events with tool id and bounded-read params', () => {
+    const entries = [
+      { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1',
+        message: { id: 'msg_b', model: 'claude-opus-4-6', usage: { input_tokens: 1 }, content: [
+          { type: 'tool_use', id: 'tu_r', name: 'Read', input: { file_path: '/repo/a.js', offset: 10, limit: 50 } },
+          { type: 'tool_use', id: 'tu_g', name: 'Grep', input: { pattern: 'x', path: '/repo/lib' } },
+          { type: 'tool_use', id: 'tu_e', name: 'Edit', input: { file_path: '/repo/b.js' } },
+        ] } },
+    ];
+    const events = claudeAdapter.extractEvents(entries, { pendingCreates: {}, tasks: {} });
+    const reads = events.filter(e => e.kind === 'read');
+    assert.strictEqual(reads.length, 2, 'Read and Grep produce reads; Edit does not');
+    const r = reads.find(e => e.tool === 'Read');
+    assert.strictEqual(r.file, '/repo/a.js');
+    assert.strictEqual(r.toolUseId, 'tu_r');
+    assert.strictEqual(r.offset, 10);
+    assert.strictEqual(r.limit, 50);
+    assert.strictEqual(r.messageId, 'msg_b');
+    assert.ok(events.some(e => e.kind === 'edit' && e.file === '/repo/b.js'), 'edit events still emitted');
+  });
+
   check('capture: temp/scratchpad edits are dropped; real edits attributed to the repo', () => {
     const repo = path.join(ROOT, 'hygiene-repo');
     fs.mkdirSync(repo, { recursive: true });
@@ -245,6 +436,18 @@ async function main() {
       assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', name, 'package.json')),
         `app/node_modules/${name} missing — the packaged app cannot require it`);
     }
+    // Same incident class as libsodium, for lib/skeleton.js's tree-sitter
+    // engine: web-tree-sitter must be in the closure (it's a root dependency,
+    // covered by the loop above) AND the vendored grammar wasm files must
+    // ride along too — they aren't an npm dependency, so prepare-app.js has
+    // to copy them explicitly. Missing either means the packaged app can
+    // only ever fall back to lib/skeleton-strip.js.
+    assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', 'web-tree-sitter', 'package.json')),
+      'app/node_modules/web-tree-sitter missing — the packaged app cannot require it');
+    assert.ok(fs.existsSync(path.join(appRoot, 'app', 'vendor', 'grammars')),
+      'app/vendor/grammars missing — the packaged app cannot load any tree-sitter grammar');
+    const vendoredWasm = fs.readdirSync(path.join(appRoot, 'app', 'vendor', 'grammars')).filter(f => f.endsWith('.wasm'));
+    assert.ok(vendoredWasm.length >= 4, `expected at least 4 vendored grammar wasm files, found ${vendoredWasm.length}`);
   });
 
   check('gen-install: sha256File hashes file contents', () => {
@@ -278,6 +481,30 @@ async function main() {
       'mac target should be a single arm64-pinned zip');
     assert.strictEqual(pkg.build.mac.artifactName, 'MemBridge-${version}-${arch}.${ext}',
       'artifactName must be deterministic so install.sh can build the release URL');
+  });
+  check('C1: the npm tarball ships vendor/grammars, not just the packaged Electron app', () => {
+    // CRITICAL (final whole-branch review, C1): package.json's "files"
+    // whitelist excluded vendor/, so a plain `npm install
+    // @membridgeai/membridge` -- the PRIMARY install channel -- shipped
+    // web-tree-sitter (a real, installed dependency) with ZERO grammars to
+    // load. lib/skeleton.js resolves vendor/grammars relative to
+    // __dirname/../; with nothing there, the engine caches null on first
+    // failure and every project silently falls back to the stripper
+    // forever, with no warning ever surfaced. The "prepare-app bundles the
+    // runtime dependency closure" check above catches this same class of
+    // omission for the packaged Electron app (app/vendor/grammars); this is
+    // its npm-channel counterpart -- the libsodium incident, replayed on
+    // the channel most installs actually use.
+    // --dry-run --json only computes the file list; it writes no tarball
+    // and touches no network.
+    const out = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+      cwd: path.join(__dirname, '..'), encoding: 'utf8',
+    });
+    assert.strictEqual(out.status, 0, `npm pack --dry-run failed: ${out.stderr}`);
+    const [{ files }] = JSON.parse(out.stdout);
+    const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
+    assert.ok(vendoredWasm.length >= 4,
+      `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
   });
 
   // --- 1. fresh sync ---
@@ -4866,6 +5093,99 @@ async function main() {
     assert.ok(!/\(not captured\)/.test(body),
       'the "(not captured)" placeholder must be gone — an empty row is noise on every card');
   });
+  // Task 8: the dashboard savings panel, driven by /api/savings. Same
+  // extraction technique as pxHasSummary/pxGlanceFor above -- pull the pure
+  // function's source out of the served client bundle and sandbox-run it, so
+  // this pins real behavior rather than just grepping for a string. This is
+  // also the require() smoke check: requiring the file (a single giant
+  // template literal) throws immediately on a stray backtick, so simply
+  // reaching these asserts already proves the file still parses/loads.
+  check('dashboard: pxFmtTokens formats token counts human-readably', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const body = grab(src, 'pxFmtTokens');
+    assert.ok(body, 'pxFmtTokens is missing from the client bundle');
+    const pxFmtTokens = new Function('return (' + body + ')')();
+    assert.strictEqual(pxFmtTokens(0), '0');
+    assert.strictEqual(pxFmtTokens(42), '42');
+    assert.strictEqual(pxFmtTokens(3830), '4k');
+    assert.strictEqual(pxFmtTokens(118000), '118k');
+    assert.strictEqual(pxFmtTokens(1400000), '1.4M');
+    assert.strictEqual(pxFmtTokens(undefined), '0', 'a missing count must not throw or read NaN');
+  });
+  check('dashboard: pxProjectSavingsLine reads "<n> avoided · <serves> reads answered", never "saved"', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const fmtBody = grab(src, 'pxFmtTokens');
+    const lineBody = grab(src, 'pxProjectSavingsLine');
+    assert.ok(lineBody, 'pxProjectSavingsLine is missing from the client bundle');
+    const pxProjectSavingsLine = new Function('var pxFmtTokens = ' + fmtBody + ';\nreturn (' + lineBody + ')')();
+    assert.strictEqual(pxProjectSavingsLine({ tokens: 0, serves: 0 }), 'no repeat reads yet');
+    assert.strictEqual(pxProjectSavingsLine(null), 'no repeat reads yet', 'a missing avoided block must not throw');
+    assert.strictEqual(pxProjectSavingsLine({ tokens: 3830, serves: 1 }), '4k avoided · 1 reads answered');
+    assert.ok(!/saved/i.test(pxProjectSavingsLine({ tokens: 3830, serves: 1 })), 'must never say "saved"');
+  });
+  check('dashboard: pxHomeSavingsLine reads "<total> tokens of file reading avoided · <pct>% of context loaded"', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const fmtBody = grab(src, 'pxFmtTokens');
+    const pctBody = grab(src, 'pxSavingsPct');
+    const lineBody = grab(src, 'pxHomeSavingsLine');
+    assert.ok(pctBody, 'pxSavingsPct is missing from the client bundle');
+    assert.ok(lineBody, 'pxHomeSavingsLine is missing from the client bundle');
+    const preamble = 'var pxFmtTokens = ' + fmtBody + ';\nvar pxSavingsPct = ' + pctBody + ';\n';
+    const pxSavingsPct = new Function(preamble + 'return (' + pctBody + ')')();
+    const pxHomeSavingsLine = new Function(preamble + 'return (' + lineBody + ')')();
+    assert.strictEqual(pxSavingsPct(0, 0), 0, 'no denominator must not throw or read NaN');
+    assert.strictEqual(pxSavingsPct(1400000, 21540983), 6.1, 'the spec\'s own worked example');
+    assert.strictEqual(pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 0 }), 'no repeat reads yet');
+    assert.strictEqual(pxHomeSavingsLine(null), 'no repeat reads yet', 'a missing totals block must not throw');
+    assert.strictEqual(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 }),
+      '1.4M tokens of file reading avoided · 6.1% of context loaded');
+    assert.ok(!/saved/i.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'must never say "saved"');
+    assert.ok(!/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'no dollar figure');
+  });
+  check('dashboard: the Projects grid row renders the per-project savings line from pxData.savingsByPath', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const row = src.slice(src.indexOf('function pxRowHtml'));
+    const body = row.slice(0, row.indexOf('\nfunction pxNewCount'));
+    assert.ok(/pxProjectSavingsLine\(/.test(body), 'pxRowHtml must render the savings line via pxProjectSavingsLine');
+    assert.ok(/pxData\.savingsByPath/.test(body), 'pxRowHtml must read the per-project savings entry from pxData.savingsByPath');
+  });
+  check('dashboard: the Projects index renders the Home savings stat and fetches /api/savings', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    assert.ok(/fetch\('\/api\/savings'\)/.test(src), 'loadProjectsIndex must fetch /api/savings');
+    const idx = src.slice(src.indexOf('function renderProjectsIndex'));
+    const body = idx.slice(0, idx.indexOf('\nfunction renderProjectsEmpty'));
+    assert.ok(/pxHomeSavingsLine\(/.test(body), 'renderProjectsIndex must render the Home savings stat via pxHomeSavingsLine');
+  });
   // The pill had two authors: setPill (which knows about solo) and
   // renderSyncBanner (which did not, and ran on a timer). The banner won, so a
   // solo machine flipped back to "Synced" seconds after saying "Local only".
@@ -5268,6 +5588,158 @@ async function main() {
     assert.ok(stored, 'summary event stored');
     assert.strictEqual(stored.headline, 'tight glance line', 'headline dropped by mergeEvents (never reaches buildEntries)');
   });
+  check('mergeEvents carries usage/read payload fields through and keeps same-ts reads distinct', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'usage-read-merge');
+    const ts = '2026-07-28T10:00:00Z';
+    const events = [
+      { ts, project, source: 'Claude Code', kind: 'usage', session: 's1',
+        messageId: 'msg_u1', model: 'claude-opus-4-6',
+        usage: { input_tokens: 5, output_tokens: 20 } },
+      // Two reads sharing the same ts, same file, different tool_use ids --
+      // must not collide in eventKey and dedupe away the second one.
+      { ts, project, source: 'Claude Code', kind: 'read', session: 's1',
+        file: '/repo/a.js', tool: 'Read', toolUseId: 'tu_1', offset: 10, limit: 50, messageId: 'msg_u1' },
+      { ts, project, source: 'Claude Code', kind: 'read', session: 's1',
+        file: '/repo/a.js', tool: 'Read', toolUseId: 'tu_2', offset: 60, limit: 50, messageId: 'msg_u1' },
+    ];
+    digest.mergeEvents(state, events, {});
+    const key = Object.keys(state.projects)[0];
+    const stored = state.projects[key].events;
+
+    const usage = stored.find(e => e.kind === 'usage');
+    assert.ok(usage, 'usage event not stored');
+    assert.deepStrictEqual(usage.usage, { input_tokens: 5, output_tokens: 20 }, 'usage payload stripped by mergeEvents');
+    assert.strictEqual(usage.messageId, 'msg_u1', 'messageId stripped by mergeEvents');
+    assert.strictEqual(usage.model, 'claude-opus-4-6', 'model stripped by mergeEvents');
+
+    const reads = stored.filter(e => e.kind === 'read');
+    assert.strictEqual(reads.length, 2, 'same-ts reads with different toolUseId must not collide in eventKey');
+    const r1 = reads.find(e => e.toolUseId === 'tu_1');
+    const r2 = reads.find(e => e.toolUseId === 'tu_2');
+    assert.ok(r1 && r2, 'both reads must survive the merge');
+    assert.strictEqual(r1.tool, 'Read');
+    assert.strictEqual(r1.offset, 10);
+    assert.strictEqual(r1.limit, 50);
+    assert.strictEqual(r2.offset, 60);
+    assert.strictEqual(r2.limit, 50);
+  });
+  // FINDING C1. Usage/read events are ~87% of everything the adapters emit, so
+  // a SINGLE flat cap over the whole event array lets plumbing evict the
+  // narrative (prompt/edit/summary/todos) that memory.md, team sync and
+  // provenance are built from. Narrative retention must be exactly what it was
+  // before the ledger branch existed, no matter how much plumbing arrives.
+  check('mergeEvents: plumbing events never evict narrative history', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'per-kind-cap');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const events = [];
+    for (let i = 0; i < 300; i++) {
+      events.push({ ts: at(i * 2), project, source: 'Claude Code', kind: 'usage', session: 's1',
+        messageId: 'm' + i, model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } });
+    }
+    for (let j = 0; j < 30; j++) {
+      events.push({ ts: at(j * 20 + 1), project, source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask ' + j });
+    }
+    digest.mergeEvents(state, events, { maxStoredEvents: 100 });
+    const stored = state.projects[path.resolve(project)].events;
+    const prompts = stored.filter(e => e.kind === 'prompt');
+    assert.strictEqual(prompts.length, 30,
+      '300 usage events overflowed a 100 cap and evicted the narrative the product is made of');
+    assert.strictEqual(stored.filter(e => e.kind === 'usage').length, 300,
+      'usage rides its own (much larger) plumbing cap, not maxStoredEvents');
+    const tss = stored.map(e => e.ts);
+    assert.deepStrictEqual(tss, tss.slice().sort(),
+      'the two capped partitions must be re-interleaved in ts order, not concatenated');
+
+    // Narrative keeps EXACTLY the pre-branch cap semantics: newest N survive.
+    const state2 = { projects: {} };
+    const proj2Path = path.join(ROOT, 'projects', 'per-kind-cap-narrative');
+    const many = [];
+    for (let j = 0; j < 150; j++) {
+      many.push({ ts: at(j), project: proj2Path, source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask ' + j });
+    }
+    digest.mergeEvents(state2, many, { maxStoredEvents: 100 });
+    const kept = state2.projects[path.resolve(proj2Path)].events;
+    assert.strictEqual(kept.length, 100, 'narrative cap must still be maxStoredEvents');
+    assert.strictEqual(kept[0].text, 'ask 50', 'narrative cap must still slice from the tail (newest kept)');
+
+    // ...and plumbing is bounded too, on its own budget.
+    const state3 = { projects: {} };
+    const proj3Path = path.join(ROOT, 'projects', 'per-kind-cap-plumbing');
+    digest.mergeEvents(state3, events.map(e => Object.assign({}, e, { project: proj3Path })),
+      { maxStoredEvents: 100, maxPlumbingEvents: 50 });
+    const kept3 = state3.projects[path.resolve(proj3Path)].events;
+    assert.strictEqual(kept3.filter(e => e.kind === 'usage').length, 50, 'plumbing honours its own cap');
+    assert.strictEqual(kept3.filter(e => e.kind === 'prompt').length, 30, 'narrative untouched by the plumbing cap');
+  });
+  // FINDING I3. One API request is written to the transcript as several sibling
+  // records (same message id, different ts). 57% of persisted usage rows were
+  // those duplicates. Dropping them at persistence is lossless for the ledger,
+  // which folds on message id anyway.
+  check('mergeEvents: sibling usage records for one message id store a single row', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'usage-sibling-dedupe');
+    const key = path.resolve(project);
+    const u = { input_tokens: 5, cache_read_input_tokens: 900, output_tokens: 20 };
+    const base = { project, source: 'Claude Code', kind: 'usage', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u };
+    digest.mergeEvents(state, [
+      Object.assign({}, base, { ts: '2026-07-28T10:00:00.000Z' }),
+      Object.assign({}, base, { ts: '2026-07-28T10:00:00.500Z' }),
+    ], {});
+    const usageRows = () => state.projects[key].events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usageRows().length, 1, 'two records of one request must persist as one row');
+
+    // The index has to be seeded from what is already on disk, or the dedupe
+    // only works within a single sync pass.
+    digest.mergeEvents(state, [Object.assign({}, base, { ts: '2026-07-28T10:00:01.000Z' })], {});
+    assert.strictEqual(usageRows().length, 1, 'dedupe must survive across sync passes');
+
+    // A sidechain request with the same id is a DIFFERENT request stream, and
+    // so is the same fallback id seen in another session -- both must survive.
+    digest.mergeEvents(state, [
+      Object.assign({}, base, { ts: '2026-07-28T10:00:02.000Z', sidechain: true }),
+      Object.assign({}, base, { ts: '2026-07-28T10:00:03.000Z', session: 's2' }),
+    ], {});
+    assert.strictEqual(usageRows().length, 3, 'sidechain and cross-session siblings are distinct requests');
+
+    // A usage event with no message id has nothing but its ts to tell it
+    // apart, so it must never be collapsed.
+    digest.mergeEvents(state, [
+      { project, source: 'Codex', kind: 'usage', session: 's3', ts: '2026-07-28T10:00:04.000Z', usage: u },
+      { project, source: 'Codex', kind: 'usage', session: 's3', ts: '2026-07-28T10:00:05.000Z', usage: u },
+    ], {});
+    assert.strictEqual(usageRows().length, 5, 'id-less usage events must not be collapsed onto each other');
+  });
+  // MINOR 5. "Sessions" and "events" are user-facing counts of WORK. Token
+  // plumbing outnumbers real activity ~7:1, so counting it here would inflate
+  // every discovery/adoption number the dashboard shows.
+  check('scanPayload: sessionCount counts narrative events only, never token plumbing', () => {
+    const { scanPayload } = require('../lib/server');
+    const project = path.join(ROOT, 'projects', 'narrative-count');
+    fs.mkdirSync(project, { recursive: true });
+    const dir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-narrative-count');
+    fs.mkdirSync(dir, { recursive: true });
+    const usage = { input_tokens: 5, cache_read_input_tokens: 900, output_tokens: 20 };
+    const assistant = (id, ts, tool, toolId, file) => ({
+      type: 'assistant', cwd: project, timestamp: ts, sessionId: 'sN',
+      message: { role: 'assistant', id, model: 'claude-opus-4-6', usage,
+        content: [{ type: 'tool_use', id: toolId, name: tool, input: { file_path: file } }] },
+    });
+    fs.writeFileSync(path.join(dir, 'sessN.jsonl'), jsonl([
+      { type: 'user', message: { role: 'user', content: 'First ask' }, cwd: project, timestamp: '2026-07-28T10:00:00.000Z', sessionId: 'sN' },
+      assistant('ma1', '2026-07-28T10:00:01.000Z', 'Read', 'tu1', path.join(project, 'a.js')),
+      assistant('ma2', '2026-07-28T10:00:02.000Z', 'Edit', 'tu2', path.join(project, 'a.js')),
+      { type: 'user', message: { role: 'user', content: 'Second ask' }, cwd: project, timestamp: '2026-07-28T10:00:03.000Z', sessionId: 'sN' },
+      assistant('ma3', '2026-07-28T10:00:04.000Z', 'Read', 'tu3', path.join(project, 'b.js')),
+    ]));
+    const row = scanPayload().projects.find(p => p.path.toLowerCase() === project.toLowerCase());
+    assert.ok(row, 'fixture project missing from discovery');
+    const total = Object.values(row.bySource).reduce((a, b) => a + b, 0);
+    assert.strictEqual(total, 8, 'fixture emits 2 prompts + 1 edit + 3 usage + 2 reads');
+    assert.strictEqual(row.sessionCount, 3, 'sessionCount must count narrative events only');
+  });
   check('scanSummaries labels Codex fallback summaries as Codex, not Distilled', () => {
     const proj = path.join(ROOT, 'projects', 'codex-summary-source'); fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
     fs.writeFileSync(path.join(proj, '.membridge', 'summaries.jsonl'),
@@ -5278,6 +5750,2869 @@ async function main() {
     assert.ok(ev, 'codex summary event missing');
     assert.strictEqual(ev.source, 'Codex');
     assert.strictEqual(ev.distilled, true);
+  });
+  check('ledger: folds repeated records for one message id into a single request', () => {
+    const ledger = require('../lib/ledger');
+    const u = { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 20 };
+    const events = [
+      { kind: 'usage', ts: '2026-07-28T10:00:00Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'usage', ts: '2026-07-28T10:00:01Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'usage', ts: '2026-07-28T10:00:02Z', session: 's1', messageId: 'm2', model: 'claude-opus-4-6', usage: u },
+    ];
+    const reqs = ledger.buildRequests(events);
+    assert.strictEqual(reqs.length, 2, 'three records, two real requests');
+    assert.strictEqual(reqs[0].ctx, 1005);
+    assert.strictEqual(reqs[0].out, 20);
+    assert.ok(reqs[0].inCost > 0);
+    // a sidechain request with the same id is a DIFFERENT request stream
+    const withSide = events.concat([
+      { kind: 'usage', ts: '2026-07-28T10:00:03Z', session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u, sidechain: true },
+    ]);
+    assert.strictEqual(ledger.buildRequests(withSide).length, 3);
+
+    // A project can hold both Claude Code and Codex sessions. Each request must
+    // be normalised by ITS OWN provider -- this is where a cross-vendor bug hides.
+    const mixed = ledger.buildRequests([
+      { kind: 'usage', ts: 't1', session: 'a', messageId: 'x', source: 'Claude Code',
+        model: 'claude-opus-4-6',
+        usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 995, output_tokens: 1 } },
+      { kind: 'usage', ts: 't2', session: 'b', messageId: 'y', source: 'Codex',
+        model: 'gpt-5',
+        usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 1 } },
+    ]);
+    assert.strictEqual(mixed[0].ctx, 1000, 'anthropic: fields sum to context');
+    assert.strictEqual(mixed[1].ctx, 1000, 'openai: cached is inside input, not added on top');
+    assert.strictEqual(mixed[0].provider, 'anthropic');
+    assert.strictEqual(mixed[1].provider, 'openai');
+  });
+  check('ledger: volume sums context per request and splits epochs on context reset', () => {
+    const ledger = require('../lib/ledger');
+    const mk = (ts, ctx, out) => ({ ts, ctx, out, inCost: 0, outCost: 0, session: 's1', sidechain: false });
+    // context grows, then drops hard (compaction) and grows again
+    const reqs = [
+      mk('t1', 1000, 100), mk('t2', 2000, 100), mk('t3', 3000, 100),
+      mk('t4', 400, 100), mk('t5', 900, 100),
+    ];
+    const out = ledger.sessionVolume(reqs);
+    assert.strictEqual(out.nRequests, 5);
+    assert.strictEqual(out.volume, 1000 + 2000 + 3000 + 400 + 900, 'volume is the sum of per-request context');
+    assert.strictEqual(out.epochs.length, 2, 'the drop at t4 starts a new epoch');
+    assert.deepStrictEqual(out.epochs[0], [0, 2]);
+    assert.deepStrictEqual(out.epochs[1], [3, 4]);
+  });
+  check('redundancy: classifies reads as first, same-session repeat, or cross-session repeat', () => {
+    const redundancy = require('../lib/redundancy');
+    const reads = [
+      { kind: 'read', ts: 't1', session: 'a', file: '/r/x.js' },  // first ever
+      { kind: 'read', ts: 't2', session: 'a', file: '/r/x.js' },  // same session again
+      { kind: 'read', ts: 't3', session: 'b', file: '/r/x.js' },  // different session
+      { kind: 'read', ts: 't4', session: 'b', file: '/r/y.js' },  // first ever
+    ];
+    const out = redundancy.classifyReads(reads, []);
+    assert.deepStrictEqual(out.map(r => r.tier),
+      ['first', 'same-session', 'cross-session', 'first']);
+    const t = redundancy.tally(out);
+    assert.strictEqual(t.first, 2);
+    assert.strictEqual(t.sameSession, 1);
+    assert.strictEqual(t.crossSession, 1);
+  });
+  check('redundancy: reads with no session at all pin to same-session (scan.js backfill reliance)', () => {
+    const redundancy = require('../lib/redundancy');
+    const reads = [
+      { kind: 'read', ts: 't1', file: '/r/z.js' },  // no session field
+      { kind: 'read', ts: 't2', file: '/r/z.js' },  // still no session field
+    ];
+    const out = redundancy.classifyReads(reads, []);
+    assert.deepStrictEqual(out.map(r => r.tier), ['first', 'same-session']);
+  });
+  check('ledger-store: builds and round-trips a project ledger with a hot set', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const events = [
+      { kind: 'usage', ts: 't1', session: 'a', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'usage', ts: 't2', session: 'b', messageId: 'm2', model: 'claude-opus-4-6', usage: u },
+      { kind: 'read', ts: 't1', session: 'a', file: '/r/x.js' },
+      { kind: 'read', ts: 't2', session: 'b', file: '/r/x.js' },
+      { kind: 'read', ts: 't3', session: 'b', file: '/r/y.js' },
+    ];
+    const built = store.buildProjectLedger(events);
+    assert.strictEqual(built.requests, 2);
+    assert.strictEqual(built.volume, 2000);
+    assert.strictEqual(built.sessions, 2);
+    assert.strictEqual(built.reads.crossSession, 1);
+    assert.strictEqual(built.hotPaths[0].file, '/r/x.js', 'x.js is read by 2 sessions so it leads the hot set');
+    assert.strictEqual(built.hotPaths.length, 1, 'single-reader files are not hot');
+
+    store.writeLedger(proj, built);
+    const back = store.readLedger(proj);
+    assert.strictEqual(back.volume, built.volume);
+    assert.strictEqual(store.readLedger(path.join(ROOT, 'nope')), null);
+  });
+  // FINDING C2. proj.events is a SLIDING window, so a ledger rebuilt from it
+  // each pass reports a shrinking slice of history -- /api/savings showed
+  // ~6.6% of the real total and volume could go DOWN after more work. The
+  // fold must accumulate: idempotent on a repeat, strictly increasing on new
+  // work, and never regressing when old events fall out of the window.
+  check('ledger-store: the ledger accumulates durably and never regresses as the window slides', () => {
+    const store = require('../lib/ledger-store');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const batch = (n, session, from) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const ts = new Date(T0 + (from + i) * 1000).toISOString();
+        out.push({ kind: 'usage', ts, session, messageId: `${session}-m${from + i}`, model: 'claude-opus-4-6', usage: u });
+        out.push({ kind: 'read', ts, session, toolUseId: `${session}-t${from + i}`, file: '/r/x.js' });
+      }
+      return out;
+    };
+    const b1 = batch(3, 'a', 0);
+    const b2 = batch(2, 'b', 10);
+
+    const one = store.foldProjectLedger(null, b1);
+    assert.strictEqual(one.requests, 3);
+    assert.strictEqual(one.volume, 3000);
+    assert.strictEqual(one.sessions, 1);
+    assert.deepStrictEqual(one.reads, { first: 1, sameSession: 2, crossSession: 0 });
+
+    // Same window again: every request and read is already accounted for.
+    const twice = store.foldProjectLedger(one, b1);
+    assert.strictEqual(twice.requests, 3, 're-syncing the same window must not double-count requests');
+    assert.strictEqual(twice.volume, 3000, 're-syncing the same window must not double-count volume');
+    assert.deepStrictEqual(twice.reads, one.reads, 're-syncing the same window must not double-count reads');
+
+    // New work arrives alongside the old window: totals strictly increase.
+    const three = store.foldProjectLedger(twice, b1.concat(b2));
+    assert.strictEqual(three.requests, 5);
+    assert.strictEqual(three.volume, 5000);
+    assert.strictEqual(three.sessions, 2);
+    assert.deepStrictEqual(three.reads, { first: 1, sameSession: 2, crossSession: 2 });
+
+    // Eviction: batch 1 has aged out of the stored window entirely.
+    const four = store.foldProjectLedger(three, b2);
+    assert.strictEqual(four.requests, 5, 'a slid window must never shrink the request count');
+    assert.strictEqual(four.volume, 5000, 'a slid window must never shrink volume');
+    assert.strictEqual(four.sessions, 2, 'a slid window must never shrink the session count');
+    assert.deepStrictEqual(four.reads, three.reads, 'a slid window must never shrink the read tally');
+    assert.strictEqual(four.hotPaths.length, 1);
+    assert.strictEqual(four.hotPaths[0].file, '/r/x.js');
+    assert.strictEqual(four.hotPaths[0].readers, 2, 'both sessions stay in the hot set after eviction');
+    assert.strictEqual(four.hotPaths[0].reads, 5, 'per-path read counts accumulate too');
+    assert.ok(!isNaN(Date.parse(four.updatedAt)), 'updatedAt must be a real timestamp');
+
+    // The accumulation evidence survives a JSON round-trip -- it lives on disk,
+    // so a fold onto what readLedger returns must behave like a fold onto the
+    // in-memory object.
+    const roundTripped = store.foldProjectLedger(JSON.parse(JSON.stringify(four)), b2);
+    assert.strictEqual(roundTripped.requests, 5, 'dedupe evidence must survive serialization');
+  });
+  check('ledger-store: every accumulated list is bounded', () => {
+    const store = require('../lib/ledger-store');
+    const L = store.LIMITS;
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const events = [];
+    const n = L.SEEN_KEY_CAP + 500;
+    for (let i = 0; i < n; i++) {
+      events.push({ kind: 'usage', ts: new Date(T0 + i * 1000).toISOString(), session: 's' + i,
+        messageId: 'm' + i, model: 'claude-opus-4-6', usage: u });
+    }
+    const led = store.foldProjectLedger(null, events);
+    assert.strictEqual(led.requests, n, 'every request is still counted');
+    assert.strictEqual(led.seenKeys.length, L.SEEN_KEY_CAP, 'the dedupe horizon is bounded');
+    assert.strictEqual(led.sessionIds.length, L.SESSION_ID_CAP, 'the session-id list is bounded');
+    assert.strictEqual(led.sessions, n, 'the session COUNT survives ids ageing out of the list');
+
+    // Readers per path and the hot set are bounded too.
+    const reads = [];
+    for (let i = 0; i < L.READERS_PER_PATH_CAP + 20; i++) {
+      reads.push({ kind: 'read', ts: new Date(T0 + i * 1000).toISOString(), session: 'r' + i,
+        toolUseId: 'tu' + i, file: '/r/hot.js' });
+    }
+    for (let f = 0; f < L.HOT_PATH_CAP + 40; f++) {
+      for (const s of ['p', 'q']) {
+        reads.push({ kind: 'read', ts: new Date(T0 + (f * 2 + (s === 'q' ? 1 : 0)) * 1000).toISOString(),
+          session: s, toolUseId: `${s}-${f}`, file: `/r/f${f}.js` });
+      }
+    }
+    const led2 = store.foldProjectLedger(null, reads);
+    const hot = led2.hotPaths.find(h => h.file === '/r/hot.js');
+    assert.ok(hot, 'the many-reader path is in the hot set');
+    assert.strictEqual(hot.readers, L.READERS_PER_PATH_CAP, 'reader sessions per path are bounded');
+    assert.strictEqual(led2.hotPaths.length, L.HOT_PATH_CAP, 'the hot set is bounded');
+  });
+  check('ledger-fold: keyHorizonFor scales 2.5x the plumbing cap, floored at the old 5000 bound', () => {
+    const fold = require('../lib/ledger-fold');
+    assert.strictEqual(fold.keyHorizonFor(2000), 5000, 'the default plumbing cap keeps the old fixed horizon exactly');
+    assert.strictEqual(fold.keyHorizonFor(8000), 20000, '2.5x scaling once the window is raised past the old bound');
+    assert.strictEqual(fold.keyHorizonFor(100), 5000, 'small windows are floored at 5000, never shrink below it');
+    assert.strictEqual(fold.keyHorizonFor(undefined), 5000, 'an unknown cap falls back to the default-config horizon');
+  });
+  // BLOCKING 1. SEEN_KEY_CAP/READ_KEY_CAP used to be a hard-coded 5000 while
+  // config.maxPlumbingEvents (the window that feeds this fold) is
+  // user-configurable and unclamped. Raise the window above the fixed
+  // horizon and a re-fold of the SAME window evicts its own dedupe keys
+  // before the repeat, double-counting every request and read in it,
+  // permanently and compounding every sync (measured: window 8000 against
+  // the old fixed 5000-key horizon, folded twice, inflated totals by 38%).
+  // The horizon must scale with the effective window instead.
+  check('ledger-fold: BLOCKING 1 -- a window bigger than the old fixed cap folds twice without double-counting', () => {
+    const store = require('../lib/ledger-store');
+    const fold = require('../lib/ledger-fold');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const plumbingCap = 8000;
+    const n = 6000; // bigger than the pre-fix fixed 5000-key horizon
+    assert.ok(n > fold.LIMITS.SEEN_KEY_CAP, 'the scenario must exceed the pre-fix fixed cap to reproduce the bug');
+    const window = [];
+    for (let i = 0; i < n; i++) {
+      const ts = new Date(T0 + i * 1000).toISOString();
+      window.push({ kind: 'usage', ts, session: 's' + i, messageId: 'm' + i, model: 'claude-opus-4-6', usage: u });
+      window.push({ kind: 'read', ts, session: 's' + i, toolUseId: 'tu' + i, file: '/r/f' + i + '.js' });
+    }
+
+    const first = store.foldProjectLedger(null, window, plumbingCap);
+    assert.strictEqual(first.requests, n, 'every request in the window is counted the first pass');
+    assert.strictEqual(first.reads.first, n, 'every read in the window is counted the first pass');
+
+    // Re-folding the SAME window (a re-sync before anything new happened) is
+    // exactly the failure the reviewer measured with the old fixed horizon.
+    const second = store.foldProjectLedger(first, window, plumbingCap);
+    assert.strictEqual(second.requests, n, 'requests must not double-count on a repeat fold of a raised window');
+    assert.strictEqual(second.volume, first.volume, 'volume must not double-count on a repeat fold of a raised window');
+    assert.deepStrictEqual(second.reads, first.reads, 'reads must not double-count on a repeat fold of a raised window');
+  });
+  // BLOCKING 2. Pre-fix ledger.json files on real machines have nonzero
+  // totals but empty seenKeys/readKeys (dedupe evidence was never
+  // persisted before this fix) and no version field. Folding onto one of
+  // those re-adds the whole current window on top of the old total --
+  // measured +100% one-time over-count, permanent because it's baked into
+  // the persisted number. Such a ledger must be discarded and rebuilt from
+  // zero, not folded onto.
+  check('ledger-fold: BLOCKING 2 -- an un-versioned ledger with totals but no seenKeys resets to zero', () => {
+    const store = require('../lib/ledger-store');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const window = [];
+    for (let i = 0; i < 10; i++) {
+      window.push({ kind: 'usage', ts: new Date(T0 + i * 1000).toISOString(), session: 's' + i,
+        messageId: 'm' + i, model: 'claude-opus-4-6', usage: u });
+    }
+    // Exactly the shape a real pre-fix ledger.json has: nonzero totals from
+    // real usage, but no version field and no dedupe evidence.
+    const preFix = {
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sessions: 4, requests: 500, volume: 900000, inCost: 1.2, outCost: 0.4,
+      reads: { first: 50, sameSession: 20, crossSession: 5 },
+      hotPaths: [], seenKeys: [], readKeys: [], sessionIds: [], fileReaders: {},
+    };
+    const migrated = store.foldProjectLedger(preFix, window);
+    const fresh = store.foldProjectLedger(null, window);
+    assert.deepStrictEqual(migrated, Object.assign({}, fresh, { updatedAt: migrated.updatedAt }),
+      'an un-versioned ledger with totals but no evidence must fold exactly like a fresh (null) ledger');
+    assert.strictEqual(migrated.requests, window.length, 'the old poisoned totals are discarded, not carried forward');
+    assert.strictEqual(migrated.version, 4, 'the reset ledger is stamped with the current version');
+  });
+  check('ledger-fold: BLOCKING 2 -- a current-version ledger round-trips untouched (no reset)', () => {
+    const store = require('../lib/ledger-store');
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const window = [
+      { kind: 'usage', ts: new Date(T0).toISOString(), session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+    ];
+    const built = store.foldProjectLedger(null, window);
+    assert.strictEqual(built.version, 4, 'every fold stamps the current version');
+    // Round-trip through JSON (as it would through disk) and fold the SAME
+    // window again: real dedupe evidence plus the current version must
+    // dedupe, not reset, unlike the unmigrated case above.
+    const reloaded = JSON.parse(JSON.stringify(built));
+    const refolded = store.foldProjectLedger(reloaded, window);
+    assert.strictEqual(refolded.requests, 1, 'a versioned ledger with real evidence dedupes instead of resetting');
+    assert.strictEqual(refolded.version, 4);
+  });
+  // H1 (BLOCKER, fix round 1). The producer (this fold, fed by
+  // lib/adapters/claude-code.js) used to key fileReaders/hotPaths by the read
+  // event's VERBATIM file -- an ABSOLUTE path -- while every consumer looks
+  // the path up REPO-RELATIVE (lib/recall.js's tiering via the PreToolUse
+  // hook, lib/recall-store.js's warm() joining projectPath + hp.file). The
+  // two sides never agreed, so tierFor() returned null for every real read
+  // and the whole recall layer was inert on real data. Normalization happens
+  // HERE, on the producer side, and only at the per-project ledger write
+  // boundary -- the events themselves keep their absolute paths.
+  check('ledger-fold: H1 -- an absolute-path read event keys fileReaders repo-relative', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-relkey-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const T = t => new Date(Date.parse('2026-07-28T10:00:00.000Z') + t * 1000).toISOString();
+    // Exactly the shape lib/adapters/claude-code.js emits for a Read.
+    const events = [
+      { kind: 'read', ts: T(0), session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
+      { kind: 'read', ts: T(1), session: 'b', toolUseId: 'tu2', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
+      // Outside the project entirely: never a key, never counted.
+      { kind: 'read', ts: T(2), session: 'a', toolUseId: 'tu3', file: path.join(ROOT, 'elsewhere', 'y.js'), tool: 'Read' },
+    ];
+    const led = store.foldProjectLedger(null, events, undefined, proj);
+    assert.deepStrictEqual(Object.keys(led.fileReaders), ['src/x.js'], 'fileReaders must be keyed repo-relative, and only for in-project files');
+    assert.strictEqual(led.hotPaths[0].file, 'src/x.js', 'the hot set carries the same relative key warm() will join onto projectPath');
+    assert.deepStrictEqual(led.reads, { first: 1, sameSession: 0, crossSession: 1 }, 'the out-of-project read is ignored entirely');
+    // updateLedger is the production entry point and already knows the
+    // project path -- it must thread it through on its own.
+    store.updateLedger(proj, events, {});
+    assert.deepStrictEqual(Object.keys(store.readLedger(proj).fileReaders), ['src/x.js'], 'updateLedger did not thread projectPath into the fold');
+  });
+  check('ledger-fold: H1 -- a pre-v3 ledger keyed by absolute paths drops the old keys without mixing shapes', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-v2-mix-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    // A v2 ledger with REAL dedupe evidence (so the pre-existing unmigrated
+    // rule would happily fold onto it) but absolute fileReaders keys.
+    const prev = {
+      version: 2, updatedAt: '2026-01-01T00:00:00.000Z',
+      sessions: 2, requests: 10, volume: 1000, inCost: 0, outCost: 0,
+      reads: { first: 3, sameSession: 1, crossSession: 1 },
+      hotPaths: [{ file: '/abs/src/x.js', readers: 2, reads: 4 }],
+      seenKeys: ['k1'], readKeys: ['r1'], sessionIds: ['a'],
+      fileReaders: { '/abs/src/x.js': { sessions: ['a', 'b'], reads: 4, lastTs: 't', firstTs: 't', firstSession: 'a' } },
+    };
+    const events = [
+      { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
+    ];
+    const next = store.foldProjectLedger(prev, events, undefined, proj);
+    assert.strictEqual(next.version, 4, 'the key-shape change gets its own schema version');
+    assert.deepStrictEqual(Object.keys(next.fileReaders), ['src/x.js'], 'no absolute key may survive alongside the new relative ones');
+    // MEDIUM (fix round 3): this used to reset requests/volume/cost to zero
+    // right alongside the key-shaped fields -- exactly the regression the
+    // module header warns against ("volume can go DOWN after more work").
+    // Only fileReaders/readKeys are key-shaped; requests/volume/etc. are
+    // real evidence-backed totals (this ledger has seenKeys) and must
+    // survive untouched. No new request event is in this fold's window, so
+    // requests stays exactly the old total.
+    assert.strictEqual(next.requests, 10, 'a v2->v3 migration preserves totals, it does not discard them');
+    assert.strictEqual(next.volume, 1000, 'volume must survive the key-shape migration');
+    assert.strictEqual(next.sessions, 2, 'the session total must survive the key-shape migration');
+  });
+  // MEDIUM (fix round 3). isPreRelativeKeys used to trigger a FULL reset
+  // (p = {}) of the entire accumulator -- not just the read-shaped fields
+  // whose key format actually changed. Measured on a real v2 ledger: 900
+  // requests / 54M volume / accumulated cost zeroed by an upgrade that
+  // touched nothing but the fileReaders key shape. That is exactly the
+  // failure this module's own header exists to prevent. Fix: only
+  // fileReaders/hotPaths/readKeys (the fields keyed by the old absolute
+  // path shape, or existing purely to dedupe against them) are cleared;
+  // requests/volume/inCost/outCost/sessions/sessionIds/seenKeys, AND
+  // reads.first/sameSession/crossSession, are preserved -- the counters are
+  // cumulative totals under the exact same never-goes-backwards invariant
+  // as requests/volume, so zeroing them would be the identical regression
+  // for a different field.
+  check('ledger-fold: MEDIUM -- a v2 ledger with real evidence migrates to v3 with totals intact and read-shaped fields empty', () => {
+    const store = require('../lib/ledger-store');
+    const prev = {
+      version: 2, updatedAt: '2026-01-01T00:00:00.000Z',
+      sessions: 4, requests: 900, volume: 54000000, inCost: 12.5, outCost: 3.1,
+      reads: { first: 300, sameSession: 400, crossSession: 200 },
+      hotPaths: [{ file: '/abs/src/hot.js', readers: 3, reads: 50 }],
+      seenKeys: ['k1', 'k2'], readKeys: ['r1', 'r2'], sessionIds: ['a', 'b'],
+      fileReaders: {
+        '/abs/src/hot.js': { sessions: ['a', 'b', 'c'], reads: 50, lastTs: 't', firstTs: 't', firstSession: 'a' },
+      },
+    };
+    // No events at all this pass -- isolates the migration itself from any
+    // newly-folded activity.
+    const next = store.foldProjectLedger(prev, []);
+    assert.strictEqual(next.version, 4, 'stamped with the current version');
+    assert.strictEqual(next.requests, 900, 'requests must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.volume, 54000000, 'volume must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.inCost, 12.5, 'inCost must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.outCost, 3.1, 'outCost must not be zeroed by the key-shape migration');
+    assert.strictEqual(next.sessions, 4, 'the session total must not be zeroed by the key-shape migration');
+    assert.deepStrictEqual(next.sessionIds, ['a', 'b'], 'sessionIds evidence must survive the key-shape migration');
+    assert.deepStrictEqual(next.reads, { first: 300, sameSession: 400, crossSession: 200 },
+      'read TALLIES are cumulative totals, not key-shaped evidence -- they must survive intact');
+    assert.deepStrictEqual(next.fileReaders, {}, 'fileReaders is key-shaped (absolute under v2) and must be cleared');
+    assert.deepStrictEqual(next.hotPaths, [], 'hotPaths is derived from fileReaders and must be empty too');
+  });
+  // A pre-v2 ledger (no seenKeys at all -- isUnmigrated) must still fully
+  // reset: unlike the v2 case above, there is no dedupe evidence to trust,
+  // so the existing totals could already double-count the current window.
+  // (Covered end-to-end by the "BLOCKING 2" un-versioned-ledger test above;
+  // this check pins the same rule specifically alongside the new partial
+  // migration, so the two paths can never silently converge.)
+  check('ledger-fold: MEDIUM -- a pre-v2 ledger (no seenKeys) still fully resets, unlike a real v2 ledger', () => {
+    const store = require('../lib/ledger-store');
+    const prev = {
+      // No version field at all -- exactly like the real pre-fix ledgers on
+      // disk (see BLOCKING 2 above).
+      sessions: 4, requests: 900, volume: 54000000, inCost: 12.5, outCost: 3.1,
+      reads: { first: 300, sameSession: 400, crossSession: 200 },
+      hotPaths: [{ file: '/abs/src/hot.js', readers: 3, reads: 50 }],
+      seenKeys: [], readKeys: [], sessionIds: ['a', 'b'],
+      fileReaders: {
+        '/abs/src/hot.js': { sessions: ['a', 'b', 'c'], reads: 50, lastTs: 't', firstTs: 't', firstSession: 'a' },
+      },
+    };
+    const next = store.foldProjectLedger(prev, []);
+    assert.strictEqual(next.requests, 0, 'no dedupe evidence at all -- totals are not trustworthy, must fully reset');
+    assert.strictEqual(next.volume, 0);
+    assert.strictEqual(next.sessions, 0);
+    assert.deepStrictEqual(next.reads, { first: 0, sameSession: 0, crossSession: 0 });
+  });
+  // MINOR A. Incremental tiering processes reads pass-by-pass; a path's
+  // reads can arrive across passes with INVERTED timestamps (an earlier
+  // read folded in a later pass than a later read from another session).
+  check('ledger-fold: MINOR A -- ordering guard bounds (but does not eliminate) crossSession inflation', () => {
+    const store = require('../lib/ledger-store');
+    const { classifyReads, tally } = require('../lib/redundancy');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const file = '/r/shared.js';
+    const tA1 = new Date(T0 + 5000).toISOString();  // A's earliest read
+    const tA2 = new Date(T0 + 10000).toISOString(); // A's second read
+    const tB = new Date(T0 + 20000).toISOString();  // B's read, latest ts
+
+    // Chronological order (what a batch classifier sorts on): A@tA1, A@tA2, B@tB.
+    // Process order (what actually happens: B's pass is folded first):
+    //   pass 1: B@tB
+    //   pass 2: A@tA1, A@tA2
+    const passB = [{ kind: 'read', ts: tB, session: 'B', toolUseId: 'b1', file }];
+    const passA = [
+      { kind: 'read', ts: tA1, session: 'A', toolUseId: 'a1', file },
+      { kind: 'read', ts: tA2, session: 'A', toolUseId: 'a2', file },
+    ];
+
+    // Oracle: A@tA1 -> first (nobody has read `file` yet); A@tA2 -> same-session
+    // (only A so far); B@tB -> cross-session (A already has).
+    const oracle = tally(classifyReads(passA.concat(passB), []));
+    assert.deepStrictEqual(oracle, { first: 1, sameSession: 1, crossSession: 1 },
+      'sanity: confirms the oracle answer this scenario is built around');
+
+    const afterB = store.foldProjectLedger(null, passB);
+    assert.deepStrictEqual(afterB.reads, { first: 1, sameSession: 0, crossSession: 0 },
+      'B is the only reader seen so far -- tiers as first');
+
+    const afterA = store.foldProjectLedger(afterB, passA);
+    // Pre-fix (no ordering guard), both A reads would tier against a reader
+    // set that already contained B, giving {first 1, sameSession 0,
+    // crossSession 2} overall -- double the oracle's crossSession. With the
+    // fix: A@tA1 precedes B's recorded firstTs, so it re-tiers as 'first'
+    // (moving firstTs/firstSession back to A@tA1); A@tA2 is not earlier than
+    // the now-updated firstTs, and B is already a recorded reader, so it
+    // still tiers 'crossSession'. Net incremental answer:
+    // { first: 2, sameSession: 0, crossSession: 1 } -- still not the oracle's
+    // { first: 1, sameSession: 1, crossSession: 1 } (the fix trades a
+    // 'sameSession' miscount for a 'first' miscount), but crossSession --
+    // the metric the bug actually inflated -- now matches the oracle exactly
+    // instead of doubling it.
+    assert.deepStrictEqual(afterA.reads, { first: 2, sameSession: 0, crossSession: 1 },
+      'the ordering guard produces the improved-but-imperfect incremental answer');
+    assert.notStrictEqual(afterA.reads.crossSession, 2,
+      'crossSession must no longer be inflated to double the oracle value');
+  });
+  // MINOR C. Differential guard: nothing previously cross-checked this
+  // incremental classifier against the batch oracle in lib/redundancy.js.
+  check('ledger-fold: MINOR C -- differential guard, incremental tiering matches the batch oracle over in-order windows', () => {
+    const store = require('../lib/ledger-store');
+    const { classifyReads, tally } = require('../lib/redundancy');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const projectPath = '/p';
+    const paths = ['/p/a.js', '/p/b.js', '/p/c.js', '/p/d.js', '/p/e.js', '/p/f.js'];
+    // Deterministic session-per-block sequence (no randomness): block 0
+    // establishes 'first' for every path, block 1 repeats the SAME session
+    // ('sameSession'), and blocks 2+ bring in other sessions ('crossSession').
+    const blockSessions = ['s1', 's1', 's2', 's3', 's2', 's1', 's3'];
+    const N = 40;
+    const events = [];
+    for (let i = 0; i < N; i++) {
+      const block = Math.floor(i / paths.length);
+      events.push({
+        kind: 'read',
+        ts: new Date(T0 + i * 1000).toISOString(),
+        session: blockSessions[block % blockSessions.length],
+        toolUseId: 'tu' + i,
+        file: paths[i % paths.length],
+      });
+    }
+    // FINDING 4 (fix round 3): lib/ledger-fold.js's incremental fold drops
+    // out-of-project reads entirely (readKeyFor returns null for them), but
+    // lib/redundancy.js's batch classifier used to count every read
+    // regardless of project membership -- the two sides could only ever
+    // agree on fixtures that happened to be all in-project, like this one
+    // was before this line. An out-of-project read, scoped against the same
+    // projectPath, must now be dropped identically on both sides.
+    const outOfProjectEvent = {
+      kind: 'read', ts: new Date(T0 + N * 1000).toISOString(),
+      session: 's1', toolUseId: 'tu-outside', file: '/elsewhere/z.js',
+    };
+    events.push(outOfProjectEvent);
+
+    // Oracle: one batch classification over every event, scoped to the same
+    // project the incremental fold is scoped to.
+    const oracle = tally(classifyReads(events, [], projectPath));
+    assert.ok(oracle.first > 0 && oracle.sameSession > 0 && oracle.crossSession > 0,
+      'the fixture must exercise all three tiers for the differential check to be meaningful');
+
+    // Incremental: the SAME events, split into 4 sequential (chronologically
+    // non-overlapping, in-order) windows, folded one after another -- this
+    // is what real scanning does: each dirty pass folds whatever the
+    // sliding window currently holds. The out-of-project read lands in the
+    // last window, in order, same as the oracle sees it.
+    const WINDOWS = 4;
+    const perWindow = N / WINDOWS;
+    let led = null;
+    for (let w = 0; w < WINDOWS; w++) {
+      const slice = events.slice(w * perWindow, (w + 1) * perWindow);
+      const window = w === WINDOWS - 1 ? slice.concat(outOfProjectEvent) : slice;
+      led = store.foldProjectLedger(led, window, undefined, projectPath);
+    }
+
+    assert.deepStrictEqual(led.reads, oracle,
+      'incremental tiering across sequential in-order windows must match the batch oracle exactly, including agreement on the out-of-project read');
+  });
+
+  check('skeleton-strip: keeps signatures, drops bodies, refuses minified input', () => {
+    const { strip } = require('../lib/skeleton-strip');
+    const src = [
+      "'use strict';",
+      "const fs = require('fs');",
+      'function outer(a, b) {',
+      '  const x = a + b;',
+      '  if (x) {',
+      '    deep();',
+      '  }',
+      '  return x;',
+      '}',
+      'module.exports = { outer };',
+    ].join('\n');
+    const out = strip(src, '.js');
+    assert.ok(out.ok);
+    assert.ok(out.text.includes('function outer(a, b) {'), 'signature survives');
+    assert.ok(out.text.includes("const fs = require('fs');"), 'imports survive');
+    assert.ok(!out.text.includes('deep()'), 'nested body dropped');
+    assert.ok(out.text.split('\n').length < src.split('\n').length, 'smaller');
+    // Elided brace blocks must stay balanced -- the marker replaces the
+    // body, but the block's own closing brace still has to appear
+    // somewhere in the output, or every skeletonized function looks like
+    // "function f() {  ..." with no matching "}".
+    const opens = (out.text.match(/\{/g) || []).length;
+    const closes = (out.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens, closes, 'braces stay balanced after eliding a block');
+    // python: indentation depth, no braces
+    const py = ['import os', 'def f(a):', '    x = a', '    return x', 'class C:', '    def m(self):', '        pass'].join('\n');
+    const pout = strip(py, '.py');
+    assert.ok(pout.ok && pout.text.includes('def f(a):') && !pout.text.includes('x = a'));
+    // minified refusal
+    assert.strictEqual(strip('x'.repeat(3000), '.js').ok, false);
+  });
+
+  check('skeleton-strip: brace counting ignores comments/strings/templates, fails closed on real mismatches', () => {
+    // Regression coverage for the 59be87a incident: braceDelta() used to
+    // count every literal `{`/`}` character in a line, including ones
+    // living inside comments, strings, or template literals. That only cost
+    // compression quality until 59be87a added the openBraces stack -- after
+    // that, a single miscounted line corrupted every synthesized closing
+    // brace after it (a stray `}` landing mid-body, one real function never
+    // getting its own closer). lib/skeleton-scan.js fixes the counting;
+    // strip() also fails closed (no synthesized closers at all) if its
+    // whole-file dry run ever sees a negative depth or a real mismatch.
+    const { strip } = require('../lib/skeleton-strip');
+    const { createScanState, scanLineBraces } = require('../lib/skeleton-scan');
+
+    // Scans SOURCE text (not strip()'s output -- a collapsed/truncated
+    // multi-line comment in the OUTPUT can leave a still-open block-comment
+    // marker, which would make a naive re-scan of the output unreliable).
+    // Used below only as a sanity check that a fixture is ordinary, legal,
+    // balanced code -- i.e. that the fail-closed valve should NOT trip for
+    // it.
+    function realBalance(text) {
+      let state = createScanState();
+      let depth = 0;
+      let mismatch = false;
+      for (const line of text.split('\n')) {
+        const r = scanLineBraces(line, state);
+        state = r.state;
+        depth += r.opens - r.closes;
+        if (r.mismatch) mismatch = true;
+      }
+      return { depth, mismatch };
+    }
+
+    // 1. The exact regression counterexample: a brace-shaped character
+    // living inside a `//` comment. Comments are still kept verbatim in the
+    // output -- the fix is about not MISCOUNTING their contents for depth
+    // bookkeeping, not about deleting characters from them -- so the stray
+    // `{` itself still appears once in the output with no partner; that is
+    // the ONLY imbalance a correct fix can leave behind.
+    const counterexample = [
+      'function outer() {',
+      '  // note: reject inputs starting with {',
+      '  const t = 5;',
+      '  return t;',
+      '}',
+      'function afterwards() {',
+      '  return 42;',
+      '}',
+    ].join('\n');
+    const realCounter = realBalance(counterexample);
+    assert.strictEqual(realCounter.mismatch, false, 'fixture is ordinary balanced code');
+    assert.strictEqual(realCounter.depth, 0, 'fixture is ordinary balanced code');
+    const out1 = strip(counterexample, '.js');
+    const expected1 = [
+      'function outer() {',
+      '  // note: reject inputs starting with {  …',
+      '}',
+      'function afterwards() {  …',
+      '}',
+    ].join('\n');
+    assert.strictEqual(out1.text, expected1,
+      'outer closes cleanly right after the comment run; afterwards is untouched by the miscount');
+    const opens1 = (out1.text.match(/\{/g) || []).length;
+    const closes1 = (out1.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens1 - closes1, 1,
+      'the only unmatched brace is the literal one inside the kept comment text -- both real function bodies are fully balanced');
+    assert.ok(out1.text.split('\n').some(l => /^function afterwards\(\)/.test(l)),
+      "'function afterwards()' survives as its own clean line, not glued to a misplaced brace");
+
+    // 2. A string literal containing a stray `}` must not be mistaken for a
+    // real closing brace.
+    const stringCase = [
+      'function outer() {',
+      '  const s = "abc } def";',
+      '  return s;',
+      '}',
+      'function afterwards() {',
+      '  return 1;',
+      '}',
+    ].join('\n');
+    const out2 = strip(stringCase, '.js');
+    const opens2 = (out2.text.match(/\{/g) || []).length;
+    const closes2 = (out2.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens2, closes2, 'string-literal brace never reaches the counter, both functions balance exactly');
+    assert.ok(!out2.text.includes('abc } def'), 'the string body is still ordinary collapsed body content');
+
+    // 3. A block comment spanning multiple lines, with a brace inside it
+    // that has no partner WITHIN the comment (an evenly-balanced dummy pair
+    // like `{ braces }` would net to zero even under the OLD naive counter,
+    // so it wouldn't actually distinguish old vs. fixed behaviour here --
+    // this one is deliberately lopsided, the same shape as the regression).
+    const blockCommentCase = [
+      'function outer() {',
+      '  /* a comment',
+      '     with a stray {',
+      '     unmatched brace */',
+      '  const t = 1;',
+      '  return t;',
+      '}',
+      'function afterwards() {',
+      '  return 2;',
+      '}',
+    ].join('\n');
+    const out3 = strip(blockCommentCase, '.js');
+    const opens3 = (out3.text.match(/\{/g) || []).length;
+    const closes3 = (out3.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens3, closes3, 'the stray brace inside a multi-line block comment never reaches the counter');
+    assert.ok(!out3.text.includes('unmatched brace'), 'the interior of the block comment is still ordinary collapsed body content');
+
+    // 4. A template literal with `${...}` interpolation -- this codebase's
+    // dashboard files are one giant template literal, so this case matters
+    // in practice. The braces INSIDE the interpolation (a real object
+    // literal) must still count; the `${`/`}` delimiters themselves must
+    // not be mistaken for a brace pair.
+    const templateCase = [
+      'function outer() {',
+      '  const html = `<div>${getValue({a:1})}</div>`;',
+      '  return html;',
+      '}',
+      'function afterwards() {',
+      '  return 3;',
+      '}',
+    ].join('\n');
+    const out4 = strip(templateCase, '.js');
+    const opens4 = (out4.text.match(/\{/g) || []).length;
+    const closes4 = (out4.text.match(/\}/g) || []).length;
+    assert.strictEqual(opens4, closes4, 'template-literal interpolation braces are counted correctly and net to zero');
+
+    // 5. Fail-closed valve: genuinely unbalanced input (a real stray `}`
+    // with nothing open to close) must not produce confidently-wrong
+    // synthesized structure -- strip() falls back to the pre-balancer
+    // behaviour instead (no synthetic `}` insertion at all).
+    const malformed = [
+      'function outer() {',
+      '  return 1;',
+      '}',
+      '}', // stray -- one closing brace too many
+      'function afterwards() {',
+      '  return 2;',
+      '}',
+    ].join('\n');
+    const out5 = strip(malformed, '.js');
+    const expected5 = [
+      'function outer() {  …',
+      '}',
+      'function afterwards() {  …',
+    ].join('\n');
+    assert.strictEqual(out5.text, expected5,
+      'no synthetic closing brace is fabricated once the file has a real, unrecoverable mismatch');
+  });
+
+  check('skeleton-scan: a bare `#` is never a comment starter (ES2022 private fields must not corrupt brace depth)', () => {
+    // FIX ROUND 1, FINDING 1 (HIGH, confirmed silent corruption): scanLineBraces
+    // used to treat a bare '#' outside strings/comments as a line-comment
+    // starter. That is never correct for any language that actually reaches
+    // it -- this module is only invoked from lib/skeleton-strip.js's
+    // brace-mode path (JS/TS/Go); .py/.yml go through the separate
+    // indentMode branch and never call scanLineBraces at all. For ES2022
+    // private class fields/methods (`#count`, `#increment() {`), the old
+    // rule swallowed the method's own `{` as "inside a comment", so its
+    // depthBefore bookkeeping never saw the open brace, and the method's
+    // real closing `}` popped the CLASS's frame instead -- corrupting depth
+    // for every line after it and leaving a later, unrelated function
+    // permanently unclosed while still reporting ok:true (servable).
+    const { strip } = require('../lib/skeleton-strip');
+    const { createScanState, scanLineBraces } = require('../lib/skeleton-scan');
+
+    const fixture = [
+      'class Counter {',
+      '  #count = 0;',
+      '  #increment() {',
+      '    this.#count++;',
+      '  }',
+      '  get value() {',
+      '    return this.#count;',
+      '  }',
+      '}',
+      'function afterwards() {',
+      '  return 42;',
+      '}',
+    ].join('\n');
+
+    const out = strip(fixture, '.js');
+
+    // Pin via the module's own scanner: re-scanning strip()'s OUTPUT must
+    // find net brace depth 0 and no mismatch -- i.e. the skeleton itself is
+    // structurally balanced, not just "the same number of { and } chars".
+    let state = createScanState();
+    let depth = 0;
+    let mismatch = false;
+    for (const line of out.text.split('\n')) {
+      const r = scanLineBraces(line, state);
+      state = r.state;
+      depth += r.opens - r.closes;
+      if (r.mismatch) mismatch = true;
+    }
+    assert.strictEqual(mismatch, false, `skeleton output has a real brace mismatch:\n${out.text}`);
+    assert.strictEqual(depth, 0, `skeleton output nets to non-zero brace depth:\n${out.text}`);
+
+    // And the concrete regression: 'function afterwards()' must survive with
+    // its own closing brace, not be swallowed or left permanently unclosed.
+    const lines = out.text.split('\n');
+    const afterIdx = lines.findIndex(l => /^function afterwards\(\)/.test(l));
+    assert.ok(afterIdx !== -1, "'function afterwards()' must appear in the output");
+    assert.ok(lines.slice(afterIdx).some(l => l.trim() === '}'),
+      "'function afterwards()' must get its own closing brace, not run unclosed to EOF");
+  });
+
+  await check('skeleton: skeletonize compresses source and reports its engine', async () => {
+    const { skeletonize, estimateTokens } = require('../lib/skeleton');
+    const src = 'export function add(a: number, b: number): number {\n  const s = a + b;\n  return s;\n}\n' +
+      'export interface Row { id: string; }\n' + 'function helper() {\n  inner();\n}\n'.repeat(20);
+    const out = await skeletonize('/repo/x.ts', src);
+    assert.ok(out.ok);
+    assert.ok(['tree-sitter', 'strip'].includes(out.engine));
+    assert.ok(out.text.includes('add(a: number, b: number)'), 'signature survives');
+    assert.ok(!out.text.includes('inner();'), 'bodies gone');
+    assert.ok(out.tokens < estimateTokens(src) / 2.25, 'clears the compression floor on this fixture');
+    assert.strictEqual(estimateTokens('abcd'.repeat(100)), 100);
+  });
+
+  await check('recall-store: round-trips entries, redacts secrets, warms the hot set', async () => {
+    const store = require('../lib/recall-store');
+    const proj = path.join(ROOT, 'recall-proj'); fs.mkdirSync(proj, { recursive: true });
+    // FIX ROUND 1, FINDING 5: realistic dash-bearing key shape (sk-live-...,
+    // matching how real OpenAI keys like sk-proj-... actually look).
+    // lib/redact.js's openai-key pattern now allows internal dashes/
+    // underscores specifically so this realistic shape is caught -- this
+    // fixture was previously swapped for a dash-free variant that only
+    // exercised the OLD, narrower pattern; restored now that the gap is
+    // fixed. Three small functions (not just one) so the skeleton clears
+    // skeletonize()'s own compression floor (FIX ROUND 1, FINDING 3 now
+    // enforces that warm() only stores when ok:true) -- a single
+    // one-liner body compresses too little on its own to pass that floor.
+    fs.writeFileSync(path.join(proj, 'a.js'), [
+      'const KEY = "sk-live-1234567890abcdef";',
+      'function f() {',
+      '  body();',
+      '  moreBody();',
+      '  evenMoreBody();',
+      '}',
+      'function g() {',
+      '  helper();',
+      '  helper();',
+      '  helper();',
+      '}',
+      'function h() {',
+      '  doStuff();',
+      '  doStuff();',
+      '  doStuff();',
+      '}',
+      '',
+    ].join('\n'));
+    const n = await store.warm(proj, [{ file: 'a.js' }], util.getConfig());
+    assert.strictEqual(n, 1);
+    const e = store.get(proj, 'a.js');
+    assert.ok(e && e.contentHash && e.skeletonTokens > 0);
+    assert.ok(!e.skeleton.includes('sk-live'), 'secret redacted from stored skeleton');
+    assert.strictEqual(store.get(proj, 'missing.js'), null);
+    store.bumpRejection(proj, 'a.js');
+    assert.strictEqual(store.get(proj, 'a.js').rejections, 1);
+    // A second warm() with unchanged content must be a no-op (skip, not
+    // re-write) -- the whole point of the content-hash check.
+    const n2 = await store.warm(proj, [{ file: 'a.js' }], util.getConfig());
+    assert.strictEqual(n2, 0, 'unchanged content is skipped on re-warm');
+  });
+
+  await check('recall-store: warm() skips a file skeletonize() refuses (ok:false), never stores the raw content', async () => {
+    // FIX ROUND 1, FINDING 3 (HIGH): lib/skeleton-strip.js returns
+    // { text: <ORIGINAL UNMODIFIED CONTENT>, ok:false } for degenerate/
+    // binary/minified/poorly-compressing input. warm() used to ignore `ok`
+    // and store that text anyway -- writing whole raw minified/binary files
+    // into .membridge/recall/, a strictly worse exposure surface than a
+    // skeleton. A single very long line trips looksLikeDegenerate's
+    // MAX_LINE_LEN guard, giving ok:false deterministically.
+    const store = require('../lib/recall-store');
+    const proj = path.join(ROOT, 'recall-degenerate-proj'); fs.mkdirSync(proj, { recursive: true });
+    const minified = 'x'.repeat(3000); // single line over MAX_LINE_LEN -> looksDegenerate -> ok:false
+    fs.writeFileSync(path.join(proj, 'bundle.min.js'), minified);
+    const n = await store.warm(proj, [{ file: 'bundle.min.js' }], util.getConfig());
+    assert.strictEqual(n, 0, 'a file skeletonize() refuses must not count as warmed');
+    assert.strictEqual(store.get(proj, 'bundle.min.js'), null, 'nothing is stored for a refused file');
+    // Nothing was ever written for this project at all -- index.json itself
+    // is never created (readIndex() fails open to {} but nothing triggers a
+    // write), which is itself proof no stub entry was left behind.
+    assert.ok(!fs.existsSync(store.indexPath(proj)), 'no index.json is written when every candidate is refused');
+    // MINOR 4 (final whole-branch review): a refusal is no longer silent --
+    // it bumps a persisted per-project counter (separate from index.json)
+    // so lib/diagnostics.js's reject_reasons.no_structure can report a real
+    // figure instead of a hardcoded 0.
+    assert.strictEqual(store.readCounters(proj).noStructure, 1, 'a refused file must bump the no_structure counter');
+    const minified2 = 'y'.repeat(3000);
+    fs.writeFileSync(path.join(proj, 'bundle2.min.js'), minified2);
+    await store.warm(proj, [{ file: 'bundle2.min.js' }], util.getConfig());
+    assert.strictEqual(store.readCounters(proj).noStructure, 2, 'the counter accumulates across separate refused files');
+  });
+
+  await check('recall-store: warm() keeps processing the rest of the hot set when one path\'s write fails', async () => {
+    // FIX ROUND 1, FINDING 4 (MEDIUM): readFileSync and skeletonize are each
+    // wrapped in try/catch-continue so one bad file can never abort the
+    // whole warm pass -- but the put() call after them used to be
+    // unguarded, so a write failure (disk full, permissions, a path
+    // collision) rejected warm()'s whole promise and abandoned every
+    // remaining hot path. Simulated here by pre-creating a DIRECTORY at the
+    // exact path put() will try to rename its temp file onto -- the rename
+    // then fails (EISDIR/ENOTDIR), reliably reproducing a write failure
+    // without relying on chmod/root-permission quirks.
+    const store = require('../lib/recall-store');
+    const proj = path.join(ROOT, 'recall-write-fail-proj'); fs.mkdirSync(proj, { recursive: true });
+    fs.writeFileSync(path.join(proj, 'good.js'), 'function good() {\n  doGoodThing();\n}\n');
+    fs.writeFileSync(path.join(proj, 'bad.js'), 'function bad() {\n  doBadThing();\n}\n');
+    // Pre-create a directory at bad.js's computed entry path so put()'s
+    // atomic rename onto it fails.
+    fs.mkdirSync(store.entryPath(proj, 'bad.js'), { recursive: true });
+    const n = await store.warm(proj, [{ file: 'good.js' }, { file: 'bad.js' }], util.getConfig());
+    assert.strictEqual(n, 1, 'only the successful write counts, but the pass did not abort');
+    assert.ok(store.get(proj, 'good.js'), 'the path after the failing one is still processed and stored');
+    assert.strictEqual(store.get(proj, 'bad.js'), null, 'the failed write itself never lands a readable entry');
+  });
+
+  check('recall: serve policy — tiers, floors, holdout, rejection learning', () => {
+    const crypto = require('crypto');
+    const recall = require('../lib/recall');
+
+    assert.strictEqual(recall.MIN_CALL_TOKENS, 400);
+    assert.strictEqual(recall.MIN_COMPRESSION, 2.25);
+    assert.strictEqual(recall.HOLDOUT_PCT, 3);
+    assert.strictEqual(recall.HOLDOUT_DAYS, undefined, 'the 14-day holdout window is gone -- holdout is now continuous');
+    assert.strictEqual(recall.ANNOUNCE_TOKENS, 1000);
+    assert.strictEqual(recall.REJECTION_LIMIT, 3);
+
+    // Deterministic holdout bucket, matching recall.js's own algorithm
+    // exactly: first 4 bytes of sha1(sessionId + relPath), as a uint32, % 100.
+    // Scanned rather than hardcoded, per the brief -- a hardcoded pair would
+    // silently stop testing anything if the hash algorithm ever shifted.
+    const bucketFor = (sid, relPath) =>
+      crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+    let holdoutSid = null;
+    for (let i = 0; i < 100000; i++) {
+      const candidate = `holdout-session-${i}`;
+      if (bucketFor(candidate, 'src/holdout.js') < recall.HOLDOUT_PCT) { holdoutSid = candidate; break; }
+    }
+    assert.ok(holdoutSid, 'must find a (sessionId, path) pair landing in the 3% holdout bucket');
+    const holdoutPath = 'src/holdout.js';
+
+    const base = overrides => Object.assign({
+      projectPath: '/proj',
+      relPath: 'src/file.js',
+      absPath: '/proj/src/file.js',
+      sessionId: 'session-x',
+      toolName: 'Read',
+      offset: null,
+      limit: null,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: {} },
+      storeEntry: null,
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      // FIX ROUND 1, FINDING 2: tracked must be the explicit literal `true`
+      // for decide() to ever consider serving -- every fixture in THIS
+      // block represents a genuinely tracked, unpaused project, so it opts
+      // in explicitly rather than relying on any default.
+      tracked: true,
+    }, overrides);
+
+    // 1. Holdout hit: deterministic bucket < 3 -> never served. No
+    // projectCreatedAt/date field is passed at all -- decide() no longer
+    // accepts one, and the holdout has no notion of a project's age.
+    const holdoutHit = recall.decide({
+      projectPath: '/proj', relPath: holdoutPath, absPath: `/proj/${holdoutPath}`,
+      sessionId: holdoutSid, toolName: 'Read', offset: null, limit: 100,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { [holdoutPath]: { sessions: [holdoutSid], reads: 1, lastTs: 't', firstTs: 't', firstSession: holdoutSid } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      tracked: true,
+    });
+    assert.strictEqual(holdoutHit.serve, false);
+    assert.strictEqual(holdoutHit.reason, 'holdout');
+
+    // 2. PIN (rewrite 2026-07-28): the SAME (sessionId, path) pair, still
+    // refused, no matter what a caller claims about the project's age. The
+    // holdout used to switch off after 14 days (projectCreatedAt tracked
+    // that); it is now continuous, so even a caller passing a stale-looking
+    // `projectCreatedAt` (a field decide() no longer reads at all) must stay
+    // held out -- there is no escape hatch left.
+    const holdoutStillHeldOutRegardlessOfAge = recall.decide({
+      projectPath: '/proj', relPath: holdoutPath, absPath: `/proj/${holdoutPath}`,
+      sessionId: holdoutSid, toolName: 'Read', offset: null, limit: 100,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { [holdoutPath]: { sessions: [holdoutSid], reads: 1, lastTs: 't', firstTs: 't', firstSession: holdoutSid } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+      // Stale field, deliberately still supplied: proves decide() ignores it
+      // rather than merely never being handed it.
+      projectCreatedAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
+      tracked: true,
+    });
+    assert.strictEqual(holdoutStillHeldOutRegardlessOfAge.serve, false, 'holdout must never expire -- it is continuous, not a 14-day window');
+    assert.strictEqual(holdoutStillHeldOutRegardlessOfAge.reason, 'holdout');
+
+    // 3. Tier A: same session already read it, hash matches -> pointer serve.
+    const tierA = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(tierA.serve, true);
+    assert.strictEqual(tierA.tier, 'A');
+    assert.ok(tierA.body.includes('src/file.js') && tierA.body.includes('HASH1'));
+    // PIN (attribution realignment): the decision reports the OPTIMISTIC
+    // figure under avoidedTokensOptimistic, alongside the raw callTokens and
+    // skeletonTokens the fold (a later task) needs to settle the real net.
+    // savedTokens must be gone entirely, not just renamed and left behind.
+    assert.ok(tierA.avoidedTokensOptimistic > 0 && tierA.pct > 0);
+    assert.strictEqual(typeof tierA.callTokens, 'number');
+    assert.strictEqual(typeof tierA.skeletonTokens, 'number');
+    assert.strictEqual(tierA.savedTokens, undefined, 'savedTokens must not survive under its old name');
+
+    // 4. Tier A refused: same session read it, but the file changed since.
+    const tierAMismatch = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH-OLD', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH-NEW' },
+    }));
+    assert.strictEqual(tierAMismatch.serve, false);
+
+    // 5. Tier B: a DIFFERENT session read it before, skeleton fresh, and this
+    // call clears 2.25x compression (1200 / 400 = 3x).
+    const tierB = recall.decide(base({
+      sessionId: 'session-y',
+      limit: 100, // callTokens = 1200
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(tierB.serve, true);
+    assert.strictEqual(tierB.tier, 'B');
+    assert.strictEqual(tierB.callTokens, 1200);
+    assert.strictEqual(tierB.skeletonTokens, 400);
+    assert.strictEqual(tierB.avoidedTokensOptimistic, 1200 - 400);
+    assert.strictEqual(tierB.pct, Math.round((100 * (1200 - 400)) / 1200));
+    assert.strictEqual(tierB.savedTokens, undefined, 'savedTokens must not survive under its old name');
+
+    // 6. Tier B refused: same shape, but compression falls below 2.25x
+    // (1200 / 700 ≈ 1.71x).
+    const tierBBelowFloor = recall.decide(base({
+      sessionId: 'session-y',
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 700, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(tierBBelowFloor.serve, false);
+    assert.strictEqual(tierBBelowFloor.reason, 'below-compression-floor');
+
+    // 7. Refused: the call itself is under the 400-token floor.
+    const underFloor = recall.decide(base({
+      limit: 10, // 10 * 12 = 120 tokens
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(underFloor.serve, false);
+    assert.strictEqual(underFloor.reason, 'below-min-tokens');
+
+    // 8. Refused: this path was already served earlier in the session.
+    const alreadyServed = recall.decide(base({
+      limit: 100,
+      sessionState: { served: { 'src/file.js': 'HASH1' }, interceptions: 1 },
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(alreadyServed.serve, false);
+    assert.strictEqual(alreadyServed.reason, 'already-served');
+
+    // 9. Refused: rejections already at the limit.
+    const rejectionLimited = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 3 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(rejectionLimited.serve, false);
+    assert.strictEqual(rejectionLimited.reason, 'rejection-limit');
+
+    // 10. Tier C: dark by default (first-ever read, no config flag)...
+    const tierCDark = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: {} },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+      config: {},
+    }));
+    assert.strictEqual(tierCDark.serve, false);
+    assert.strictEqual(tierCDark.reason, 'no-tier');
+    // ...and lit once config.recall.tierC is explicitly set.
+    const tierCLit = recall.decide(base({
+      limit: 100,
+      ledger: { fileReaders: {} },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+      config: { recall: { tierC: true } },
+    }));
+    assert.strictEqual(tierCLit.serve, true);
+    assert.strictEqual(tierCLit.tier, 'C');
+
+    // 11. C3 (final whole-branch review): a Grep/Glob interception must
+    // never be answered -- decide() accepted a `toolName` in its input
+    // contract but never read it, so a Grep on a hot file was priced by
+    // estimateCallTokens(null, {size}) as though the WHOLE FILE had been
+    // read, though a grep call would only ever return a few matching lines.
+    // Refused here regardless of tier/floor eligibility: this exact
+    // storeEntry/ledger shape is the same one tierB above proves WOULD
+    // serve for toolName 'Read'.
+    const grepRefused = recall.decide(base({
+      toolName: 'Grep',
+      sessionId: 'session-y',
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(grepRefused.serve, false);
+    assert.strictEqual(grepRefused.reason, 'non-read-tool');
+    const globRefused = recall.decide(base({ toolName: 'Glob', limit: 100 }));
+    assert.strictEqual(globRefused.serve, false);
+    assert.strictEqual(globRefused.reason, 'non-read-tool');
+    // A Read call, same shape otherwise, still serves -- the narrowing must
+    // not have collaterally broken the tool it exists to keep serving.
+    const readStillServes = recall.decide(base({
+      toolName: 'Read',
+      sessionId: 'session-y',
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(readStillServes.serve, true);
+  });
+
+  check('recall: MINOR 1 -- estimateCallTokens and everything downstream of it are whole numbers, never fractional', () => {
+    // A no-limit (full-file) call prices callTokens as fileStat.size / 4
+    // (bytes/4 -- see estimateCallTokens's own header for why bytes, not
+    // chars). Any size not a clean multiple of 4 used to leave a fractional
+    // remainder that survived all the way to the terminal string
+    // ('672.75 tokens'), avoided.tokens, and net_tokens. Math.round at the
+    // estimator boundary is enough: skeletonTokens is already
+    // Math.ceil'd by lib/token-estimate.js's estimateTokens, so once
+    // callTokens is also an integer, every value derived from the two
+    // (avoidedTokensOptimistic = callTokens - skeletonTokens, pct) is too.
+    const recall = require('../lib/recall');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), 673, '2691 / 4 = 672.75, rounds to 673');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2690 }), 673, '2690 / 4 = 672.5, rounds to 673');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2689 }), 672, '2689 / 4 = 672.25, rounds to 672');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 0 }), 0);
+    assert.strictEqual(recall.estimateCallTokens(50, { size: 2691 }), 600, 'a limit-priced call (50*12) is untouched -- always already whole');
+
+    const fractional = recall.decide({
+      projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
+      sessionId: 'session-y', toolName: 'Read', offset: null,
+      limit: null, // no-limit call -- exercises the fractional size/4 branch
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 673, rejections: 0 },
+      fileStat: { size: 2691, hash: 'HASH1' }, // 2691 / 4 = 672.75
+      config: {},
+      tracked: true,
+    });
+    assert.strictEqual(fractional.serve, true);
+    assert.strictEqual(fractional.callTokens, 673, 'callTokens must be rounded, not fractional');
+    assert.strictEqual(Number.isInteger(fractional.avoidedTokensOptimistic), true, 'avoidedTokensOptimistic must be a whole number');
+    assert.strictEqual(fractional.avoidedTokensOptimistic, 623);
+  });
+
+  check('recall: decide() refuses unless tracked is the explicit literal true (fail-closed, never intercepts untracked/paused)', () => {
+    // FIX ROUND 1, FINDING 2 (HIGH): the old gate only refused on an
+    // EXPLICIT `tracked === false`, so an omitted/undefined `tracked` fell
+    // through toward serving. The Global Constraints require recall to
+    // never intercept an untracked or paused project -- the gate must
+    // default toward NOT serving, requiring an explicit affirmative.
+    const recall = require('../lib/recall');
+    const wellFormed = {
+      projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
+      sessionId: 'session-x', toolName: 'Read', offset: null, limit: 100,
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+      config: {},
+    };
+    // Every field here would otherwise clear every later gate (tier A serve)
+    // -- tracked is the ONLY thing withheld, so a serve:true here would mean
+    // the gate is not doing its job.
+    const omitted = recall.decide(wellFormed);
+    assert.strictEqual(omitted.serve, false, 'tracked omitted must never serve');
+    assert.strictEqual(omitted.reason, 'untracked-or-paused');
+
+    const explicitFalse = recall.decide(Object.assign({}, wellFormed, { tracked: false }));
+    assert.strictEqual(explicitFalse.serve, false, 'tracked:false must never serve');
+    assert.strictEqual(explicitFalse.reason, 'untracked-or-paused');
+
+    const truthyButNotTrue = recall.decide(Object.assign({}, wellFormed, { tracked: 1 }));
+    assert.strictEqual(truthyButNotTrue.serve, false, 'a truthy non-boolean tracked must still refuse -- only literal true opts in');
+    assert.strictEqual(truthyButNotTrue.reason, 'untracked-or-paused');
+
+    const explicitTrue = recall.decide(Object.assign({}, wellFormed, { tracked: true }));
+    assert.strictEqual(explicitTrue.serve, true, 'tracked:true with every other gate clear must serve');
+  });
+
+  // --- Task 5: the PreToolUse recall hook (lib/hooks-recall.js) ---
+  // Driven exactly like the Stop hook's own tests: spawn membridge-hook.js as
+  // a child process and feed the payload on stdin (see the `distill:
+  // membridge-hook.js entry behaves like...` test above for the precedent).
+  {
+    const crypto = require('crypto');
+    const recallStoreLib = require('../lib/recall-store');
+    const ledgerStoreLib = require('../lib/ledger-store');
+    const hooksRecall = require('../lib/hooks-recall');
+    const RECALL_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+
+    const recallProj = path.join(ROOT, 'projects', 'recall-hook-proj');
+    fs.mkdirSync(path.join(recallProj, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(recallProj, '.membridge'), { recursive: true });
+    {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [recallProj]: { events: [] } } });
+    }
+
+    const recallHash = content => crypto.createHash('sha1').update(content).digest('hex');
+    const bucketFor = (sid, relPath) => crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+    // The holdout is continuous (spec §7.2, rewritten 2026-07-28) -- there is
+    // no age-based window to be inside or outside of any more. Scan for
+    // session ids that land OUTSIDE the 3% holdout bucket for the "normal
+    // serve" scenarios below — deterministic, exactly like lib/recall.js's
+    // own policy test does, never a flaky pick.
+    const recallLib = require('../lib/recall');
+    const nonHoldoutSession = (relPath, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        if (bucketFor(sid, relPath) >= recallLib.HOLDOUT_PCT) return sid;
+      }
+      throw new Error(`could not find a non-holdout session id for ${relPath}`);
+    };
+
+    const runRecallHook = (payload, env) => spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], {
+      input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const recallPayload = (session, filePath, extra) => ({
+      session_id: session, cwd: recallProj, tool_name: 'Read',
+      tool_input: { file_path: filePath, ...extra },
+    });
+
+    // (a) Tier B serve: a DIFFERENT session already read this path (per the
+    // ledger), the store's skeleton is fresh, and this call clears both the
+    // 400-token and 2.25x floors comfortably.
+    const fileB = path.join(recallProj, 'src', 'shared.js');
+    const contentB = [
+      'const KEY = 1;',
+      'function helperOne() {',
+      '  doWorkOne();',
+      '  doWorkOne();',
+      '  doWorkOne();',
+      '}',
+      'function helperTwo() {',
+      '  doWorkTwo();',
+      '  doWorkTwo();',
+      '  doWorkTwo();',
+      '}',
+      '',
+    ].join('\n');
+    fs.writeFileSync(fileB, contentB);
+    const relB = 'src/shared.js';
+    const hashB = recallHash(contentB);
+    recallStoreLib.put(recallProj, relB, {
+      contentHash: hashB, skeleton: 'SKELETON_TEXT_FOR_B', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(recallProj, {
+      fileReaders: { [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' } },
+    });
+    const sessB = nonHoldoutSession(relB, 'sess-tierb');
+    const outB = runRecallHook(recallPayload(sessB, fileB, { limit: 100 })); // callTokens = 1200
+
+    check('recall hook: tier B serve prints valid deny JSON with the skeleton and the first-interception terminal line', () => {
+      assert.strictEqual(outB.status, 0, outB.stderr);
+      assert.strictEqual(outB.stderr, '', 'hook wrote to stderr');
+      const parsed = JSON.parse(outB.stdout);
+      assert.deepStrictEqual(Object.keys(parsed), ['hookSpecificOutput']);
+      const hso = parsed.hookSpecificOutput;
+      assert.deepStrictEqual(Object.keys(hso).sort(), ['hookEventName', 'permissionDecision', 'permissionDecisionReason']);
+      assert.strictEqual(hso.hookEventName, 'PreToolUse');
+      assert.strictEqual(hso.permissionDecision, 'deny');
+      assert.ok(hso.permissionDecisionReason.includes('SKELETON_TEXT_FOR_B'), 'reason lacks the served skeleton');
+      assert.ok(hso.permissionDecisionReason.includes('answered from MemBridge · avoided 96% of this read (1150 tokens)'), `reason lacks the terminal line: ${hso.permissionDecisionReason}`);
+      assert.ok(!hso.permissionDecisionReason.includes('saved'), 'the word "saved" must never appear in user-facing recall output');
+      assert.ok(hso.permissionDecisionReason.startsWith('answered from MemBridge'), 'terminal line must be the FIRST line');
+    });
+
+    check('recall hook: after serving, sessionState.served/interceptions are updated on disk', () => {
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
+      assert.deepStrictEqual(raw.served, { [relB]: hashB });
+      assert.strictEqual(raw.interceptions, 1);
+    });
+
+    // (e) events.jsonl carries the served row with the exact documented shape.
+    // Fix round 3 (Finding 3): a serve now lands TWO rows -- a pending row
+    // (committed:false) written before the session-state commit, and a
+    // confirmation row (committed:true) written after it succeeds -- so a
+    // state-write failure leaves a detectably-uncommitted row instead of a
+    // phantom one that looks exactly like a real serve (see the
+    // "fix round 3" hook test further down for the failure case itself).
+    check('recall hook: a served pair lands in events.jsonl with the documented shape (pending, then confirmed)', () => {
+      const lines = fs.readFileSync(hooksRecall.eventsPath(recallProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      const mine = lines.filter(l => l.relPath === relB && l.sessionId === sessB);
+      assert.strictEqual(mine.length, 2, 'a serve must leave exactly a pending row and a confirmation row');
+      const [pending, confirmed] = mine;
+      // callTokens/skeletonTokens replace the old savedTokens field: the
+      // served row must carry both raw figures (spec §7.1) so the fold (a
+      // later task) can apply net = callTokens - (skeletonTokens +
+      // followTokens) instead of the old, all-or-nothing savedTokens.
+      assert.deepStrictEqual(Object.keys(pending).sort(), ['callTokens', 'committed', 'holdout', 'relPath', 'sessionId', 'skeletonTokens', 'tier', 'ts']);
+      assert.strictEqual(pending.tier, 'B');
+      assert.strictEqual(pending.callTokens, 1200);
+      assert.strictEqual(pending.skeletonTokens, 50);
+      assert.strictEqual(pending.holdout, false);
+      assert.strictEqual(pending.committed, false, 'the first row is a pending claim, not yet a completed serve');
+      assert.ok(!Number.isNaN(Date.parse(pending.ts)), 'ts is not a valid timestamp');
+      assert.deepStrictEqual(Object.keys(confirmed).sort(), ['committed', 'relPath', 'sessionId', 'ts']);
+      assert.strictEqual(confirmed.committed, true, 'the second row confirms the session-state commit actually succeeded');
+      assert.strictEqual(confirmed.ts, pending.ts, 'the confirmation correlates back to the same attempt');
+    });
+
+    // C3 (final whole-branch review): a Grep interception, driven through
+    // the REAL hook entry point, must step aside silently -- decide()'s new
+    // toolName gate refuses it -- even though this is the exact same
+    // path/ledger/store shape that just served for toolName 'Read' above. A
+    // fresh session id is used so 'already-served' can never be the reason
+    // this steps aside instead.
+    const sessGrep = nonHoldoutSession(relB, 'sess-tierb-grep');
+    const outGrep = runRecallHook({ session_id: sessGrep, cwd: recallProj, tool_name: 'Grep', tool_input: { file_path: fileB, limit: 100 } });
+    check('recall hook: C3 -- a Grep call steps aside silently (decide() refuses non-Read tools), even when the ledger/store would otherwise serve', () => {
+      assert.strictEqual(outGrep.status, 0, outGrep.stderr);
+      assert.strictEqual(outGrep.stdout, '', 'a Grep call must never be answered with a skeleton');
+      const lines = fs.readFileSync(hooksRecall.eventsPath(recallProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      assert.ok(!lines.some(l => l.sessionId === sessGrep), 'a refused Grep call must never write an events.jsonl row');
+    });
+
+    // A second, different path served in the SAME session, past the first
+    // interception and with a modest saving, must stay quiet (body only, no
+    // terminal line) — the announce gate's other half.
+    const fileA2 = path.join(recallProj, 'src', 'again.js');
+    const contentA2 = 'function again() {\n  z();\n  z();\n  z();\n}\n';
+    fs.writeFileSync(fileA2, contentA2);
+    const relA2 = 'src/again.js';
+    const hashA2 = recallHash(contentA2);
+    recallStoreLib.put(recallProj, relA2, {
+      contentHash: hashA2, skeleton: 'SKEL_A2', skeletonTokens: 20, fileTokens: 200, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(recallProj, {
+      fileReaders: {
+        [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' },
+        // sessB itself already read relA2, per the ledger's own evidence -> tier A.
+        [relA2]: { sessions: [sessB], reads: 1, lastTs: 't', firstTs: 't', firstSession: sessB },
+      },
+    });
+    const outA2 = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 })); // 34*12 = 408 tokens, just clears the 400 floor
+
+    check('recall hook: tier A serve past the first interception, with a modest saving, omits the terminal line', () => {
+      assert.strictEqual(outA2.status, 0, outA2.stderr);
+      const reason = JSON.parse(outA2.stdout).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(!reason.includes('answered from MemBridge ·'), `terminal line should not appear on a quiet interception: ${reason}`);
+      assert.ok(reason.startsWith('MemBridge: this session already read'), 'tier A pointer body missing');
+      assert.ok(reason.includes(relA2) && reason.includes(hashA2.slice(0, 8)), 'tier A body lacks path/hash');
+    });
+
+    // (b) The SAME path served earlier this session must never be intercepted twice.
+    const outBAgain = runRecallHook(recallPayload(sessB, fileB, { limit: 100 }));
+    check('recall hook: a path already served this session steps aside on the next identical call', () => {
+      assert.strictEqual(outBAgain.status, 0, outBAgain.stderr);
+      assert.strictEqual(outBAgain.stdout, '', 'already-served path must not be re-intercepted');
+      assert.strictEqual(outBAgain.stderr, '');
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
+      assert.strictEqual(raw.interceptions, 2, 'interceptions should only have grown from the tier A serve above, not this no-op');
+    });
+
+    // (c) Corrupted store entry -> a cache miss, never a crash; step aside.
+    const fileC = path.join(recallProj, 'src', 'corrupt-store.js');
+    fs.writeFileSync(fileC, 'function corrupt() {\n  c();\n  c();\n  c();\n}\n');
+    const relC = 'src/corrupt-store.js';
+    fs.mkdirSync(path.dirname(recallStoreLib.entryPath(recallProj, relC)), { recursive: true });
+    fs.writeFileSync(recallStoreLib.entryPath(recallProj, relC), 'this is { not json');
+    const sessC = nonHoldoutSession(relC, 'sess-corrupt-store');
+    const outC = runRecallHook(recallPayload(sessC, fileC, { limit: 100 }));
+    check('recall hook: a corrupted store entry is a silent step-aside, exit 0', () => {
+      assert.strictEqual(outC.status, 0, outC.stderr);
+      assert.strictEqual(outC.stdout, '');
+      assert.strictEqual(outC.stderr, '');
+    });
+
+    // (c) Target file gone -> nothing to hash, step aside.
+    const missingFile = path.join(recallProj, 'src', 'does-not-exist.js');
+    const sessMissing = nonHoldoutSession('src/does-not-exist.js', 'sess-missing-file');
+    const outMissing = runRecallHook(recallPayload(sessMissing, missingFile, { limit: 100 }));
+    check('recall hook: a target file that no longer exists is a silent step-aside, exit 0', () => {
+      assert.strictEqual(outMissing.status, 0, outMissing.stderr);
+      assert.strictEqual(outMissing.stdout, '');
+      assert.strictEqual(outMissing.stderr, '');
+    });
+
+    // (d) MEMBRIDGE_NO_RECALL=1 steps aside even for a read that would otherwise serve.
+    const sessD = nonHoldoutSession(relB, 'sess-no-recall');
+    const outD = runRecallHook(recallPayload(sessD, fileB, { limit: 100 }), { MEMBRIDGE_NO_RECALL: '1' });
+    check('recall hook: MEMBRIDGE_NO_RECALL=1 steps aside unconditionally', () => {
+      assert.strictEqual(outD.status, 0, outD.stderr);
+      assert.strictEqual(outD.stdout, '');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(recallProj, sessD)), 'no session state should be written under the kill switch');
+    });
+
+    // (f) The file changed on disk since the store's skeleton was built ->
+    // the freshness check must refuse to serve stale content.
+    const fileF = path.join(recallProj, 'src', 'stale.js');
+    const contentFOld = 'function old() {\n  a();\n  a();\n  a();\n}\n';
+    fs.writeFileSync(fileF, contentFOld);
+    const relF = 'src/stale.js';
+    recallStoreLib.put(recallProj, relF, {
+      contentHash: recallHash(contentFOld), skeleton: 'STALE_SKELETON', skeletonTokens: 40, fileTokens: 800, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(recallProj, {
+      fileReaders: {
+        [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' },
+        [relA2]: { sessions: [sessB], reads: 1, lastTs: 't', firstTs: 't', firstSession: sessB },
+        [relF]: { sessions: ['other-session-f'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-f' },
+      },
+    });
+    // The file changes AFTER the store entry was built -- contentHash goes stale.
+    fs.writeFileSync(fileF, 'function fresh() {\n  b();\n  b();\n  b();\n}\nextra();\n');
+    const sessF = nonHoldoutSession(relF, 'sess-stale-hash');
+    const outF = runRecallHook(recallPayload(sessF, fileF, { limit: 100 }));
+    check('recall hook: a stale store entry (file changed since) is never served, even though the tier would otherwise apply', () => {
+      assert.strictEqual(outF.status, 0, outF.stderr);
+      assert.strictEqual(outF.stdout, '', 'a hash mismatch must never serve stale content');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(recallProj, sessF)), 'no session state written for a refused serve');
+    });
+
+    // An untracked project (no state.projects entry, no .membridge) must
+    // never be intercepted, matching the existing isTrackedProject gate.
+    const untrackedDir = path.join(ROOT, 'projects', 'recall-untracked');
+    fs.mkdirSync(untrackedDir, { recursive: true });
+    const untrackedFile = path.join(untrackedDir, 'x.js');
+    fs.writeFileSync(untrackedFile, 'function x() {\n  a();\n  a();\n  a();\n}\n');
+    const outUntracked = runRecallHook({
+      session_id: 'sess-untracked', cwd: untrackedDir, tool_name: 'Read',
+      tool_input: { file_path: untrackedFile, limit: 100 },
+    });
+    check('recall hook: an untracked project is never intercepted', () => {
+      assert.strictEqual(outUntracked.status, 0, outUntracked.stderr);
+      assert.strictEqual(outUntracked.stdout, '');
+    });
+
+    check('recall hook: fails open on garbage/empty/malformed stdin', () => {
+      for (const input of ['not json at all', '', '42', JSON.stringify({ session_id: 'x' }), JSON.stringify([1, 2, 3])]) {
+        const out = spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], { input, encoding: 'utf8', env: { ...process.env } });
+        assert.strictEqual(out.status, 0, `input ${JSON.stringify(input)}: exit ${out.status} (${out.stderr})`);
+        assert.strictEqual(out.stdout, '', `input ${JSON.stringify(input)}: wrote to stdout`);
+        assert.strictEqual(out.stderr, '', `input ${JSON.stringify(input)}: wrote to stderr`);
+      }
+    });
+
+    // The top-level fail-open contract: an injected real exception (mirroring
+    // lib/skeleton.js's MEMBRIDGE_FORCE_ENGINE_FAIL test hook) must still exit
+    // 0 with no output at all -- the outer try/catch in runRecall() is the
+    // last line of defense the Global Constraints require.
+    const outForced = runRecallHook(recallPayload('sess-force-fail', fileB, { limit: 100 }), { MEMBRIDGE_RECALL_FORCE_FAIL: '1' });
+    check('recall hook: an injected internal exception still exits 0 with no stdout/stderr (fail-open contract)', () => {
+      assert.strictEqual(outForced.status, 0, outForced.stderr);
+      assert.strictEqual(outForced.stdout, '', 'a forced failure must never leak to stdout');
+      assert.strictEqual(outForced.stderr, '', 'a forced failure must never leak to stderr either');
+    });
+
+    // --- fix round 1 pins -------------------------------------------------
+    // A tracked, .membridge-carrying project with a fresh store entry, ready
+    // to be driven end to end. Every scenario below gets its own so one
+    // ledger/events file can never bleed into another.
+    const seedRecallProject = (name, relPath, content) => {
+      const proj = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(path.join(proj, path.dirname(relPath)), { recursive: true });
+      fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [proj]: { events: [] } } });
+      fs.writeFileSync(path.join(proj, relPath), content);
+      return proj;
+    };
+    const holdoutSession = (relPath, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        if (bucketFor(sid, relPath) < recallLib.HOLDOUT_PCT) return sid;
+      }
+      throw new Error(`could not find a holdout session id for ${relPath}`);
+    };
+    const bodyContent = name => [
+      `function ${name}One() {`, '  work();', '  work();', '  work();', '}',
+      `function ${name}Two() {`, '  work();', '  work();', '  work();', '}', '',
+    ].join('\n');
+
+    // H1 (BLOCKER): end-to-end producer/consumer agreement. The ledger here is
+    // built the way PRODUCTION builds it -- ledgerStore.updateLedger() over
+    // adapter-shaped read events carrying ABSOLUTE paths -- and the hook must
+    // then serve. Before the fix the fold keyed those events by their absolute
+    // path while the hook looked up 'src/agree.js', so tierFor() returned null
+    // and the recall layer never served a single real read.
+    const e2eRel = 'src/agree.js';
+    const e2eContent = bodyContent('agree');
+    const e2eProj = seedRecallProject('recall-e2e-proj', e2eRel, e2eContent);
+    const e2eFile = path.join(e2eProj, e2eRel);
+    recallStoreLib.put(e2eProj, e2eRel, {
+      contentHash: recallHash(e2eContent), skeleton: 'SKELETON_E2E', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.updateLedger(e2eProj, [
+      { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'other-e2e-1', toolUseId: 'e1', file: e2eFile, tool: 'Read' },
+      { kind: 'read', ts: '2026-07-28T10:00:01.000Z', session: 'other-e2e-2', toolUseId: 'e2', file: e2eFile, tool: 'Read' },
+    ], util.getConfig());
+    const sessE2E = nonHoldoutSession(e2eRel, 'sess-e2e');
+    const outE2E = runRecallHook({ session_id: sessE2E, cwd: e2eProj, tool_name: 'Read', tool_input: { file_path: e2eFile, limit: 100 } });
+    check('recall hook: H1 -- serves a read whose ledger was built from ABSOLUTE-path events (producer and consumer agree)', () => {
+      assert.strictEqual(outE2E.status, 0, outE2E.stderr);
+      assert.ok(outE2E.stdout, 'the hook stepped aside: the ledger the fold wrote does not agree with the path the hook looks up');
+      const reason = JSON.parse(outE2E.stdout).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(reason.includes('SKELETON_E2E'), `expected the cached skeleton in the served body: ${reason}`);
+    });
+
+    // M5: recallStore.get() must be consulted BEFORE the target file is read
+    // and sha1'd -- on a store miss (the common case) that hash is pure waste
+    // (measured 74ms on a 22MB file). Pinned by making the file's CONTENT
+    // unreadable while stat() still succeeds: hashing it would throw and land
+    // a 'hook recall error' line in the log, returning early never touches it.
+    // (A root-run test suite cannot enforce chmod, so this pins on any normal
+    // developer/CI account and passes vacuously as root.)
+    const missRel = 'src/nostore.js';
+    const missProj = seedRecallProject('recall-store-miss-proj', missRel, bodyContent('miss'));
+    const missFile = path.join(missProj, missRel);
+    fs.chmodSync(missFile, 0o000);
+    const logBefore = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
+    const outMiss = runRecallHook({ session_id: nonHoldoutSession(missRel, 'sess-miss'), cwd: missProj, tool_name: 'Read', tool_input: { file_path: missFile, limit: 100 } });
+    const logAfterMiss = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
+    fs.chmodSync(missFile, 0o644);
+    check('recall hook: M5 -- a store miss returns before hashing the target file', () => {
+      assert.strictEqual(outMiss.status, 0, outMiss.stderr);
+      assert.strictEqual(outMiss.stdout, '', 'a store miss must never serve');
+      assert.ok(!logAfterMiss.slice(logBefore.length).includes('hook recall error'),
+        'the hook hashed the file before checking the store: an unreadable file threw instead of being a cheap miss');
+    });
+
+    // L6: a held-out read with NOTHING cached used to append a holdout row
+    // anyway (wouldServe null), biasing the held-out arm with reads that could
+    // never have been served and growing events.jsonl unbounded.
+    const noiseRel = 'src/holdout-noise.js';
+    const noiseProj = seedRecallProject('recall-holdout-noise-proj', noiseRel, bodyContent('noise'));
+    const outNoise = runRecallHook({
+      session_id: holdoutSession(noiseRel, 'sess-holdout-noise'), cwd: noiseProj,
+      tool_name: 'Read', tool_input: { file_path: path.join(noiseProj, noiseRel), limit: 100 },
+    });
+    check('recall hook: L6 -- a held-out read with no cache entry logs nothing at all', () => {
+      assert.strictEqual(outNoise.status, 0, outNoise.stderr);
+      assert.strictEqual(outNoise.stdout, '');
+      assert.ok(!fs.existsSync(hooksRecall.eventsPath(noiseProj)),
+        'a read that could never have been served must not land in the holdout arm');
+    });
+
+    // ...but a held-out read that WOULD have served still logs, with the tier
+    // it would have used -- that comparison is the whole point of the arm.
+    const hoRel = 'src/holdout-real.js';
+    const hoContent = bodyContent('held');
+    const hoProj = seedRecallProject('recall-holdout-real-proj', hoRel, hoContent);
+    recallStoreLib.put(hoProj, hoRel, {
+      contentHash: recallHash(hoContent), skeleton: 'SKEL_HELD', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(hoProj, {
+      version: 3,
+      fileReaders: { [hoRel]: { sessions: ['other-held'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-held' } },
+    });
+    const sessHo = holdoutSession(hoRel, 'sess-holdout-real');
+    const outHo = runRecallHook({ session_id: sessHo, cwd: hoProj, tool_name: 'Read', tool_input: { file_path: path.join(hoProj, hoRel), limit: 100 } });
+    check('recall hook: L6 -- a held-out read that WOULD have served still logs its tier and callTokens', () => {
+      assert.strictEqual(outHo.status, 0, outHo.stderr);
+      assert.strictEqual(outHo.stdout, '', 'a held-out read must never serve');
+      const rows = fs.readFileSync(hooksRecall.eventsPath(hoProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      assert.strictEqual(rows.length, 1);
+      assert.strictEqual(rows[0].holdout, true);
+      assert.strictEqual(rows[0].wouldServe, 'B');
+      // PIN (attribution realignment): the holdout row must also carry
+      // callTokens (limit 100 * 12 tokens/line) so the fold can compare the
+      // held-out arm against the served arm on equal footing.
+      assert.strictEqual(rows[0].callTokens, 1200);
+    });
+
+    // L6: events.jsonl is append-only and otherwise unbounded. Past the cap it
+    // rotates to its most recent half, on a line boundary.
+    const rotRel = 'src/rotate.js';
+    const rotContent = bodyContent('rot');
+    const rotProj = seedRecallProject('recall-rotate-proj', rotRel, rotContent);
+    recallStoreLib.put(rotProj, rotRel, {
+      contentHash: recallHash(rotContent), skeleton: 'SKEL_ROT', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(rotProj, {
+      version: 3,
+      fileReaders: { [rotRel]: { sessions: ['other-rot'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-rot' } },
+    });
+    fs.mkdirSync(hooksRecall.recallDir(rotProj), { recursive: true });
+    const filler = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', callTokens: 401, skeletonTokens: 1, holdout: false }) + '\n';
+    fs.writeFileSync(hooksRecall.eventsPath(rotProj), filler.repeat(Math.ceil((2 * 1024 * 1024) / filler.length) + 100));
+    const sizeBeforeRotate = fs.statSync(hooksRecall.eventsPath(rotProj)).size;
+    const outRot = runRecallHook({ session_id: nonHoldoutSession(rotRel, 'sess-rotate'), cwd: rotProj, tool_name: 'Read', tool_input: { file_path: path.join(rotProj, rotRel), limit: 100 } });
+    check('recall hook: L6 -- an oversized events.jsonl rotates to its most recent half instead of growing forever', () => {
+      assert.strictEqual(outRot.status, 0, outRot.stderr);
+      assert.ok(outRot.stdout, 'the serve itself must still happen');
+      const after = fs.readFileSync(hooksRecall.eventsPath(rotProj), 'utf8');
+      assert.ok(after.length < sizeBeforeRotate * 0.75, `events.jsonl did not rotate (${sizeBeforeRotate} -> ${after.length})`);
+      const rows = after.trim().split('\n');
+      rows.forEach(l => JSON.parse(l)); // every surviving line is whole -- rotation cut on a newline
+      assert.strictEqual(JSON.parse(rows[rows.length - 1]).relPath, rotRel, 'the new row is missing after rotation');
+    });
+
+    // Fix round 3 (FINDING 3, carried): a naive byte-midpoint rotation can
+    // split a pending row from its confirmation -- if the pending row lands
+    // in the dropped head while its confirmation survives in the kept tail,
+    // the fold is left with a stray confirmation and no pending row to
+    // settle it against (lib/ledger-fold-recall-settle.js's groupServeRows
+    // silently drops it: "nothing to settle or retain"). Places a
+    // pending/confirmation pair straddling the naive midpoint -- pending well
+    // before it, confirmation well after -- and asserts rotation keeps them
+    // together (both survive, since the pending row anchors the kept tail
+    // back to include it) rather than orphaning the confirmation.
+    const pairProj = path.join(ROOT, 'projects', 'recall-rotate-pairing-proj');
+    fs.mkdirSync(hooksRecall.recallDir(pairProj), { recursive: true });
+    const pairFillerLine = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', callTokens: 401, skeletonTokens: 1, holdout: false });
+    const pairFillerRow = pairFillerLine + '\n';
+    const pairTotalRows = Math.ceil((2 * 1024 * 1024 * 1.3) / pairFillerRow.length);
+    const pairPendingRow = JSON.stringify({
+      ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-pair', relPath: 'src/paired.js',
+      tier: 'B', callTokens: 999, skeletonTokens: 99, holdout: false, committed: false,
+    }) + '\n';
+    const pairConfirmRow = JSON.stringify({ ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-pair', relPath: 'src/paired.js', committed: true }) + '\n';
+    const pairHeadCount = Math.floor(pairTotalRows * 0.45);   // pending lands well before the naive ~50% cut
+    const pairGapCount = Math.floor(pairTotalRows * 0.15);    // confirmation lands well after it
+    const pairTailCount = pairTotalRows - pairHeadCount - pairGapCount;
+    const pairFile = hooksRecall.eventsPath(pairProj);
+    fs.writeFileSync(pairFile,
+      pairFillerRow.repeat(pairHeadCount) + pairPendingRow + pairFillerRow.repeat(pairGapCount) + pairConfirmRow + pairFillerRow.repeat(pairTailCount));
+    check('recall hook: rotateEvents never orphans a confirmation row by splitting it from its pending row', () => {
+      assert.ok(fs.statSync(pairFile).size > 2 * 1024 * 1024, 'test setup must actually exceed the rotation threshold');
+      hooksRecall.rotateEvents(pairFile);
+      const rows = fs.readFileSync(pairFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+      const hasPending = rows.some(r => r.relPath === 'src/paired.js' && r.committed === false);
+      const hasConfirm = rows.some(r => r.relPath === 'src/paired.js' && r.committed === true);
+      assert.strictEqual(hasConfirm, true, 'the confirmation (placed well past the midpoint) should always survive naively');
+      assert.strictEqual(hasPending, true, 'the pending row must rotate together WITH its confirmation, not be dropped and orphan it');
+    });
+
+    // FLOOR GUARD (fix round 4): pairing safety's retreat can pin `cut` at
+    // exactly 0 -- forced whenever line 0 ITSELF is a still-open pending row
+    // whose confirmation only shows up later in the kept tail. Left alone,
+    // rotation becomes a PERMANENT no-op on that file: the identical
+    // straddling pair sits at the identical position (line 0) on every
+    // future rotation call too, so a file already well past MAX_EVENTS_BYTES
+    // never shrinks. Places the pending row AT LINE 0, its confirmation well
+    // past the naive midpoint (mirroring the pairing test above, just with
+    // the pending row moved to the very front) and asserts the file still
+    // shrinks -- resolved by dropping that one straddling pair TOGETHER
+    // (never orphaning one end without the other) instead of retreating to
+    // protect it.
+    const zeroProj = path.join(ROOT, 'projects', 'recall-rotate-floor-guard-proj');
+    fs.mkdirSync(hooksRecall.recallDir(zeroProj), { recursive: true });
+    const zeroFillerRow = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', callTokens: 401, skeletonTokens: 1, holdout: false }) + '\n';
+    const zeroTotalRows = Math.ceil((2 * 1024 * 1024 * 1.3) / zeroFillerRow.length);
+    const zeroPendingRow = JSON.stringify({
+      ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-zero', relPath: 'src/zero.js',
+      tier: 'B', callTokens: 999, skeletonTokens: 99, holdout: false, committed: false,
+    }) + '\n';
+    const zeroConfirmRow = JSON.stringify({ ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-zero', relPath: 'src/zero.js', committed: true }) + '\n';
+    const zeroGapCount = Math.floor(zeroTotalRows * 0.6);   // confirmation lands well past the naive ~50% cut
+    const zeroTailCount = zeroTotalRows - zeroGapCount;
+    const zeroFile = hooksRecall.eventsPath(zeroProj);
+    fs.writeFileSync(zeroFile, zeroPendingRow + zeroFillerRow.repeat(zeroGapCount) + zeroConfirmRow + zeroFillerRow.repeat(zeroTailCount));
+    const zeroSizeBefore = fs.statSync(zeroFile).size;
+    check('recall hook: hooks-recall-rotate FLOOR GUARD -- a pathological file (straddling pair anchored at line 0) still shrinks, never a permanent no-op', () => {
+      assert.ok(zeroSizeBefore > 2 * 1024 * 1024, 'test setup must actually exceed the rotation threshold');
+      hooksRecall.rotateEvents(zeroFile);
+      const after = fs.readFileSync(zeroFile, 'utf8');
+      assert.ok(after.length < zeroSizeBefore, `the file must shrink even though line 0 is a straddling pending row (${zeroSizeBefore} -> ${after.length})`);
+      const rows = after.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+      const hasPending = rows.some(r => r.relPath === 'src/zero.js' && r.committed === false);
+      const hasConfirm = rows.some(r => r.relPath === 'src/zero.js' && r.committed === true);
+      assert.strictEqual(hasPending, false, 'the offending pair is dropped TOGETHER once keeping it would mean zero progress');
+      assert.strictEqual(hasConfirm, false, 'still never split -- the confirmation goes with its pending row, never orphaned');
+    });
+
+    // L7: saveSessionState used to commit BEFORE the event write, so an
+    // events.jsonl failure marked the path served and burned an interception
+    // for a serve the agent never received -- locking that path out for the
+    // whole session. Reproduced by pre-creating a DIRECTORY at events.jsonl.
+    const l7Rel = 'src/order.js';
+    const l7Content = bodyContent('order');
+    const l7Proj = seedRecallProject('recall-write-order-proj', l7Rel, l7Content);
+    recallStoreLib.put(l7Proj, l7Rel, {
+      contentHash: recallHash(l7Content), skeleton: 'SKEL_ORDER', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(l7Proj, {
+      version: 3,
+      fileReaders: { [l7Rel]: { sessions: ['other-order'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-order' } },
+    });
+    fs.mkdirSync(hooksRecall.eventsPath(l7Proj), { recursive: true }); // appendFileSync -> EISDIR
+    const sessL7 = nonHoldoutSession(l7Rel, 'sess-order');
+    const outL7 = runRecallHook({ session_id: sessL7, cwd: l7Proj, tool_name: 'Read', tool_input: { file_path: path.join(l7Proj, l7Rel), limit: 100 } });
+    check('recall hook: L7 -- a failed event write never marks the path served', () => {
+      assert.strictEqual(outL7.status, 0, outL7.stderr);
+      assert.strictEqual(outL7.stdout, '', 'nothing may be printed when the bookkeeping failed');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(l7Proj, sessL7)),
+        'the path was marked served (and locked out for the session) for a serve the agent never got');
+    });
+
+    // FIX ROUND 3, FINDING 3: the reverse ordering failure from L7. An
+    // events.jsonl write that SUCCEEDS followed by a session-state write
+    // that FAILS used to leave a phantom `holdout:false, savedTokens:N` row
+    // in events.jsonl for a serve the agent never received (stdout is still
+    // correctly suppressed -- the failure is purely in the measurement
+    // data lying about what happened). Reproduced by pre-creating a FILE
+    // (not a directory) at the sessions/ directory path, so
+    // saveSessionState's own fs.mkdirSync(dir, {recursive:true}) throws.
+    const l9Rel = 'src/state-fail.js';
+    const l9Content = bodyContent('statefail');
+    const l9Proj = seedRecallProject('recall-state-write-fail-proj', l9Rel, l9Content);
+    recallStoreLib.put(l9Proj, l9Rel, {
+      contentHash: recallHash(l9Content), skeleton: 'SKEL_STATEFAIL', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(l9Proj, {
+      version: 3,
+      fileReaders: { [l9Rel]: { sessions: ['other-statefail'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-statefail' } },
+    });
+    fs.mkdirSync(hooksRecall.recallDir(l9Proj), { recursive: true });
+    fs.writeFileSync(hooksRecall.sessionsDir(l9Proj), 'not a directory'); // mkdirSync(dir) -> EEXIST
+    const sessL9 = nonHoldoutSession(l9Rel, 'sess-statefail');
+    const outL9 = runRecallHook({ session_id: sessL9, cwd: l9Proj, tool_name: 'Read', tool_input: { file_path: path.join(l9Proj, l9Rel), limit: 100 } });
+    check('recall hook: fix round 3 -- a failed session-state write never leaves a phantom committed-looking event row', () => {
+      assert.strictEqual(outL9.status, 0, outL9.stderr);
+      assert.strictEqual(outL9.stdout, '', 'nothing may be printed when the session-state commit failed');
+      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(l9Proj, sessL9)),
+        'the session state write failed -- no state file should exist');
+      const rows = fs.existsSync(hooksRecall.eventsPath(l9Proj))
+        ? fs.readFileSync(hooksRecall.eventsPath(l9Proj), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+        : [];
+      const mine = rows.filter(r => r.relPath === l9Rel && r.sessionId === sessL9);
+      assert.ok(mine.length > 0, 'the attempted serve must still leave SOME trace in events.jsonl');
+      const confirmed = mine.filter(r => r.committed === true);
+      assert.strictEqual(confirmed.length, 0,
+        'a failed session-state commit must never produce a row that looks like a completed, committed serve');
+      for (const row of mine) {
+        assert.notStrictEqual(row.committed, undefined,
+          'every row for a serve attempt must explicitly say whether it committed -- an unmarked row is indistinguishable from a real serve');
+      }
+    });
+  }
+
+  // L8: the hook is the hot path -- it must never pull a parser into the
+  // process. It used to require all of lib/skeleton.js just for
+  // estimateTokens, leaving that invariant resting on lazy-require luck with
+  // nothing pinning it.
+  check('recall: L8 -- requiring the PreToolUse hook never pulls tree-sitter into the require cache', () => {
+    const script = `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'hooks-recall.js'))});
+      console.log(JSON.stringify(Object.keys(require.cache).filter(k => /tree-sitter/.test(k))));`;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env } });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.deepStrictEqual(JSON.parse(out.stdout.trim()), [], 'the recall hot path loaded a parser at require time');
+  });
+
+  await check('skeleton: sibling dedup only collapses runs whose renders involved an elided body', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    // 30 identical helper functions (elided bodies) mixed with 5 identical
+    // plain top-level calls in the SAME file, so a single skeletonize()
+    // call exercises both sides: the elided-body run must still collapse
+    // (proving dedup still does its job), while the plain duplicate
+    // statements -- never elided -- must all survive individually, not
+    // get folded away just because they happen to be byte-identical.
+    const src = 'function helper() {\n  inner();\n}\n'.repeat(30) + 'doThing();\n'.repeat(5);
+    const out = await skeletonize('/repo/dup.ts', src);
+    assert.strictEqual(out.engine, 'tree-sitter', 'fixture must exercise real tree-sitter parsing for this to be meaningful');
+    assert.ok(out.text.includes('(×29 more identical)'), 'the 30 identical elided-body helpers still collapse');
+    const callOccurrences = (out.text.match(/doThing\(\);/g) || []).length;
+    assert.strictEqual(callOccurrences, 5, 'all 5 identical top-level calls survive individually via tree-sitter');
+    assert.ok(!out.text.includes('(×4 more identical)'), 'no dedup marker for the plain duplicate calls');
+  });
+
+  await check('skeleton: a wasm-less MEMBRIDGE_GRAMMAR_DIR falls back to strip via per-grammar cache memoization (engine itself still initializes)', () => {
+    // NOTE (fix round 2): this used to be labeled a "permanent-fallback
+    // contract test", implying it exercised initEngine()'s engineState=false
+    // catch branch. It does NOT: web-tree-sitter boots its own bundled
+    // runtime regardless of MEMBRIDGE_GRAMMAR_DIR, so Parser.init() still
+    // succeeds here -- only the later per-grammar Language.load() call fails
+    // (no wasm file at this path), which getParserForGrammar memoizes via
+    // cache.set(grammar, null). That's a real, worth-keeping behaviour (a
+    // missing grammar's wasm doesn't get re-attempted on every call either),
+    // just a DIFFERENT one from the engineState=false path -- see the test
+    // below for that. Spawned as a child process because MEMBRIDGE_GRAMMAR_DIR
+    // is read once at require time (a fixed vendoring location for the
+    // process lifetime), so it must be set before lib/skeleton.js is first
+    // required in a fresh process.
+    const emptyGrammarDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-empty-grammars-'));
+    const skeletonPath = path.join(__dirname, '..', 'lib', 'skeleton.js');
+    const script = `
+      process.env.MEMBRIDGE_GRAMMAR_DIR = ${JSON.stringify(emptyGrammarDir)};
+      const skeletonMod = require(${JSON.stringify(skeletonPath)});
+      (async () => {
+        const src = 'function f() {\\n  return 1;\\n}\\n';
+        const a = await skeletonMod.skeletonize('/repo/a.ts', src);
+        const b = await skeletonMod.skeletonize('/repo/b.ts', src);
+        console.log(JSON.stringify({ aEngine: a.engine, bEngine: b.engine, attempts: skeletonMod._initAttempts }));
+      })();
+    `;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, `child process failed: ${out.stderr}`);
+    const result = JSON.parse(out.stdout.trim());
+    assert.strictEqual(result.aEngine, 'strip', 'first call falls back to strip when no grammar wasm can be found');
+    assert.strictEqual(result.bEngine, 'strip', 'second call stays on strip -- the per-grammar null is cached, not re-attempted');
+    assert.strictEqual(result.attempts, 1, 'initEngine() itself still only runs once (memoized regardless of outcome)');
+  });
+
+  await check('skeleton: MEMBRIDGE_FORCE_ENGINE_FAIL proves the engineState=false permanent-fallback path (not just per-grammar memoization)', () => {
+    // The real binding contract from the module docstring: "Any failure to
+    // initialize ... permanently downgrades every future call in this
+    // process to lib/skeleton-strip.js." MEMBRIDGE_FORCE_ENGINE_FAIL is a
+    // test-only hook (see initEngine() in lib/skeleton.js) that makes
+    // initEngine() throw before doing any real work, landing in the catch
+    // branch and setting engineState=false exactly as a genuine wasm/init
+    // failure would. Two skeletonize() calls both returning engine 'strip'
+    // AND the attempt counter staying at 1 proves engineState=false was set
+    // once and never re-evaluated -- the actual permanence contract, as
+    // opposed to the per-grammar cache.set(grammar, null) memoization the
+    // MEMBRIDGE_GRAMMAR_DIR test above exercises. Spawned as a child process
+    // for the same reason as that test: engineState is a module-level
+    // singleton, so this needs a fresh require in a fresh process.
+    const skeletonPath = path.join(__dirname, '..', 'lib', 'skeleton.js');
+    const script = `
+      process.env.MEMBRIDGE_FORCE_ENGINE_FAIL = '1';
+      const skeletonMod = require(${JSON.stringify(skeletonPath)});
+      (async () => {
+        const src = 'function f() {\\n  return 1;\\n}\\n';
+        const a = await skeletonMod.skeletonize('/repo/a.ts', src);
+        const b = await skeletonMod.skeletonize('/repo/b.ts', src);
+        console.log(JSON.stringify({ aEngine: a.engine, bEngine: b.engine, attempts: skeletonMod._initAttempts }));
+      })();
+    `;
+    const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, `child process failed: ${out.stderr}`);
+    const result = JSON.parse(out.stdout.trim());
+    assert.strictEqual(result.aEngine, 'strip', 'first call falls back to strip once engine init is forced to fail');
+    assert.strictEqual(result.bEngine, 'strip', 'second call stays on strip -- engineState=false is permanent for the process');
+    assert.strictEqual(result.attempts, 1, 'init is attempted exactly once across both calls -- proves the false branch is memoized, not retried');
+  });
+
+  // --- Task 6: settling avoided tokens into the ledger (spec §7.1/§7.3) ---
+  // Fix round 2 (revisable settlement): a committed serve used to wait
+  // RECALL_SETTLE_GRACE_MS (5 minutes) before settling at all, so a
+  // same-session follow-up read landing inside the window could be priced
+  // into followTokens up front. Measured against 57,941 real same-session
+  // re-reads, a 5-minute window still missed ~34% of follow-ups (median gap
+  // 1 min, p75 11 min, p90 59 min, p95 154 min) -- each miss permanently
+  // recorded a serve as full avoidance even though the agent went on to
+  // re-pull real content. There is no fixed window that both settles
+  // promptly and waits long enough, so settlement is no longer clock-gated
+  // at all: every confirmed serve settles on the very FIRST fold pass that
+  // sees it (followTokens=0, optimistic full avoidance), and a CORRECTION
+  // pass revises it against later read evidence instead. These tests
+  // therefore drive updateLedger across MULTIPLE passes with real
+  // events.jsonl + a real recall queue, pinning the exact worked example
+  // from the design doc: settle full -> correct to partial -> correct to
+  // net-negative -> idempotent re-fold -> a too-late follow-up is ignored.
+  //
+  // NOTE ON TESTS REMOVED FROM ROUND 1: every "does NOT settle before the
+  // grace window elapses" assertion from fix round 1 (tagged FINDING 1 in
+  // that round) encoded exactly the behavior this round deliberately
+  // removes -- immediate settlement is now correct, waiting is the bug. Those
+  // assertions are gone, not weakened; their replacements below assert the
+  // opposite (settles on pass 1, no wait) and cover the follow-up case with
+  // the correction pass instead. FINDING 3's rejection-gated-on-queue-write
+  // scenario is also restructured: rejections now originate ONLY from
+  // corrections (never from a fresh optimistic settle, which can never be
+  // negative -- see ledger-fold-recall-open-serves.js's classify()), and a
+  // correction's effect is already durably written into ledger.json by the
+  // time the queue is touched, so it can no longer be gated on the queue
+  // rewrite succeeding (see lib/ledger-fold-recall.js's own header for why).
+  // What FINDING 3 still pins -- a failed queue rewrite delays, never loses,
+  // a settled row, at the cost of an accepted one-time over-count on retry
+  // -- is preserved below under its own case.
+  {
+    const ledgerStoreT6 = require('../lib/ledger-store');
+    const ledgerFoldRecall = require('../lib/ledger-fold-recall');
+    const openServesT6 = require('../lib/ledger-fold-recall-open-serves');
+    const recallStoreT6 = require('../lib/recall-store');
+
+    const seedT6Project = name => {
+      const proj = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(path.join(proj, 'src'), { recursive: true });
+      fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [proj]: { events: [] } } });
+      return proj;
+    };
+    // Writes exactly the two-row shape lib/hooks-recall.js's appendEvent
+    // produces for a committed serve: a pending row (full detail) followed
+    // by its confirmation (same ts/sessionId/relPath).
+    const writeServeRows = (proj, ts, sessionId, relPath, tier, callTokens, skeletonTokens) => {
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj)), { recursive: true });
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(proj), jsonl([
+        { ts, sessionId, relPath, tier, callTokens, skeletonTokens, holdout: false, committed: false },
+        { ts, sessionId, relPath, committed: true },
+      ]));
+    };
+    const readEvent = (sessionId, relPath, ts, proj, opts) => ({
+      kind: 'read', ts, session: sessionId, toolUseId: opts.toolUseId,
+      file: path.join(proj, relPath), tool: 'Read', limit: opts.limit || null, offset: null,
+    });
+
+    // === PIN: the exact worked example from the design doc, driven across
+    // four real updateLedger passes over a real events.jsonl. ===
+    const projPin = seedT6Project('t6-pin-worked-example');
+    const relPin = 'src/pin.js';
+    const tsPin = '2026-07-28T10:00:00.000Z';
+    const tPin = Date.parse(tsPin);
+    recallStoreT6.put(projPin, relPin, { contentHash: 'hpin', skeleton: 'SKELPIN', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    writeServeRows(projPin, tsPin, 'sess-pin', relPin, 'B', 4210, 380);
+
+    // pass 1: no follow-up in evidence yet -- settles IMMEDIATELY (no grace
+    // wait) to the full net, classified 'full', no rejection.
+    const requestsBefore = [];
+    const led1 = ledgerStoreT6.updateLedger(projPin, [], util.getConfig(), () => tPin + 10);
+    requestsBefore.push({ requests: led1.requests, volume: led1.volume, sessions: led1.sessions });
+    check('ledger-fold-recall (revisable settlement): a confirmed serve settles on the very FIRST fold pass, no grace wait', () => {
+      assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0);
+      assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(projPin)) || fs.readFileSync(ledgerFoldRecall.eventsPath(projPin), 'utf8') === '',
+        'the settled serve must be consumed out of the queue on this same pass');
+      assert.strictEqual(led1.openServes.length, 1, 'a settled serve leaves exactly one open-serve receipt behind for later correction');
+      assert.strictEqual(led1.openServes[0].classified, 'full');
+    });
+
+    // pass 2 (later): a follow-up read pulling 600 tokens (limit 50 -> 12*50)
+    // is now present in proj.events -- the CORRECTION pass finds the open
+    // serve and revises it down to a partial win.
+    const followUpPin1 = readEvent('sess-pin', relPin, '2026-07-28T10:05:00.000Z', projPin, { toolUseId: 'fu-pin-1', limit: 50 });
+    const led2 = ledgerStoreT6.updateLedger(projPin, [followUpPin1], util.getConfig(), () => tPin + 20);
+    requestsBefore.push({ requests: led2.requests, volume: led2.volume, sessions: led2.sessions });
+    check('ledger-fold-recall (revisable settlement): a later follow-up CORRECTS a full avoidance down to a partial win', () => {
+      assert.deepStrictEqual(led2.avoided, { tokens: 3230, serves: 1, tierA: 0, tierB: 1, partialWins: 1, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0, 'a positive net must never bump rejections');
+      assert.strictEqual(led2.openServes[0].classified, 'partial');
+      assert.deepStrictEqual(led2.openServes[0].correctedBy, ['sess-pin|fu-pin-1|' + path.join(projPin, relPin)]);
+    });
+
+    // pass 3: a SECOND follow-up (a full re-read, priced off the file's
+    // current byte size: 14440 bytes / 4 = 3610 tokens) pushes cumulative
+    // followTokens to 600+3610=4210 -- net goes negative, and this is the
+    // FIRST time this serve has crossed into 'negative', so bumpRejection
+    // fires exactly once.
+    fs.writeFileSync(path.join(projPin, relPin), 'x'.repeat(14440));
+    const followUpPin2 = readEvent('sess-pin', relPin, '2026-07-28T10:06:00.000Z', projPin, { toolUseId: 'fu-pin-2' });
+    const led3 = ledgerStoreT6.updateLedger(projPin, [followUpPin2], util.getConfig(), () => tPin + 30);
+    requestsBefore.push({ requests: led3.requests, volume: led3.volume, sessions: led3.sessions });
+    check('ledger-fold-recall (revisable settlement): a second follow-up corrects a partial win down to a net negative, bumping rejection exactly once', () => {
+      assert.deepStrictEqual(led3.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 });
+      assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 1);
+      assert.strictEqual(led3.openServes[0].classified, 'negative');
+    });
+
+    // pass 4: re-fold with NOTHING NEW -- the same two follow-up reads are
+    // simply still inside proj.events' sliding window (production re-presents
+    // them every pass until they age out), so this is the realistic
+    // idempotency case, not just "no events at all".
+    const led4 = ledgerStoreT6.updateLedger(projPin, [followUpPin1, followUpPin2], util.getConfig(), () => tPin + 40);
+    requestsBefore.push({ requests: led4.requests, volume: led4.volume, sessions: led4.sessions });
+    check('ledger-fold-recall (revisable settlement): re-folding already-applied corrections is idempotent', () => {
+      assert.deepStrictEqual(led4.avoided, led3.avoided, 'both follow-ups are already in correctedBy -- nothing left to correct');
+      assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 1, 'never bumped a second time for the same serve');
+      assert.strictEqual(led4.openServes[0].correctedBy.length, 2);
+    });
+    check('ledger-fold-recall (revisable settlement): request/volume/session totals never decrease across the whole PIN sequence', () => {
+      for (let i = 1; i < requestsBefore.length; i++) {
+        assert.ok(requestsBefore[i].requests >= requestsBefore[i - 1].requests, `requests fell at pass ${i + 1}`);
+        assert.ok(requestsBefore[i].volume >= requestsBefore[i - 1].volume, `volume fell at pass ${i + 1}`);
+        assert.ok(requestsBefore[i].sessions >= requestsBefore[i - 1].sessions, `sessions fell at pass ${i + 1}`);
+      }
+      // avoided.tokens, by deliberate contrast, DID fall (3830 -> 3230 -> -380)
+      // -- see lib/ledger-fold.js's header for why that is the one accepted
+      // exception, not a regression of the invariant just asserted above.
+      assert.ok(led3.avoided.tokens < led2.avoided.tokens && led2.avoided.tokens < led1.avoided.tokens);
+    });
+
+    // A follow-up arriving after OPEN_SERVE_TTL_MS has elapsed finds no
+    // receipt left to correct -- the number stands, permanently, and this is
+    // the documented residual (see ledger-fold-recall-open-serves.js's
+    // header), not a bug.
+    const projTtl = seedT6Project('t6-open-serve-ttl-expired');
+    const relTtl = 'src/ttl.js';
+    const tsTtl = '2026-07-28T10:00:00.000Z';
+    const tTtl = Date.parse(tsTtl);
+    writeServeRows(projTtl, tsTtl, 'sess-ttl', relTtl, 'B', 4210, 380);
+    const ledTtl1 = ledgerStoreT6.updateLedger(projTtl, [], util.getConfig(), () => tTtl + 10);
+    const lateFollowUp = readEvent('sess-ttl', relTtl, new Date(tTtl + openServesT6.OPEN_SERVE_TTL_MS + 5000).toISOString(), projTtl, { toolUseId: 'fu-late', limit: 50 });
+    const ledTtl2 = ledgerStoreT6.updateLedger(projTtl, [lateFollowUp], util.getConfig(), () => tTtl + openServesT6.OPEN_SERVE_TTL_MS + 10000);
+    check('ledger-fold-recall-open-serves: a follow-up arriving after OPEN_SERVE_TTL_MS is ignored -- the number stands', () => {
+      assert.deepStrictEqual(ledTtl2.avoided, ledTtl1.avoided, 'a too-late follow-up must not move the already-reported number');
+      assert.strictEqual(ledTtl2.openServes.length, 0, 'the expired receipt is dropped, not left around uncorrectable-but-present');
+    });
+
+    // Multiple follow-up reads of the SAME served path in ONE session must
+    // each correct at most once and ACCUMULATE (not just apply the last one
+    // seen) -- exercised here as two reads landing in the very same pass.
+    const projAcc = seedT6Project('t6-multiple-followups-accumulate');
+    const relAcc = 'src/acc.js';
+    const tsAcc = '2026-07-28T10:00:00.000Z';
+    const tAcc = Date.parse(tsAcc);
+    writeServeRows(projAcc, tsAcc, 'sess-acc', relAcc, 'B', 4210, 380);
+    ledgerStoreT6.updateLedger(projAcc, [], util.getConfig(), () => tAcc + 10);
+    const accRead1 = readEvent('sess-acc', relAcc, '2026-07-28T10:01:00.000Z', projAcc, { toolUseId: 'acc-1', limit: 25 }); // 25*12=300
+    const accRead2 = readEvent('sess-acc', relAcc, '2026-07-28T10:02:00.000Z', projAcc, { toolUseId: 'acc-2', limit: 50 }); // 50*12=600
+    const ledAcc = ledgerStoreT6.updateLedger(projAcc, [accRead1, accRead2], util.getConfig(), () => tAcc + 20);
+    check('ledger-fold-recall-open-serves: two follow-up reads in the same pass both correct and ACCUMULATE, not just the last one', () => {
+      // net = 4210 - (380 + 300 + 600) = 2930
+      assert.strictEqual(ledAcc.avoided.tokens, 2930);
+      assert.strictEqual(ledAcc.avoided.partialWins, 1);
+      assert.strictEqual(ledAcc.openServes[0].correctedBy.length, 2);
+    });
+
+    // FINDINGS 1+2 (fix round 4 -- CORRECTED, was an anti-requirement pin):
+    // this block used to assert `serves:2` / `openServes.length:2` /
+    // `avoided.tokens:7660` after one failed queue rewrite + a retry --
+    // encoding the exact bug the review flagged: settlement re-triggering on
+    // every pass that still finds a confirmed row on the queue, because a
+    // failed rewrite is PERSISTENT (ENOSPC, a read-only dir), not transient.
+    // Reproduced against the pre-fix code: 4 failed rewrite passes over one
+    // physical serve produced 5 receipts, rejections=5, and burned through
+    // REJECTION_LIMIT=3 after just two failed passes -- permanently
+    // disabling recall for a working path from a single real follow-up read.
+    // settleRows is now idempotent on serveId (skips a confirmed row whose
+    // serveId is already durable evidence in prevLedger.openServes -- see
+    // lib/ledger-fold-recall-settle.js's own header), so a failed rewrite
+    // delays draining the queue but never re-settles what is already on
+    // record. Corrected numbers: serves stays 1, openServes.length stays 1,
+    // avoided is UNCHANGED by the retry (not doubled).
+    {
+      const proj3cT6 = seedT6Project('t6-queue-rewrite-failure');
+      const rel3c = 'src/g.js';
+      const rel3d = 'src/h.js';
+      const ts3c = '2026-07-28T10:00:00.000Z';
+      const now3c = Date.parse(ts3c) + 10;
+      writeServeRows(proj3cT6, ts3c, 'sess-3c', rel3c, 'B', 4210, 380);
+      // A companion pending row with NO confirmation yet, young enough to be
+      // RETAINED regardless of outcome -- gives commit() real content to
+      // write back (not the empty-queue rmSync branch, which the mock below
+      // does not intercept).
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(proj3cT6), jsonl([
+        { ts: new Date(now3c - 1000).toISOString(), sessionId: 'sess-3d', relPath: rel3d, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSync = fs.writeFileSync;
+      const recallDirTag = path.join(memorydb.DIR_NAME, 'recall');
+      let sawQueueWrite = false;
+      fs.writeFileSync = function (p, ...rest) {
+        if (typeof p === 'string' && p.includes(recallDirTag)) {
+          sawQueueWrite = true;
+          throw new Error('simulated queue rewrite failure');
+        }
+        return realWriteFileSync.call(fs, p, ...rest);
+      };
+      let ledFailedWrite;
+      try {
+        ledFailedWrite = ledgerStoreT6.updateLedger(proj3cT6, [], util.getConfig(), () => now3c);
+      } finally {
+        fs.writeFileSync = realWriteFileSync;
+      }
+      check('ledger-fold-recall (FINDING 3): a failed queue rewrite still folds the settlement into the ledger', () => {
+        assert.ok(sawQueueWrite, 'test did not actually exercise the queue rewrite path');
+        assert.deepStrictEqual(ledFailedWrite.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+          'rel3c settles; rel3d (still-young, unconfirmed) contributes nothing yet');
+      });
+      check('ledger-fold-recall (FINDING 3): the on-disk queue is untouched after a failed rewrite (old rows all still there)', () => {
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 3, 'rel3c\'s pending+confirmation rows AND rel3d\'s pending row must survive a failed rewrite untouched');
+      });
+      // Second pass: real fs.writeFileSync restored, AND far enough past
+      // PENDING_CONFIRM_GRACE_MS that rel3d (still never confirmed) is now a
+      // genuine phantom too -- so this pass empties the queue completely.
+      const ledRetry = ledgerStoreT6.updateLedger(proj3cT6, [], util.getConfig(), () => now3c + 61000);
+      check('ledger-fold-recall (FINDINGS 1+2, corrected pin): a subsequent successful rewrite drains the queue WITHOUT re-settling -- idempotent on serveId', () => {
+        assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj3cT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8') === '',
+          'the retried pass must finally consume the queue (rel3c\'s already-settled row is skipped, not re-settled; rel3d finally ages out as a phantom)');
+        assert.deepStrictEqual(ledRetry.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+          'rel3c must NOT settle a second time just because its confirmed row was still sitting on the queue -- avoided is unchanged by the retry');
+        assert.strictEqual(ledRetry.openServes.length, 1, 'exactly one receipt -- serveId dedupe means the retry never creates a duplicate');
+      });
+    }
+
+    // FINDINGS 1+2 (fix round 4): the realistic failure shape is not one
+    // failed rewrite but a PERSISTENT one -- ENOSPC or a read-only recall
+    // dir does not clear itself after a single retry. Three consecutive
+    // failed passes over the SAME physical serve, followed by a pass whose
+    // rewrite finally succeeds and which also carries a net-negative
+    // follow-up read, must settle exactly once and bump rejection exactly
+    // once -- not once per failed pass.
+    {
+      const projMulti = seedT6Project('t6-idempotent-settlement-multipass');
+      const relMulti = 'src/multipass.js';
+      const companionRelMulti = 'src/multipass-companion.js';
+      recallStoreT6.put(projMulti, relMulti, { contentHash: 'hmp', skeleton: 'SKELMP', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsMulti = '2026-07-28T10:00:00.000Z';
+      const tMulti = Date.parse(tsMulti);
+      writeServeRows(projMulti, tsMulti, 'sess-multi', relMulti, 'B', 4210, 380);
+      // Companion pending row, always young enough (< PENDING_CONFIRM_GRACE_MS)
+      // across every failed pass below, so commit() always has real content
+      // to (fail to) write back -- keeps the mock's failure path exercised
+      // on every pass rather than falling into the empty-queue rmSync branch.
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(projMulti), jsonl([
+        { ts: new Date(tMulti - 500).toISOString(), sessionId: 'sess-multi-companion', relPath: companionRelMulti, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSyncMulti = fs.writeFileSync;
+      const recallDirTagMulti = path.join(memorydb.DIR_NAME, 'recall');
+      let failMultiWrites = true;
+      fs.writeFileSync = function (p, ...rest) {
+        if (failMultiWrites && typeof p === 'string' && p.includes(recallDirTagMulti)) {
+          throw new Error('simulated persistent queue rewrite failure');
+        }
+        return realWriteFileSyncMulti.call(fs, p, ...rest);
+      };
+      let ledMulti;
+      try {
+        ledMulti = ledgerStoreT6.updateLedger(projMulti, [], util.getConfig(), () => tMulti + 10); // pass 1: settles, rewrite fails
+        ledMulti = ledgerStoreT6.updateLedger(projMulti, [], util.getConfig(), () => tMulti + 20); // pass 2: rewrite fails again
+        ledMulti = ledgerStoreT6.updateLedger(projMulti, [], util.getConfig(), () => tMulti + 30); // pass 3: rewrite fails again
+      } finally {
+        failMultiWrites = false;
+        fs.writeFileSync = realWriteFileSyncMulti;
+      }
+      check('ledger-fold-recall (FINDINGS 1+2): three consecutive failed queue rewrites never re-settle the same physical serve', () => {
+        assert.deepStrictEqual(ledMulti.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+          'still exactly one settle worth of avoided.tokens/serves after 3 failed passes, not 3 (or 4)');
+        assert.strictEqual(ledMulti.openServes.length, 1, 'still exactly one receipt -- no duplicate per failed pass');
+      });
+
+      // Pass 4: the rewrite finally succeeds AND a net-negative follow-up
+      // (full re-read, no limit -> 20000/4=5000 tokens > 3830) arrives in the
+      // same pass -- must correct the SINGLE surviving receipt to negative
+      // and bump rejection exactly once, proving the old per-pass rejection
+      // inflation (measured: rejections=5 from one physical serve after 4
+      // failed passes, pre-fix) is gone.
+      fs.writeFileSync(path.join(projMulti, relMulti), 'x'.repeat(20000));
+      const followUpMulti = readEvent('sess-multi', relMulti, new Date(tMulti + 40000).toISOString(), projMulti, { toolUseId: 'fu-multi' });
+      const ledMultiFinal = ledgerStoreT6.updateLedger(projMulti, [followUpMulti], util.getConfig(), () => tMulti + 40000 + 100);
+      check('ledger-fold-recall (FINDINGS 1+2): once the rewrite succeeds, a net-negative follow-up corrects the single receipt and bumps rejection exactly once', () => {
+        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: -1170, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 },
+          'net = 4210 - (380 + 5000); serves/tierB stay at 1 -- one physical serve, one receipt, one correction');
+        assert.strictEqual(ledMultiFinal.openServes.length, 1);
+        assert.strictEqual(ledMultiFinal.openServes[0].classified, 'negative');
+        assert.strictEqual(recallStoreT6.get(projMulti, relMulti).rejections, 1,
+          'exactly one rejection bump for one physical serve, regardless of how many failed passes preceded it');
+      });
+    }
+
+    // Fix round 3 (carried FINDING 1): the correction pass used to order a
+    // read against its serve with a raw string compare
+    // (`String(e.ts) > String(current.ts)`), which misorders mixed-precision
+    // ISO stamps -- '.' (0x2E) sorts before 'Z' (0x5A), so a millisecond-
+    // bearing stamp can sort BEFORE the whole second it is actually later
+    // than. serve.ts is always millisecond-precision (new
+    // Date().toISOString() in lib/hooks-recall.js); read ts can arrive
+    // second-precision from an adapter transcript. PIN: a read stamped
+    // '2026-07-28T10:00:05Z' (no millis) is chronologically BEFORE a serve
+    // stamped '2026-07-28T10:00:05.500Z' (500ms later) and must NOT be
+    // treated as a follow-up, even though it string-sorts after it; a read
+    // stamped '2026-07-28T10:00:06Z' (genuinely a half-second later) must.
+    {
+      const projByTs = seedT6Project('t6-byts-ordering');
+      const relByTs = 'src/byts.js';
+      const tsByTsServe = '2026-07-28T10:00:05.500Z';
+      const tByTsServe = Date.parse(tsByTsServe);
+      writeServeRows(projByTs, tsByTsServe, 'sess-byts', relByTs, 'B', 4210, 380);
+      const ledByTs1 = ledgerStoreT6.updateLedger(projByTs, [], util.getConfig(), () => tByTsServe + 10);
+      check('ledger-fold-recall-open-serves (FINDING 1): settles full before any follow-up is in evidence', () => {
+        assert.strictEqual(ledByTs1.avoided.tokens, 3830);
+      });
+
+      // Chronologically EARLIER than the serve (05.000 < 05.500) but sorts
+      // AFTER it as a raw string ("...:05Z" > "...:05.500Z" lexically) --
+      // must be rejected as a follow-up, not applied.
+      const earlierButStringGreater = readEvent('sess-byts', relByTs, '2026-07-28T10:00:05Z', projByTs, { toolUseId: 'fu-byts-early', limit: 50 });
+      const ledByTs2 = ledgerStoreT6.updateLedger(projByTs, [earlierButStringGreater], util.getConfig(), () => tByTsServe + 20);
+      check('ledger-fold-recall-open-serves (FINDING 1): a read that STRING-sorts later but is chronologically earlier must not correct', () => {
+        assert.strictEqual(ledByTs2.avoided.tokens, 3830, 'the pre-serve read must be ignored, not applied as a follow-up');
+        assert.strictEqual(ledByTs2.openServes[0].correctedBy.length, 0);
+      });
+
+      // Genuinely later (06.000 > 05.500) -- must apply.
+      const genuinelyLater = readEvent('sess-byts', relByTs, '2026-07-28T10:00:06.000Z', projByTs, { toolUseId: 'fu-byts-late', limit: 50 });
+      const ledByTs3 = ledgerStoreT6.updateLedger(projByTs, [genuinelyLater], util.getConfig(), () => tByTsServe + 30);
+      check('ledger-fold-recall-open-serves (FINDING 1): a genuinely later read (correct byTs ordering) does correct', () => {
+        assert.strictEqual(ledByTs3.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledByTs3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // Fix round 3 (carried FINDING 4): a corrupt/skewed serve ts far in the
+    // future used to make an open-serve record BOTH immortal ((now - ts) is
+    // negative, never crossing OPEN_SERVE_TTL_MS) and uncorrectable (no real
+    // read's ts could ever exceed it). buildOpenServe now clamps a
+    // future-of-`now` pending ts down to `now` at the moment the record is
+    // created, anchoring it to a real clock reading. PIN: the stored ts is
+    // the clamp, not the corrupt value; a real follow-up shortly after can
+    // still correct it; and it properly ages out once OPEN_SERVE_TTL_MS of
+    // REAL time has passed the clamped anchor.
+    {
+      const projFuture = seedT6Project('t6-future-ts-clamp');
+      const relFuture = 'src/future.js';
+      const corruptFutureTs = '2030-01-01T00:00:00.000Z'; // implausibly far in the future
+      const realNow = Date.parse('2026-07-28T10:00:00.000Z');
+      writeServeRows(projFuture, corruptFutureTs, 'sess-future', relFuture, 'B', 4210, 380);
+      const ledFuture1 = ledgerStoreT6.updateLedger(projFuture, [], util.getConfig(), () => realNow);
+      check('ledger-fold-recall-open-serves (FINDING 4): a future-of-now serve ts is clamped to `now` on the stored receipt', () => {
+        assert.strictEqual(ledFuture1.avoided.tokens, 3830, 'settlement itself is unaffected by the clamp');
+        assert.strictEqual(ledFuture1.openServes[0].ts, new Date(realNow).toISOString(),
+          'the receipt must record the REAL clock reading, not the corrupt future stamp');
+      });
+
+      // A real follow-up shortly after `realNow` must still be able to
+      // correct it -- proving the clamp fixed uncorrectability too, not just
+      // the age computation.
+      const followUpFuture = readEvent('sess-future', relFuture, new Date(realNow + 5000).toISOString(), projFuture, { toolUseId: 'fu-future', limit: 50 });
+      const ledFuture2 = ledgerStoreT6.updateLedger(projFuture, [followUpFuture], util.getConfig(), () => realNow + 10000);
+      check('ledger-fold-recall-open-serves (FINDING 4): a real follow-up shortly after `now` still corrects a clamped receipt', () => {
+        assert.strictEqual(ledFuture2.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12) -- proves the clamped ts is usable as an ordering anchor');
+      });
+
+      // Once OPEN_SERVE_TTL_MS of REAL wall-clock time has elapsed past the
+      // clamped anchor, the receipt must finally age out -- proving it is no
+      // longer immortal.
+      const ledFuture3 = ledgerStoreT6.updateLedger(projFuture, [], util.getConfig(), () => realNow + openServesT6.OPEN_SERVE_TTL_MS + 10000);
+      check('ledger-fold-recall-open-serves (FINDING 4): the clamped receipt properly ages out after a real TTL window, not immortally', () => {
+        assert.strictEqual(ledFuture3.openServes.length, 0, 'a future-stamped receipt must not survive forever');
+      });
+    }
+
+    // CORRECTED (fix round 4 -- was an anti-requirement pin, same cluster as
+    // the FINDINGS 1+2 correction above): fix round 3 introduced a
+    // bumpedServeIds guard so that a follow-up read landing in the SAME pass
+    // as a queue-rewrite retry never double-bumped rejection for what was,
+    // at the time, an ACCEPTED duplicate open-serve record. Fix round 4
+    // removes the duplication at the source (settleRows now skips a
+    // confirmed row whose serveId is already durable evidence in
+    // prevLedger.openServes -- see lib/ledger-fold-recall-settle.js), which
+    // also removes the need for bumpedServeIds entirely (deleted from
+    // lib/ledger-fold-recall-open-serves.js's applyCorrections). This test's
+    // ORIGINAL assertion (`openServes.length, 2`, `avoided.tokens, -2340`)
+    // pinned the old duplicate-record shape; corrected below to the single-
+    // receipt idempotent shape -- the rejection bump still fires exactly
+    // once, now because there is only ever one receipt to correct, not
+    // because a guard suppressed a second bump on a second one.
+    {
+      const projIdem = seedT6Project('t6-idempotent-rejection-bump');
+      const relIdem = 'src/idem.js';
+      recallStoreT6.put(projIdem, relIdem, { contentHash: 'hidem', skeleton: 'SKELIDEM', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsIdem = '2026-07-28T10:00:00.000Z';
+      const now0Idem = Date.parse(tsIdem) + 10;
+      writeServeRows(projIdem, tsIdem, 'sess-idem', relIdem, 'B', 4210, 380);
+      // A companion pending row with no confirmation yet, young enough to be
+      // RETAINED regardless of outcome -- gives commit() real content to
+      // write back (not the empty-queue rmSync branch, which the mock below
+      // does not intercept -- see the identical trick in the FINDING 3 test
+      // above).
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(projIdem), jsonl([
+        { ts: new Date(now0Idem - 1000).toISOString(), sessionId: 'sess-idem-companion', relPath: 'src/idem-companion.js', tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSyncIdem = fs.writeFileSync;
+      const recallDirTagIdem = path.join(memorydb.DIR_NAME, 'recall');
+      fs.writeFileSync = function (p, ...rest) {
+        if (typeof p === 'string' && p.includes(recallDirTagIdem)) {
+          throw new Error('simulated queue rewrite failure');
+        }
+        return realWriteFileSyncIdem.call(fs, p, ...rest);
+      };
+      let ledIdem1;
+      try {
+        ledIdem1 = ledgerStoreT6.updateLedger(projIdem, [], util.getConfig(), () => now0Idem);
+      } finally {
+        fs.writeFileSync = realWriteFileSyncIdem;
+      }
+      check('ledger-fold-recall (idempotent rejection setup): first pass settles full, queue rewrite fails, row stays queued', () => {
+        assert.strictEqual(ledIdem1.avoided.tokens, 3830);
+        assert.strictEqual(ledIdem1.openServes.length, 1);
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(projIdem), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 3, 'the confirmed pair AND the young companion pending row must still be queued after the failed rewrite');
+      });
+
+      // File big enough that a full re-read (no limit -> size/4 tokens) alone
+      // pushes net negative in ONE shot: 20000/4=5000 > 3830.
+      fs.writeFileSync(path.join(projIdem, relIdem), 'x'.repeat(20000));
+      const followUpIdem = readEvent('sess-idem', relIdem, '2026-07-28T10:05:00.000Z', projIdem, { toolUseId: 'fu-idem' });
+      // This pass sees relIdem's confirmed row STILL on the queue (real fs
+      // restored, but the row was never consumed by the earlier failed
+      // rewrite) AND carries the negative-crossing follow-up in the same
+      // pass. serveId dedupe (fix round 4) means the still-queued row is
+      // recognized as already-settled and skipped -- no second open-serve
+      // record -- so the correction below applies to the ONE existing
+      // receipt, and the rejection bump fires exactly once because there was
+      // only ever one thing to correct.
+      const ledIdem2 = ledgerStoreT6.updateLedger(projIdem, [followUpIdem], util.getConfig(), () => now0Idem + 100);
+      check('ledger-fold-recall-open-serves: a queue-rewrite-failure retry never double-bumps rejection for one logical serve', () => {
+        assert.strictEqual(ledIdem2.openServes.length, 1, 'idempotent settlement: the still-queued row never creates a second receipt');
+        assert.strictEqual(ledIdem2.openServes[0].classified, 'negative');
+        assert.strictEqual(recallStoreT6.get(projIdem, relIdem).rejections, 1,
+          'exactly ONE bump for one physical follow-up read correcting the one receipt on record');
+        assert.strictEqual(ledIdem2.avoided.tokens, -1170, 'net = 4210 - (380 + 5000); one settle, one correction, no duplicate');
+      });
+    }
+
+    // Fix round 3 (documented residual, FINDING 2): a correction, once
+    // applied, is permanent regardless of what later happens to proj.events
+    // -- the avoidedDelta is already folded into st.avoided and the read's
+    // key is already in correctedBy, both durably written into ledger.json.
+    // Neither is re-derived from proj.events on a later pass, so a read that
+    // subsequently falls out of the sliding window (evicted by
+    // lib/digest.js's mergeEvents plumbing cap) can neither un-correct
+    // (nothing re-examines proj.events to undo it) nor re-correct (even if
+    // it somehow reappears, correctedBy already remembers its key).
+    {
+      const projEvict = seedT6Project('t6-correction-survives-eviction');
+      const relEvict = 'src/evict.js';
+      const tsEvict = '2026-07-28T10:00:00.000Z';
+      const tEvict = Date.parse(tsEvict);
+      writeServeRows(projEvict, tsEvict, 'sess-evict', relEvict, 'B', 4210, 380);
+      ledgerStoreT6.updateLedger(projEvict, [], util.getConfig(), () => tEvict + 10);
+      const followUpEvict = readEvent('sess-evict', relEvict, '2026-07-28T10:05:00.000Z', projEvict, { toolUseId: 'fu-evict', limit: 50 });
+      const ledEvict1 = ledgerStoreT6.updateLedger(projEvict, [followUpEvict], util.getConfig(), () => tEvict + 20);
+      check('ledger-fold-recall-open-serves (residual setup): the follow-up corrects to a partial win', () => {
+        assert.strictEqual(ledEvict1.avoided.tokens, 3230);
+        assert.strictEqual(ledEvict1.openServes[0].correctedBy.length, 1);
+      });
+      // Pass with the follow-up ABSENT from readEvents -- simulating eviction
+      // from proj.events' capped window.
+      const ledEvict2 = ledgerStoreT6.updateLedger(projEvict, [], util.getConfig(), () => tEvict + 30);
+      check('ledger-fold-recall-open-serves (FINDING 2): a correction is not undone once its read is evicted from later passes', () => {
+        assert.strictEqual(ledEvict2.avoided.tokens, 3230, 'the correction must stand -- no un-correct');
+        assert.strictEqual(ledEvict2.openServes[0].correctedBy.length, 1, 'correctedBy must not lose the entry either');
+      });
+      // Pass with the SAME follow-up reappearing (e.g. a re-scan quirk) --
+      // correctedBy must still prevent a second application.
+      const ledEvict3 = ledgerStoreT6.updateLedger(projEvict, [followUpEvict], util.getConfig(), () => tEvict + 40);
+      check('ledger-fold-recall-open-serves (FINDING 2): a re-presented already-applied read does not re-correct', () => {
+        assert.strictEqual(ledEvict3.avoided.tokens, 3230, 'no double-application');
+        assert.strictEqual(ledEvict3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // MINOR 3 (final whole-branch review): holdout rows had no idempotency
+    // guard -- unlike serve rows (deduped on serveId via
+    // prevLedger.openServes, see settleRows' own header), a re-read of the
+    // SAME still-queued holdout row after a failed queue rewrite re-tallied
+    // holdout.skips/callTokens on every retried pass. Fixed the same way
+    // serves already are: deduped on the row's own identity
+    // (ts|sessionId|relPath), persisted as ledger.holdout.seenKeys, bounded
+    // like the openServes/seenKeys precedent. Mirrors the FINDINGS 1+2
+    // failed-queue-rewrite tests above, but for the holdout arm.
+    {
+      const projHoldoutIdem = seedT6Project('t6-holdout-idempotent-on-failed-rewrite');
+      const relHoldoutIdem = 'src/holdout-idem.js';
+      const tsHoldoutIdem = '2026-07-28T10:00:00.000Z';
+      const nowHoldoutIdem = Date.parse(tsHoldoutIdem) + 10;
+      const holdoutIdemKey = `${tsHoldoutIdem}|sess-holdout-idem|${relHoldoutIdem}`;
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(projHoldoutIdem)), { recursive: true });
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(projHoldoutIdem), jsonl([
+        { ts: tsHoldoutIdem, sessionId: 'sess-holdout-idem', relPath: relHoldoutIdem, holdout: true, wouldServe: 'B', callTokens: 1200 },
+        // A companion pending row, young enough to be RETAINED regardless of
+        // outcome -- gives commit() real content to (fail to) write back on
+        // the first pass (not the empty-queue rmSync branch, which the mock
+        // below does not intercept -- same trick as the FINDING 3 /
+        // idempotent-rejection tests above).
+        { ts: new Date(nowHoldoutIdem - 1000).toISOString(), sessionId: 'sess-holdout-companion', relPath: 'src/holdout-companion.js', tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSyncHoldout = fs.writeFileSync;
+      const recallDirTagHoldout = path.join(memorydb.DIR_NAME, 'recall');
+      fs.writeFileSync = function (p, ...rest) {
+        if (typeof p === 'string' && p.includes(recallDirTagHoldout)) {
+          throw new Error('simulated queue rewrite failure');
+        }
+        return realWriteFileSyncHoldout.call(fs, p, ...rest);
+      };
+      let ledHoldoutIdem1;
+      try {
+        ledHoldoutIdem1 = ledgerStoreT6.updateLedger(projHoldoutIdem, [], util.getConfig(), () => nowHoldoutIdem);
+      } finally {
+        fs.writeFileSync = realWriteFileSyncHoldout;
+      }
+      check('ledger-fold-recall (MINOR 3 setup): a holdout row tallies on the very first pass even though the queue rewrite fails', () => {
+        assert.deepStrictEqual(ledHoldoutIdem1.holdout, { skips: 1, callTokens: 1200, seenKeys: [holdoutIdemKey] });
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(projHoldoutIdem), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 2, 'the holdout row AND the young companion pending row must still be queued after the failed rewrite');
+      });
+
+      // Real fs restored: the SAME holdout row is still on the queue (the
+      // rewrite that would have dropped it failed) and gets re-read on this
+      // pass. Without the seenKeys dedupe this would tally a second time
+      // (skips:2, callTokens:2400) -- exactly the bug this fix closes.
+      const ledHoldoutIdem2 = ledgerStoreT6.updateLedger(projHoldoutIdem, [], util.getConfig(), () => nowHoldoutIdem + 61000);
+      check('ledger-fold-recall (MINOR 3): a subsequent pass re-reading the still-queued holdout row does not re-tally it', () => {
+        assert.deepStrictEqual(ledHoldoutIdem2.holdout, { skips: 1, callTokens: 1200, seenKeys: [holdoutIdemKey] },
+          'holdout.skips/callTokens/seenKeys must be unchanged by the retry -- idempotent on the row\'s own identity');
+      });
+    }
+
+    // FINDING 3 (fix round 4): a malformed openServes record used to freeze
+    // the project's ledger forever -- normalizeOpenServes only checked
+    // object-ness, so a receipt missing `correctedBy` made applyCorrections'
+    // unguarded `current.correctedBy.includes(...)` throw, which lib/scan.js
+    // catches and logs, but the SAME malformed ledger.json is read back and
+    // re-thrown on every later pass, freezing requests/volume/warm too (not
+    // just avoided). PIN: a ledger.json with a receipt missing correctedBy
+    // (and a foreign `classified` value, and string-typed numeric fields --
+    // all coerced by the same fix) folds cleanly and the project keeps
+    // accumulating.
+    {
+      const projMalformed = seedT6Project('t6-malformed-open-serve-record');
+      const relMalformed = 'src/malformed.js';
+      recallStoreT6.put(projMalformed, relMalformed, { contentHash: 'hmal', skeleton: 'SKELMAL', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsMalformed = '2026-07-28T10:00:00.000Z';
+      const tMalformed = Date.parse(tsMalformed);
+      // A hand-edited/foreign ledger.json: an openServes entry missing
+      // `correctedBy` entirely, a `classified` value that isn't one of
+      // full/partial/negative, and a missing numeric field (netRecorded) --
+      // exercising the SAME num() helper every other field in
+      // lib/ledger-fold-state.js already normalizes through, which coerces
+      // any non-finite-number value (including a missing one) to 0.
+      ledgerStoreT6.writeLedger(projMalformed, {
+        version: 4,
+        avoided: { tokens: 100, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        openServes: [{
+          serveId: `${tsMalformed}|sess-malformed|${relMalformed}`,
+          ts: tsMalformed, sessionId: 'sess-malformed', relPath: relMalformed,
+          callTokens: 4210, skeletonTokens: 380,
+          classified: 'bogus-status',
+          // netRecorded and correctedBy deliberately omitted
+        }],
+      });
+      let ledMalformedThrew = false;
+      let ledMalformed;
+      try {
+        ledMalformed = ledgerStoreT6.updateLedger(projMalformed, [], util.getConfig(), () => tMalformed + 1000);
+      } catch {
+        ledMalformedThrew = true;
+      }
+      check('ledger-fold-state (FINDING 3): a receipt missing correctedBy folds cleanly instead of throwing', () => {
+        assert.strictEqual(ledMalformedThrew, false, 'a malformed openServes record must never freeze the fold');
+        assert.strictEqual(ledMalformed.openServes.length, 1);
+        assert.deepStrictEqual(ledMalformed.openServes[0].correctedBy, [], 'coerced to an empty array, not left undefined');
+        assert.strictEqual(ledMalformed.openServes[0].classified, 'full', 'a foreign classification value defaults to full');
+        assert.strictEqual(ledMalformed.openServes[0].netRecorded, 0, 'a missing numeric field coerces through num() to 0, not undefined');
+        assert.strictEqual(ledMalformed.openServes[0].callTokens, 4210, 'a well-formed numeric field passes through num() unchanged');
+      });
+      // The project must keep accumulating afterward -- a second pass over
+      // the same (now-normalized) ledger must not throw either, proving this
+      // isn't just a one-time survival but a real, ongoing recovery.
+      const ledMalformed2 = ledgerStoreT6.updateLedger(projMalformed, [], util.getConfig(), () => tMalformed + 2000);
+      check('ledger-fold-state (FINDING 3): the project keeps accumulating on later passes too, not just the first recovery pass', () => {
+        assert.strictEqual(ledMalformed2.openServes.length, 1);
+        assert.strictEqual(ledMalformed2.openServes[0].classified, 'full');
+      });
+    }
+
+    // FINDING 4 (fix round 4): correctionKeyFor used to collapse two
+    // genuinely distinct same-session, same-ts, same-file follow-up reads
+    // onto one key whenever neither carried a toolUseId -- the second read's
+    // dedupe check then read "already applied" even though it never was,
+    // silently dropping its followTokens. PIN: two 300/600-token follow-ups
+    // of the same path, same ts, neither with a toolUseId, must accumulate
+    // to the honest net (2930), not the overstated one (3530) a collapsed
+    // key would produce.
+    {
+      const projOcc = seedT6Project('t6-correction-key-occurrence-index');
+      const relOcc = 'src/occ.js';
+      const tsOcc = '2026-07-28T10:00:00.000Z';
+      const tOcc = Date.parse(tsOcc);
+      writeServeRows(projOcc, tsOcc, 'sess-occ', relOcc, 'B', 4210, 380);
+      ledgerStoreT6.updateLedger(projOcc, [], util.getConfig(), () => tOcc + 10);
+      const sameTs = '2026-07-28T10:01:00.000Z';
+      // Deliberately NO toolUseId on either -- the exact case FINDING 4
+      // covers. opts.toolUseId is left undefined by omitting it.
+      const occRead1 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 25 }); // 25*12=300
+      const occRead2 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 50 }); // 50*12=600
+      const ledOcc = ledgerStoreT6.updateLedger(projOcc, [occRead1, occRead2], util.getConfig(), () => tOcc + 20);
+      check('ledger-fold-recall-open-serves (FINDING 4): two toolUseId-less same-ts follow-ups both apply via the occurrence index', () => {
+        // net = 4210 - (380 + 300 + 600) = 2930 -- the honest total, not the
+        // 3530 a collapsed key would produce by dropping the second read.
+        assert.strictEqual(ledOcc.avoided.tokens, 2930);
+        assert.strictEqual(ledOcc.openServes[0].correctedBy.length, 2, 'both reads earned distinct correction keys');
+        assert.notStrictEqual(ledOcc.openServes[0].correctedBy[0], ledOcc.openServes[0].correctedBy[1],
+          'the occurrence index must make the two keys distinct');
+      });
+      // Idempotency: re-folding the SAME two reads on a later pass must not
+      // apply either one a second time (proving the occurrence index is
+      // stable across passes, not just within one).
+      const ledOcc2 = ledgerStoreT6.updateLedger(projOcc, [occRead1, occRead2], util.getConfig(), () => tOcc + 30);
+      check('ledger-fold-recall-open-serves (FINDING 4): the occurrence-indexed keys stay stable across a later re-fold -- no double-application', () => {
+        assert.strictEqual(ledOcc2.avoided.tokens, 2930);
+        assert.strictEqual(ledOcc2.openServes[0].correctedBy.length, 2);
+      });
+    }
+
+    // FINDING 5 (fix round 4): a follow-up read whose ts exactly TIES the
+    // serve's ts used to be dropped (`byTs <= 0` excluded it) on the theory
+    // that it might be the serve's own intercepted call echoing back. That
+    // reasoning doesn't hold (see applyCorrections' own header) -- the
+    // serve's ts is always stamped LATER than any transcript entry for the
+    // intercepted call itself, so a genuine tie can only be a separate,
+    // later, second-precision follow-up. PIN: a read stamped exactly on the
+    // serve's own whole second (serve ts carries :00.000, read ts carries no
+    // millis at all -- both parse to the identical epoch millisecond) must
+    // still correct the serve.
+    {
+      const projTie = seedT6Project('t6-tie-ts-follow-up');
+      const relTie = 'src/tie.js';
+      const tsTieServe = '2026-07-28T10:00:05.000Z'; // exactly on a whole second
+      const tTieServe = Date.parse(tsTieServe);
+      writeServeRows(projTie, tsTieServe, 'sess-tie', relTie, 'B', 4210, 380);
+      const ledTie1 = ledgerStoreT6.updateLedger(projTie, [], util.getConfig(), () => tTieServe + 10);
+      check('ledger-fold-recall-open-serves (FINDING 5): settles full before any follow-up is in evidence', () => {
+        assert.strictEqual(ledTie1.avoided.tokens, 3830);
+      });
+      // Parses to the IDENTICAL epoch millisecond as tsTieServe -- a true
+      // tie, not merely a close call.
+      const tieRead = readEvent('sess-tie', relTie, '2026-07-28T10:00:05Z', projTie, { toolUseId: 'fu-tie', limit: 50 });
+      assert.strictEqual(Date.parse('2026-07-28T10:00:05Z'), tTieServe, 'test setup must produce a genuine tie, not an off-by-one');
+      const ledTie2 = ledgerStoreT6.updateLedger(projTie, [tieRead], util.getConfig(), () => tTieServe + 20);
+      check('ledger-fold-recall-open-serves (FINDING 5): a read whose ts TIES the serve\'s ts counts as a follow-up, not a self-reference', () => {
+        assert.strictEqual(ledTie2.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledTie2.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // Holdout rows (spec §7.2) must accumulate ONLY into `holdout`, and must
+    // never touch `avoided` -- the two are strictly separate arms.
+    const proj4T6 = seedT6Project('t6-holdout-isolated');
+    const rel4 = 'src/d.js';
+    fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj4T6)), { recursive: true });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj4T6), jsonl([
+      { ts: '2026-07-28T10:00:00.000Z', sessionId: 'sess-4', relPath: rel4, holdout: true, wouldServe: 'B', callTokens: 1200 },
+    ]));
+    const led4Holdout = ledgerStoreT6.updateLedger(proj4T6, [], util.getConfig());
+    check('ledger-fold-recall: a holdout row accumulates only into `holdout`, never `avoided`', () => {
+      // seenKeys (MINOR 3, final whole-branch review) is this row's own
+      // idempotency evidence -- see the dedicated MINOR 3 test block below
+      // for the failed-rewrite scenario it exists to fix.
+      assert.deepStrictEqual(led4Holdout.holdout, { skips: 1, callTokens: 1200, seenKeys: ['2026-07-28T10:00:00.000Z|sess-4|src/d.js'] });
+      assert.deepStrictEqual(led4Holdout.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+    });
+
+    // An uncommitted pending row (the state-commit write may simply not have
+    // landed YET -- lib/hooks-recall.js writes it as a separate,
+    // microseconds-later appendFileSync call) must not be treated as a
+    // phantom and dropped while young; a confirmation that lands later still
+    // settles as a real serve, IMMEDIATELY once seen (no wait even then).
+    const proj5T6 = seedT6Project('t6-phantom-pending');
+    const rel5 = 'src/e.js';
+    const ts5 = '2026-07-28T10:00:00.000Z';
+    const t5 = Date.parse(ts5);
+    fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj5T6)), { recursive: true });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([
+      { ts: ts5, sessionId: 'sess-5', relPath: rel5, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      // no confirmation row yet
+    ]));
+    const led5Early = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 1000);
+    check('ledger-fold-recall: an unconfirmed pending row is never treated as a phantom while still young', () => {
+      assert.deepStrictEqual(led5Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5T6), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remaining.length, 1, 'the young pending row must stay queued, not be dropped as a phantom');
+    });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([{ ts: ts5, sessionId: 'sess-5', relPath: rel5, committed: true }]));
+    const led5Confirmed = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 2000);
+    check('ledger-fold-recall: a late-arriving confirmation settles IMMEDIATELY, well before the old grace window would have allowed', () => {
+      assert.deepStrictEqual(led5Confirmed.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+    });
+
+    // A pending row whose confirmation NEVER arrives (a genuine, permanent
+    // state-write failure) is still dropped as a phantom once
+    // PENDING_CONFIRM_GRACE_MS has elapsed -- it never lingers forever.
+    const proj5bT6 = seedT6Project('t6-phantom-pending-never-confirms');
+    const rel5b = 'src/e2.js';
+    const ts5b = '2026-07-28T10:00:00.000Z';
+    const t5b = Date.parse(ts5b);
+    recallStoreT6.put(proj5bT6, rel5b, { contentHash: 'h5b', skeleton: 'SKEL5B', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+    fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(proj5bT6)), { recursive: true });
+    fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5bT6), jsonl([
+      { ts: ts5b, sessionId: 'sess-5b', relPath: rel5b, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+    ]));
+    const ledPastGrace = ledgerStoreT6.updateLedger(proj5bT6, [], util.getConfig(), () => t5b + 5000); // still young: retained
+    check('ledger-fold-recall: a young never-confirmed row stays retained, not yet judged a phantom', () => {
+      const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remaining.length, 1);
+      assert.deepStrictEqual(ledPastGrace.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+    });
+    const led5b = ledgerStoreT6.updateLedger(proj5bT6, [], util.getConfig(), () => t5b + 24 * 60 * 60 * 1000);
+    check('ledger-fold-recall: an uncommitted pending row that NEVER confirms is eventually dropped as a phantom', () => {
+      assert.deepStrictEqual(led5b.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.strictEqual(recallStoreT6.get(proj5bT6, rel5b).rejections, 0);
+      assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj5bT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8') === '',
+        'the permanently-unconfirmed row must eventually be dropped from the queue, not linger forever');
+    });
+
+    // Tier A pointer serves count toward tierA, not tierB.
+    const proj6T6 = seedT6Project('t6-tier-a');
+    const rel6 = 'src/f.js';
+    const ts6 = '2026-07-28T10:00:00.000Z';
+    writeServeRows(proj6T6, ts6, 'sess-6', rel6, 'A', 500, 20);
+    const led6 = ledgerStoreT6.updateLedger(proj6T6, [], util.getConfig(), () => Date.parse(ts6) + 10);
+    check('ledger-fold-recall: a tier A serve is tallied under tierA, not tierB', () => {
+      assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, partialWins: 0, netNegatives: 0 });
+    });
+
+    // MAX_OPEN_SERVES: past the cap, the OLDEST open serves are evicted
+    // (FIFO) -- an evicted serve can no longer be corrected, exactly like a
+    // TTL-expired one, while the most recently settled serves remain.
+    check('ledger-fold-recall-open-serves: MAX_OPEN_SERVES caps the list, evicting the oldest first', () => {
+      const projCap = seedT6Project('t6-max-open-serves-cap');
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(projCap)), { recursive: true });
+      const total = openServesT6.MAX_OPEN_SERVES + 5;
+      const rows = [];
+      const baseT = Date.parse('2026-07-28T10:00:00.000Z');
+      for (let i = 0; i < total; i++) {
+        const ts = new Date(baseT + i).toISOString();
+        rows.push({ ts, sessionId: 'sess-cap', relPath: `src/cap${i}.js`, tier: 'B', callTokens: 1000, skeletonTokens: 100, holdout: false, committed: false });
+        rows.push({ ts, sessionId: 'sess-cap', relPath: `src/cap${i}.js`, committed: true });
+      }
+      fs.writeFileSync(ledgerFoldRecall.eventsPath(projCap), jsonl(rows));
+      const ledCap = ledgerStoreT6.updateLedger(projCap, [], util.getConfig(), () => baseT + total + 10);
+      assert.strictEqual(ledCap.openServes.length, openServesT6.MAX_OPEN_SERVES, 'the list never grows past the cap');
+      const relPaths = new Set(ledCap.openServes.map(r => r.relPath));
+      assert.ok(!relPaths.has('src/cap0.js'), 'the OLDEST serve must be the one evicted');
+      assert.ok(relPaths.has(`src/cap${total - 1}.js`), 'the newest serve must survive the cap');
+    });
+
+    // Bounded read: at most MAX_FOLD_LINES rows are consumed per fold pass --
+    // anything past that stays queued (not dropped) for the next pass.
+    check('ledger-fold-recall: readQueue bounds itself at MAX_FOLD_LINES, leaving the remainder queued', () => {
+      const projBound = seedT6Project('t6-bounded-read');
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(projBound)), { recursive: true });
+      const extraRows = 25;
+      const rows = [];
+      for (let i = 0; i < ledgerFoldRecall.MAX_FOLD_LINES + extraRows; i++) {
+        rows.push({ ts: `2026-07-28T10:00:${String(i % 60).padStart(2, '0')}.000Z`, sessionId: 'noise', relPath: `src/noise${i}.js`, holdout: true, wouldServe: 'B', callTokens: 1 });
+      }
+      fs.writeFileSync(ledgerFoldRecall.eventsPath(projBound), jsonl(rows));
+      const ledBound = ledgerStoreT6.updateLedger(projBound, [], util.getConfig());
+      assert.strictEqual(ledBound.holdout.skips, ledgerFoldRecall.MAX_FOLD_LINES, 'exactly one fold pass worth of rows must be consumed');
+      const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(projBound), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remaining.length, extraRows, 'rows past the bound stay queued, never dropped');
+      const ledBound2 = ledgerStoreT6.updateLedger(projBound, [], util.getConfig());
+      assert.strictEqual(ledBound2.holdout.skips, ledgerFoldRecall.MAX_FOLD_LINES + extraRows, 'a second pass finishes off the remainder');
+    });
+
+    // Fix round 3 (carried FINDING 5): overflow rows must keep their relative
+    // order, and a remainder row must settle on the NEXT pass, not be
+    // skipped, dropped, or reordered. MAX_FOLD_LINES itself is a hard
+    // constant (10,000 confirmed serves is too heavy for a unit test) -- so
+    // this exercises the SAME injectable-bound mechanism updateLedger/
+    // settleRecallQueue/readQueue already expose (mirroring the nowFn
+    // pattern) with a small override instead.
+    check('ledger-fold-recall: overflow rows keep relative order across passes when MAX_FOLD_LINES is overridden small', () => {
+      const projOverflow = seedT6Project('t6-fold-lines-override');
+      const nowOverflow = Date.parse('2026-07-28T11:00:00.000Z');
+      // Three confirmed serves (2 lines each = 6 lines), written in order.
+      writeServeRows(projOverflow, '2026-07-28T10:00:00.000Z', 'sess-o1', 'src/o1.js', 'B', 1000, 100); // net 900
+      writeServeRows(projOverflow, '2026-07-28T10:00:01.000Z', 'sess-o2', 'src/o2.js', 'B', 2000, 200); // net 1800
+      writeServeRows(projOverflow, '2026-07-28T10:00:02.000Z', 'sess-o3', 'src/o3.js', 'B', 3000, 300); // net 2700
+
+      // maxLines=4 covers exactly serve1+serve2's two pairs; serve3's pair
+      // must stay queued as the remainder.
+      const ledOverflow1 = ledgerStoreT6.updateLedger(projOverflow, [], util.getConfig(), () => nowOverflow, 4);
+      assert.strictEqual(ledOverflow1.avoided.tokens, 900 + 1800, 'only the first two (in-order) serves settle this pass');
+      assert.strictEqual(ledOverflow1.avoided.serves, 2);
+      assert.deepStrictEqual(ledOverflow1.openServes.map(s => s.relPath).sort(), ['src/o1.js', 'src/o2.js']);
+      const remainingOverflow = fs.readFileSync(ledgerFoldRecall.eventsPath(projOverflow), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remainingOverflow.length, 2, 'serve3\'s pending+confirmation pair stays queued as the remainder, never dropped');
+      assert.strictEqual(JSON.parse(remainingOverflow[0]).relPath, 'src/o3.js', 'the remainder is the correct, un-reordered row');
+
+      // Next pass finishes off the remainder -- serve3 settles, and the
+      // already-settled serve1/serve2 receipts are untouched (not
+      // re-settled, not reordered, not lost).
+      const ledOverflow2 = ledgerStoreT6.updateLedger(projOverflow, [], util.getConfig(), () => nowOverflow + 1000, 4);
+      assert.strictEqual(ledOverflow2.avoided.tokens, 900 + 1800 + 2700, 'serve3 settles on the very next pass, nothing lost or duplicated');
+      assert.strictEqual(ledOverflow2.avoided.serves, 3);
+      assert.deepStrictEqual(ledOverflow2.openServes.map(s => s.relPath).sort(), ['src/o1.js', 'src/o2.js', 'src/o3.js']);
+      assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(projOverflow)) || fs.readFileSync(ledgerFoldRecall.eventsPath(projOverflow), 'utf8') === '',
+        'the queue is fully drained once the remainder settles');
+    });
+  }
+
+  // Task 6: warm() finally gets called somewhere -- wired into syncOnce right
+  // after the ledger write, off the FRESH ledger's own hot set.
+  check('scan: syncOnce warms the recall store after the ledger write, off the fresh ledger\'s hot set', () => {
+    const recallStoreForWarm = require('../lib/recall-store');
+    const originalWarm = recallStoreForWarm.warm;
+    let calledWith = null;
+    recallStoreForWarm.warm = (projectPath, hotPaths, config) => {
+      calledWith = { projectPath, hotPaths, config };
+      return Promise.resolve(0);
+    };
+    try {
+      syncOnce({ project: proj1 });
+    } finally {
+      recallStoreForWarm.warm = originalWarm;
+    }
+    assert.ok(calledWith, 'recallStore.warm was never called from syncOnce');
+    assert.strictEqual(calledWith.projectPath, proj1);
+    assert.ok(Array.isArray(calledWith.hotPaths), 'warm must be handed the fresh ledger\'s hotPaths array');
+  });
+
+  check('ledger-store: writeLedger writes ledger.json atomically (temp file + rename, no leftovers)', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-atomic-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const built = store.buildProjectLedger([]);
+    const p = store.writeLedger(proj, built);
+    assert.ok(fs.existsSync(p), 'ledger.json is written');
+    assert.strictEqual(store.readLedger(proj).version, 4, 'the write round-trips through the same path readLedger uses');
+    const dir = path.dirname(p);
+    const leftovers = fs.readdirSync(dir).filter(f => f.startsWith('.ledger.json.') && f.endsWith('.tmp'));
+    assert.deepStrictEqual(leftovers, [], 'no temp file survives a successful write');
+  });
+  check('api: /api/savings reports per-project ledgers and totals', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'savings-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    store.writeLedger(proj, {
+      updatedAt: new Date().toISOString(), sessions: 2, requests: 10, volume: 5000,
+      inCost: 0.5, outCost: 0.1,
+      reads: { first: 3, sameSession: 2, crossSession: 5 },
+      hotPaths: [{ file: '/r/x.js', readers: 2, reads: 4 }],
+      // Direct avoidance / holdout (Task 6): a real, nonzero fixture so the
+      // wire projection is proven to actually carry the ledger's numbers,
+      // not just default them to zero.
+      avoided: { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+      holdout: { skips: 2, callTokens: 900 },
+      // Accumulation bookkeeping: durable on disk, never on the wire.
+      seenKeys: ['0|s1|m1'], readKeys: ['s1|tu1|/r/x.js'], sessionIds: ['s1'],
+      fileReaders: { '/r/x.js': { sessions: ['s1', 's2'], reads: 4, lastTs: 't1' } },
+    });
+    // savingsPayload takes no argument -- like every other payload builder in
+    // lib/server.js it reads state via util.loadState() itself, not from a
+    // passed-in shape. Swap in an isolated state.projects (just this one
+    // fixture) for the call, then restore the suite's real accumulated state,
+    // or every other project's own ledger.json (written by syncOnce's ledger
+    // wiring over the course of the suite) would inflate these totals.
+    const savedState = read(util.statePath());
+    try {
+      util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [proj]: { name: 'savings-proj', events: [] } } });
+      const payload = savingsPayload();
+      assert.strictEqual(payload.totals.volume, 5000);
+      assert.strictEqual(payload.totals.reads.crossSession, 5);
+      assert.strictEqual(payload.projects[0].hotPaths, 1);
+      // FINDING I4. MemBridge prices at list-price API rates while many users
+      // are on flat subscription plans, so a dollar figure here would be a
+      // number the user can disprove -- and it would discredit every honest
+      // token figure next to it. Costs are computed and stored, never served.
+      assert.strictEqual(payload.projects[0].inCost, undefined, 'the ledger must never serve a dollar figure');
+      assert.strictEqual(payload.projects[0].outCost, undefined, 'the ledger must never serve a dollar figure');
+      assert.strictEqual(payload.totals.inCost, undefined, 'totals must never carry a dollar figure');
+      assert.strictEqual(payload.totals.outCost, undefined, 'totals must never carry a dollar figure');
+      // Task 6 (spec §7.1/§7.2/§8.2): avoided/holdout ride onto the wire
+      // too, tokens only -- the fixture's real numbers must survive the
+      // projection (and its sum into totals), never silently drop to zero.
+      assert.deepStrictEqual(payload.projects[0].avoided,
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(payload.projects[0].holdout, { skips: 2, callTokens: 900 });
+      assert.deepStrictEqual(payload.totals.avoided,
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(payload.totals.holdout, { skips: 2, callTokens: 900 });
+      assert.deepStrictEqual(Object.keys(payload.projects[0].avoided).sort(),
+        ['netNegatives', 'partialWins', 'serves', 'tierA', 'tierB', 'tokens'],
+        'avoided must carry tokens only -- no dollar/cost field');
+      assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
+        'holdout must carry tokens only -- no dollar/cost field');
+      // Whitelist: the payload is an explicit projection, so accumulation
+      // bookkeeping (dedupe keys, per-path reader sets) can never leak onto
+      // the wire just because it was added to ledger.json.
+      assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
+        ['avoided', 'holdout', 'hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        'the /api/savings project shape must stay exactly this set');
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['avoided', 'holdout', 'reads', 'requests', 'volume'],
+        'the /api/savings totals shape must stay exactly this set');
+    } finally {
+      fs.writeFileSync(util.statePath(), savedState);
+    }
+  });
+  // Task 8 (dashboard savings panel): the panel branches on
+  // `avoided.tokens === 0` to show "no repeat reads yet" instead of a
+  // count. That honest zero must ride the wire as a real 0, not be dropped
+  // or coerced to null/undefined by the projection.
+  check('api: /api/savings serves an honest zero for a project with no avoided tokens yet', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'savings-zero-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    store.writeLedger(proj, {
+      updatedAt: new Date().toISOString(), sessions: 1, requests: 3, volume: 1200,
+      reads: { first: 3, sameSession: 0, crossSession: 0 },
+      hotPaths: [],
+      avoided: { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+      holdout: { skips: 0, callTokens: 0 },
+      seenKeys: [], readKeys: [], sessionIds: ['s1'], fileReaders: {},
+    });
+    const savedState = read(util.statePath());
+    try {
+      util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [proj]: { name: 'savings-zero-proj', events: [] } } });
+      const payload = savingsPayload();
+      assert.strictEqual(payload.projects[0].avoided.tokens, 0, 'a real 0, not dropped/undefined');
+      assert.strictEqual(payload.projects[0].avoided.serves, 0);
+      assert.strictEqual(payload.totals.volume, 1200, 'volume still rides the wire for the % of context loaded denominator');
+    } finally {
+      fs.writeFileSync(util.statePath(), savedState);
+    }
+  });
+  check('codex adapter: two token_count events with the same timestamp get distinct messageIds; both survive buildRequests', () => {
+    const ledger = require('../lib/ledger');
+    const entries = [
+      { type: 'session_meta', timestamp: '2026-07-28T09:59:00Z', payload: { cwd: '/repo' } },
+      { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+        payload: { type: 'token_count', info: {
+          last_token_usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 },
+        } } },
+      // same millisecond -- turn_id absent in both, as observed in real Codex transcripts
+      { type: 'event_msg', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo',
+        payload: { type: 'token_count', info: {
+          last_token_usage: { input_tokens: 200, cached_input_tokens: 0, output_tokens: 20 },
+        } } },
+    ];
+    const events = codexAdapter.extractEvents(entries, {});
+    const usage = events.filter(e => e.kind === 'usage');
+    assert.strictEqual(usage.length, 2);
+    assert.notStrictEqual(usage[0].messageId, usage[1].messageId, 'same-ms fallback ids must be distinct');
+    const reqs = ledger.buildRequests(usage.map(u => Object.assign({}, u, { session: 's1' })));
+    assert.strictEqual(reqs.length, 2, 'both requests must survive dedupe, not collapse into one');
+  });
+  check('ledger: buildRequests keeps requests from different sessions even when the fallback messageId collides', () => {
+    const ledger = require('../lib/ledger');
+    const events = [
+      { kind: 'usage', ts: 't1', session: 'session-a', model: 'gpt-5',
+        usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 5 } },
+      { kind: 'usage', ts: 't1', session: 'session-b', model: 'gpt-5',
+        usage: { input_tokens: 200, cached_input_tokens: 0, output_tokens: 5 } },
+    ];
+    const reqs = ledger.buildRequests(events);
+    assert.strictEqual(reqs.length, 2, 'identical fallback id from two different sessions must not collide');
+  });
+  check('ledger: sessionVolume epoch-splits each sidechain stream independently of the main stream', () => {
+    const ledger = require('../lib/ledger');
+    const mk = (ts, ctx, out, sidechain) => ({ ts, ctx, out, inCost: 0, outCost: 0, session: 's1', sidechain: !!sidechain });
+    // non-sidechain context grows steadily: 1000 -> 2000 -> 3000, no reset.
+    // A sidechain request (small ctx 100) lands chronologically between the
+    // 2000 and 3000 non-sidechain requests -- it must not look like a
+    // compaction/reset in the MAIN stream.
+    const reqs = [
+      mk('t1', 1000, 0, false),
+      mk('t2', 2000, 0, false),
+      mk('t3', 100, 0, true),
+      mk('t4', 3000, 0, false),
+    ];
+    const out = ledger.sessionVolume(reqs);
+    assert.strictEqual(out.nRequests, 4);
+    assert.strictEqual(out.volume, 1000 + 2000 + 100 + 3000, 'volume sums context over everything');
+    assert.strictEqual(out.epochs.length, 2, 'one epoch for the non-sidechain stream, one for the sidechain stream');
+    assert.deepStrictEqual(out.epochs[0], [0, 3], 'non-sidechain stream: no split, spans its own indices 0 and 3');
+    assert.deepStrictEqual(out.epochs[1], [2, 2], 'sidechain stream: single request, its own epoch');
+  });
+  check('ledger: sessionVolume single-stream output is unchanged (regression guard for the epoch fix)', () => {
+    const ledger = require('../lib/ledger');
+    const mk = (ts, ctx, out) => ({ ts, ctx, out, inCost: 0, outCost: 0, session: 's1', sidechain: false });
+    const reqs = [
+      mk('t1', 1000, 100), mk('t2', 2000, 100), mk('t3', 3000, 100),
+      mk('t4', 400, 100), mk('t5', 900, 100),
+    ];
+    const out = ledger.sessionVolume(reqs);
+    assert.strictEqual(out.epochs.length, 2);
+    assert.deepStrictEqual(out.epochs[0], [0, 2]);
+    assert.deepStrictEqual(out.epochs[1], [3, 4]);
+  });
+  check('ordering: mixed-precision ISO timestamps sort chronologically, not lexicographically', () => {
+    const ledger = require('../lib/ledger');
+    // Inserted in reverse-of-chronological order: the millisecond-bearing
+    // stamp first, the whole-second stamp second. String comparison would
+    // keep them in THAT order ("." sorts before "Z"); byTs must correct it.
+    const events = [
+      { kind: 'usage', ts: '2026-07-28T10:00:00.500Z', session: 's1', messageId: 'later',
+        model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } },
+      { kind: 'usage', ts: '2026-07-28T10:00:00Z', session: 's1', messageId: 'earlier',
+        model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } },
+    ];
+    const reqs = ledger.buildRequests(events);
+    assert.strictEqual(reqs.length, 2);
+    assert.strictEqual(reqs[0].messageId, 'earlier');
+    assert.strictEqual(reqs[1].messageId, 'later', 'the .500Z stamp must sort second, not first');
   });
 
   // --- 10. distillation: Stop hook, settings surgery, Distilled precedence ---
@@ -5443,11 +8778,17 @@ async function main() {
     assert.strictEqual(afterSetup.hooks.Stop.length, 2, 'membridge entry not appended');
     assert.strictEqual(JSON.stringify(afterSetup.hooks.Stop[0]), JSON.stringify(seedSettings.hooks.Stop[0]), 'user Stop hook changed');
     assert.strictEqual(afterSetup.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved absolute form');
-    assert.deepStrictEqual(afterSetup.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
+    // PreToolUse: the user's own Bash-matcher entry survives untouched, and
+    // the recall hook is appended as its own entry alongside it (Task 5).
+    assert.strictEqual(afterSetup.hooks.PreToolUse.length, 2, 'recall entry not appended');
+    assert.deepStrictEqual(afterSetup.hooks.PreToolUse[0], seedSettings.hooks.PreToolUse[0], 'unrelated PreToolUse hook changed');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[1].matcher, 'Read', 'recall hook matcher missing/wrong');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'recall command missing or not the resolved absolute form');
     assert.strictEqual(afterSetup.model, 'opus');
     assert.deepStrictEqual(afterSetup.feedbackSurveyState, seedSettings.feedbackSurveyState, 'unknown keys lost');
     assert.ok(/already installed/.test(setup2.stdout), `second run said: ${setup2.stdout}`);
-    assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the entry');
+    assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the Stop entry');
+    assert.strictEqual(afterSetup2.hooks.PreToolUse.length, 2, 'setup-hooks duplicated the recall entry');
   });
   check('distill: hook command is absolute and needs no PATH', () => {
     const cmd = hooks.hookCommand();
@@ -5479,10 +8820,17 @@ async function main() {
       const after1 = JSON.parse(read(arFile));
       assert.strictEqual(after1.hooks.Stop.length, 1, 'Stop hook not auto-registered');
       assert.strictEqual(after1.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'auto-registered command is not the resolved form');
+      // Task 5: ensureInstalled registers the recall PreToolUse hook the same
+      // way, on the same every-launch path, from a settings file that starts
+      // with no PreToolUse key at all.
+      assert.strictEqual(after1.hooks.PreToolUse.length, 1, 'recall hook not auto-registered');
+      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read', 'recall hook matcher missing/wrong');
+      assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand(), 'auto-registered recall command is not the resolved form');
       assert.strictEqual(after1.model, 'opus', 'unrelated settings key lost');
       hooks.ensureInstalled();
       const after2 = JSON.parse(read(arFile));
       assert.strictEqual(after2.hooks.Stop.length, 1, 'ensureInstalled duplicated the Stop entry');
+      assert.strictEqual(after2.hooks.PreToolUse.length, 1, 'ensureInstalled duplicated the recall entry');
     } finally {
       process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
@@ -5522,6 +8870,272 @@ async function main() {
     const again = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.ok(/already installed/.test(again.stdout), `upgrade not idempotent: ${again.stdout}`);
   });
+  // Stop-hook twin of the H2 recall fix above: reconcileStopHook used to claim
+  // ownership of any hook whose JSON merely CONTAINS "membridge", which is true
+  // of any hook script a user keeps under a directory named Membridge. Left
+  // unfixed, setup-hooks would OVERWRITE that command with ours, and
+  // remove-hooks would then DELETE it outright -- unrecoverably, since the
+  // user's own command is gone the moment setup-hooks runs. Ownership must be
+  // isOwnStopHook (mirrors isOwnAppendRule / isOwnRecallHook), not the broad
+  // mentionsMembridge.
+  check('stop: H2-twin -- a user Stop hook whose command merely contains "membridge" survives setup-hooks and remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-user-membridge.json');
+    const userEntry = { matcher: '', hooks: [{ type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mylint.js' }] };
+    fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [userEntry] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.deepStrictEqual(after.hooks.Stop[0], userEntry, "setup-hooks rewrote the user's own Stop hook");
+    assert.strictEqual(after.hooks.Stop.length, 2, 'the MemBridge Stop entry was not appended alongside the user entry');
+    assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], 'remove-hooks deleted a Stop hook that was never ours');
+  });
+  // Fix round 4 (anchoring). isOwnStopHook's primary branch matched on
+  // cmd.includes(HOOK_SCRIPT) plus an UNANCHORED regex that only required the
+  // command to END with the literal characters "membridge-hook.js" -- no
+  // path-separator or word-boundary before it, unlike the legacy PATH-form
+  // fallback on the next line which already anchors with (^|[\s"'/]). Any
+  // command whose last path segment merely ENDS in those characters (a
+  // user's own "notmembridge-hook.js", "custom-membridge-hook.js",
+  // "backup_membridge-hook.js", or "my-membridge-hook.js stop") was falsely
+  // claimed as MemBridge's own, then overwritten by setup-hooks and deleted
+  // by remove-hooks -- the exact destructive failure this predicate exists to
+  // prevent, reached through a different filename. Each command below must
+  // survive both operations byte-identical.
+  for (const falsePositiveCmd of [
+    '/usr/bin/notmembridge-hook.js',
+    '/Users/x/scripts/custom-membridge-hook.js',
+    'node /Users/marco/tools/backup_membridge-hook.js',
+    '/Users/marco/Documents/Membridge/lib/my-membridge-hook.js stop',
+  ]) {
+    check(`stop: anchoring -- a user Stop hook command that merely ENDS with "membridge-hook.js" (${falsePositiveCmd}) survives setup-hooks and remove-hooks`, () => {
+      const f = path.join(ROOT, `claude-settings-stop-fp-${count(falsePositiveCmd, ' ')}-${falsePositiveCmd.length}.json`);
+      const userEntry = { hooks: [{ type: 'command', command: falsePositiveCmd }] };
+      fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [userEntry] } }, null, 2));
+      const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const after = JSON.parse(read(f));
+      assert.deepStrictEqual(after.hooks.Stop[0], userEntry, `setup-hooks rewrote the user's own Stop hook command: ${falsePositiveCmd}`);
+      assert.strictEqual(after.hooks.Stop.length, 2, `the MemBridge Stop entry was not appended alongside the false-positive user entry: ${falsePositiveCmd}`);
+      assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
+      const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(rm.status, 0, rm.stderr);
+      const afterRm = JSON.parse(read(f));
+      assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], `remove-hooks deleted a Stop hook that was never ours: ${falsePositiveCmd}`);
+    });
+  }
+  // The real-world install shape has NO subcommand at all (membridge-hook.js
+  // falls through to runStop() when argv is empty). isOwnStopHook must
+  // recognize this exact shape or setup-hooks would append a duplicate Stop
+  // entry on every currently-installed machine.
+  check('stop: a real-shape entry (node + membridge-hook.js, no subcommand) is recognized as owned; a stale path is upgraded in place', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-realshape.json');
+    const staleCommand = '"/opt/homebrew/Cellar/node/25.7.0/bin/node" "/Users/marco/Documents/Membridge/lib/membridge-hook.js"';
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: staleCommand, timeout: 10 }] }] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    assert.ok(/Updated the MemBridge Stop hook command/.test(out.stdout), `real-shape entry not recognized as owned: ${out.stdout}`);
+    const after = JSON.parse(read(f));
+    assert.strictEqual(after.hooks.Stop.length, 1, 'setup-hooks appended a duplicate instead of recognizing the real-shape entry');
+    assert.strictEqual(after.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'stale real-shape command not upgraded to the current install path');
+    assert.strictEqual(after.hooks.Stop[0].hooks[0].timeout, 10, 'sibling fields lost in upgrade');
+  });
+  // The Electron-launched app prefixes the command with ELECTRON_RUN_AS_NODE=1
+  // so its bundled binary behaves as plain node; that prefix sits before the
+  // part isOwnStopHook inspects and must not defeat recognition.
+  check('stop: the Electron-prefixed variant (ELECTRON_RUN_AS_NODE=1 ...) is recognized as owned', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-electron.json');
+    const electronCommand = 'ELECTRON_RUN_AS_NODE=1 "/Applications/MemBridge.app/Contents/MacOS/MemBridge" "/Applications/MemBridge.app/Contents/Resources/app.asar/lib/membridge-hook.js"';
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: electronCommand, timeout: 10 }] }] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.strictEqual(after.hooks.Stop.length, 1, 'setup-hooks duplicated the Electron-prefixed entry instead of recognizing it as owned');
+  });
+  // Second bug, same fix round: Marco's real settings.json accumulated THREE
+  // byte-identical Stop entries. setup-hooks must converge to exactly one
+  // owned entry regardless of how many piled up, leaving any unrelated user
+  // Stop hook untouched, and a second run must be a true no-op.
+  check('stop: setup-hooks converges three duplicate owned Stop entries to one; a second run is a no-op; the user hook survives', () => {
+    const f = path.join(ROOT, 'claude-settings-stop-triplicate.json');
+    const ownedEntry = { hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] };
+    const userEntry = { hooks: [{ type: 'command', command: 'echo user-stop-triplicate' }] };
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [ownedEntry, ownedEntry, ownedEntry, userEntry] },
+    }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    const ownedCount = after.hooks.Stop.filter(e => e && Array.isArray(e.hooks) && e.hooks.some(h => h.command === hooks.hookCommand())).length;
+    assert.strictEqual(ownedCount, 1, `expected exactly one owned Stop entry after convergence, found ${ownedCount}`);
+    assert.strictEqual(after.hooks.Stop.length, 2, 'user Stop hook lost, or leftover duplicate entries remain');
+    assert.ok(after.hooks.Stop.some(e => JSON.stringify(e) === JSON.stringify(userEntry)), "user's Stop hook not preserved byte-for-byte");
+    const before2 = read(f);
+    const out2 = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out2.status, 0, out2.stderr);
+    assert.ok(/already installed/.test(out2.stdout), `second run after convergence was not a no-op: ${out2.stdout}`);
+    assert.strictEqual(read(f), before2, 'second setup-hooks run rewrote the file after convergence');
+  });
+  check('recall: reconcileRecallHook installs on Read into a settings file with no PreToolUse key at all', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-fresh.json');
+    fs.writeFileSync(f, JSON.stringify({ model: 'opus' }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const r1 = hooks.reconcileRecallHook();
+      assert.strictEqual(r1.wrote, true, 'first reconcile should write');
+      const after1 = JSON.parse(read(f));
+      assert.strictEqual(after1.hooks.PreToolUse.length, 1);
+      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read');
+      assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand());
+      assert.strictEqual(after1.model, 'opus', 'unrelated key lost');
+      const r2 = hooks.reconcileRecallHook();
+      assert.strictEqual(r2.wrote, false, 'second reconcile must be a no-op');
+      const after2 = JSON.parse(read(f));
+      assert.strictEqual(after2.hooks.PreToolUse.length, 1, 'reconcile duplicated the entry');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('recall: reconcileRecallHook upgrades a stale command in place, leaves an unrelated PreToolUse matcher alone', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-stale.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] },
+        { matcher: 'Read|Grep|Glob', hooks: [{ type: 'command', command: '/old/node /old/lib/membridge-hook.js recall', timeout: 5 }] },
+      ] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const r = hooks.reconcileRecallHook();
+      assert.strictEqual(r.upgraded, 1);
+      const after = JSON.parse(read(f));
+      assert.strictEqual(after.hooks.PreToolUse.length, 2, 'entry count changed');
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, 'unrelated matcher touched');
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'stale recall command not upgraded');
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost in upgrade');
+      // The fixture's matcher also carries the pre-C3 value -- a command
+      // upgrade and a matcher rematch can land in the same reconcile pass.
+      assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the pre-narrowing matcher was not reconciled alongside the stale command');
+      const r2 = hooks.reconcileRecallHook();
+      assert.strictEqual(r2.wrote, false, 'upgrade not idempotent');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  // H2 (HIGH, fix round 1). The PreToolUse reconcile used to claim ownership
+  // of any hook whose JSON merely CONTAINS "membridge" -- which is true of any
+  // hook script the user happens to keep under a directory named Membridge.
+  // Verified damage: the user's own hook had its command OVERWRITTEN with the
+  // recall command, the recall hook inherited that entry's "Write" matcher (so
+  // it never fired on reads), and remove-hooks then deleted the user's hook
+  // outright. Ownership must be established by the command actually being
+  // ours, in the spirit of isOwnAppendRule.
+  check('recall: H2 -- a user hook whose command merely contains "membridge" survives setup-hooks and remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-user-membridge-hook.json');
+    const userEntry = { matcher: 'Write', hooks: [{ type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mylint.js' }] };
+    const seed = { hooks: { PreToolUse: [userEntry] } };
+    fs.writeFileSync(f, JSON.stringify(seed, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own hook");
+    assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the user entry');
+    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit a foreign matcher');
+    assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a hook that was never ours');
+  });
+  // Fix round 4 (anchoring), recall sibling of the Stop-hook anchoring fix
+  // above. isOwnRecallHook's primary branch was `cmd.includes(HOOK_SCRIPT) ||
+  // <legacy regex>` -- once the command ended with " recall", a bare
+  // substring test with NO filename anchoring at all decided ownership, so a
+  // user's own "notmembridge-hook.js" (last path segment merely ENDING in
+  // "membridge-hook.js") followed by " recall" was falsely claimed as ours.
+  check('recall: anchoring -- a user PreToolUse hook command that merely ENDS with "membridge-hook.js" before " recall" survives setup-hooks and remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-fp-anchor.json');
+    const userEntry = { matcher: 'Read', hooks: [{ type: 'command', command: '"/usr/bin/notmembridge-hook.js" recall' }] };
+    fs.writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [userEntry] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own false-positive recall-shaped hook");
+    assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the false-positive user entry');
+    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit the false-positive matcher');
+    assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a false-positive recall-shaped hook that was never ours');
+  });
+  // H3. doRunRecall() is fully synchronous (it blocks on a stdin read), so a
+  // JS timer can never fire to bound it -- the settings-level per-hook timeout
+  // is the only real bound that exists.
+  check('recall: H3 -- the installed PreToolUse entry carries a low settings-level timeout', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-timeout.json');
+    fs.writeFileSync(f, JSON.stringify({}, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      hooks.reconcileRecallHook();
+      const h = JSON.parse(read(f)).hooks.PreToolUse[0].hooks[0];
+      assert.strictEqual(typeof h.timeout, 'number', 'the recall entry has no timeout at all');
+      assert.ok(h.timeout > 0 && h.timeout <= 5, `recall timeout must be 5s or lower, got ${h.timeout}`);
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  // M4. The upgrade path rewrote h.command but never entry.matcher, so an
+  // entry narrowed to a matcher other than the current RECALL_MATCHER left
+  // it permanently mismatched -- any future RECALL_MATCHER change could
+  // never propagate to an already-installed entry.
+  //
+  // C3 (final whole-branch review) is exactly that future change: Grep/Glob
+  // interceptions were priced as a full-file read (estimateCallTokens(null,
+  // {size}) has no notion of what a grep call actually returns), so
+  // RECALL_MATCHER narrowed from 'Read|Grep|Glob' to 'Read'. This test now
+  // pins the real migration: an entry installed under the OLD, broader
+  // matcher must be reconciled down to the new one.
+  check('recall: M4/C3 -- an owned entry carrying the pre-narrowing matcher (Read|Grep|Glob) is reconciled down to Read', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-matcher.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] },
+        { matcher: 'Read|Grep|Glob', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] },
+      ] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const r = hooks.reconcileRecallHook();
+      assert.strictEqual(r.wrote, true, 'an entry carrying the old, broader matcher must be reconciled');
+      const after = JSON.parse(read(f));
+      assert.strictEqual(after.hooks.PreToolUse.length, 2, 'reconciling the matcher must not add or drop entries');
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, 'unrelated matcher touched');
+      assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the owned entry must be narrowed from Read|Grep|Glob to Read');
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost while reconciling the matcher');
+      assert.strictEqual(hooks.reconcileRecallHook().wrote, false, 'matcher reconcile is not idempotent');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
   check('distill: isHookInstalled is false when the hook executable does not resolve', () => {
     const deadFile = path.join(ROOT, 'claude-settings-dead.json');
     fs.writeFileSync(deadFile, JSON.stringify({
@@ -5550,8 +9164,10 @@ async function main() {
   const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
   const afterRemove = JSON.parse(read(claudeSettings));
   check('distill: remove-hooks strips only membridge entries', () => {
-    assert.ok(/Removed the MemBridge Stop hook/.test(removeOut.stdout), removeOut.stdout);
+    assert.ok(/Removed the MemBridge hooks/.test(removeOut.stdout), removeOut.stdout);
     assert.deepStrictEqual(afterRemove.hooks.Stop, seedSettings.hooks.Stop, 'user Stop hooks not intact');
+    // The recall PreToolUse entry (added by setup-hooks above) is gone; the
+    // user's own Bash-matcher entry is back to exactly what it started as.
     assert.deepStrictEqual(afterRemove.hooks.PreToolUse, seedSettings.hooks.PreToolUse, 'unrelated hooks changed');
     assert.strictEqual(afterRemove.model, 'opus');
   });
@@ -5595,6 +9211,157 @@ async function main() {
     const after = JSON.parse(read(staleFile));
     assert.deepStrictEqual(after.permissions.allow.filter(r => /membridge/i.test(r)), [hooks.appendAllowRule()], 'stale rule not rewritten to current form');
   });
+  // Fix round 5 (allow-rule anchoring). isOwnAppendRule was a bare substring
+  // test -- v.toLowerCase().includes(HOOK_SCRIPT) && v.includes(' append') --
+  // with no boundary anchoring and no ordering requirement, unlike its two
+  // siblings isOwnStopHook / isOwnRecallHook (anchored in 66c17a0). A user's
+  // own Bash allow-rule mentioning a similarly-named script (last path
+  // segment merely ENDING in "membridge-hook.js", e.g.
+  // /usr/bin/notmembridge-hook.js), or any rule containing both the
+  // substring "membridge-hook.js" and the substring " append" anywhere in any
+  // order, was falsely claimed as MemBridge's own and silently dropped by
+  // remove-hooks -- unrecoverable, degrading the user's permission setup
+  // without warning. Fixed the same way as its siblings: the script
+  // reference must sit at a path boundary (^|[\s"'/\\]) and the append
+  // subcommand must immediately follow it, not merely appear somewhere in
+  // the string.
+  check('distill: anchoring -- the real generated append allow-rule is still recognized and removed by remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-real.json');
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: ['Bash(npm run test:*)'] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    assert.ok(after.permissions.allow.includes(hooks.appendAllowRule()), 'the real append allow rule was not installed/recognized');
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    const allowRm = ((afterRm.permissions || {}).allow) || [];
+    assert.ok(!allowRm.includes(hooks.appendAllowRule()), 'the real append allow rule was not removed by remove-hooks');
+    assert.ok(allowRm.includes('Bash(npm run test:*)'), 'unrelated user rule lost');
+  });
+  check('distill: anchoring -- a user allow-rule for a similarly-named script (notmembridge-hook.js append) survives remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-fp1.json');
+    const userRule = '/usr/bin/notmembridge-hook.js append foo';
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [userRule, 'Bash(npm run test:*)'] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
+    assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule that was never ours (unanchored notmembridge-hook.js false positive)');
+  });
+  check('distill: anchoring -- a user allow-rule containing both substrings out of order survives remove-hooks', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-fp2.json');
+    const userRule = 'Bash(my append tool: /opt/notmembridge-hook.js)';
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [userRule] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
+    assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule whose substrings merely appear out of order');
+  });
+  check('distill: anchoring -- setup-hooks/remove-hooks leave unrelated allow rules untouched and preserve ordering', () => {
+    const f = path.join(ROOT, 'claude-settings-append-anchor-order.json');
+    const rules = ['Bash(npm run test:*)', 'Bash(git status:*)', 'Bash(echo hi:*)'];
+    fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [...rules] } }, null, 2));
+    const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+    const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = JSON.parse(read(f));
+    // Unrelated rules keep their original relative order, with our rule
+    // appended after them.
+    assert.deepStrictEqual(after.permissions.allow.slice(0, rules.length), rules, 'unrelated rule order changed');
+    assert.strictEqual(after.permissions.allow[rules.length], hooks.appendAllowRule(), 'our rule not appended after the user rules');
+    const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    assert.strictEqual(rm.status, 0, rm.stderr);
+    const afterRm = JSON.parse(read(f));
+    assert.deepStrictEqual(afterRm.permissions.allow, rules, 'unrelated rules changed or reordered by remove-hooks');
+  });
+  // Fix round 6 (post-commit anchoring), fourth and last instance of the
+  // ownership-predicate defect fixed in isOwnStopHook / isOwnRecallHook /
+  // isOwnAppendRule above. isOurPostCommitLine was two INDEPENDENT substring
+  // tests -- l.includes('membridge-hook.js') && l.includes('post-commit') --
+  // with no path-boundary anchor and no ordering/adjacency requirement. That
+  // let a user's own similarly-named script (a last path segment merely
+  // ENDING in "membridge-hook.js") or a line mentioning both substrings
+  // anywhere, in any order, be falsely claimed as MemBridge's own. Unlike its
+  // three siblings, this predicate feeds removePostCommitHooks, which can
+  // delete a LINE from -- or delete outright -- a user's per-repo
+  // .git/hooks/post-commit file, with no undo. Each pinned case below uses a
+  // real temp git repo under ROOT (isolated by MEMBRIDGE_HOME, never real
+  // state) and calls hooks.installPostCommitHooks() / removePostCommitHooks()
+  // directly, exactly as the auto-register post-commit sweep test above does.
+  {
+    const pcAnchorRepo = path.join(ROOT, 'postcommit-anchor-repo');
+    fs.mkdirSync(path.join(pcAnchorRepo, '.git', 'hooks'), { recursive: true });
+    {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [pcAnchorRepo]: { events: [] } } });
+    }
+    const pcAnchorFile = path.join(pcAnchorRepo, '.git', 'hooks', 'post-commit');
+
+    check('post-commit: anchoring -- a real MemBridge-generated line is recognized and removed exactly, nothing else', () => {
+      fs.writeFileSync(pcAnchorFile, '');
+      const installResult = hooks.installPostCommitHooks();
+      assert.strictEqual(installResult.failed, 0, 'install reported a failure');
+      const body = read(pcAnchorFile);
+      assert.ok(body.startsWith('#!/bin/sh'), 'fresh hook file needs a shebang');
+      const cmdLine = hooks.postCommitCommand();
+      assert.strictEqual(body, `#!/bin/sh\n${cmdLine}\n`, `unexpected hook body: ${body}`);
+      const removed = hooks.removePostCommitHooks();
+      assert.ok(removed >= 1, 'removePostCommitHooks reported nothing removed');
+      assert.ok(!fs.existsSync(pcAnchorFile), 'a post-commit file that was only our scaffolding + our line must be deleted');
+    });
+
+    check('post-commit: anchoring -- a user line referencing /opt/notmembridge-hook.js with post-commit survives byte-identical', () => {
+      const userLine = '#!/bin/sh\n/opt/notmembridge-hook.js post-commit\n';
+      fs.writeFileSync(pcAnchorFile, userLine);
+      hooks.installPostCommitHooks(); // must APPEND our real line, never touch this one
+      const removed = hooks.removePostCommitHooks();
+      const body = read(pcAnchorFile);
+      assert.ok(body.startsWith(userLine), `false-positive match mutated the user's own line; body: ${body}`);
+      assert.ok(removed >= 1, 'our own appended line should still have been removed');
+      fs.unlinkSync(pcAnchorFile);
+    });
+
+    check('post-commit: anchoring -- a line with both substrings out of order survives byte-identical', () => {
+      const userLine = '#!/bin/sh\n# post-commit: see notes about membridge-hook.js\n';
+      fs.writeFileSync(pcAnchorFile, userLine);
+      hooks.installPostCommitHooks();
+      hooks.removePostCommitHooks();
+      const body = read(pcAnchorFile);
+      assert.ok(body.startsWith(userLine), `false-positive match mutated the user's comment line; body: ${body}`);
+      fs.unlinkSync(pcAnchorFile);
+    });
+
+    check('post-commit: a shebang plus one user command plus our line keeps the shebang and user command, file survives', () => {
+      const userCmd = 'echo user-post-commit-hook';
+      fs.writeFileSync(pcAnchorFile, `#!/bin/sh\n${userCmd}\n`);
+      hooks.installPostCommitHooks();
+      const beforeRemove = read(pcAnchorFile);
+      assert.ok(beforeRemove.includes(userCmd) && beforeRemove.includes('membridge-hook.js'), 'setup did not append alongside the user command');
+      hooks.removePostCommitHooks();
+      assert.ok(fs.existsSync(pcAnchorFile), 'a file with real user content must never be deleted');
+      const afterRemove = read(pcAnchorFile);
+      assert.ok(afterRemove.startsWith('#!/bin/sh'), 'shebang lost after removal');
+      assert.ok(afterRemove.includes(userCmd), 'the user command line was lost after removal');
+      assert.ok(!afterRemove.includes('membridge-hook.js'), 'our line was not actually removed');
+      fs.unlinkSync(pcAnchorFile);
+    });
+
+    check('post-commit: install is idempotent -- installing twice does not duplicate the line', () => {
+      fs.writeFileSync(pcAnchorFile, '');
+      hooks.installPostCommitHooks();
+      hooks.installPostCommitHooks();
+      const body = read(pcAnchorFile);
+      assert.strictEqual(count(body, 'membridge-hook.js'), 1, `line duplicated across two installs: ${body}`);
+      hooks.removePostCommitHooks();
+    });
+  }
   check('distill: setup-hooks refuses a settings file whose permissions shape is malformed', () => {
     const badFile = path.join(ROOT, 'claude-settings-badperm.json');
     const badBody = JSON.stringify({ permissions: [] });
@@ -6901,6 +10668,11 @@ async function main() {
   const GH_TOKEN = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const SLACK_TOKEN = 'xox' + 'b-9999999999-ABCDEFGHIJKLMNOP';
   const ANTHROPIC_KEY = 'sk-ant-api03-ABCDEFGHIJKLMNOP1234567890';
+  // FIX ROUND 1, FINDING 5: real OpenAI keys are dash-bearing (sk-proj-...,
+  // sk-live-...) -- the old pattern (/\bsk-[A-Za-z0-9]{20,}/) disallowed
+  // internal dashes and missed this shape entirely, a genuine gap since
+  // skeletons derive from raw source where such keys actually appear.
+  const OPENAI_KEY = 'sk-live-' + '1234567890abcdef1234567890';
   const GOOGLE_KEY = 'AIza' + 'B1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2'; // AIza + 35
   const AWS_KEY = 'AKIA1234567890ABCDEF';
   const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N';
@@ -6922,6 +10694,7 @@ async function main() {
     ['google-api-key', `key ${GOOGLE_KEY} end`, GOOGLE_KEY],
     ['slack-token', `slack ${SLACK_TOKEN} end`, SLACK_TOKEN],
     ['anthropic-key', `key ${ANTHROPIC_KEY} tail`, ANTHROPIC_KEY],
+    ['openai-key', `key ${OPENAI_KEY} tail`, OPENAI_KEY],
     ['jwt', `token ${JWT} done`, JWT],
     ['private-key', '-----BEGIN RSA PRIVATE KEY-----\nMIIBhaha+notreal/xyz==\n-----END RSA PRIVATE KEY-----', 'MIIBhaha'],
     ['credentials', `DB ${PG_URI} yo`, 'hunter2secret'],
@@ -8046,6 +11819,11 @@ async function main() {
       'getUserAuthenticationTokenFromLocalCache is called on every request',
       'the config keys checkpointEvery and summaries.jsonl are documented',
       'a b c d camelCaseWord PascalCaseWord snake_case_word kebab-case-word',
+      // FIX ROUND 1, FINDING 5 negative: the openai-key pattern now allows
+      // internal dashes/underscores after 'sk-', so ordinary prose using
+      // 'sk-' as a word fragment must still survive -- real sentences break
+      // the run with spaces long before the 20-char floor the pattern needs.
+      'We use sk-prefixed identifiers like sk-8 and sk-42 for test fixtures, not credentials.',
     ];
     for (const s of survivors) {
       assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s}`);
@@ -8687,9 +12465,9 @@ async function main() {
     };
 
     const toolsList = await client.listTools();
-    check('mcp: exposes exactly the five read-only tools, all marked readOnlyHint', () => {
+    check('mcp: exposes exactly the six read-only tools, all marked readOnlyHint', () => {
       const names = toolsList.tools.map(t => t.name).sort();
-      assert.deepStrictEqual(names, ['get_project_memory', 'get_recent_activity', 'list_projects', 'search_memory', 'why']);
+      assert.deepStrictEqual(names, ['get_project_memory', 'get_recent_activity', 'list_projects', 'recall', 'search_memory', 'why']);
       assert.ok(toolsList.tools.every(t => t.annotations && t.annotations.readOnlyHint === true), 'a tool is missing readOnlyHint');
       assert.ok(toolsList.tools.every(t => t.annotations.destructiveHint === false), 'a tool is missing destructiveHint:false');
     });
@@ -8758,6 +12536,138 @@ async function main() {
       assert.deepStrictEqual(searchNone.results, []);
     });
 
+    // recall: the same Tier B "header + skeleton" body decide() would serve,
+    // but with NO session gating (an MCP caller manages its own context) --
+    // just freshness + a cached skeleton + the same floors. Never writes
+    // sessionState or events.jsonl: an MCP call is not an interception and
+    // must never count toward avoided totals.
+    const recallStoreForMcp = require('../lib/recall-store');
+    const eventsFileMcp = path.join(projMcp, '.membridge', 'recall', 'events.jsonl');
+    const sessionsDirMcp = path.join(projMcp, '.membridge', 'recall', 'sessions');
+    const bigSrc = Array.from({ length: 40 }, (_, i) => `function f${i}() {\n  doWork();\n  doWork();\n  doWork();\n}\n`).join('');
+    fs.writeFileSync(path.join(projMcp, 'big.js'), bigSrc);
+    await recallStoreForMcp.warm(projMcp, [{ file: 'big.js' }], util.getConfig());
+
+    const { data: recallHit } = await callJson('recall', { project: projMcp, path: 'big.js' });
+    check('mcp: recall serves the tier-B body for a warmed, fresh path with no session gating', () => {
+      assert.strictEqual(recallHit.available, true);
+      assert.ok(recallHit.body.includes('MemBridge structural summary of big.js'), `wrong body wording: ${recallHit.body}`);
+      assert.ok(recallHit.body.includes('f0('), 'signature missing from skeleton body');
+      assert.ok(!recallHit.body.includes('doWork();'), 'function bodies should be stripped from the skeleton');
+      assert.ok(recallHit.callTokens > 0 && recallHit.skeletonTokens > 0, 'callTokens/skeletonTokens missing');
+    });
+
+    // C2 (CRITICAL, final whole-branch review): the PreToolUse hook honours
+    // THREE kill switches (lib/hooks-recall.js:151,178,204) -- the
+    // MEMBRIDGE_NO_RECALL env var, config.recall.enabled === false, and
+    // config.recall.pausedProjects (the Task 9 net-negative auto-pause) --
+    // but the MCP recall tool used to gate on isProjectOff alone, so a user
+    // who globally disabled recall, or whose project had just been
+    // auto-paused for going net-negative, still got every read served
+    // through the MCP surface. Each case below is driven against the exact
+    // same warmed, fresh big.js the "serves the tier-B body" case just
+    // above proved WOULD serve, absent the switch under test -- so a
+    // regression that silently drops the check surfaces as `available:
+    // true`, not just a wrong reason string.
+    {
+      const prevNoRecall = process.env.MEMBRIDGE_NO_RECALL;
+      process.env.MEMBRIDGE_NO_RECALL = '1';
+      let killEnvData;
+      try {
+        ({ data: killEnvData } = await callJson('recall', { project: projMcp, path: 'big.js' }));
+      } finally {
+        if (prevNoRecall === undefined) delete process.env.MEMBRIDGE_NO_RECALL;
+        else process.env.MEMBRIDGE_NO_RECALL = prevNoRecall;
+      }
+      check('mcp: C2 -- MEMBRIDGE_NO_RECALL=1 kill switch is honoured by the recall tool', () => {
+        assert.strictEqual(killEnvData.available, false);
+        assert.strictEqual(killEnvData.reason, 'recall-disabled');
+      });
+    }
+
+    {
+      const rcBeforeDisable = util.loadUserConfig();
+      util.saveUserConfig({ ...rcBeforeDisable, recall: { ...(rcBeforeDisable.recall || {}), enabled: false } });
+      let killCfgData;
+      try {
+        ({ data: killCfgData } = await callJson('recall', { project: projMcp, path: 'big.js' }));
+      } finally {
+        util.saveUserConfig(rcBeforeDisable);
+      }
+      check('mcp: C2 -- config.recall.enabled === false kill switch is honoured by the recall tool', () => {
+        assert.strictEqual(killCfgData.available, false);
+        assert.strictEqual(killCfgData.reason, 'recall-disabled');
+      });
+    }
+
+    {
+      const stateForPause = util.loadState();
+      const mcpKeyForPause = Object.keys(stateForPause.projects).find(k => path.resolve(k) === path.resolve(projMcp));
+      const rcBeforePause = util.loadUserConfig();
+      util.saveUserConfig({ ...rcBeforePause, recall: { ...(rcBeforePause.recall || {}), pausedProjects: [mcpKeyForPause] } });
+      let killPauseData;
+      try {
+        ({ data: killPauseData } = await callJson('recall', { project: projMcp, path: 'big.js' }));
+      } finally {
+        util.saveUserConfig(rcBeforePause);
+      }
+      check('mcp: C2 -- config.recall.pausedProjects (net-negative auto-pause) kill switch is honoured by the recall tool', () => {
+        assert.strictEqual(killPauseData.available, false);
+        assert.strictEqual(killPauseData.reason, 'recall-paused');
+      });
+    }
+
+    // Below floors (the fixture that recall-store's own tests already proved
+    // warms successfully): tiny call size never clears MIN_CALL_TOKENS.
+    fs.writeFileSync(path.join(projMcp, 'tiny.js'), [
+      'function f() {', '  body();', '  moreBody();', '  evenMoreBody();', '}',
+      'function g() {', '  helper();', '  helper();', '  helper();', '}',
+      'function h() {', '  doStuff();', '  doStuff();', '  doStuff();', '}', '',
+    ].join('\n'));
+    await recallStoreForMcp.warm(projMcp, [{ file: 'tiny.js' }], util.getConfig());
+    const { data: recallBelowFloor } = await callJson('recall', { project: projMcp, path: 'tiny.js' });
+    check('mcp: recall returns a structured miss when the read is below the serve floors', () => {
+      assert.strictEqual(recallBelowFloor.available, false);
+      assert.strictEqual(recallBelowFloor.reason, 'below-floor');
+    });
+
+    fs.writeFileSync(path.join(projMcp, 'unwarmed.js'), 'function z() {\n  return 1;\n}\n');
+    const { data: recallNoEntry } = await callJson('recall', { project: projMcp, path: 'unwarmed.js' });
+    check('mcp: recall returns a structured miss when there is no cache entry for an existing file', () => {
+      assert.strictEqual(recallNoEntry.available, false);
+      assert.strictEqual(recallNoEntry.reason, 'no-entry');
+    });
+
+    const { data: recallNotFound } = await callJson('recall', { project: projMcp, path: 'nope-does-not-exist.js' });
+    check('mcp: recall returns a structured miss for a path that does not exist on disk', () => {
+      assert.strictEqual(recallNotFound.available, false);
+      assert.strictEqual(recallNotFound.reason, 'not-found');
+    });
+
+    fs.writeFileSync(path.join(projMcp, 'big.js'), bigSrc + '\n// changed on disk since warm\n');
+    const { data: recallStale } = await callJson('recall', { project: projMcp, path: 'big.js' });
+    check('mcp: recall returns a structured miss for a stale cache entry (file changed since warm)', () => {
+      assert.strictEqual(recallStale.available, false);
+      assert.strictEqual(recallStale.reason, 'stale');
+    });
+
+    const { data: recallUnknownProj } = await callJson('recall', { project: path.join(ROOT, 'projects', 'does-not-exist'), path: 'x.js' });
+    check('mcp: recall returns a structured miss for an unknown project', () => {
+      assert.strictEqual(recallUnknownProj.available, false);
+      assert.strictEqual(recallUnknownProj.reason, 'unknown-project');
+    });
+
+    const { data: recallPaused } = await callJson('recall', { project: projPaused, path: 'x.js' });
+    check('mcp: recall returns a structured miss for a paused project', () => {
+      assert.strictEqual(recallPaused.available, false);
+      assert.strictEqual(recallPaused.reason, 'project-paused');
+    });
+
+    check('mcp: recall never writes sessionState or events.jsonl (an MCP call is not an interception)', () => {
+      assert.ok(!fs.existsSync(eventsFileMcp), 'recall must never touch events.jsonl');
+      assert.ok(!fs.existsSync(sessionsDirMcp), 'recall must never write session state');
+    });
+
     await client.close();
   }
 
@@ -8775,9 +12685,10 @@ async function main() {
     await client.connect(transport);
     const tools = await client.listTools();
     check('mcp: `membridge mcp` starts a real stdio server and lists its tools', () => {
-      assert.strictEqual(tools.tools.length, 5);
+      assert.strictEqual(tools.tools.length, 6);
       assert.ok(tools.tools.some(t => t.name === 'list_projects'));
       assert.ok(tools.tools.some(t => t.name === 'why'));
+      assert.ok(tools.tools.some(t => t.name === 'recall'));
     });
     await client.close();
   }
@@ -11396,6 +15307,250 @@ async function main() {
       if (origCI === undefined) delete process.env.CI; else process.env.CI = origCI;
       fs.writeFileSync(util.statePath(), savedState); // restore the suite's accumulated state
     }
+  }
+
+  // --- Task 9: net-negative diagnostics (spec §7.1/§8.5, lib/diagnostics.js) ---
+  {
+    const diagnosticsLib = require('../lib/diagnostics');
+    const ledgerFoldState = require('../lib/ledger-fold-state');
+    const ledgerStoreLib = require('../lib/ledger-store');
+    const recallStoreLib = require('../lib/recall-store');
+    const hooksRecall = require('../lib/hooks-recall');
+    const RECALL_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+
+    const negLedger = {
+      version: ledgerFoldState.LEDGER_VERSION,
+      avoided: { tokens: -500, serves: 25, tierA: 5, tierB: 20, partialWins: 3, netNegatives: 7 },
+      holdout: { skips: 8, callTokens: 4000 },
+    };
+    const posLedger = {
+      version: ledgerFoldState.LEDGER_VERSION,
+      avoided: { tokens: 500, serves: 50, tierA: 10, tierB: 40, partialWins: 5, netNegatives: 1 },
+      holdout: { skips: 2, callTokens: 400 },
+    };
+
+    // A dummy, never-reachable default so a test that forgets to pass a
+    // fetchImpl still cannot reach a real host (belt-and-suspenders on top
+    // of fetchImpl injection -- see the ABSOLUTE RULE against any test
+    // touching the real network).
+    { const rc = util.loadUserConfig(); rc.diagnosticsUrl = 'http://127.0.0.1:1/unused-in-unit-tests'; util.saveUserConfig(rc); }
+
+    const diagProjA = path.join(ROOT, 'projects', 'diag-unit-proj');
+    fs.mkdirSync(path.join(diagProjA, '.membridge'), { recursive: true });
+
+    check('diagnostics: below the serve floor never triggers (net negative but too few serves)', () => {
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, { avoided: { tokens: -10, serves: 5 }, holdout: {} }, util.getConfig());
+      assert.strictEqual(fired, false);
+      assert.strictEqual(diagnosticsLib.isRecallPausedForProject(diagProjA, util.getConfig()), false);
+    });
+
+    check('diagnostics: net-positive project never triggers, however many serves', () => {
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, posLedger, util.getConfig());
+      assert.strictEqual(fired, false);
+      assert.strictEqual(diagnosticsLib.isRecallPausedForProject(diagProjA, util.getConfig()), false);
+    });
+
+    check('diagnostics: net-negative + serves>=20 pauses recall for the project via a config flag write', () => {
+      assert.strictEqual(diagnosticsLib.isRecallPausedForProject(diagProjA, util.getConfig()), false);
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, negLedger, util.getConfig(), { fetchImpl: async () => ({ ok: true }) });
+      assert.strictEqual(fired, true);
+      assert.ok(util.getConfig().recall.pausedProjects.includes(diagProjA), 'project must be recorded as recall-paused in config.json');
+    });
+
+    check('diagnostics: an already-paused project never fires a second diagnostic (one diagnostic per project, not per pass)', () => {
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const fired = diagnosticsLib.checkNetNegative(diagProjA, negLedger, util.getConfig(), { fetchImpl });
+      assert.strictEqual(fired, false, 'a project already paused must not re-trigger');
+      assert.strictEqual(calls, 0, 'no network call for an already-paused project');
+    });
+
+    check('diagnostics: MEMBRIDGE_NO_DIAGNOSTICS=1 still pauses but suppresses the network send', () => {
+      const diagProjB = path.join(ROOT, 'projects', 'diag-unit-proj-envkill');
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const prev = process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+      process.env.MEMBRIDGE_NO_DIAGNOSTICS = '1';
+      try {
+        const fired = diagnosticsLib.checkNetNegative(diagProjB, negLedger, util.getConfig(), { fetchImpl });
+        assert.strictEqual(fired, true, 'the pause itself is a local safety behaviour, unaffected by the diagnostics kill switch');
+        assert.ok(diagnosticsLib.isRecallPausedForProject(diagProjB, util.getConfig()));
+      } finally {
+        if (prev === undefined) delete process.env.MEMBRIDGE_NO_DIAGNOSTICS; else process.env.MEMBRIDGE_NO_DIAGNOSTICS = prev;
+      }
+      assert.strictEqual(calls, 0, 'MEMBRIDGE_NO_DIAGNOSTICS=1 must suppress the network send entirely');
+    });
+
+    check('diagnostics: config.diagnostics.enabled === false suppresses the network send, same as the env kill switch', () => {
+      const diagProjC = path.join(ROOT, 'projects', 'diag-unit-proj-cfgkill');
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const cfg = { ...util.getConfig(), diagnostics: { enabled: false } };
+      const fired = diagnosticsLib.checkNetNegative(diagProjC, negLedger, cfg, { fetchImpl });
+      assert.strictEqual(fired, true);
+      assert.strictEqual(calls, 0, 'diagnostics.enabled:false must suppress the network send');
+    });
+
+    check('diagnostics: payload has exactly the allowed keys, tracks the ledger figures, and leaks no path/project-identifying strings', () => {
+      recallStoreLib.put(diagProjA, 'src/app.ts', { contentHash: 'h1', skeleton: 'x', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
+      recallStoreLib.put(diagProjA, 'db/schema.sql', { contentHash: 'h2', skeleton: 'y', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
+      const payload = diagnosticsLib.buildPayload(diagProjA, negLedger, util.getConfig());
+      assert.deepStrictEqual(Object.keys(payload).sort(), [
+        'acceptance', 'compression_realization', 'direct_avoided', 'install_id',
+        'languages', 'net_tokens', 'reads_answered', 'reject_reasons', 'version',
+      ]);
+      assert.strictEqual(payload.net_tokens, -500);
+      assert.strictEqual(payload.reads_answered, 25);
+      assert.strictEqual(payload.reject_reasons.read_after_serve, 7);
+      assert.strictEqual(payload.reject_reasons.no_structure, 0, 'diagProjA has had no warm() refusals yet');
+      assert.strictEqual(payload.languages.ts, 1);
+      assert.strictEqual(payload.languages.sql, 1);
+      assert.strictEqual(payload.direct_avoided.tokens, -500);
+      assert.ok(/^[0-9a-f-]{36}$/i.test(payload.install_id), 'install_id must be a uuid');
+      assert.strictEqual(typeof payload.version, 'string');
+
+      const projName = path.basename(diagProjA);
+      const walk = v => {
+        if (typeof v === 'string') {
+          assert.ok(!v.includes('/') && !v.includes('\\'), `payload string leaked a path separator: ${JSON.stringify(v)}`);
+          assert.ok(!v.includes(projName), `payload string leaked the project name: ${JSON.stringify(v)}`);
+          assert.ok(!v.includes(diagProjA), `payload string leaked the project path: ${JSON.stringify(v)}`);
+        } else if (v && typeof v === 'object') {
+          for (const val of Object.values(v)) walk(val);
+        }
+      };
+      walk(payload);
+    });
+
+    // MINOR 4 (final whole-branch review): reject_reasons.no_structure used
+    // to be a hardcoded 0, teaching the pooled dataset that a warm() refusal
+    // never happens. It is now wired to lib/recall-store.js's real,
+    // per-project counter (bumped in warm()'s `if (!skeletonized.ok)`
+    // branch -- see that module's own test for the counter itself).
+    await check('diagnostics: reject_reasons.no_structure reflects real warm() refusals, not a hardcoded 0', async () => {
+      const diagProjD = path.join(ROOT, 'projects', 'diag-unit-proj-no-structure');
+      fs.mkdirSync(path.join(diagProjD, '.membridge'), { recursive: true });
+      const minifiedD = 'z'.repeat(3000); // trips looksLikeDegenerate -> ok:false, same fixture as the recall-store test
+      fs.writeFileSync(path.join(diagProjD, 'bundle.min.js'), minifiedD);
+      await recallStoreLib.warm(diagProjD, [{ file: 'bundle.min.js' }], util.getConfig());
+      const payloadD = diagnosticsLib.buildPayload(diagProjD, negLedger, util.getConfig());
+      assert.strictEqual(payloadD.reject_reasons.no_structure, 1, 'a real warm() refusal must be reflected, not zeroed');
+    });
+
+    check('diagnostics: install_id is generated once and stays stable across calls', () => {
+      const first = diagnosticsLib.getOrCreateInstallId();
+      const second = diagnosticsLib.getOrCreateInstallId();
+      assert.strictEqual(first, second);
+      assert.strictEqual(util.loadUserConfig().installId, first, 'install_id must persist to config.json');
+    });
+
+    check('diagnostics: compression_realization is null below MIN_HOLDOUT_SKIPS and a number once there is enough signal', () => {
+      const thin = diagnosticsLib.buildPayload(diagProjA, { avoided: negLedger.avoided, holdout: { skips: 1, callTokens: 50 } }, util.getConfig());
+      assert.strictEqual(thin.compression_realization, null);
+      const enough = diagnosticsLib.buildPayload(diagProjA, negLedger, util.getConfig());
+      assert.strictEqual(typeof enough.compression_realization, 'number');
+    });
+
+    // Task 9's "config flag write" pause must actually stop the PreToolUse
+    // hook from serving -- otherwise a paused project is a lie. Mirrors the
+    // Task 5 recall-hook fixture pattern (tier B: another session already
+    // read the path, a fresh skeleton is cached, the call clears both floors).
+    await check('diagnostics: a recall-paused project is refused by the real PreToolUse hook (tracked gate)', () => {
+      const crypto = require('crypto');
+      const pausedProj = path.join(ROOT, 'projects', 'diag-hook-paused-proj');
+      fs.mkdirSync(path.join(pausedProj, 'src'), { recursive: true });
+      fs.mkdirSync(path.join(pausedProj, '.membridge'), { recursive: true });
+      {
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [pausedProj]: { events: [] } } });
+      }
+      const file = path.join(pausedProj, 'src', 'paused.js');
+      const content = Array(20).fill('function work() { doWork(); doWork(); doWork(); }').join('\n') + '\n';
+      fs.writeFileSync(file, content);
+      const rel = 'src/paused.js';
+      const hash = crypto.createHash('sha1').update(content).digest('hex');
+      recallStoreLib.put(pausedProj, rel, { contentHash: hash, skeleton: 'SKELETON_TEXT_PAUSED', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0 });
+      ledgerStoreLib.writeLedger(pausedProj, { fileReaders: { [rel]: { sessions: ['other-session'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session' } } });
+
+      const bucketFor = (sid, relPath) => crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+      const recallLib = require('../lib/recall');
+      let sid = null;
+      for (let i = 0; i < 1000; i++) {
+        const cand = `sess-paused-${i}`;
+        if (bucketFor(cand, rel) >= recallLib.HOLDOUT_PCT) { sid = cand; break; }
+      }
+      assert.ok(sid, 'could not find a non-holdout session id');
+
+      // Sanity: before the pause, this exact payload WOULD serve.
+      const before = spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], {
+        input: JSON.stringify({ session_id: sid, cwd: pausedProj, tool_name: 'Read', tool_input: { file_path: file, limit: 100 } }),
+        encoding: 'utf8',
+      });
+      assert.strictEqual(before.status, 0, before.stderr);
+      assert.ok(before.stdout.includes('SKELETON_TEXT_PAUSED'), 'sanity check: the unpaused project should have served');
+
+      diagnosticsLib.pauseRecallForProject(pausedProj);
+
+      const after = spawnSync(process.execPath, [RECALL_ENTRY, 'recall'], {
+        input: JSON.stringify({ session_id: `${sid}-2`, cwd: pausedProj, tool_name: 'Read', tool_input: { file_path: file, limit: 100 } }),
+        encoding: 'utf8',
+      });
+      assert.strictEqual(after.status, 0, after.stderr);
+      assert.strictEqual(after.stdout, '', 'a recall-paused project must never serve, even with an otherwise-servable cache entry');
+    });
+
+    // End-to-end through lib/scan.js itself: a project whose PERSISTED ledger
+    // is already net negative gets paused and reported the very next sync
+    // pass, with the diagnostic actually landing on the configured URL (a
+    // local mock server, never the real network -- see the diagnosticsUrl
+    // write below).
+    await check('diagnostics: syncOnce (lib/scan.js) pauses a net-negative project and POSTs one diagnostic to config.diagnosticsUrl', async () => {
+      const scanProj = path.join(ROOT, 'projects', 'diag-scan-proj');
+      fs.mkdirSync(path.join(scanProj, '.membridge'), { recursive: true });
+      ledgerStoreLib.writeLedger(scanProj, negLedger);
+      {
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [scanProj]: { events: [], dirty: true } } });
+      }
+
+      let received = null;
+      const mockSrv = http.createServer((req, res) => {
+        const chunks = [];
+        req.on('data', c => chunks.push(c));
+        req.on('end', () => {
+          try { received = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { received = {}; }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+        });
+      });
+      await new Promise(r => mockSrv.listen(0, '127.0.0.1', r));
+      const { port } = mockSrv.address();
+      { const rc = util.loadUserConfig(); rc.diagnosticsUrl = `http://127.0.0.1:${port}/diagnostics`; util.saveUserConfig(rc); }
+
+      try {
+        assert.strictEqual(diagnosticsLib.isRecallPausedForProject(scanProj, util.getConfig()), false);
+        syncOnce({ project: scanProj });
+        // The POST is fire-and-forget from scan.js's perspective; give the
+        // event loop a couple of turns for the local mock to receive it.
+        for (let i = 0; i < 20 && !received; i++) await new Promise(r => setTimeout(r, 25));
+
+        assert.ok(util.getConfig().recall.pausedProjects.includes(scanProj), 'syncOnce must pause a net-negative project');
+        assert.ok(received, 'the diagnostics mock server never received a POST from syncOnce');
+        assert.deepStrictEqual(Object.keys(received).sort(), [
+          'acceptance', 'compression_realization', 'direct_avoided', 'install_id',
+          'languages', 'net_tokens', 'reads_answered', 'reject_reasons', 'version',
+        ]);
+        assert.strictEqual(received.net_tokens, -500);
+      } finally {
+        await new Promise(r => mockSrv.close(r));
+      }
+    });
+
+    check('diagnostics: settingsPayload exposes diagnostics.enabled (default true)', () => {
+      const { settingsPayload } = require('../lib/server');
+      const payload = settingsPayload();
+      assert.strictEqual(payload.diagnostics.enabled, true);
+    });
   }
 
   // --- summary ---

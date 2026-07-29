@@ -25,6 +25,7 @@
   "files": [
     "bin",
     "lib",
+    "vendor",
     "README.md",
     "LICENSE"
   ],
@@ -76,6 +77,7 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
-    "libsodium-wrappers": "^0.8.4"
+    "libsodium-wrappers": "^0.8.4",
+    "web-tree-sitter": "^0.26.11"
   }
 }
