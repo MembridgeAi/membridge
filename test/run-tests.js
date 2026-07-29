@@ -16367,6 +16367,41 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // The same clobber lib/mcp-json.js's readConfig exists to prevent, in the
+  // settings file that carries the user's whole Claude Code config. Every other
+  // branch of readSettings refuses rather than write over a file it cannot
+  // understand; the read failure must classify the same way. ONLY ENOENT means
+  // "absent, safe to create" -- EACCES/EISDIR/EIO mean something IS there that
+  // we cannot see, and reporting those as missing hands writeSettings an empty
+  // object to write. Today a plain writeFileSync happens to fail on a mode-000
+  // file, so the damage is latent; the moment writeSettings goes atomic
+  // (tmp + rename, as the MCP auto-registration plan requires) the rename only
+  // needs the DIRECTORY writable and the user's settings.json is replaced
+  // wholesale. Verified empirically against the atomic pattern.
+  check('hooks: readSettings refuses an existing-but-unreadable settings file, never "missing"', () => {
+    const asDir = path.join(ROOT, 'settings-isdir.json');
+    fs.mkdirSync(asDir, { recursive: true });
+    assert.throws(() => hooks.readSettings(asDir), /refusing to touch/i,
+      'a directory in the settings slot is not an absent file');
+
+    const locked = path.join(ROOT, 'settings-locked.json');
+    const body = JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: 'theirs' }] }] } });
+    fs.writeFileSync(locked, body);
+    fs.chmodSync(locked, 0o000);
+    try {
+      // root reads through any mode, so only assert where the OS denied us.
+      let denied = false;
+      try { fs.readFileSync(locked, 'utf8'); } catch { denied = true; }
+      if (process.getuid() !== 0 && denied) {
+        assert.throws(() => hooks.readSettings(locked), /refusing to touch/i,
+          'an unreadable settings file must never read as empty-and-writable');
+      }
+    } finally {
+      fs.chmodSync(locked, 0o600);
+    }
+    assert.strictEqual(read(locked), body, 'the unreadable file must survive byte-for-byte');
+  });
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
