@@ -5165,13 +5165,44 @@ async function main() {
       return s.slice(start, end);
     };
     const fmtBody = grab(src, 'pxFmtTokens');
+    const repeatBody = grab(src, 'pxRepeatReads');
+    const zeroBody = grab(src, 'pxSavingsZeroLine');
     const lineBody = grab(src, 'pxProjectSavingsLine');
     assert.ok(lineBody, 'pxProjectSavingsLine is missing from the client bundle');
-    const pxProjectSavingsLine = new Function('var pxFmtTokens = ' + fmtBody + ';\nreturn (' + lineBody + ')')();
+    assert.ok(repeatBody, 'pxRepeatReads is missing from the client bundle');
+    assert.ok(zeroBody, 'pxSavingsZeroLine is missing from the client bundle');
+    const projPreamble = 'var pxFmtTokens = ' + fmtBody + ';\n'
+      + 'var pxRepeatReads = ' + repeatBody + ';\n'
+      + 'var pxSavingsZeroLine = ' + zeroBody + ';\n';
+    const pxProjectSavingsLine = new Function(projPreamble + 'return (' + lineBody + ')')();
     assert.strictEqual(pxProjectSavingsLine({ tokens: 0, serves: 0 }), 'no repeat reads yet');
     assert.strictEqual(pxProjectSavingsLine(null), 'no repeat reads yet', 'a missing avoided block must not throw');
     assert.strictEqual(pxProjectSavingsLine({ tokens: 3830, serves: 1 }), '4k avoided · 1 reads answered');
     assert.ok(!/saved/i.test(pxProjectSavingsLine({ tokens: 3830, serves: 1 })), 'must never say "saved"');
+    // The bug this pair pins: "no repeat reads yet" gated on avoided.tokens,
+    // which is what the RECALL layer served -- not whether repeat reads were
+    // DETECTED. A project whose ledger has found repeat reads but has avoided
+    // nothing (recall not serving, e.g. every hot path declined by the
+    // skeletonizer) was being told it had no repeat reads, which is false.
+    // Spec §8.3's honest zero survives untouched for the genuine zero below.
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 0, serves: 0 }, { first: 10, sameSession: 5, crossSession: 1 }),
+      '6 repeat reads · nothing avoided yet',
+      'repeat reads found but nothing served must report the reads, not deny them');
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 0, serves: 0 }, { first: 3, sameSession: 1, crossSession: 0 }),
+      '1 repeat read · nothing avoided yet',
+      'a single repeat read must read in the singular');
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 0, serves: 0 }, { first: 9, sameSession: 0, crossSession: 0 }),
+      'no repeat reads yet',
+      'first reads alone are not repeat reads -- spec §8.3 honest zero stands');
+    assert.strictEqual(
+      pxProjectSavingsLine(null, null), 'no repeat reads yet',
+      'a missing reads block must not throw');
+    assert.ok(
+      !/saved/i.test(pxProjectSavingsLine({ tokens: 0 }, { sameSession: 5, crossSession: 1 })),
+      'the new state must never say "saved" either');
   });
   check('dashboard: pxHomeSavingsLine reads "<total> tokens of file reading avoided · <pct>% of context loaded"', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5190,7 +5221,9 @@ async function main() {
     const lineBody = grab(src, 'pxHomeSavingsLine');
     assert.ok(pctBody, 'pxSavingsPct is missing from the client bundle');
     assert.ok(lineBody, 'pxHomeSavingsLine is missing from the client bundle');
-    const preamble = 'var pxFmtTokens = ' + fmtBody + ';\nvar pxSavingsPct = ' + pctBody + ';\n';
+    const preamble = 'var pxFmtTokens = ' + fmtBody + ';\nvar pxSavingsPct = ' + pctBody + ';\n'
+      + 'var pxRepeatReads = ' + grab(src, 'pxRepeatReads') + ';\n'
+      + 'var pxSavingsZeroLine = ' + grab(src, 'pxSavingsZeroLine') + ';\n';
     const pxSavingsPct = new Function(preamble + 'return (' + pctBody + ')')();
     const pxHomeSavingsLine = new Function(preamble + 'return (' + lineBody + ')')();
     assert.strictEqual(pxSavingsPct(0, 0), 0, 'no denominator must not throw or read NaN');
@@ -5201,6 +5234,23 @@ async function main() {
       '1.4M tokens of file reading avoided · 6.1% of context loaded');
     assert.ok(!/saved/i.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'must never say "saved"');
     assert.ok(!/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'no dollar figure');
+    // Same three-state contract as the per-project line above: the roll-up
+    // may not claim "no repeat reads" when totals.reads says otherwise.
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 210495091, reads: { first: 10, sameSession: 5, crossSession: 1 } }),
+      '6 repeat reads · nothing avoided yet',
+      'the roll-up must report detected repeat reads even when nothing was served');
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { first: 4, sameSession: 0, crossSession: 1 } }),
+      '1 repeat read · nothing avoided yet',
+      'a single repeat read must read in the singular');
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { first: 4, sameSession: 0, crossSession: 0 } }),
+      'no repeat reads yet',
+      'spec §8.3 honest zero stands when there really are no repeat reads');
+    assert.ok(
+      !/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { sameSession: 5, crossSession: 1 } })),
+      'no dollar figure in the new state either');
   });
   check('dashboard: the Projects grid row renders the per-project savings line from pxData.savingsByPath', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5208,6 +5258,11 @@ async function main() {
     const body = row.slice(0, row.indexOf('\nfunction pxNewCount'));
     assert.ok(/pxProjectSavingsLine\(/.test(body), 'pxRowHtml must render the savings line via pxProjectSavingsLine');
     assert.ok(/pxData\.savingsByPath/.test(body), 'pxRowHtml must read the per-project savings entry from pxData.savingsByPath');
+    // Passing only `avoided` is exactly the bug: pxProjectSavingsLine then
+    // sees no read tiers and reports "no repeat reads yet" for every project
+    // that has repeat reads but no serves yet.
+    assert.ok(/pxProjectSavingsLine\([^)]*savingsEntry\s*&&\s*savingsEntry\.reads/.test(body),
+      'pxRowHtml must pass the entry\'s reads block, not just avoided');
   });
   check('dashboard: the Projects index renders the Home savings stat and fetches /api/savings', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -6043,7 +6098,7 @@ async function main() {
     assert.deepStrictEqual(migrated, Object.assign({}, fresh, { updatedAt: migrated.updatedAt }),
       'an un-versioned ledger with totals but no evidence must fold exactly like a fresh (null) ledger');
     assert.strictEqual(migrated.requests, window.length, 'the old poisoned totals are discarded, not carried forward');
-    assert.strictEqual(migrated.version, 4, 'the reset ledger is stamped with the current version');
+    assert.strictEqual(migrated.version, require('../lib/ledger-fold').LEDGER_VERSION, 'the reset ledger is stamped with the current version');
   });
   check('ledger-fold: BLOCKING 2 -- a current-version ledger round-trips untouched (no reset)', () => {
     const store = require('../lib/ledger-store');
@@ -6053,14 +6108,14 @@ async function main() {
       { kind: 'usage', ts: new Date(T0).toISOString(), session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
     ];
     const built = store.foldProjectLedger(null, window);
-    assert.strictEqual(built.version, 4, 'every fold stamps the current version');
+    assert.strictEqual(built.version, require('../lib/ledger-fold').LEDGER_VERSION, 'every fold stamps the current version');
     // Round-trip through JSON (as it would through disk) and fold the SAME
     // window again: real dedupe evidence plus the current version must
     // dedupe, not reset, unlike the unmigrated case above.
     const reloaded = JSON.parse(JSON.stringify(built));
     const refolded = store.foldProjectLedger(reloaded, window);
     assert.strictEqual(refolded.requests, 1, 'a versioned ledger with real evidence dedupes instead of resetting');
-    assert.strictEqual(refolded.version, 4);
+    assert.strictEqual(refolded.version, require('../lib/ledger-fold').LEDGER_VERSION);
   });
   // H1 (BLOCKER, fix round 1). The producer (this fold, fed by
   // lib/adapters/claude-code.js) used to key fileReaders/hotPaths by the read
@@ -6110,7 +6165,7 @@ async function main() {
       { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
     ];
     const next = store.foldProjectLedger(prev, events, undefined, proj);
-    assert.strictEqual(next.version, 4, 'the key-shape change gets its own schema version');
+    assert.strictEqual(next.version, require('../lib/ledger-fold').LEDGER_VERSION, 'the key-shape change gets its own schema version');
     assert.deepStrictEqual(Object.keys(next.fileReaders), ['src/x.js'], 'no absolute key may survive alongside the new relative ones');
     // MEDIUM (fix round 3): this used to reset requests/volume/cost to zero
     // right alongside the key-shaped fields -- exactly the regression the
@@ -6151,7 +6206,7 @@ async function main() {
     // No events at all this pass -- isolates the migration itself from any
     // newly-folded activity.
     const next = store.foldProjectLedger(prev, []);
-    assert.strictEqual(next.version, 4, 'stamped with the current version');
+    assert.strictEqual(next.version, require('../lib/ledger-fold').LEDGER_VERSION, 'stamped with the current version');
     assert.strictEqual(next.requests, 900, 'requests must not be zeroed by the key-shape migration');
     assert.strictEqual(next.volume, 54000000, 'volume must not be zeroed by the key-shape migration');
     assert.strictEqual(next.inCost, 12.5, 'inCost must not be zeroed by the key-shape migration');
@@ -6187,6 +6242,77 @@ async function main() {
     assert.strictEqual(next.volume, 0);
     assert.strictEqual(next.sessions, 0);
     assert.deepStrictEqual(next.reads, { first: 0, sameSession: 0, crossSession: 0 });
+  });
+  // The repeat-reads-are-always-zero bug. readKeyFor keyed a read against the
+  // TRACKED PROJECT, so the same file read from the main checkout and from a
+  // nested linked worktree occupied two fileReaders rows and both scored
+  // 'first' -- a project doing all its work in worktrees (MemBridge's own
+  // layout) could never register a repeat read. Measured on the live ledger
+  // before the fix: 12/12 rows worktree-prefixed, two files present twice.
+  // Pre-fix this fold returns { first: 2, sameSession: 0, crossSession: 0 }.
+  {
+    const wtRepo = path.join(ROOT, 'projects', 'wt-repeat');
+    fs.mkdirSync(path.join(wtRepo, 'lib'), { recursive: true });
+    spawnSync('git', ['init', '-q', wtRepo], { encoding: 'utf8' });
+    fs.writeFileSync(path.join(wtRepo, 'lib', 'scan.js'), 'module.exports = 1;\n');
+    for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+      spawnSync('git', ['-C', wtRepo, ...args], { encoding: 'utf8' });
+    }
+    const wtLinked = path.join(wtRepo, '.claude', 'worktrees', 'feature-y');
+    spawnSync('git', ['-C', wtRepo, 'worktree', 'add', '-q', '-b', 'feature-y', wtLinked], { encoding: 'utf8' });
+    // The repo-root memo caches misses too, and this fixture is git-init'ed
+    // long after other tests may have probed these paths.
+    require('../lib/repo-root').clearCache();
+    const wtEvents = [
+      { ts: '2026-07-29T01:00:00.000Z', kind: 'read', session: 's1', toolUseId: 'a', file: path.join(wtRepo, 'lib', 'scan.js') },
+      { ts: '2026-07-29T02:00:00.000Z', kind: 'read', session: 's2', toolUseId: 'b', file: path.join(wtLinked, 'lib', 'scan.js') },
+    ];
+
+    check('ledger-fold: a worktree read of an already-read file tiers as a repeat, not a first read', () => {
+      const store = require('../lib/ledger-store');
+      const led = store.foldProjectLedger(null, wtEvents, undefined, wtRepo);
+      assert.deepStrictEqual(led.reads, { first: 1, sameSession: 0, crossSession: 1 },
+        'the worktree read is the SAME file -- it must tier crossSession');
+      assert.deepStrictEqual(Object.keys(led.fileReaders), ['lib/scan.js'],
+        'one file must occupy exactly one reader row, with no worktree prefix');
+    });
+
+    check('ledger-fold: the collapsed key is one warm() can still resolve', () => {
+      const store = require('../lib/ledger-store');
+      const led = store.foldProjectLedger(null, wtEvents, undefined, wtRepo);
+      assert.strictEqual(led.hotPaths.length, 1, 'two readers of one path makes it hot');
+      assert.strictEqual(led.hotPaths[0].file, 'lib/scan.js');
+      // lib/recall-store.js's warm() resolves a hot path by joining it onto
+      // projectPath. A key relative to anything ABOVE projectPath would make
+      // that join miss every time, which is why the collapse stops at
+      // worktrees (see lib/repo-root.js's ledgerKeyFor).
+      assert.ok(fs.existsSync(path.join(wtRepo, led.hotPaths[0].file)),
+        'join(projectPath, hotPath.file) must land on the real file');
+    });
+  }
+  check('ledger-fold: a pre-v5 ledger drops worktree-shaped reader rows but keeps every cumulative total', () => {
+    const { normalize } = require('../lib/ledger-fold-state');
+    const st = normalize({
+      version: 4, requests: 985, volume: 210495091, inCost: 12, outCost: 34, sessions: 5,
+      sessionIds: ['s1'], seenKeys: ['k1'],
+      reads: { first: 10, sameSession: 5, crossSession: 1 },
+      readKeys: ['r1'],
+      fileReaders: {
+        '.claude/worktrees/x/lib/scan.js': { sessions: ['s1'], reads: 1, lastTs: '', firstTs: '', firstSession: 's1' },
+      },
+    });
+    // Same contract the v2->v3 bump above holds: only the key-SHAPED fields
+    // reset. Past tier counts stay as they were observed -- the evidence
+    // needed to re-tier them is long gone from the event window, and this
+    // module's whole point is that cumulative totals never move backwards.
+    assert.strictEqual(st.requests, 985, 'requests must survive the key-shape migration');
+    assert.strictEqual(st.volume, 210495091, 'volume must survive');
+    assert.strictEqual(st.sessionsTotal, 5, 'the session total must survive');
+    assert.deepStrictEqual(st.reads, { first: 10, sameSession: 5, crossSession: 1 },
+      'tier totals are cumulative and must survive');
+    assert.deepStrictEqual(st.seenKeys, ['k1'], 'request dedupe evidence must survive');
+    assert.deepStrictEqual(st.fileReaders, {}, 'worktree-shaped reader rows must be cleared');
+    assert.deepStrictEqual(st.readKeys, [], 'their dedupe list is cleared alongside them');
   });
   // MINOR A. Incremental tiering processes reads pass-by-pass; a path's
   // reads can arrive across passes with INVERTED timestamps (an earlier
@@ -6552,6 +6678,90 @@ async function main() {
     assert.ok(!out.text.includes('inner();'), 'bodies gone');
     assert.ok(out.tokens < estimateTokens(src) / 2.25, 'clears the compression floor on this fixture');
     assert.strictEqual(estimateTokens('abcd'.repeat(100)), 100);
+  });
+
+  // Markdown had NO engine: tree-sitter has no grammar for it and the strip
+  // engine finds no brace/indent signatures, so every prose doc came back
+  // ok:false, lib/recall-store.js's warm() bumped noStructure and stored
+  // nothing, and a project whose hot paths are docs could never serve a
+  // skeleton -- so its avoided-token total could never leave zero. Measured
+  // live: the only hot path was a plan doc and noStructure had reached 61.
+  const MD_DOC = [
+    '# Live teammate decisions',
+    '',
+    'Introductory prose that is not structure and should not survive.',
+    'More background prose padding.',
+    '',
+    '## Goals',
+    '',
+    '- ship the thing',
+    'Prose padding.',
+    'Prose padding.',
+    'Prose padding.',
+    '',
+    '```js',
+    '// a fenced code block',
+    '# this hash is NOT a heading, it is inside a fence',
+    'const x = 1;',
+    '```',
+    '',
+    '### Non-goals',
+    '',
+    'Prose. Prose. Prose.',
+    'Prose. Prose. Prose.',
+    'Prose. Prose. Prose.',
+    '',
+    'Setext Heading',
+    '==============',
+    '',
+    'Closing prose.',
+    'Closing prose.',
+    'Closing prose.',
+    '',
+  ].join('\n');
+
+  await check('skeleton: a markdown doc outlines to its headings instead of being refused', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    const out = await skeletonize('/repo/plan.md', MD_DOC);
+    assert.strictEqual(out.ok, true, 'ok:false here is the bug -- warm() would store nothing');
+    assert.strictEqual(out.engine, 'markdown');
+    for (const h of ['# Live teammate decisions', '## Goals', '### Non-goals']) {
+      assert.ok(out.text.includes(h), 'heading must survive: ' + h);
+    }
+    assert.ok(out.text.includes('Setext Heading'), 'setext headings count as structure too');
+    assert.ok(!out.text.includes('Introductory prose'), 'prose must be elided');
+    assert.ok(!out.text.includes('const x = 1'), 'fenced code bodies must be elided');
+    assert.ok(!out.text.includes('this hash is NOT a heading'),
+      'fence tracking is required, or code comments leak in as document structure');
+    assert.ok(out.text.split('\n').length < MD_DOC.split('\n').length * 0.6,
+      'must clear the same compression floor as every other engine');
+  });
+
+  await check('skeleton: a markdown doc with no headings is refused honestly', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    const prose = Array.from({ length: 30 }, (_, i) => 'Just prose line ' + i + '.').join('\n');
+    const out = await skeletonize('/repo/notes.md', prose);
+    assert.strictEqual(out.ok, false,
+      'no headings means genuinely no structure -- refuse rather than cache a body of ellipses');
+  });
+
+  // The exact shape that kept the live install's only hot path refused: two
+  // NUL characters inside a fenced code block (documenting a hash delimiter)
+  // in 100KB of ordinary prose. computeOk()'s binary guard reads the INPUT, so
+  // one NUL anywhere vetoed the whole document. The markdown branch checks
+  // degeneracy against its OUTPUT instead -- an outline of matched heading
+  // lines provably carries none of it.
+  await check('skeleton: a NUL inside a fenced code block does not veto the whole document', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    // Built with fromCharCode so the fixture carries a real NUL without this
+    // source file itself containing an invisible control character.
+    const NUL = String.fromCharCode(0);
+    const withNul = MD_DOC.replace('const x = 1;', 'const sep = "a' + NUL + 'b' + NUL + 'c";');
+    assert.ok(withNul.includes(NUL), 'the fixture must actually contain the NUL it is testing');
+    const out = await skeletonize('/repo/plan.md', withNul);
+    assert.strictEqual(out.ok, true, 'a NUL buried in a fence must not refuse the document');
+    assert.strictEqual(out.engine, 'markdown');
+    assert.strictEqual(out.text.indexOf(NUL), -1, 'and it must never reach the stored skeleton');
   });
 
   await check('recall-store: round-trips entries, redacts secrets, warms the hot set', async () => {
@@ -8467,7 +8677,7 @@ async function main() {
     const built = store.buildProjectLedger([]);
     const p = store.writeLedger(proj, built);
     assert.ok(fs.existsSync(p), 'ledger.json is written');
-    assert.strictEqual(store.readLedger(proj).version, 4, 'the write round-trips through the same path readLedger uses');
+    assert.strictEqual(store.readLedger(proj).version, require('../lib/ledger-fold').LEDGER_VERSION, 'the write round-trips through the same path readLedger uses');
     const dir = path.dirname(p);
     const leftovers = fs.readdirSync(dir).filter(f => f.startsWith('.ledger.json.') && f.endsWith('.tmp'));
     assert.deepStrictEqual(leftovers, [], 'no temp file survives a successful write');
@@ -8537,10 +8747,12 @@ async function main() {
       fs.writeFileSync(util.statePath(), savedState);
     }
   });
-  // Task 8 (dashboard savings panel): the panel branches on
-  // `avoided.tokens === 0` to show "no repeat reads yet" instead of a
-  // count. That honest zero must ride the wire as a real 0, not be dropped
-  // or coerced to null/undefined by the projection.
+  // Task 8 (dashboard savings panel): with avoided.tokens === 0 the panel
+  // falls through to pxSavingsZeroLine, which needs BOTH numbers -- the zero
+  // itself and the `reads` tier block that says whether any repeat reads were
+  // detected. Both must ride the wire as real values, not be dropped or
+  // coerced to null/undefined by the projection: a missing `reads` block
+  // silently re-creates the "no repeat reads yet" lie this pins against.
   check('api: /api/savings serves an honest zero for a project with no avoided tokens yet', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'savings-zero-proj');
@@ -8560,6 +8772,10 @@ async function main() {
       assert.strictEqual(payload.projects[0].avoided.tokens, 0, 'a real 0, not dropped/undefined');
       assert.strictEqual(payload.projects[0].avoided.serves, 0);
       assert.strictEqual(payload.totals.volume, 1200, 'volume still rides the wire for the % of context loaded denominator');
+      assert.deepStrictEqual(payload.projects[0].reads, { first: 3, sameSession: 0, crossSession: 0 },
+        'the per-project read tiers must ride the wire -- pxSavingsZeroLine reads them');
+      assert.deepStrictEqual(payload.totals.reads, { first: 3, sameSession: 0, crossSession: 0 },
+        'and so must the roll-up tiers -- pxHomeSavingsLine reads them');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
     }
@@ -16048,6 +16264,46 @@ const repoRoot = require('../lib/repo-root');
     const first = repoRoot.wireKeyFor(f);
     assert.strictEqual(repoRoot.wireKeyFor(f), first);
     assert.strictEqual(repoRoot.wireKeyFor(path.join(mono, 'src', 'root.ts')), 'src/root.ts');
+  });
+
+  // ---- ledgerKeyFor: the repeat-read bug ----
+  // The ledger keyed reads against the TRACKED PROJECT, so the same file read
+  // from a nested worktree and from the main checkout produced two different
+  // keys and could never tier as a repeat read. Measured on a live ledger:
+  // every one of 12 fileReaders keys carried a .claude/worktrees/<name>/
+  // prefix, with two files present TWICE under different worktrees -- genuine
+  // cross-session repeat reads both scored 'first'.
+  check('ledger-key: a worktree read and a main-checkout read of one file share a key', () => {
+    const main = repoRoot.ledgerKeyFor(mono, path.join(mono, 'src', 'root.ts'));
+    const fromWt = repoRoot.ledgerKeyFor(mono, path.join(wt, 'src', 'root.ts'));
+    assert.strictEqual(main, 'src/root.ts');
+    assert.strictEqual(fromWt, 'src/root.ts', 'the worktree prefix must be stripped, not baked into the key');
+    assert.strictEqual(main, fromWt, 'same file, one key -- this equality IS the repeat-read fix');
+  });
+
+  check('ledger-key: a file outside the tracked project is dropped, as before', () => {
+    const outside = path.join(ROOT, 'projects', 'not-a-repo', 'a.js');
+    assert.strictEqual(repoRoot.ledgerKeyFor(mono, outside), null,
+      'containment is still the gate -- another repo is not this ledger\'s business');
+  });
+
+  check('ledger-key: a monorepo sub-project keeps project-relative keys', () => {
+    // Only a LINKED WORKTREE collapses. A normal clone above the tracked root
+    // must not, or lib/recall-store.js's warm() -- which joins projectPath
+    // onto the key -- would resolve every hot path to a non-existent file.
+    const proj = path.join(mono, 'packages', 'api');
+    assert.strictEqual(repoRoot.ledgerKeyFor(proj, path.join(api, 'validate.ts')), 'src/validate.ts');
+  });
+
+  check('ledger-key: a project that IS a worktree keys relative to itself', () => {
+    assert.strictEqual(repoRoot.ledgerKeyFor(wt, path.join(wt, 'src', 'root.ts')), 'src/root.ts');
+  });
+
+  check('ledger-key: warm() can resolve every key it is handed', () => {
+    // The contract recall-store.warm() depends on: path.join(projectPath, key)
+    // must land on the real file for a main-checkout read.
+    const key = repoRoot.ledgerKeyFor(mono, path.join(mono, 'src', 'root.ts'));
+    assert.ok(fs.existsSync(path.join(mono, key)), 'join(projectPath, key) must resolve');
   });
 
   // ---- teamsync emits wire keys (spec §7) ----
