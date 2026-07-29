@@ -25,6 +25,8 @@ const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
 const hooks = require('../lib/hooks');
 const counters = require('../lib/counters');
+const notes = require('../lib/teammate-notes');
+const notesStore = require('../lib/teammate-notes-store');
 const prompts = require('../lib/prompts');
 const pkg = require('../package.json');
 
@@ -71,11 +73,52 @@ function cmdSync() {
   }
 }
 
+// Rebuild the teammate-notes index for every project whose teammate entries
+// just changed, so the hooks have it before the agent's next tool call (spec
+// §3.1). Shared by BOTH pull paths -- the daemon tick and a manual/cron
+// `membridge sync` -- because a user who runs the CLI instead of the daemon
+// must not silently get a stale index.
+//
+// The rows are state.projects[key].teamEntries, written by teamsync's pull.
+// That is the only place pulled teammate rows live: memorydb holds LOCAL
+// entries, and `origin` is a field lib/feed.js invents at render time, so
+// neither can answer "what did my teammates just say". The pull already
+// excludes self-authored rows (author_id=neq), so no further filtering.
+//
+// Fail-open throughout: a project that throws keeps its previous index and the
+// loop continues.
+function rebuildNotesForChanged(changed) {
+  if (!changed || !changed.length) return;
+  const config = util.getConfig();
+  if (!notes.isNotesEnabled(config)) return; // kill switch: write nothing at all
+  const nowIso = new Date().toISOString();
+  let state;
+  try {
+    state = util.loadState();
+  } catch (err) {
+    util.log(`teammate notes: cannot read state (${err.message})`);
+    return;
+  }
+  for (const key of changed) {
+    try {
+      const proj = (state.projects || {})[key];
+      // No project, or a project with no teamEntries array, is a broken read --
+      // NOT "the teammates said nothing". Passing a non-array through would
+      // hand rebuildTeammateNotes an empty pull; it refuses those on purpose.
+      if (!proj) continue;
+      notesStore.rebuildTeammateNotes(key, proj.teamEntries || [], nowIso);
+    } catch (err) {
+      util.log(`teammate notes: ${key}: ${err.message}`);
+    }
+  }
+}
+
 // One team push/pull pass; pulled teammate entries re-render those projects'
 // context blocks right away.
 async function teamSyncPass(opts = {}) {
   const r = await teamsync.syncTeams(opts);
   for (const key of r.changed) syncOnce({ project: key });
+  rebuildNotesForChanged(r.changed);
   for (const e of r.errors) util.log(`team sync: ${e}`);
   if (r.synced.length || r.errors.length) {
     console.log(`team sync: ${r.synced.length} project(s), ${r.changed.length} with new teammate activity${r.errors.length ? `, ${r.errors.length} error(s) (see log)` : ''}`);
@@ -176,6 +219,7 @@ function cmdDaemon() {
     teamsync.syncTeams()
       .then(r => {
         for (const key of r.changed) syncOnce({ project: key });
+        rebuildNotesForChanged(r.changed);
         for (const e of r.errors) util.log(`team sync: ${e}`);
         if (r.changed.length) util.log(`team sync: pulled teammate activity into ${r.changed.length} project(s)`);
       })
@@ -881,10 +925,8 @@ Distillation (agent-written session summaries — see README):
 MCP (expose project memory, read-only, to MCP-capable clients — Claude
 Desktop, Cursor, Cowork, ...; see README):
   mcp                 start a read-only MCP server over stdio
-                      One-time setup — MemBridge's core stays dependency-free,
-                      so this needs its own packages installed once:
-                        npm install @modelcontextprotocol/sdk zod
-                      Then point your MCP client's config at:
+                      Nothing to install — it ships with MemBridge. Point your
+                      MCP client's config at:
                         { "command": "membridge", "args": ["mcp"] }
 
 Team sync (share project memory with your team — see README):

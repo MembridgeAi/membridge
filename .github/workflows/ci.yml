@@ -24,10 +24,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # Prod deps from the lockfile (tests exercise libsodium-wrappers), minus
-      # devDependencies — electron/electron-builder are heavy and unused by the
-      # suite. The MCP SDK + zod are deliberately opt-in (not in package.json),
-      # but the MCP tests require them, so install them without saving.
+      # Prod deps from the lockfile (tests exercise libsodium-wrappers and the
+      # MCP SDK), minus devDependencies — electron/electron-builder are heavy
+      # and unused by the suite. No side-install: the MCP SDK and zod are
+      # ordinary dependencies now, and CI must fail if they ever stop being.
       - run: npm ci --omit=dev --no-audit --no-fund
-      - run: npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4
       - run: node test/run-tests.js

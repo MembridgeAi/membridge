@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "test": "node test/run-tests.js",
-    "prepublishOnly": "npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4 && npm test",
+    "prepublishOnly": "npm test",
     "start": "node bin/membridge.js start",
     "app": "node scripts/prepare-app.js && electron app",
     "dist:mac": "node scripts/prepare-app.js && electron-builder --mac --publish never",
@@ -77,7 +77,9 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1",
     "libsodium-wrappers": "^0.8.4",
-    "web-tree-sitter": "^0.26.11"
+    "web-tree-sitter": "^0.26.11",
+    "zod": "^4"
   }
 }

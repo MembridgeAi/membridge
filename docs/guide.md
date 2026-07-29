@@ -155,8 +155,11 @@ the Copy-for-AI digest, and the team feed. The feed your teammates read is
 written by the agent that did the work.
 
 Long sessions get checkpoints rather than one shot: the hook re-asks every
-few edits (defaults: first summary after 1 edit, then every 4), and the
-newest line wins while `memory.md` keeps the full history. The hook is
+so many edits (defaults: first summary after 1 edit, then every 12), and the
+newest line wins while `memory.md` keeps the full history. Only that newest
+line is ever displayed or shared, so the re-asks exist mainly so a session
+that dies without a clean stop still leaves a recent summary behind — lower
+`checkpointEvery` for fresher checkpoints, raise it for fewer interruptions. The hook is
 strictly fail-open: any error, a paused project, or a too-small session
 means Claude Code stops normally. Nothing is installed silently, and
 turning it off removes exactly what was added.
@@ -248,9 +251,8 @@ boxes and terminal-first teammates aren't second-class:
 (`list_projects`, `get_project_memory`, `get_recent_activity`,
 `search_memory`) for Claude Desktop, Cursor, and other MCP clients. Nothing
 it exposes can write files or trigger sync, and every field passes through
-the same redaction as the context files. The SDK isn't part of the
-zero-dependency core, so install it once before first use:
-`npm install @modelcontextprotocol/sdk zod`, then point your client at
+the same redaction as the context files. The MCP SDK ships with MemBridge —
+there is nothing extra to install. Point your client at
 `{ "command": "membridge", "args": ["mcp"] }`.
 
 ## Supported tools
@@ -300,7 +302,7 @@ Settings covers the common options. Under the hood it's
   "redactExtra": [],                     // additive, same syntax
   "maxPrompts": 8,
   "maxFiles": 10,
-  "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 4 },
+  "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 12 },
   "adapters": {
     "claude-code": { "enabled": true },
     "codex": { "enabled": true },
@@ -331,19 +333,24 @@ sync runs MemBridge Beta. People who just want to watch can use the web
 workspace from a browser.
 
 **How much overhead does it add?** Near zero. It reads only the bytes
-appended since the last pass, sleeps between syncs (60s default), and the
-core has zero runtime dependencies.
+appended since the last pass, sleeps between syncs (60s default), and its
+runtime dependency list is deliberately short — encryption
+(`libsodium-wrappers`), code parsing (`web-tree-sitter`), and the MCP server
+(`@modelcontextprotocol/sdk`, `zod`).
 
 ## Development
 
 ```bash
-node test/run-tests.js   # zero-dependency offline suite (temp dirs + mock Supabase)
+node test/run-tests.js   # dependency-free offline suite (temp dirs + mock Supabase)
 npm run app              # run the tray app from source (Electron)
 npm run dist:mac         # build the macOS menu-bar app
 ```
 
-The core stays zero-dependency; Electron is a devDependency used only by
-the tray app. CI runs the suite on Linux, Windows, and macOS across Node
+The test suite itself needs no test framework — it is plain Node with
+`assert`, and it never touches the network. The runtime dependencies
+(`libsodium-wrappers`, `web-tree-sitter`, `@modelcontextprotocol/sdk`, `zod`)
+all arrive with a plain `npm install`; Electron is a devDependency used only
+by the tray app. CI runs the suite on Linux, Windows, and macOS across Node
 18/20/22.
 
 The suite is fully offline: it runs in temp dirs and talks to mock backends
