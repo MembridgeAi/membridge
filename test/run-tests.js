@@ -5794,6 +5794,46 @@ async function main() {
     assert.strictEqual(kept3.filter(e => e.kind === 'usage').length, 50, 'plumbing honours its own cap');
     assert.strictEqual(kept3.filter(e => e.kind === 'prompt').length, 30, 'narrative untouched by the plumbing cap');
   });
+  // Reads used to SHARE the plumbing budget with usage, and usage outnumbers
+  // them by ~47:1 in practice -- measured on a real project: 1,958 usage rows
+  // against 42 reads, exactly at the 2,000 cap, leaving reads 2% of the window
+  // and about 12 hours of history. That starves the one signal the recall
+  // layer runs on, because a cross-session repeat read can only be seen if the
+  // FIRST read is still in the window days later. Reads now get their own
+  // budget, so no volume of usage telemetry can evict them.
+  check('mergeEvents: a flood of usage events cannot evict reads', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'read-budget');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const evs = [];
+    for (let j = 0; j < 20; j++) {
+      evs.push({ ts: at(j), project, source: 'Claude Code', kind: 'read', session: 's1', file: `f${j}.js` });
+    }
+    // ...then bury them under far more usage than the plumbing cap allows.
+    for (let j = 0; j < 400; j++) {
+      evs.push({ ts: at(100 + j), project, source: 'Claude Code', kind: 'usage', session: 's1', messageId: 'm' + j });
+    }
+    digest.mergeEvents(state, evs, { maxStoredEvents: 100, maxPlumbingEvents: 50, maxReadEvents: 50 });
+    const kept = state.projects[path.resolve(project)].events;
+    assert.strictEqual(kept.filter(e => e.kind === 'usage').length, 50, 'usage still honours its own cap');
+    assert.strictEqual(kept.filter(e => e.kind === 'read').length, 20,
+      'every read must survive — usage volume must not consume the read budget');
+  });
+  check('mergeEvents: reads are bounded by their own cap, newest kept', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'read-budget-cap');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const evs = [];
+    for (let j = 0; j < 60; j++) {
+      evs.push({ ts: at(j), project, source: 'Claude Code', kind: 'read', session: 's1', file: `f${j}.js` });
+    }
+    digest.mergeEvents(state, evs, { maxReadEvents: 25 });
+    const reads = state.projects[path.resolve(project)].events.filter(e => e.kind === 'read');
+    assert.strictEqual(reads.length, 25, 'reads honour their own cap');
+    assert.strictEqual(reads[0].file, 'f35.js', 'the read cap must slice from the tail (newest kept)');
+  });
   // FINDING I3. One API request is written to the transcript as several sibling
   // records (same message id, different ts). 57% of persisted usage rows were
   // those duplicates. Dropping them at persistence is lossless for the ledger,
