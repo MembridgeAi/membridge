@@ -16511,6 +16511,162 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- MCP JSON config merge (mcp spec §5.3) ----
+  const mcpJson = require('../lib/mcp-json');
+
+  {
+    const jRoot = path.join(ROOT, 'mcpjson');
+    fs.mkdirSync(jRoot, { recursive: true });
+    const ENTRY = { command: '/usr/bin/node', args: ['/opt/membridge/bin/membridge.js', 'mcp'] };
+
+    check('mcp-json: a missing file reads as empty-but-writable', () => {
+      const r = mcpJson.readConfig(path.join(jRoot, 'absent.json'));
+      assert.ok(r, 'a missing file is writable, not a refusal');
+      assert.strictEqual(r.existed, false);
+      assert.deepStrictEqual(r.data, {});
+    });
+
+    check('mcp-json: invalid JSON is a REFUSAL (null), never treated as empty', () => {
+      const f = path.join(jRoot, 'broken.json');
+      fs.writeFileSync(f, '{not json');
+      assert.strictEqual(mcpJson.readConfig(f), null);
+    });
+
+    check('mcp-json: mcpServers present but not an object is a refusal', () => {
+      const f = path.join(jRoot, 'wrongshape.json');
+      fs.writeFileSync(f, JSON.stringify({ mcpServers: ['nope'] }));
+      assert.strictEqual(mcpJson.readConfig(f), null);
+    });
+
+    check('mcp-json: a file holding literally null is a refusal', () => {
+      const f = path.join(jRoot, 'null.json');
+      fs.writeFileSync(f, 'null\n');
+      assert.strictEqual(mcpJson.readConfig(f), null);
+    });
+
+    check('mcp-json: a config with no mcpServers key at all is usable, not a refusal', () => {
+      const f = path.join(jRoot, 'nokey.json');
+      fs.writeFileSync(f, JSON.stringify({ somethingElse: true }));
+      const r = mcpJson.readConfig(f);
+      assert.ok(r, 'an absent mcpServers key is a config we can add to');
+      assert.strictEqual(r.existed, true);
+      assert.strictEqual(r.data.somethingElse, true);
+      const { data, changed } = mcpJson.upsertServer(r.data, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.strictEqual(data.somethingElse, true, 'the rest of their config must survive');
+      assert.deepStrictEqual(data.mcpServers.membridge, ENTRY);
+    });
+
+    // The clobber this module exists to prevent. readConfig must not decide
+    // "missing" from "readFileSync threw" — only ENOENT is missing. A config
+    // we cannot READ can still be renamed over (rename needs the directory
+    // writable, not the file), so mis-reading it as {} destroys it.
+    check('mcp-json: an existing but unreadable config is a refusal, never "missing"', () => {
+      const asDir = path.join(jRoot, 'isdir.json');
+      fs.mkdirSync(asDir, { recursive: true });
+      assert.strictEqual(mcpJson.readConfig(asDir), null, 'a directory in the config slot is not an absent file');
+
+      const locked = path.join(jRoot, 'locked.json');
+      fs.writeFileSync(locked, JSON.stringify({ mcpServers: { theirs: { command: 'x' } } }));
+      fs.chmodSync(locked, 0o000);
+      let unreadable = false;
+      try { fs.readFileSync(locked, 'utf8'); } catch { unreadable = true; }
+      try {
+        // root can read anything, so only assert where the OS actually denied us
+        if (unreadable) assert.strictEqual(mcpJson.readConfig(locked), null, 'an unreadable config must never read as empty-and-writable');
+      } finally {
+        fs.chmodSync(locked, 0o600);
+      }
+    });
+
+    check('mcp-json: upsert adds ours and preserves foreign servers', () => {
+      const { data, changed } = mcpJson.upsertServer({ mcpServers: { other: { command: 'x' } }, unrelated: 7 }, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.deepStrictEqual(data.mcpServers.other, { command: 'x' });
+      assert.strictEqual(data.unrelated, 7, 'unrelated top-level keys must survive');
+      assert.deepStrictEqual(data.mcpServers.membridge, ENTRY);
+    });
+
+    check('mcp-json: upsert is idempotent', () => {
+      const first = mcpJson.upsertServer({}, 'membridge', ENTRY);
+      const second = mcpJson.upsertServer(first.data, 'membridge', ENTRY);
+      assert.strictEqual(second.changed, false);
+    });
+
+    check('mcp-json: upsert updates a stale command', () => {
+      const stale = { mcpServers: { membridge: { command: '/old/node', args: [] } } };
+      const { data, changed } = mcpJson.upsertServer(stale, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.strictEqual(data.mcpServers.membridge.command, '/usr/bin/node');
+    });
+
+    check('mcp-json: upsert leaves the caller\'s config untouched', () => {
+      const theirs = Object.freeze({ mcpServers: Object.freeze({ other: Object.freeze({ command: 'x' }) }) });
+      const { changed } = mcpJson.upsertServer(theirs, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.deepStrictEqual(theirs.mcpServers, { other: { command: 'x' } }, 'a caller that then refuses to write must be holding what it started with');
+    });
+
+    check('mcp-json: removeServer only removes what isOurs approves', () => {
+      // The real shape: node is the command, OUR path lives in argv. Ownership
+      // therefore has to look at the whole invocation (mcp spec §5.4).
+      const isOurs = e => [e.command, ...(e.args || [])].some(s => /(^|\/)bin\/membridge\.js$/.test(String(s)));
+
+      const unrelated = { command: '/somebody/elses/thing' };
+      const kept = mcpJson.removeServer({ mcpServers: { membridge: unrelated, other: { command: 'x' } } }, 'membridge', isOurs);
+      assert.strictEqual(kept.changed, false, 'a foreign server merely NAMED membridge must survive');
+      assert.deepStrictEqual(kept.data.mcpServers.membridge, unrelated, 'and must still be present in the returned config');
+
+      // The nastier foreign case: it name-drops membridge but is not our binary.
+      const lookalike = { command: '/usr/bin/node', args: ['/home/them/my-membridge-helper.js'] };
+      const kept2 = mcpJson.removeServer({ mcpServers: { membridge: lookalike } }, 'membridge', isOurs);
+      assert.strictEqual(kept2.changed, false, 'merely mentioning membridge is not ownership');
+      assert.deepStrictEqual(kept2.data.mcpServers.membridge, lookalike);
+
+      const ours = mcpJson.removeServer({ mcpServers: { membridge: ENTRY, other: { command: 'x' } } }, 'membridge', isOurs);
+      assert.strictEqual(ours.changed, true);
+      assert.strictEqual(ours.data.mcpServers.membridge, undefined);
+      assert.deepStrictEqual(ours.data.mcpServers.other, { command: 'x' }, 'removing ours must not disturb theirs');
+    });
+
+    // Asserting "no strays" alone proves nothing — a plain writeFileSync never
+    // makes a temp file either, so that test passes against the non-atomic
+    // implementation (measured). Watch the rename instead: the complete bytes
+    // must already be staged in a SIBLING temp when it fires, and the
+    // destination must not have been touched before then.
+    check('mcp-json: write stages the whole file in a sibling temp and lands it by rename', () => {
+      const f = path.join(jRoot, 'out.json');
+      const payload = { mcpServers: { membridge: ENTRY } };
+      const expected = `${JSON.stringify(payload, null, 2)}\n`;
+      const realRename = fs.renameSync;
+      const renames = [];
+      fs.renameSync = (from, to) => {
+        renames.push({ from, to, staged: fs.readFileSync(from, 'utf8'), destExisted: fs.existsSync(to) });
+        return realRename(from, to);
+      };
+      try {
+        mcpJson.writeConfig(f, payload);
+      } finally {
+        fs.renameSync = realRename;
+      }
+      assert.strictEqual(renames.length, 1, 'the config must arrive via exactly one rename, not a direct write');
+      assert.strictEqual(renames[0].to, f);
+      assert.strictEqual(path.dirname(renames[0].from), path.dirname(f), 'the temp must be a sibling — a cross-filesystem rename is not atomic');
+      assert.ok(/\.tmp$/.test(renames[0].from), `temp file should be marked .tmp, got ${renames[0].from}`);
+      assert.strictEqual(renames[0].staged, expected, 'every byte must be staged BEFORE the rename');
+      assert.strictEqual(renames[0].destExisted, false, 'nothing may be written at the destination before the rename');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(f, 'utf8')).mcpServers.membridge, ENTRY);
+      const strays = fs.readdirSync(jRoot).filter(n => n.includes('.tmp'));
+      assert.deepStrictEqual(strays, []);
+    });
+
+    check('mcp-json: write creates missing parent directories', () => {
+      const f = path.join(jRoot, 'deep', 'nested', 'mcp.json');
+      mcpJson.writeConfig(f, { mcpServers: {} });
+      assert.ok(fs.existsSync(f));
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
