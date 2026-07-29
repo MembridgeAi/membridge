@@ -15974,6 +15974,120 @@ async function main() {
     });
   }
 
+  // ---- claude binary resolution (mcp spec §5.1.1) ----
+  const claudeBin = require('../lib/claude-bin');
+
+  {
+    const cbRoot = path.join(ROOT, 'claudebin');
+    fs.mkdirSync(cbRoot, { recursive: true });
+    const mk = name => {
+      const f = path.join(cbRoot, name);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, '#!/bin/sh\n');
+      return f;
+    };
+    const real = mk('bin/claude');
+    const other = mk('elsewhere/claude');
+
+    check('claude-bin: config override wins over everything', () => {
+      const r = claudeBin.resolveClaudeBin({
+        config: { mcp: { claudeBin: real } },
+        recorded: other, env: {}, runShell: () => other,
+      });
+      assert.strictEqual(r.source, 'config');
+      assert.strictEqual(r.path, real);
+    });
+
+    check('claude-bin: a recorded path is used when it still exists', () => {
+      const r = claudeBin.resolveClaudeBin({ config: {}, recorded: real, env: {}, runShell: () => other });
+      assert.strictEqual(r.source, 'recorded');
+      assert.strictEqual(r.path, real);
+    });
+
+    check('claude-bin: a STALE recorded path is discarded, not returned', () => {
+      const gone = path.join(cbRoot, 'deleted', 'claude');
+      const r = claudeBin.resolveClaudeBin({ config: {}, recorded: gone, env: {}, runShell: () => other });
+      assert.notStrictEqual(r && r.path, gone, 'a deleted binary must never be returned');
+      assert.strictEqual(r.source, 'shell');
+    });
+
+    check('claude-bin: falls back to asking the login shell', () => {
+      const r = claudeBin.resolveClaudeBin({ config: {}, recorded: null, env: {}, runShell: () => other });
+      assert.strictEqual(r.source, 'shell');
+      assert.strictEqual(r.path, other);
+    });
+
+    check('claude-bin: a shell that hangs or errors does not throw', () => {
+      assert.doesNotThrow(() => {
+        const r = claudeBin.resolveClaudeBin({
+          config: {}, recorded: null, env: {},
+          runShell: () => { throw new Error('timed out'); },
+          candidates: [],
+        });
+        assert.strictEqual(r, null);
+      });
+    });
+
+    check('claude-bin: probe list is the LAST resort, after the shell', () => {
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: {},
+        runShell: () => null,
+        candidates: [other],
+      });
+      assert.strictEqual(r.source, 'probe');
+      assert.strictEqual(r.path, other);
+    });
+
+    check('claude-bin: nothing found is null, never a bare "claude" guess', () => {
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: {}, runShell: () => null, candidates: [],
+      });
+      assert.strictEqual(r, null);
+    });
+
+    check('claude-bin: the probe list is exported and non-empty', () => {
+      assert.ok(Array.isArray(claudeBin.CANDIDATES) && claudeBin.CANDIDATES.length > 0);
+    });
+
+    // A hanging rc file is a DIFFERENT failure mode from a throwing shell: the
+    // spawn returns normally with error/status set. Exercise the real
+    // defaultRunShell against a stub shell so the timeout branch is covered.
+    check('claude-bin: defaultRunShell returns null when the shell times out (never hangs the daemon)', () => {
+      const slow = path.join(cbRoot, 'slow-shell.sh');
+      fs.writeFileSync(slow, '#!/bin/sh\nsleep 30\n');
+      fs.chmodSync(slow, 0o755);
+      const t0 = Date.now();
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: { SHELL: slow }, candidates: [],
+      });
+      assert.strictEqual(r, null, 'a shell that never answers must resolve to null');
+      assert.ok(Date.now() - t0 < 20000, 'the shell query must be bounded by its timeout');
+    });
+
+    // A GUI-launched .app is the case this module exists for, and launchd does
+    // not reliably export SHELL. Falling to /bin/sh there reads ~/.profile,
+    // never ~/.zshrc -- losing exactly the version-manager shims we came for.
+    check('claude-bin: with no SHELL in the env, the user record picks the shell, not /bin/sh', () => {
+      assert.strictEqual(claudeBin.loginShell({ SHELL: '/opt/fish' }), '/opt/fish');
+      let recorded = null;
+      try { recorded = os.userInfo().shell; } catch { recorded = null; }
+      assert.strictEqual(claudeBin.loginShell({}), recorded || '/bin/sh');
+    });
+
+    check('claude-bin: a chatty rc file cannot displace the resolved path', () => {
+      const chatty = path.join(cbRoot, 'chatty-shell.sh');
+      // Emits rc-file noise on both sides of the answer, as a real .zshrc can.
+      fs.writeFileSync(chatty, `#!/bin/sh\necho "nvm: using v20"\necho "${other}"\necho "welcome back"\n`);
+      fs.chmodSync(chatty, 0o755);
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: { SHELL: chatty }, candidates: [],
+      });
+      assert.ok(r, 'a path printed among rc-file noise must still be found');
+      assert.strictEqual(r.source, 'shell');
+      assert.strictEqual(r.path, other);
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
