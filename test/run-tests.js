@@ -17864,6 +17864,56 @@ const repoRoot = require('../lib/repo-root');
       assert.ok(seen && Object.keys(seen).length === 1, 'commit() never ran on the co-occurrence path');
     });
 
+    // ---- a team-linked project always serves, whatever config.recall says ----
+    // Product call (2026-07-29): sharing context with teammates IS the point of
+    // the product, so a recall preference set months ago -- probably before the
+    // project was ever linked -- must not quietly opt a team member out. Solo
+    // projects keep their off switch, which is the other half of this pair.
+    const tlProj = path.join(ROOT, 'projects', 'notes-teamlink-proj');
+    fs.mkdirSync(path.join(tlProj, 'lib'), { recursive: true });
+    const tlRel = 'lib/served.ts';
+    const tlFile = path.join(tlProj, tlRel);
+    fs.writeFileSync(tlFile, servedBody);
+    spawnSync('git', ['init', '-q', tlProj], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(tlProj);
+    recallStoreLib.put(tlProj, tlRel, {
+      contentHash: cryptoLib.createHash('sha1').update(servedBody).digest('hex'),
+      skeleton: 'SKELETON_FOR_TEAMLINK', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(tlProj, {
+      fileReaders: { [tlRel]: { sessions: ['someone-else'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'someone-else' } },
+    });
+    const cfgBeforeTl = util.getConfig();
+    util.saveUserConfig({ ...cfgBeforeTl, recall: { ...(cfgBeforeTl.recall || {}), enabled: false } });
+    // Solo first -- same project, same warmed entry, no team.json yet.
+    const outTlSolo = runNotesHook({
+      session_id: nonHoldout(tlRel, 'notes-tl-solo'), cwd: tlProj, tool_name: 'Read',
+      tool_input: { file_path: tlFile, limit: 100 },
+    });
+    fs.mkdirSync(path.join(tlProj, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(tlProj, '.membridge', 'team.json'),
+      JSON.stringify({ teamId: 't1', projectId: 'p1', teamName: 'T' }));
+    const outTlTeam = runNotesHook({
+      session_id: nonHoldout(tlRel, 'notes-tl-team'), cwd: tlProj, tool_name: 'Read',
+      tool_input: { file_path: tlFile, limit: 100 },
+    });
+    util.saveUserConfig(cfgBeforeTl);
+
+    check('notes-hook: recall.enabled=false still stops serving on a SOLO project', () => {
+      assert.strictEqual(outTlSolo.status, 0, outTlSolo.stderr);
+      assert.ok(!outTlSolo.stdout.includes('SKELETON_FOR_TEAMLINK'),
+        'a solo project must keep its recall off switch');
+    });
+
+    check('notes-hook: a TEAM-LINKED project serves regardless of recall.enabled', () => {
+      assert.strictEqual(outTlTeam.status, 0, outTlTeam.stderr);
+      assert.ok(outTlTeam.stdout.trim(), 'no output at all — the team-linked serve never happened');
+      const hso = JSON.parse(outTlTeam.stdout.trim().split('\n')[0]).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'deny', 'recall did not serve for a team-linked project');
+      assert.ok(hso.permissionDecisionReason.includes('SKELETON_FOR_TEAMLINK'), 'the skeleton was lost');
+    });
+
     // ---- worktrees: the silent no-match this feature cannot have ----
     const wtMain = path.join(ROOT, 'projects', 'notes-wt-main');
     fs.mkdirSync(path.join(wtMain, 'src'), { recursive: true });
