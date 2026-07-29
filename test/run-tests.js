@@ -4951,6 +4951,99 @@ async function main() {
     assert.ok(!/\(not captured\)/.test(body),
       'the "(not captured)" placeholder must be gone — an empty row is noise on every card');
   });
+  // Task 8: the dashboard savings panel, driven by /api/savings. Same
+  // extraction technique as pxHasSummary/pxGlanceFor above -- pull the pure
+  // function's source out of the served client bundle and sandbox-run it, so
+  // this pins real behavior rather than just grepping for a string. This is
+  // also the require() smoke check: requiring the file (a single giant
+  // template literal) throws immediately on a stray backtick, so simply
+  // reaching these asserts already proves the file still parses/loads.
+  check('dashboard: pxFmtTokens formats token counts human-readably', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const body = grab(src, 'pxFmtTokens');
+    assert.ok(body, 'pxFmtTokens is missing from the client bundle');
+    const pxFmtTokens = new Function('return (' + body + ')')();
+    assert.strictEqual(pxFmtTokens(0), '0');
+    assert.strictEqual(pxFmtTokens(42), '42');
+    assert.strictEqual(pxFmtTokens(3830), '4k');
+    assert.strictEqual(pxFmtTokens(118000), '118k');
+    assert.strictEqual(pxFmtTokens(1400000), '1.4M');
+    assert.strictEqual(pxFmtTokens(undefined), '0', 'a missing count must not throw or read NaN');
+  });
+  check('dashboard: pxProjectSavingsLine reads "<n> avoided · <serves> reads answered", never "saved"', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const fmtBody = grab(src, 'pxFmtTokens');
+    const lineBody = grab(src, 'pxProjectSavingsLine');
+    assert.ok(lineBody, 'pxProjectSavingsLine is missing from the client bundle');
+    const pxProjectSavingsLine = new Function('var pxFmtTokens = ' + fmtBody + ';\nreturn (' + lineBody + ')')();
+    assert.strictEqual(pxProjectSavingsLine({ tokens: 0, serves: 0 }), 'no repeat reads yet');
+    assert.strictEqual(pxProjectSavingsLine(null), 'no repeat reads yet', 'a missing avoided block must not throw');
+    assert.strictEqual(pxProjectSavingsLine({ tokens: 3830, serves: 1 }), '4k avoided · 1 reads answered');
+    assert.ok(!/saved/i.test(pxProjectSavingsLine({ tokens: 3830, serves: 1 })), 'must never say "saved"');
+  });
+  check('dashboard: pxHomeSavingsLine reads "<total> tokens of file reading avoided · <pct>% of context loaded"', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const grab = (s, name) => {
+      const start = s.indexOf('function ' + name + '(');
+      if (start === -1) return null;
+      let i = s.indexOf('{', start), depth = 0, end = i;
+      for (; end < s.length; end++) {
+        if (s[end] === '{') depth++;
+        else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+      }
+      return s.slice(start, end);
+    };
+    const fmtBody = grab(src, 'pxFmtTokens');
+    const pctBody = grab(src, 'pxSavingsPct');
+    const lineBody = grab(src, 'pxHomeSavingsLine');
+    assert.ok(pctBody, 'pxSavingsPct is missing from the client bundle');
+    assert.ok(lineBody, 'pxHomeSavingsLine is missing from the client bundle');
+    const preamble = 'var pxFmtTokens = ' + fmtBody + ';\nvar pxSavingsPct = ' + pctBody + ';\n';
+    const pxSavingsPct = new Function(preamble + 'return (' + pctBody + ')')();
+    const pxHomeSavingsLine = new Function(preamble + 'return (' + lineBody + ')')();
+    assert.strictEqual(pxSavingsPct(0, 0), 0, 'no denominator must not throw or read NaN');
+    assert.strictEqual(pxSavingsPct(1400000, 21540983), 6.1, 'the spec\'s own worked example');
+    assert.strictEqual(pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 0 }), 'no repeat reads yet');
+    assert.strictEqual(pxHomeSavingsLine(null), 'no repeat reads yet', 'a missing totals block must not throw');
+    assert.strictEqual(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 }),
+      '1.4M tokens of file reading avoided · 6.1% of context loaded');
+    assert.ok(!/saved/i.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'must never say "saved"');
+    assert.ok(!/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'no dollar figure');
+  });
+  check('dashboard: the Projects grid row renders the per-project savings line from pxData.savingsByPath', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    const row = src.slice(src.indexOf('function pxRowHtml'));
+    const body = row.slice(0, row.indexOf('\nfunction pxNewCount'));
+    assert.ok(/pxProjectSavingsLine\(/.test(body), 'pxRowHtml must render the savings line via pxProjectSavingsLine');
+    assert.ok(/pxData\.savingsByPath/.test(body), 'pxRowHtml must read the per-project savings entry from pxData.savingsByPath');
+  });
+  check('dashboard: the Projects index renders the Home savings stat and fetches /api/savings', () => {
+    const src = require('../lib/dashboard/client')('', '');
+    assert.ok(/fetch\('\/api\/savings'\)/.test(src), 'loadProjectsIndex must fetch /api/savings');
+    const idx = src.slice(src.indexOf('function renderProjectsIndex'));
+    const body = idx.slice(0, idx.indexOf('\nfunction renderProjectsEmpty'));
+    assert.ok(/pxHomeSavingsLine\(/.test(body), 'renderProjectsIndex must render the Home savings stat via pxHomeSavingsLine');
+  });
   // The pill had two authors: setPill (which knows about solo) and
   // renderSyncBanner (which did not, and ran on a timer). The banner won, so a
   // solo machine flipped back to "Synced" seconds after saying "Local only".
@@ -7866,6 +7959,33 @@ async function main() {
         'the /api/savings project shape must stay exactly this set');
       assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['avoided', 'holdout', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
+    } finally {
+      fs.writeFileSync(util.statePath(), savedState);
+    }
+  });
+  // Task 8 (dashboard savings panel): the panel branches on
+  // `avoided.tokens === 0` to show "no repeat reads yet" instead of a
+  // count. That honest zero must ride the wire as a real 0, not be dropped
+  // or coerced to null/undefined by the projection.
+  check('api: /api/savings serves an honest zero for a project with no avoided tokens yet', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'savings-zero-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    store.writeLedger(proj, {
+      updatedAt: new Date().toISOString(), sessions: 1, requests: 3, volume: 1200,
+      reads: { first: 3, sameSession: 0, crossSession: 0 },
+      hotPaths: [],
+      avoided: { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+      holdout: { skips: 0, callTokens: 0 },
+      seenKeys: [], readKeys: [], sessionIds: ['s1'], fileReaders: {},
+    });
+    const savedState = read(util.statePath());
+    try {
+      util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [proj]: { name: 'savings-zero-proj', events: [] } } });
+      const payload = savingsPayload();
+      assert.strictEqual(payload.projects[0].avoided.tokens, 0, 'a real 0, not dropped/undefined');
+      assert.strictEqual(payload.projects[0].avoided.serves, 0);
+      assert.strictEqual(payload.totals.volume, 1200, 'volume still rides the wire for the % of context loaded denominator');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
     }
