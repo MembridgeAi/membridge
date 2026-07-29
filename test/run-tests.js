@@ -15974,55 +15974,77 @@ async function main() {
     });
   }
 
-// ---- repo-root path translation (teammate notes, spec §7) ----
+// ---- wire keys: one rule for monorepo depth AND worktrees (spec §7) ----
 const repoRoot = require('../lib/repo-root');
 
 {
-  const rr = path.join(ROOT, 'projects', 'mono');
-  const api = path.join(rr, 'packages', 'api');
+  const mono = path.join(ROOT, 'projects', 'mono');
+  const api = path.join(mono, 'packages', 'api', 'src');
   fs.mkdirSync(api, { recursive: true });
-  spawnSync('git', ['init', '-q', rr], { encoding: 'utf8' });
+  fs.mkdirSync(path.join(mono, 'src'), { recursive: true });
+  spawnSync('git', ['init', '-q', mono], { encoding: 'utf8' });
+  // a commit is required before `git worktree add` will work
+  fs.writeFileSync(path.join(mono, 'src', 'root.ts'), 'export const a = 1;\n');
+  fs.writeFileSync(path.join(api, 'validate.ts'), 'export const b = 2;\n');
+  for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+    spawnSync('git', ['-C', mono, ...args], { encoding: 'utf8' });
+  }
+  // A worktree NESTED INSIDE the main repo -- MemBridge's own layout.
+  const wt = path.join(mono, '.claude', 'worktrees', 'feature-x');
+  spawnSync('git', ['-C', mono, 'worktree', 'add', '-q', '-b', 'feature-x', wt], { encoding: 'utf8' });
   repoRoot.clearCache();
 
-  check('repo-root: resolves the git top-level from a subdirectory', () => {
-    assert.strictEqual(fs.realpathSync(repoRoot.repoRoot(api)), fs.realpathSync(rr));
+  check('wire-key: a file at the repo root keys relative to it', () => {
+    assert.strictEqual(repoRoot.wireKeyFor(path.join(mono, 'src', 'root.ts')), 'src/root.ts');
   });
 
-  check('repo-root: offset is empty at the repo root', () => {
-    assert.strictEqual(repoRoot.trackedOffset(rr), '');
+  check('wire-key: a monorepo subpath keys from the repo root, not the tracked dir', () => {
+    assert.strictEqual(repoRoot.wireKeyFor(path.join(api, 'validate.ts')), 'packages/api/src/validate.ts');
   });
 
-  check('repo-root: offset is the posix prefix for a tracked subdirectory', () => {
-    assert.strictEqual(repoRoot.trackedOffset(api), 'packages/api/');
+  check('wire-key: a file in a nested worktree keys as if in the main checkout', () => {
+    // THE REGRESSION THIS MODULE EXISTS FOR. Keyed against the tracked project
+    // (the main repo) this came out '.claude/worktrees/feature-x/src/root.ts',
+    // which can never match a teammate's 'src/root.ts'.
+    const inWt = path.join(wt, 'src', 'root.ts');
+    assert.ok(fs.existsSync(inWt), 'worktree fixture missing — git worktree add failed');
+    assert.strictEqual(repoRoot.wireKeyFor(inWt), 'src/root.ts');
   });
 
-  check('repo-root: toWirePath prefixes a tracked-relative path', () => {
-    assert.strictEqual(repoRoot.toWirePath(api, 'src/validate.ts'), 'packages/api/src/validate.ts');
+  check('wire-key: the same file in main and in a worktree yields ONE key', () => {
+    assert.strictEqual(
+      repoRoot.wireKeyFor(path.join(mono, 'src', 'root.ts')),
+      repoRoot.wireKeyFor(path.join(wt, 'src', 'root.ts')));
   });
 
-  check('repo-root: toWirePath is identity at the repo root', () => {
-    assert.strictEqual(repoRoot.toWirePath(rr, 'src/validate.ts'), 'src/validate.ts');
+  check('wire-key: a monorepo subpath inside a worktree keys correctly too', () => {
+    assert.strictEqual(
+      repoRoot.wireKeyFor(path.join(wt, 'packages', 'api', 'src', 'validate.ts')),
+      'packages/api/src/validate.ts');
   });
 
-  check('repo-root: fromWirePath strips the offset', () => {
-    assert.strictEqual(repoRoot.fromWirePath(api, 'packages/api/src/validate.ts'), 'src/validate.ts');
+  check('wire-key: checkoutRoot finds the worktree root, not the main repo', () => {
+    assert.strictEqual(repoRoot.checkoutRoot(path.join(wt, 'src')), wt);
+    assert.strictEqual(repoRoot.checkoutRoot(path.join(mono, 'src')), mono);
   });
 
-  check('repo-root: fromWirePath leaves a non-matching path alone (legacy row)', () => {
-    assert.strictEqual(repoRoot.fromWirePath(api, 'src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: a non-repo directory yields null root and empty offset', () => {
+  check('wire-key: a file outside any checkout is null, never a local path', () => {
     const plain = path.join(ROOT, 'projects', 'not-a-repo');
     fs.mkdirSync(plain, { recursive: true });
     repoRoot.clearCache();
-    assert.strictEqual(repoRoot.repoRoot(plain), null);
-    assert.strictEqual(repoRoot.trackedOffset(plain), '');
-    assert.strictEqual(repoRoot.toWirePath(plain, 'a/b.js'), 'a/b.js');
+    assert.strictEqual(repoRoot.wireKeyFor(path.join(plain, 'a.js')), null);
+    assert.strictEqual(repoRoot.checkoutRoot(plain), null);
+  });
+
+  check('wire-key: repeated lookups are memoized and stay correct', () => {
+    const f = path.join(api, 'validate.ts');
+    const first = repoRoot.wireKeyFor(f);
+    assert.strictEqual(repoRoot.wireKeyFor(f), first);
+    assert.strictEqual(repoRoot.wireKeyFor(path.join(mono, 'src', 'root.ts')), 'src/root.ts');
   });
 }
 
-  // --- summary ---
+// --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   try {
