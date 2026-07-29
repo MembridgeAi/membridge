@@ -9,13 +9,22 @@ compatibility_date = "2026-07-01"
 binding = "COUNTERS"
 dataset = "membridge_counters"
 
-# Deploy on its own hostname so a rate-limit or firewall rule can target it
-# without touching the marketing site:
+# HOSTNAME IS AN OPEN DECISION — do not just pick one.
+#
+# membridge.app is on name.com nameservers, not Cloudflare, so no hostname under
+# it can be routed here until that zone moves. membridge.me IS on Cloudflare and
+# works today.
+#
+# The catch: this URL is baked into lib/counters-backend.json at build time, and
+# every shipped client keeps pointing at whatever it was built with. Old installs
+# never update it. So whichever hostname is chosen has to keep answering more or
+# less forever — this is not a decision to make casually to unblock a deploy.
+#
 #   wrangler deploy
 #   (then add the route in the Cloudflare dashboard, or uncomment below)
 #
 # [[routes]]
-# pattern = "counters.membridge.app"
+# pattern = "counters.membridge.me"   # or counters.membridge.app once that zone moves
 # custom_domain = true
 
 # RECOMMENDED, set in the dashboard rather than here (rate limiting rules are

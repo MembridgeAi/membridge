@@ -65,7 +65,7 @@ npx wrangler deploy
 
 Then, in the Cloudflare dashboard:
 
-- point a hostname at it (`counters.membridge.app`);
+- point a hostname at it — **see the hostname note in `counters-worker/wrangler.toml` before choosing.** `membridge.app` is not on Cloudflare, and this URL is baked into shipped clients that never update it, so the choice is close to permanent;
 - add a **rate limiting rule** on that hostname, ~10 requests/minute per IP.
   A healthy install sends one request per state change plus one per day, so
   anything above that is a bug or an attack. This is the only DoS control —
@@ -76,7 +76,7 @@ Then, in the Cloudflare dashboard:
 Create `lib/counters-backend.json`:
 
 ```json
-{ "url": "https://counters.membridge.app" }
+{ "url": "https://counters.membridge.me" }
 ```
 
 Deliberately a **separate file** from `lib/backend.json`. Nothing should be able
@@ -118,8 +118,20 @@ Access check at the edge cannot be sidestepped.
 
 ### 5. Dashboard + Access
 
-- Deploy `ops-dashboard/` as a Cloudflare Pages project on `ops.membridge.app`.
-- Route `ops.membridge.app/api` to the `ops-api` Worker.
+- Deploy `ops-dashboard/` as a Cloudflare Pages project on `ops.membridge.me`.
+- Route `ops.membridge.me/api` to the `ops-api` Worker.
+
+> **Why `.me` and not `.app`.** `membridge.app` is on name.com nameservers, not
+> Cloudflare, so Access cannot protect any hostname under it — that is why only
+> `membridge.me` appears in the domain dropdown. `membridge.me` is already a
+> Cloudflare zone and works today. Keeping the admin panel off the
+> customer-facing brand domain is also the better end state, not a compromise.
+>
+> **Check the redirect first.** `membridge.me` currently returns `301` to
+> `https://membridge.app/`. If that rule matches subdomains, it will bounce
+> `ops.membridge.me` to the marketing site before Access ever runs, and the
+> symptom looks like a broken deploy rather than a redirect. Confirm the rule is
+> scoped to the apex (and `www`), or add an explicit exception for `ops.`.
 - Confirm the page is excluded from `sitemap.xml` and `llms.txt`. It already
   carries `noindex`.
 
@@ -132,7 +144,7 @@ panel only ever sees an already-verified identity.
 
 Set it up once, in **Zero Trust → Access → Applications**:
 
-1. **Add an application** → Self-hosted → domain `ops.membridge.app`.
+1. **Add an application** → Self-hosted → domain `ops.membridge.me`.
 2. **Session duration** — 24 hours is a reasonable default. Shorter means
    re-authenticating more often; longer widens the window on a stolen laptop.
 3. **Add a policy** → Action: *Allow* → Include: *Emails* → your address.
@@ -162,7 +174,7 @@ invitations, and nothing to revoke beyond removing the address.
 
 **Cost:** Cloudflare Access is free up to 50 users.
 
-**Check it worked:** open `ops.membridge.app` in a private window — you should be
+**Check it worked:** open `ops.membridge.me` in a private window — you should be
 challenged before seeing any page content. Then request the Worker directly
 without an Access session; it must return 401.
 
@@ -170,14 +182,14 @@ without an Access session; it must return 401.
 
 ## Verify it end to end
 
-1. `curl -X POST https://counters.membridge.app -d '{"bad":true}'` → **204**.
+1. `curl -X POST https://counters.membridge.me -d '{"bad":true}'` → **204**.
    Always 204, even on garbage: an error status teaches a broken client to
    retry, and a retry storm across every install is the failure mode a silent
    diagnostic is least able to notice. Rejections are counted internally and
    show up on the dashboard instead.
 2. Start a daemon with `counters-backend.json` in place. Within one sync pass a
    `heartbeat` should appear.
-3. Open `ops.membridge.app` in a private window → Access should challenge.
+3. Open `ops.membridge.me` in a private window → Access should challenge.
 4. Hit the `ops-api` Worker directly without Access → **401**.
 
 ---

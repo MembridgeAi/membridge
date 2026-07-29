@@ -9,7 +9,7 @@ compatibility_date = "2026-07-01"
 workers_dev = false
 
 # [[routes]]
-# pattern = "ops.membridge.app/api"
+# pattern = "ops.membridge.me/api"
 # custom_domain = true
 
 # Non-secret config.
