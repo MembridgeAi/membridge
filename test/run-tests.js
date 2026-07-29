@@ -16511,6 +16511,302 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- teammate notes: PreToolUse delivery (spec §3.1, §4.1) ----
+  // Two layers, deliberately. The buildNotesOutput checks below pin the
+  // selection/marking contract in isolation; the hook-level checks after them
+  // are the ones that can actually prove the property that matters -- that a
+  // note NEVER costs the agent its read. A unit check on the returned text
+  // cannot see the permissionDecision the hook writes, so on its own it would
+  // prove only that some words were produced.
+  {
+    const hooksRecall = require('../lib/hooks-recall');
+    const recallStoreLib = require('../lib/recall-store');
+    const ledgerStoreLib = require('../lib/ledger-store');
+    const recallLib = require('../lib/recall');
+    const cryptoLib = require('crypto');
+    const NOTES_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+    const runNotesHook = (payload, env) => spawnSync(process.execPath, [NOTES_ENTRY, 'recall'], {
+      input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const trackProject = dir => {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [dir]: { events: [] } } });
+    };
+    // Same deterministic scan the recall hook's own tests use: pick a session
+    // id outside the 3% holdout bucket so "recall serves" is not a coin flip.
+    const nonHoldout = (relPath, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        const bucket = cryptoLib.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+        if (bucket >= recallLib.HOLDOUT_PCT) return sid;
+      }
+      throw new Error(`no non-holdout session id for ${relPath}`);
+    };
+
+    const hp = path.join(ROOT, 'projects', 'hook-notes-proj');
+    fs.mkdirSync(path.join(hp, 'lib'), { recursive: true });
+    // The fixture MUST be a real checkout. byFile is keyed by WIRE key, and
+    // wireKeyFor answers null outside a checkout -- without this git init every
+    // file-note assertion below would fail for a reason that has nothing to do
+    // with the code under test.
+    spawnSync('git', ['init', '-q', hp], { encoding: 'utf8' });
+    repoRoot.clearCache();
+
+    const NOW = '2026-07-28T10:00:00Z';
+    const rows = [{
+      author_name: 'Andrew', ts: '2026-07-28T09:00:00Z',
+      decisions: 'Renamed the retry cap to maxAttempts.', gotchas: '',
+      changes: [{ file: 'lib/validate.ts', note: 'blocked pending migration 018' }],
+    }];
+
+    const fresh = () => { notesStore.write(hp, notes.buildIndex(rows, null, NOW)); };
+
+    check('notes-hook: the fixture is a real checkout, so wire keys resolve (guards the file-note checks)', () => {
+      assert.strictEqual(repoRoot.wireKeyFor(path.join(hp, 'lib/validate.ts')), 'lib/validate.ts');
+    });
+
+    check('notes-hook: prose is delivered on any read (arrival)', () => {
+      fresh();
+      const out = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/unrelated.js'), relPath: 'lib/unrelated.js', sessionId: 's1', now: NOW, config: {},
+      });
+      assert.ok(out && out.text.includes('maxAttempts'));
+    });
+
+    check('notes-hook: file note is delivered on contact', () => {
+      fresh();
+      const out = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      });
+      assert.ok(out.text.includes('migration 018'));
+    });
+
+    check('notes-hook: prose is not re-delivered after commit', () => {
+      fresh();
+      const first = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's1', now: NOW, config: {},
+      });
+      first.commit();
+      const second = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's2', now: NOW, config: {},
+      });
+      assert.strictEqual(second, null);
+    });
+
+    check('notes-hook: a file note re-fires in a new session but not the same one', () => {
+      fresh();
+      const a = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      });
+      a.commit();
+      const again = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      });
+      assert.strictEqual(again, null);
+      const other = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's2', now: NOW, config: {},
+      });
+      assert.ok(other && other.text.includes('migration 018'));
+    });
+
+    check('notes-hook: nothing to say returns null', () => {
+      notesStore.write(hp, notes.emptyIndex());
+      assert.strictEqual(hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's9', now: NOW, config: {},
+      }), null);
+    });
+
+    check('notes-hook: kill switch silences it', () => {
+      fresh();
+      assert.strictEqual(hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW,
+        config: { teammateNotes: { enabled: false } },
+      }), null);
+    });
+
+    check('notes-hook: a corrupt index yields null, never a throw', () => {
+      fs.writeFileSync(notesStore.notesPath(hp), 'not json');
+      assert.doesNotThrow(() => {
+        assert.strictEqual(hooksRecall.buildNotesOutput({
+          projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+        }), null);
+      });
+    });
+
+    // ---- the hook itself: a note must never cost the agent its read ----
+    // Every fixture below carries ONLY a file note (no decisions, no gotchas).
+    // With prose in the index the output would be non-empty even if the
+    // file-keyed lookup missed entirely, and the wire-key check further down
+    // would prove nothing.
+    const ep = path.join(ROOT, 'projects', 'notes-e2e-proj');
+    fs.mkdirSync(path.join(ep, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(ep, 'lib', 'validate.ts'), 'export const a = 1;\n');
+    spawnSync('git', ['init', '-q', ep], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(ep);
+    // The hook's clock is the real one, and selectFileNotes drops anything
+    // older than the 7-day re-fire window -- a frozen fixture timestamp would
+    // make these silently undeliverable.
+    const liveTs = new Date().toISOString();
+    const fileNoteRow = (file, note) => ({
+      author_name: 'Andrew', ts: liveTs, decisions: '', gotchas: '',
+      changes: [{ file, note }],
+    });
+    notesStore.write(ep, notes.buildIndex([fileNoteRow('lib/validate.ts', 'blocked pending migration 018')], null, liveTs));
+
+    const allowPayload = {
+      session_id: 'notes-e2e-allow', cwd: ep, tool_name: 'Read',
+      tool_input: { file_path: path.join(ep, 'lib', 'validate.ts'), limit: 100 },
+    };
+    const outAllow = runNotesHook(allowPayload);
+
+    check('notes-hook: the read is ALLOWED, never denied, when a note is all there is', () => {
+      assert.strictEqual(outAllow.status, 0, outAllow.stderr);
+      assert.strictEqual(outAllow.stderr, '', 'hook wrote to stderr');
+      assert.ok(outAllow.stdout.trim(), 'no output at all — the note never reached the agent');
+      const hso = JSON.parse(outAllow.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.hookEventName, 'PreToolUse');
+      assert.strictEqual(hso.permissionDecision, 'allow', 'THE property: this feature may never block a read');
+      assert.ok(!('permissionDecisionReason' in hso), 'a note must not masquerade as a decision reason');
+      assert.ok(hso.additionalContext.includes('migration 018'), 'the note text never made it into additionalContext');
+      assert.ok(!outAllow.stdout.includes('deny'), 'the notes path emitted a denial');
+    });
+
+    check('notes-hook: commit() ran on the allow path, so the same session is not told twice', () => {
+      // Without this precondition the check passes vacuously against an
+      // unimplemented feature: nothing delivered twice is nothing delivered.
+      assert.ok(outAllow.stdout.trim(), 'precondition: the first read never produced a note');
+      const again = runNotesHook(allowPayload);
+      assert.strictEqual(again.status, 0, again.stderr);
+      assert.strictEqual(again.stdout, '', 'the note re-fired inside the same session');
+    });
+
+    // A file hot enough to have a cached skeleton is exactly where a teammate
+    // note is most likely to land. decide() refusing to serve it must not
+    // swallow the note.
+    const hotRel = 'lib/hot.ts';
+    const hotFile = path.join(ep, hotRel);
+    const hotBody = 'export const c = 3;\n';
+    fs.writeFileSync(hotFile, hotBody);
+    recallStoreLib.put(ep, hotRel, {
+      contentHash: cryptoLib.createHash('sha1').update(hotBody).digest('hex'),
+      skeleton: 'SKELETON_FOR_HOT', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    notesStore.write(ep, notes.buildIndex(
+      [fileNoteRow('lib/validate.ts', 'blocked pending migration 018'), fileNoteRow(hotRel, 'do not touch until 019 lands')],
+      notesStore.read(ep), liveTs));
+    // limit 5 -> 60 call tokens, far under recall's 400-token floor: a real
+    // cache entry, a refused serve.
+    const outHot = runNotesHook({
+      session_id: 'notes-e2e-hot', cwd: ep, tool_name: 'Read',
+      tool_input: { file_path: hotFile, limit: 5 },
+    });
+
+    check('notes-hook: a note on a cached file still arrives when recall declines to serve', () => {
+      assert.strictEqual(outHot.status, 0, outHot.stderr);
+      assert.ok(outHot.stdout.trim(), 'the note was dropped because the file happened to have a skeleton');
+      const hso = JSON.parse(outHot.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'allow');
+      assert.ok(hso.additionalContext.includes('do not touch until 019 lands'));
+      assert.ok(!hso.additionalContext.includes('SKELETON_FOR_HOT'), 'a refused skeleton leaked into the note');
+    });
+
+    // Co-occurrence: recall was ALREADY denying this read on its own account,
+    // so the note rides on that one output rather than becoming a second,
+    // conflicting one.
+    const servedRel = 'lib/served.ts';
+    const servedFile = path.join(ep, servedRel);
+    const servedBody = ['const KEY = 1;', 'function one() {', '  work();', '}', ''].join('\n');
+    fs.writeFileSync(servedFile, servedBody);
+    recallStoreLib.put(ep, servedRel, {
+      contentHash: cryptoLib.createHash('sha1').update(servedBody).digest('hex'),
+      skeleton: 'SKELETON_FOR_SERVED', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(ep, {
+      fileReaders: { [servedRel]: { sessions: ['someone-else'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'someone-else' } },
+    });
+    notesStore.write(ep, notes.buildIndex(
+      [fileNoteRow(servedRel, 'this one is mid-migration')], notesStore.read(ep), liveTs));
+    const servedSession = nonHoldout(servedRel, 'notes-e2e-serve');
+    const outServe = runNotesHook({
+      session_id: servedSession, cwd: ep, tool_name: 'Read',
+      tool_input: { file_path: servedFile, limit: 100 },
+    });
+
+    check('notes-hook: when recall already denies the read, the note rides on that ONE output', () => {
+      assert.strictEqual(outServe.status, 0, outServe.stderr);
+      const lines = outServe.stdout.trim().split('\n').filter(Boolean);
+      assert.strictEqual(lines.length, 1, `two conflicting hook outputs were written: ${outServe.stdout}`);
+      const hso = JSON.parse(lines[0]).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'deny', 'the recall serve itself regressed — fixture no longer proves co-occurrence');
+      assert.ok(hso.permissionDecisionReason.includes('SKELETON_FOR_SERVED'), 'the skeleton was lost');
+      assert.ok(hso.permissionDecisionReason.includes('this one is mid-migration'), 'the note was dropped on the deny path');
+      assert.ok(!('additionalContext' in hso), 'the note opened a second, conflicting channel on a denied read');
+    });
+
+    check('notes-hook: the note delivered on the deny path is marked seen', () => {
+      const seen = ((notesStore.read(ep).seen || {}).file || {})[servedSession];
+      assert.ok(seen && Object.keys(seen).length === 1, 'commit() never ran on the co-occurrence path');
+    });
+
+    // ---- worktrees: the silent no-match this feature cannot have ----
+    const wtMain = path.join(ROOT, 'projects', 'notes-wt-main');
+    fs.mkdirSync(path.join(wtMain, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(wtMain, 'src', 'root.ts'), 'export const b = 2;\n');
+    spawnSync('git', ['init', '-q', wtMain], { encoding: 'utf8' });
+    for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+      spawnSync('git', ['-C', wtMain, ...args], { encoding: 'utf8' });
+    }
+    const wtDir = path.join(wtMain, '.claude', 'worktrees', 'notes-feature');
+    spawnSync('git', ['-C', wtMain, 'worktree', 'add', '-q', '-b', 'notes-feature', wtDir], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(wtMain);
+    notesStore.write(wtMain, notes.buildIndex([fileNoteRow('src/root.ts', 'renamed here in the worktree too')], null, liveTs));
+    const wtFile = path.join(wtDir, 'src', 'root.ts');
+    const outWt = runNotesHook({
+      session_id: 'notes-e2e-wt', cwd: wtDir, tool_name: 'Read',
+      tool_input: { file_path: wtFile, limit: 100 },
+    });
+
+    check('notes-hook: a worktree session matches a note keyed to the main checkout', () => {
+      assert.ok(fs.existsSync(wtFile), 'worktree fixture missing — git worktree add failed');
+      // Not tautological: the hook resolves a nested worktree to its MAIN repo,
+      // so its own relPath here carries the worktree prefix and a relPath-keyed
+      // lookup finds nothing at all.
+      assert.strictEqual(path.relative(wtMain, wtFile).split(path.sep).join('/'),
+        '.claude/worktrees/notes-feature/src/root.ts');
+      assert.strictEqual(repoRoot.wireKeyFor(wtFile), 'src/root.ts');
+      assert.strictEqual(outWt.status, 0, outWt.stderr);
+      assert.ok(outWt.stdout.trim(), 'no output — the lookup used the tracked-relative path, not the wire key');
+      const hso = JSON.parse(outWt.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'allow');
+      assert.ok(hso.additionalContext.includes('renamed here in the worktree too'));
+    });
+
+    check('notes-hook: buildNotesOutput itself looks up by wire key, not relPath', () => {
+      const out = hooksRecall.buildNotesOutput({
+        projectPath: wtMain, absPath: wtFile,
+        relPath: '.claude/worktrees/notes-feature/src/root.ts',
+        sessionId: 'unit-wt', now: liveTs, config: {},
+      });
+      assert.ok(out && out.text.includes('renamed here in the worktree too'),
+        'a relPath lookup would return null here — that is the bug this guards');
+    });
+
+    check('notes-hook: a file outside any checkout yields no note, never a throw', () => {
+      const plain = path.join(ROOT, 'projects', 'notes-not-a-repo');
+      fs.mkdirSync(plain, { recursive: true });
+      repoRoot.clearCache();
+      assert.strictEqual(repoRoot.wireKeyFor(path.join(plain, 'a.js')), null,
+        'fixture is inside a checkout — this check would pass vacuously');
+      notesStore.write(plain, notes.buildIndex([fileNoteRow('a.js', 'unreachable')], null, liveTs));
+      assert.strictEqual(hooksRecall.buildNotesOutput({
+        projectPath: plain, absPath: path.join(plain, 'a.js'), relPath: 'a.js',
+        sessionId: 'unit-plain', now: liveTs, config: {},
+      }), null);
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
