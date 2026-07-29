@@ -23,6 +23,16 @@ Every task's requirements implicitly include this section.
 - **E2E encryption unchanged.** The server sees only ciphertext; decryption and all routing stay client-side.
 - **The CLAUDE.md narrative block and the Activity feed are unchanged.** This feature must not shrink, grow, or restructure either one.
 - **Redaction is mandatory** on anything injected: `lib/redact.js` runs before any decision text reaches an agent context.
+- **Baseline is 860/865 passing in a worktree, 865/865 with complete deps.** The
+  5 failures (`prepare-app` x2, `skeleton:` x2, `recall-store: warm()`) are a
+  MISSING `web-tree-sitter` — a real declared dependency the main tree was never
+  reinstalled for. They are not a regression. Record your own before/after
+  numbers and compare deltas, never absolutes.
+- **A silent no-op is the enemy in this feature.** Several functions here answer
+  '' or null for "I can't work this out", which is correct for genuinely
+  impossible input but will happily swallow a real bug — exactly what happened
+  with `trackedOffset` in Task 2 (symlinked paths). When a fallback fires in a
+  case you did not expect, treat it as a defect, not as the design working.
 - **No test may touch the network or a live backend.** Everything runs under a throwaway `MEMBRIDGE_HOME`, matching `test/run-tests.js`.
 - **Atomic writes only:** tmp file + rename, matching `lib/util.js` `saveState`, `lib/ledger-store.js` `writeLedger`, `lib/recall-store.js` `put`.
 - **No `Date.now()` inside pure functions.** Every selection and expiry function takes an injected `now` (an ISO string or ms number), so tests are deterministic.
@@ -85,9 +95,67 @@ Nothing here blocks Tasks 2–9, 11 or 12.
 
 ---
 
-## Task 2: Repo-root path translation
+## Task 2: Repo-root path translation ✅ DONE (`cf20d4c`, `feat/live-teammate-notes`)
+
+**Correction applied after implementation.** The original implementation below
+compared `git rev-parse --show-toplevel` against `path.resolve()`. Git resolves
+symlinks and `path.resolve` does not, so on macOS (`/var` -> `/private/var`) and
+under any symlinked home or volume the comparison produced a `..`-leading path,
+`trackedOffset` returned `''`, and translation silently did nothing — monorepo
+paths would have shipped untranslated with no error anywhere. The code below now
+carries the `realPath` fix that shipped. Verified independently.
+
 
 The monorepo fix (spec §7), as a standalone module with no knowledge of teams or notes.
+
+> **⚠ ADDENDUM 2026-07-28 — read before Step 1.** Raised by the recall hot-path
+> investigation (session `6821ee52`, worktree `hook-firing-sessions-90332c`). Not a
+> re-litigation of §2.3 or §7; a third case neither of them covers.
+>
+> `repoRoot()` as specced uses `git rev-parse --show-toplevel`, which **returns the
+> worktree itself, not the main repo**. Verified on this machine:
+>
+> ```
+> git -C <main>/.claude/worktrees/projects-1c rev-parse --show-toplevel
+>   → /Users/marco/Documents/Membridge/.claude/worktrees/projects-1c
+> git -C <main>/.claude/worktrees/projects-1c rev-parse --git-common-dir
+>   → /Users/marco/Documents/Membridge/.git          ← the main repo
+> ```
+>
+> Three distinct file-identity axes, only two of which are handled:
+> §2.3 closes **attribution** (which project owns a worktree file — correct, genuinely no
+> work needed); §7 fixes **depth** (`packages/api/`); nothing addresses **same file,
+> different worktree**.
+>
+> Measured against live state (`resolveTrackedKey` + `readKeyFor`, real `state.json`):
+> every worktree file resolves to the main project but keeps a distinct key —
+>
+> ```
+> <main>/lib/scan.js                              → lib/scan.js
+> <main>/.claude/worktrees/projects-1c/lib/scan.js → .claude/worktrees/projects-1c/lib/scan.js
+> <main>/.claude/worktrees/notes-index/lib/scan.js → .claude/worktrees/notes-index/lib/scan.js
+> ```
+>
+> Because the tracked dir *is* the repo root here, `trackedOffset()` returns `''` and
+> `toWirePath()` is the identity function — a worktree path crosses the wire verbatim.
+> **A note keyed `.claude/worktrees/<name>/lib/scan.js` can never match a teammate's
+> `lib/scan.js`.** That defeats file-keyed matching (§4.1, Tasks 6 and 8) for any session
+> run from a worktree — on this machine, nearly all of them.
+>
+> **Suggested fix, inside this task:** resolve the root via `git rev-parse --git-common-dir`,
+> strip a trailing `/.git`, and fall back to `--show-toplevel` when the two agree (i.e. not
+> a worktree). A worktree and the main checkout then yield the same root, and `toWirePath()`
+> maps both to `lib/scan.js`.
+>
+> **Add to Step 1's tests:**
+> - `repoRoot()` on a linked worktree returns the *main* repo root, not the worktree path.
+> - `toWirePath(<worktree>, 'lib/scan.js') === 'lib/scan.js'`, identical to the main checkout.
+> - Every non-worktree case above stays byte-identical.
+>
+> Same defect independently strands the recall layer: `hotPathsOf` requires
+> `sessions.length > 1` on one key, so per-session worktrees never accumulate a hot set and
+> `.membridge/recall/` is never created. Not this task's job to fix, but one normalization
+> closes both.
 
 **Files:**
 - Create: `lib/repo-root.js`
@@ -158,9 +226,14 @@ const repoRoot = require('../lib/repo-root');
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "repo-root"`
+Run: `node test/run-tests.js 2>&1 | tail -20`
 
-Expected: every `repo-root:` line reports `FAIL`, with `Cannot find module '../lib/repo-root'`.
+Expected: the run **aborts** with `Error: Cannot find module '../lib/repo-root'`
+and exit 1. Note it does NOT print per-check `FAIL` lines: the tests live inside
+the suite's `async main()`, so a missing top-level `require` throws before any
+check registers. That is the correct failure for the right reason — confirm the
+module name in the error, then continue. The same applies to Tasks 4, 5 and 7,
+which also add new top-level requires.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -180,10 +253,28 @@ Create `lib/repo-root.js`:
 // through here, so both sides speak repo-root-relative.
 //
 // See docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md §7.
+const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 const toPosix = p => p.split(path.sep).join('/');
+
+// CRITICAL (found while implementing Task 2): `git rev-parse --show-toplevel`
+// returns a path with symlinks RESOLVED; path.resolve() does not. On macOS the
+// temp dir alone diverges (/var -> /private/var), and any real project under a
+// symlinked home or volume hits the same thing. Comparing the two directly
+// yields a '..'-leading relative path, which trackedOffset() below then treats
+// as impossible input and answers '' -- a SILENT no-op that ships monorepo
+// paths untranslated so the teammate never matches. Resolve both sides the way
+// git does before comparing. A path that does not exist yet cannot be
+// realpath'd, so fall back to plain resolution for it.
+const realPath = p => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+};
 
 // Memoized: teamsync already spawns git per project for repoUrl(), and the
 // top-level of a project cannot change while the daemon runs. A null result
@@ -218,7 +309,7 @@ function trackedOffset(projectPath) {
   const root = repoRoot(projectPath);
   if (!root) return '';
   try {
-    const rel = path.relative(root, path.resolve(projectPath));
+    const rel = path.relative(realPath(root), realPath(projectPath));
     if (!rel) return '';
     if (rel.startsWith('..') || path.isAbsolute(rel)) return '';
     return `${toPosix(rel)}/`;
@@ -619,9 +710,10 @@ const notes = require('../lib/teammate-notes');
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "notes:"`
+Run: `node test/run-tests.js 2>&1 | tail -20`
 
-Expected: every line `FAIL` with `Cannot find module '../lib/teammate-notes'`.
+Expected: the run aborts with `Error: Cannot find module '../lib/teammate-notes'`
+and exit 1 — not per-check `FAIL` lines, for the reason given in Task 2 Step 2.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -890,9 +982,10 @@ const notesStore = require('../lib/teammate-notes-store');
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "notes-store:"`
+Run: `node test/run-tests.js 2>&1 | tail -20`
 
-Expected: all `FAIL` with `Cannot find module '../lib/teammate-notes-store'`.
+Expected: the run aborts with `Error: Cannot find module '../lib/teammate-notes-store'`
+and exit 1 — not per-check `FAIL` lines, for the reason given in Task 2 Step 2.
 
 - [ ] **Step 3: Write the implementation**
 
