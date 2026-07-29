@@ -964,7 +964,43 @@ git commit -m "feat(notes): atomic fail-open store for the teammate-notes index"
 
 ---
 
-## Task 6: Build the index on every team pull
+## Task 6: Build the index on every team pull ✅ DONE (`feat/notes-task6`)
+
+**Four things this task's text got wrong, all corrected in the shipped code.**
+
+1. **`memorydb.readEntries` does not exist, and neither does `origin === 'team'`
+   on a stored row.** `lib/memorydb.js` exports `loadDb` / `buildEntries` and
+   holds LOCAL entries only; `origin` is a field `lib/feed.js` invents at render
+   time (`normalizeLocal` / `normalizeTeam`). Pulled teammate rows live in
+   `state.projects[key].teamEntries`, written by `lib/teamsync.js`'s
+   `pullProject`. That pull already filters self rows server-side
+   (`author_id=neq.${creds.userId}`), so **no origin filter is needed at all**.
+2. **The stored row renames the author.** The wire row has `author_name`;
+   `pullProject`'s mapper stores it as `author`. `buildIndex` read only
+   `author_name`, so fed real daemon data every note would have come out as
+   "a teammate" — and since the author is part of `noteId`, every id would have
+   differed from the wire-shaped ones the unit tests used. Silent, and invisible
+   to every test in the suite. `buildIndex` now accepts both shapes.
+3. **A non-array `entries` wiped a good index.** `buildIndex(null, …)` does not
+   throw — it returns a valid EMPTY index — so the plan's "fail-open" comment
+   was untrue for the most likely failure (state unreadable). `rebuildTeammateNotes`
+   now returns the previous index untouched for a non-array, while an empty
+   ARRAY still legitimately empties it.
+4. **`const repoRoot = require('./repo-root')` in Step 3 is dead** — there is no
+   translation on receive, so nothing uses it. Not added. Likewise the "Files"
+   line below claiming `lib/server.js` needs a helper: it does not, `util.loadState`
+   already exposes what the daemon needs.
+
+**Also beyond the plan:** the rebuild is called from BOTH pull paths — the
+daemon's `teamTick` *and* `teamSyncPass` (manual/cron `membridge sync`), via one
+shared `rebuildNotesForChanged` — and it honours Task 7's `isNotesEnabled` kill
+switch, so a user who opted out gets no file written into their project.
+
+**On the "preserves seen markers" test:** the plan's version asserts only a
+prose marker. Mutation-verified: an implementation that carries `seen.prose`
+forward but silently drops `seen.file` passes the plan's test AND the entire
+rest of the suite, while re-firing every file note on every pull — the noisier
+of the two bugs. The shipped test asserts both halves plus id stability.
 
 **Files:**
 - Modify: `bin/membridge.js` (`teamTick`)
