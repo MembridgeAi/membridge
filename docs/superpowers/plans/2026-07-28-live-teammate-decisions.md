@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver a teammate's distilled decisions into a running agent session — project-wide prose on arrival, file-keyed notes at the moment the agent touches the file — plus a live human-facing terminal line.
+**Goal:** Deliver a teammate's distilled decisions into a running agent session — project-wide prose on arrival, file-keyed notes at the moment the agent touches the file.
 
-**Architecture:** The daemon already pulls teammate `decisions`, `gotchas` and per-file `changes[].note` every tick. On each pull it folds them into one small per-project index, `.membridge/teammate-notes.json`. Five hook entry points read that index and inject via `additionalContext` (model) or `systemMessage` (human). Nothing new crosses the wire; the only wire change is making file paths repo-root-relative so monorepo teammates agree on file identity.
+**Architecture:** The daemon already pulls teammate `decisions`, `gotchas` and per-file `changes[].note` every tick. On each pull it folds them into one small per-project index, `.membridge/teammate-notes.json`. Three hook entry points read that index and inject via `additionalContext`; the human surface is the existing dashboard poll. Nothing new crosses the wire; the only wire change is making file paths repo-root-relative so monorepo teammates agree on file identity.
 
-**Tech Stack:** Node.js (CommonJS, zero runtime dependencies), Claude Code hooks (`PreToolUse`, `SessionStart`, `PostCompact`, `FileChanged`), the repo's own zero-dependency test runner (`node test/run-tests.js`).
+**Tech Stack:** Node.js (CommonJS), Claude Code hooks (`PreToolUse`, `SessionStart`, `PostCompact`), the repo's own offline test runner (`node test/run-tests.js`).
+
+**Spike outcome (Task 1, done):** `FileChanged` cannot reach the human — it suppresses `systemMessage`, and its matcher rejects any filename containing `.` or `-`. Delivery point 1 is dashboard-only and `FileChanged` is dropped everywhere in this plan. See `docs/superpowers/spikes/2026-07-28-filechanged-findings.md`.
 
 **Spec:** `docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md`
 
@@ -21,6 +23,21 @@ Every task's requirements implicitly include this section.
 - **E2E encryption unchanged.** The server sees only ciphertext; decryption and all routing stay client-side.
 - **The CLAUDE.md narrative block and the Activity feed are unchanged.** This feature must not shrink, grow, or restructure either one.
 - **Redaction is mandatory** on anything injected: `lib/redact.js` runs before any decision text reaches an agent context.
+- **Baseline is 860/865 passing in a worktree, 865/865 with complete deps.** The
+  5 failures (`prepare-app` x2, `skeleton:` x2, `recall-store: warm()`) are a
+  MISSING `web-tree-sitter` — a real declared dependency the main tree was never
+  reinstalled for. They are not a regression. Record your own before/after
+  numbers and compare deltas, never absolutes.
+- **A test whose name claims more than its assertions is worse than no test.**
+  The `MAX_PROSE` case asserted only a length while being titled "newest kept",
+  so the half that mattered was unverified. When a test names a property, assert
+  that property; where it is cheap, confirm the test fails against a deliberately
+  broken implementation before trusting it.
+- **A silent no-op is the enemy in this feature.** Several functions here answer
+  '' or null for "I can't work this out", which is correct for genuinely
+  impossible input but will happily swallow a real bug — exactly what happened
+  with `trackedOffset` in Task 2 (symlinked paths). When a fallback fires in a
+  case you did not expect, treat it as a defect, not as the design working.
 - **No test may touch the network or a live backend.** Everything runs under a throwaway `MEMBRIDGE_HOME`, matching `test/run-tests.js`.
 - **Atomic writes only:** tmp file + rename, matching `lib/util.js` `saveState`, `lib/ledger-store.js` `writeLedger`, `lib/recall-store.js` `put`.
 - **No `Date.now()` inside pure functions.** Every selection and expiry function takes an injected `now` (an ISO string or ms number), so tests are deterministic.
@@ -42,10 +59,10 @@ Expected: all three files exist. If they do not, stop and merge the recall branc
 
 | File | Responsibility |
 |---|---|
-| `lib/repo-root.js` | Repo-root discovery and the tracked-dir↔repo-root path offset. Nothing else. |
+| `lib/repo-root.js` | One function: a file's cross-machine wire key = its path relative to the checkout containing it. Closes monorepo depth and worktrees together. |
 | `lib/teammate-notes.js` | Pure logic: build the index from pulled entries, select what to deliver, mark seen, prune, format. No fs, no clock. |
 | `lib/teammate-notes-store.js` | The fs layer for `.membridge/teammate-notes.json`: atomic read/write/update. |
-| `lib/hooks-notes.js` | The `SessionStart`, `PostCompact` and `FileChanged` hook bodies. |
+| `lib/hooks-notes.js` | The `SessionStart` and `PostCompact` hook bodies. |
 | `test/teammate-notes-e2e.js` | Opt-in end-to-end proof, mirroring `test/recall-e2e.js`. |
 
 **Modified:**
@@ -62,371 +79,191 @@ Expected: all three files exist. If they do not, stop and merge the recall branc
 
 ---
 
-## Task 1: Spike — can `FileChanged` reach the human?
+## Task 1: Spike — can `FileChanged` reach the human? ✅ DONE
 
-Spec §11 names two unverified claims. Both gate delivery point 1 only; Tasks 2–11 do not depend on the outcome. Do this first so the answer is known before Task 10.
+**Outcome: NO-GO.** Run 2026-07-28 against Claude Code 2.1.220. Findings in
+`docs/superpowers/spikes/2026-07-28-filechanged-findings.md`, committed.
 
-**Files:**
-- Create: `docs/superpowers/spikes/2026-07-28-filechanged-findings.md`
-- Create (throwaway, deleted in step 5): `/tmp/fc-spike/hook.js`
+- `FileChanged` **fires** and carries a usable payload (`file_path`, `event`).
+- Its `systemMessage` is **suppressed** — verified against a `SessionStart`
+  control whose `systemMessage` did surface in the same stream.
+- Its matcher accepts letters, digits, `_` and `|` only, so
+  `teammate-notes.json` **cannot be watched** under any spelling.
 
-**Interfaces:**
-- Consumes: nothing.
-- Produces: a written go/no-go for Task 10. No code.
+**Consequences, already applied to this plan and to spec §6/§11:**
+`FileChanged` is dropped everywhere. Delivery point 1 becomes the existing
+dashboard poll (5s), so Task 10 is now a dashboard task with no hook. Task 7's
+`NOTES_HOOKS` registers `SessionStart` and `PostCompact` only, and
+`lib/hooks-notes.js` needs no `runFileChanged`.
 
-- [ ] **Step 1: Create a throwaway project with a FileChanged hook**
-
-```bash
-mkdir -p /tmp/fc-spike/.claude
-cat > /tmp/fc-spike/hook.js <<'EOF'
-'use strict';
-const fs = require('fs');
-let payload = {};
-try { payload = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
-fs.appendFileSync('/tmp/fc-spike/fired.log', JSON.stringify(payload) + '\n');
-process.stdout.write(JSON.stringify({
-  systemMessage: 'MemBridge spike: FileChanged fired and carried systemMessage',
-}) + '\n');
-EOF
-cat > /tmp/fc-spike/.claude/settings.json <<'EOF'
-{
-  "hooks": {
-    "FileChanged": [
-      { "matcher": "teammate_notes|teammate-notes.json",
-        "hooks": [{ "type": "command", "command": "node /tmp/fc-spike/hook.js", "timeout": 5 }] }
-    ]
-  }
-}
-EOF
-```
-
-Note the matcher deliberately carries both a safe-charset alternative (`teammate_notes`) and the real filename, because the docs say `FileChanged` uses a narrower exact-match set — letters, digits, `_` and `|` — and that a `.` or `-` keeps it on the regular-expression path.
-
-- [ ] **Step 2: Start a Claude Code session in that directory and touch the file**
-
-In one terminal:
-
-```bash
-cd /tmp/fc-spike && claude
-```
-
-In a second terminal, while the session is open:
-
-```bash
-echo '{"version":1}' > /tmp/fc-spike/teammate-notes.json
-```
-
-- [ ] **Step 3: Record what happened**
-
-Check both channels:
-
-```bash
-cat /tmp/fc-spike/fired.log
-```
-
-Answer three questions in the findings doc:
-
-1. Did the hook fire at all? (log file exists and is non-empty)
-2. Did the `systemMessage` string appear in the Claude Code terminal?
-3. Did it fire on the `.`/`-` filename, or only when the file was renamed to `teammate_notes` (retry with `mv` if question 1 failed)?
-
-- [ ] **Step 4: Write the findings doc**
-
-```markdown
-# Spike: FileChanged as a human notification channel
-
-**Date:** 2026-07-28
-**Question:** Can a `FileChanged` hook watching `.membridge/teammate-notes.json`
-emit a `systemMessage` to the human, given the event has no decision control?
-
-## Result
-
-- Hook fired: YES / NO
-- `systemMessage` displayed: YES / NO
-- Matched the literal `teammate-notes.json`: YES / NO
-- If NO: matched as `<name that worked>`
-
-## Verdict for Task 10
-
-GO — implement delivery point 1 as specced.
-NO-GO — drop the terminal line; the dashboard (already polling every 5s)
-is the human surface. Update spec §6 and §11 to record this.
-
-## Raw payload
-
-<paste one line from fired.log>
-```
-
-- [ ] **Step 5: Clean up and commit**
-
-```bash
-rm -rf /tmp/fc-spike
-git add docs/superpowers/spikes/2026-07-28-filechanged-findings.md
-git commit -m "docs(spike): FileChanged systemMessage viability for teammate notes"
-```
+Nothing here blocks Tasks 2–9, 11 or 12.
 
 ---
 
-## Task 2: Repo-root path translation
+## Task 2: Cross-machine file keys ✅ DONE (`cf20d4c` → `2ea3f94`, `feat/live-teammate-notes`)
 
-The monorepo fix (spec §7), as a standalone module with no knowledge of teams or notes.
+**Shipped, then reworked. The original design in this task was wrong twice; both
+corrections are in `2ea3f94` and the module's own header explains them.**
 
-**Files:**
-- Create: `lib/repo-root.js`
-- Test: `test/run-tests.js` (append a new section)
-
-**Interfaces:**
-- Consumes: nothing.
-- Produces:
-  - `repoRoot(projectPath) -> string|null` — absolute path to the git top-level, or `null` if not a repo. Memoized per process.
-  - `trackedOffset(projectPath) -> string` — POSIX prefix from repo root to the tracked dir, `''` when they are the same, e.g. `'packages/api/'`.
-  - `toWirePath(projectPath, relPath) -> string` — tracked-relative → repo-root-relative.
-  - `fromWirePath(projectPath, wirePath) -> string` — repo-root-relative → tracked-relative, falling back to `wirePath` unchanged when it does not sit under the offset.
-  - `clearCache()` — test-only.
-
-- [ ] **Step 1: Write the failing tests**
-
-Append to `test/run-tests.js`, immediately before the results tally at the end of the file:
+**What shipped:** `lib/repo-root.js`, exporting one meaningful function.
 
 ```js
-// ---- repo-root path translation (teammate notes, spec §7) ----
-const repoRoot = require('../lib/repo-root');
-
-{
-  const rr = path.join(ROOT, 'projects', 'mono');
-  const api = path.join(rr, 'packages', 'api');
-  fs.mkdirSync(api, { recursive: true });
-  spawnSync('git', ['init', '-q', rr], { encoding: 'utf8' });
-  repoRoot.clearCache();
-
-  check('repo-root: resolves the git top-level from a subdirectory', () => {
-    assert.strictEqual(fs.realpathSync(repoRoot.repoRoot(api)), fs.realpathSync(rr));
-  });
-
-  check('repo-root: offset is empty at the repo root', () => {
-    assert.strictEqual(repoRoot.trackedOffset(rr), '');
-  });
-
-  check('repo-root: offset is the posix prefix for a tracked subdirectory', () => {
-    assert.strictEqual(repoRoot.trackedOffset(api), 'packages/api/');
-  });
-
-  check('repo-root: toWirePath prefixes a tracked-relative path', () => {
-    assert.strictEqual(repoRoot.toWirePath(api, 'src/validate.ts'), 'packages/api/src/validate.ts');
-  });
-
-  check('repo-root: toWirePath is identity at the repo root', () => {
-    assert.strictEqual(repoRoot.toWirePath(rr, 'src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: fromWirePath strips the offset', () => {
-    assert.strictEqual(repoRoot.fromWirePath(api, 'packages/api/src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: fromWirePath leaves a non-matching path alone (legacy row)', () => {
-    assert.strictEqual(repoRoot.fromWirePath(api, 'src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: a non-repo directory yields null root and empty offset', () => {
-    const plain = path.join(ROOT, 'projects', 'not-a-repo');
-    fs.mkdirSync(plain, { recursive: true });
-    repoRoot.clearCache();
-    assert.strictEqual(repoRoot.repoRoot(plain), null);
-    assert.strictEqual(repoRoot.trackedOffset(plain), '');
-    assert.strictEqual(repoRoot.toWirePath(plain, 'a/b.js'), 'a/b.js');
-  });
-}
+wireKeyFor(absFile) -> 'packages/api/src/validate.ts' | null
+checkoutRoot(dir)   -> absolute root of the checkout containing dir | null
+clearCache()        -> test-only
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+**The rule:** a file's cross-machine key is its path relative to **the checkout
+that contains it**. That single rule closes both identity problems at once —
+monorepo depth (§7) and worktrees — because both were the same mistake: keying
+against the *tracked project directory* rather than the checkout.
 
-Run: `node test/run-tests.js 2>&1 | grep "repo-root"`
+**Correction 1 — a silent no-op.** The original compared
+`git rev-parse --show-toplevel` against `path.resolve()`. Git resolves symlinks
+and `path.resolve` does not, so on macOS (`/var` → `/private/var`) and under any
+symlinked home the comparison produced a `..`-leading path, the guard treated it
+as impossible input and returned `''`, and translation silently did nothing.
 
-Expected: every `repo-root:` line reports `FAIL`, with `Cannot find module '../lib/repo-root'`.
+**Correction 2 — worktrees, raised by the recall hot-path investigation.**
+`--show-toplevel` returns the *worktree*, not the main repo, and a linked
+worktree nested inside its main repo resolves to the main repo as its project.
+So the key came out carrying the worktree prefix. Measured on live state before
+the fix:
 
-- [ ] **Step 3: Write the implementation**
-
-Create `lib/repo-root.js`:
-
-```js
-'use strict';
-// Repo-root discovery and the tracked-dir <-> repo-root path offset.
-//
-// WHY THIS EXISTS: lib/ledger-fold.js's readKeyFor and lib/hooks-recall.js's
-// relFile both key paths against the TRACKED project directory, which
-// lib/project-resolve.js deliberately allows to be a monorepo subdirectory.
-// Two teammates on one remote tracking different depths therefore land on the
-// same team project row (lib/teamsync.js's repoUrl) while producing
-// incompatible path keys. Local structures keep their tracked-relative keys --
-// they never leave the machine. Everything that CROSSES THE WIRE is translated
-// through here, so both sides speak repo-root-relative.
-//
-// See docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md §7.
-const path = require('path');
-const { spawnSync } = require('child_process');
-
-const toPosix = p => p.split(path.sep).join('/');
-
-// Memoized: teamsync already spawns git per project for repoUrl(), and the
-// top-level of a project cannot change while the daemon runs. A null result
-// is cached too -- a non-repo stays a non-repo, and re-spawning git on every
-// read would defeat the point.
-const cache = new Map();
-
-function repoRoot(projectPath) {
-  const key = path.resolve(projectPath);
-  if (cache.has(key)) return cache.get(key);
-  let out = null;
-  try {
-    const r = spawnSync('git', ['-C', key, 'rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', timeout: 5000,
-    });
-    if (r.status === 0) {
-      const s = String(r.stdout || '').trim();
-      if (s) out = s;
-    }
-  } catch {
-    out = null;
-  }
-  cache.set(key, out);
-  return out;
-}
-
-// '' when the tracked dir IS the repo root (the common case, and byte-identical
-// to pre-translation behaviour). 'packages/api/' when it sits below. '' as well
-// for a non-repo, or for the impossible case of a tracked dir outside its own
-// reported root -- in both, translation must be a no-op rather than a guess.
-function trackedOffset(projectPath) {
-  const root = repoRoot(projectPath);
-  if (!root) return '';
-  try {
-    const rel = path.relative(root, path.resolve(projectPath));
-    if (!rel) return '';
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return '';
-    return `${toPosix(rel)}/`;
-  } catch {
-    return '';
-  }
-}
-
-function toWirePath(projectPath, relPath) {
-  const rel = String(relPath || '');
-  if (!rel) return rel;
-  return trackedOffset(projectPath) + rel;
-}
-
-// The inverse, with the legacy fallback spec §7 requires: rows already on the
-// wire were written tracked-relative, so a path that does not sit under this
-// project's offset is returned unchanged rather than mangled. Harmless when
-// the offset is '' -- every path trivially "matches" and passes through.
-function fromWirePath(projectPath, wirePath) {
-  const wire = String(wirePath || '');
-  if (!wire) return wire;
-  const offset = trackedOffset(projectPath);
-  if (!offset) return wire;
-  return wire.startsWith(offset) ? wire.slice(offset.length) : wire;
-}
-
-// Test-only: the memo is keyed on absolute paths that outlive a single test
-// fixture, and a suite that git-inits a directory after a miss was cached
-// would otherwise read the stale null.
-function clearCache() { cache.clear(); }
-
-module.exports = { repoRoot, trackedOffset, toWirePath, fromWirePath, clearCache };
+```
+<main>/lib/scan.js                        -> lib/scan.js
+<main>/.claude/worktrees/x/lib/scan.js    -> .claude/worktrees/x/lib/scan.js
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+Same file, two keys — file-keyed notes could never match for a session run from
+a worktree, which is nearly every session on this machine. Both now key as
+`lib/scan.js`, verified against the live repo.
 
-Run: `node test/run-tests.js 2>&1 | grep "repo-root"`
+**Consequences for every later task:**
 
-Expected: eight `ok repo-root: ...` lines, no `FAIL`.
-
-- [ ] **Step 5: Run the whole suite for regressions**
-
-Run: `node test/run-tests.js 2>&1 | tail -5`
-
-Expected: the existing pass count plus 8, zero failures. Note the pre-existing count before you start so you can compare.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add lib/repo-root.js test/run-tests.js
-git commit -m "feat(paths): repo-root-relative translation for cross-machine file identity"
-```
+- **There is no inverse.** `toWirePath` / `fromWirePath` / `trackedOffset` are
+  gone. Notes stay keyed in wire form; the hook computes the wire key of the
+  file it is about to read (Task 8). No legacy-format fallback either.
+- **No subprocess on the read path.** Walking up to the nearest `.git` is what
+  `--show-toplevel` does anyway, costs one `statSync` per level, and is memoized
+  across every directory walked — which matters because this runs ahead of the
+  recall hook's `storeEntry` gate inside a 150 ms budget.
+- **`.git` as a FILE is a valid stop.** That is what a linked worktree and a
+  submodule have, and in both cases that directory is the correct key basis.
+- **Tests use a real nested `git worktree add`**, not a simulation.
 
 ---
 
-## Task 3: Wire path translation into teamsync
+## Task 3: Emit wire keys from teamsync
+
+Task 2 shipped `wireKeyFor(absPath)`. This task makes the wire actually carry
+those keys instead of tracked-relative paths.
 
 **Files:**
-- Modify: `lib/teamsync.js` (`entryToRow`, and the pull-side content mapping)
+- Modify: `lib/teamsync.js` (`entryToRow`)
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `repoRoot.toWirePath`, `repoRoot.fromWirePath` from Task 2.
-- Produces: `entryToRow(e, projectId, creds, share, regexes, projectPath)` — one new trailing parameter, `projectPath`, optional. When omitted, translation is skipped and behaviour is exactly as today.
+- Consumes: `repoRoot.wireKeyFor(absPath)` from Task 2.
+- Produces: `entryToRow(e, projectId, creds, share, regexes, projectPath)` — one
+  new trailing parameter, `projectPath`, optional. When supplied, `files` and
+  `changes[].file` ship as wire keys. When omitted, output is byte-identical to
+  today, so every existing caller keeps working untouched.
+
+**There is no inverse.** Incoming teammate notes stay keyed in wire form and the
+hook computes the wire key of the file it is about to read (Task 8). Nothing
+translates back, so there is no pull-side mapping and no legacy fallback.
+
+**Why entries need `projectPath` at all:** a local entry's `files` are relative
+to the tracked project directory, which is exactly the identity that is wrong.
+Joining them onto `projectPath` recovers the absolute path, and `wireKeyFor`
+re-keys that against the checkout it actually lives in.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `test/run-tests.js` after the Task 2 block:
+Append to `test/run-tests.js` after the Task 2 block (the fixture repo `mono`
+and its nested worktree `wt` from Task 2 are reused — keep this block after it):
 
 ```js
-// ---- teamsync path translation (spec §7) ----
+// ---- teamsync emits wire keys (spec §7) ----
 {
-  const rr2 = path.join(ROOT, 'projects', 'mono2');
-  const api2 = path.join(rr2, 'packages', 'api');
-  fs.mkdirSync(api2, { recursive: true });
-  spawnSync('git', ['init', '-q', rr2], { encoding: 'utf8' });
-  repoRoot.clearCache();
-
   const entry = {
     ts: '2026-07-28T09:00:00Z', source: 'Claude Code', session: 's1',
     ask: null, goal: null, decisions: 'Renamed the retry cap to maxAttempts.',
-    gotchas: '', files: ['src/validate.ts'],
-    changes: [{ file: 'src/validate.ts', status: 'edited', add: 3, del: 1, note: 'blocked pending 018', dep: false }],
+    gotchas: '', files: ['packages/api/src/validate.ts'],
+    changes: [{ file: 'packages/api/src/validate.ts', status: 'edited', add: 3, del: 1, note: 'blocked pending 018', dep: false }],
     summary: 'did a thing', headline: 'a thing', distilled: true,
   };
   const creds = { userId: 'u1', displayName: 'Andrew' };
 
-  check('teamsync: push translates files to repo-root-relative', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], api2);
+  check('teamsync: a repo-root project ships its paths unchanged', () => {
+    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], mono);
     assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
-  });
-
-  check('teamsync: push translates changes[].file to repo-root-relative', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], api2);
     assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
     assert.strictEqual(row.changes[0].note, 'blocked pending 018');
   });
 
-  check('teamsync: push without a projectPath is unchanged (back-compat)', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, []);
-    assert.deepStrictEqual(row.files, ['src/validate.ts']);
-    assert.strictEqual(row.changes[0].file, 'src/validate.ts');
+  check('teamsync: a worktree session ships MAIN-checkout keys', () => {
+    // THE CASE THAT WAS BROKEN. A session run from a nested worktree records
+    // its files relative to the main repo, i.e. carrying the worktree prefix.
+    // Those must leave as plain repo paths or no teammate can ever match them.
+    const wtEntry = {
+      ...entry,
+      files: ['.claude/worktrees/feature-x/packages/api/src/validate.ts'],
+      changes: [{ ...entry.changes[0], file: '.claude/worktrees/feature-x/packages/api/src/validate.ts' }],
+    };
+    const row = teamsync.entryToRow(wtEntry, 'p1', creds, false, [], mono);
+    assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
+    assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
   });
 
-  check('teamsync: push at the repo root is identity', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], rr2);
-    assert.deepStrictEqual(row.files, ['src/validate.ts']);
+  check('teamsync: a tracked monorepo subdirectory ships repo-root keys', () => {
+    const sub = path.join(mono, 'packages', 'api');
+    const subEntry = {
+      ...entry,
+      files: ['src/validate.ts'],
+      changes: [{ ...entry.changes[0], file: 'src/validate.ts' }],
+    };
+    const row = teamsync.entryToRow(subEntry, 'p1', creds, false, [], sub);
+    assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
+  });
+
+  check('teamsync: omitting projectPath leaves paths untouched (back-compat)', () => {
+    const row = teamsync.entryToRow(entry, 'p1', creds, false, []);
+    assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
+    assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
+  });
+
+  check('teamsync: a path outside any checkout is kept, never dropped', () => {
+    const odd = { ...entry, files: ['../outside/x.ts'], changes: null };
+    const row = teamsync.entryToRow(odd, 'p1', creds, false, [], mono);
+    assert.deepStrictEqual(row.files, ['../outside/x.ts']);
   });
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "teamsync: push"`
+Run: `node test/run-tests.js 2>&1 | grep -a "teamsync: "`
 
-Expected: the first two `FAIL` (paths come back untranslated); the two back-compat checks already pass.
+Expected: the two wire-key cases (`worktree session`, `monorepo subdirectory`)
+report `FAIL` with the untranslated path; the three back-compat cases already
+pass. Unlike Tasks 2 and 4 this adds no new top-level `require`, so per-check
+`FAIL` lines DO appear here.
 
-- [ ] **Step 3: Implement the push side**
+**Use `grep -a`.** This plan file and the suite output can contain a non-UTF8
+byte, and plain `grep` treats such a file as binary and silently reports
+nothing — which reads exactly like "no failures".
 
-In `lib/teamsync.js`, add the require near the other local requires at the top of the file:
+- [ ] **Step 3: Implement**
+
+In `lib/teamsync.js`, add the require alongside the other local ones:
 
 ```js
 const repoRootLib = require('./repo-root');
 ```
 
-Change the `entryToRow` signature and the two path-bearing fields. Find:
+Find:
 
 ```js
 function entryToRow(e, projectId, creds, share, regexes) {
@@ -436,11 +273,19 @@ Replace with:
 
 ```js
 // projectPath is optional and trailing so every existing caller keeps working
-// untouched. When supplied, `files` and `changes[].file` ship repo-root-relative
-// so a monorepo teammate tracking a different depth of the same remote agrees
-// on file identity (spec §7). Omitted -> no translation, byte-identical output.
+// untouched. When supplied, `files` and `changes[].file` ship as WIRE KEYS --
+// each path re-keyed against the checkout it actually lives in, which is what
+// makes a monorepo teammate and a worktree session agree on file identity
+// (spec §7). Omitted -> no re-keying, byte-identical output.
+//
+// A path that resolves to nothing (outside any checkout, or already odd) is
+// kept verbatim rather than dropped: a slightly wrong path a human can still
+// read beats a silently missing file list.
 function entryToRow(e, projectId, creds, share, regexes, projectPath) {
-  const wire = p => (projectPath ? repoRootLib.toWirePath(projectPath, p) : p);
+  const wire = p => {
+    if (!projectPath || typeof p !== 'string' || !p) return p;
+    return repoRootLib.wireKeyFor(path.resolve(projectPath, p)) || p;
+  };
 ```
 
 Then find:
@@ -459,38 +304,46 @@ Replace with:
       : null,
 ```
 
+Confirm `path` is already required at the top of `lib/teamsync.js`; add it if not.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `node test/run-tests.js 2>&1 | grep "teamsync: push"`
+Run: `node test/run-tests.js 2>&1 | grep -a "teamsync: "`
 
-Expected: four `ok` lines.
+Expected: five `ok` lines.
 
 - [ ] **Step 5: Pass the project path at every push call site**
 
-Find every call to `entryToRow` in `lib/teamsync.js`. Each sits inside a loop or function that already has the local project path in scope (the same value passed to `repoUrl()`). Add it as the sixth argument. Verify none were missed:
-
 ```bash
-grep -n "entryToRow(" lib/teamsync.js
+grep -an "entryToRow(" lib/teamsync.js
 ```
 
-Expected: every call site passes six arguments. A call with five is a missed site — the row will ship untranslated and a monorepo teammate silently will not match it.
+Every call must pass six arguments. A five-argument call is a missed site: that
+row ships untranslated and a worktree or monorepo teammate silently never
+matches it.
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `node test/run-tests.js 2>&1 | tail -5`
 
-Expected: previous count plus 4, zero failures.
+Expected: the baseline plus 5, with only the known dependency failures.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add lib/teamsync.js test/run-tests.js
-git commit -m "feat(teamsync): ship file paths repo-root-relative"
+git commit -m "feat(teamsync): ship file paths as checkout-relative wire keys"
 ```
 
 ---
 
-## Task 4: The notes index — pure logic
+## Task 4: The notes index — pure logic ✅ DONE (`a4f6c2a` + `0a489c6`, `feat/notes-index`)
+
+**Corrections applied after implementation.** The `MAX_PROSE` bounds test below
+now actually tests what its name claims (see its comment); the original asserted
+only length. Task 4 also originally had no full-suite regression step — Step 5
+below adds it, matching Tasks 2, 3 and 6.
+
 
 All decision-making for the feature, with no fs and no clock. This is the module the repetition rules live in, so it carries the heaviest tests.
 
@@ -638,13 +491,24 @@ const notes = require('../lib/teammate-notes');
   });
 
   check('notes: buildIndex bounds prose to MAX_PROSE, newest kept', () => {
+    // Timestamps MUST be monotonic in i. An earlier draft cycled the seconds
+    // field (i % 60) with a 4-digit fraction Date.parse truncates to 3, so
+    // recency had no relationship to i and the eviction set came out as four
+    // clusters rather than the oldest 25 -- with a length-only assertion, an
+    // implementation that evicted the NEWEST passed identically.
+    const base = Date.parse('2026-01-01T00:00:00Z');
     const many = [];
     for (let i = 0; i < notes.MAX_PROSE + 25; i++) {
-      const d = String(i).padStart(4, '0');
-      many.push({ author_name: 'A', ts: `2026-01-01T00:00:${(i % 60).toString().padStart(2, '0')}.${d}Z`, decisions: `d${i}`, gotchas: '' });
+      many.push({ author_name: 'A', ts: new Date(base + i * 60000).toISOString(), decisions: `d${i}`, gotchas: '' });
     }
     const ix = notes.buildIndex(many, null, T1);
     assert.strictEqual(ix.prose.length, notes.MAX_PROSE);
+    const texts = new Set(ix.prose.map(p => p.text));
+    for (let i = 0; i < 25; i++) {
+      assert.ok(!texts.has(`d${i}`), `d${i} is among the 25 oldest and must have been evicted`);
+    }
+    assert.ok(texts.has(`d${notes.MAX_PROSE + 24}`), 'the single newest entry must be kept');
+    assert.ok(texts.has(`d25`), 'the oldest SURVIVOR (d25) must be kept');
   });
 
   check('notes: pruneSeen drops session records older than SEEN_PRUNE_DAYS', () => {
@@ -701,9 +565,10 @@ const notes = require('../lib/teammate-notes');
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "notes:"`
+Run: `node test/run-tests.js 2>&1 | tail -20`
 
-Expected: every line `FAIL` with `Cannot find module '../lib/teammate-notes'`.
+Expected: the run aborts with `Error: Cannot find module '../lib/teammate-notes'`
+and exit 1 — not per-check `FAIL` lines, for the reason given in Task 2 Step 2.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -896,7 +761,14 @@ Run: `node test/run-tests.js 2>&1 | grep "notes:"`
 
 Expected: 21 `ok notes: ...` lines, no `FAIL`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the whole suite for regressions**
+
+Run: `node test/run-tests.js 2>&1 | tail -5`
+
+Expected: the baseline plus 21, with the same 5 pre-existing dependency
+failures and no others.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add lib/teammate-notes.js test/run-tests.js
@@ -972,9 +844,10 @@ const notesStore = require('../lib/teammate-notes-store');
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "notes-store:"`
+Run: `node test/run-tests.js 2>&1 | tail -20`
 
-Expected: all `FAIL` with `Cannot find module '../lib/teammate-notes-store'`.
+Expected: the run aborts with `Error: Cannot find module '../lib/teammate-notes-store'`
+and exit 1 — not per-check `FAIL` lines, for the reason given in Task 2 Step 2.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1069,7 +942,7 @@ git commit -m "feat(notes): atomic fail-open store for the teammate-notes index"
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `notes.buildIndex`, `notes.pruneSeen`, `notesStore.read`, `notesStore.write`, `repoRoot.fromWirePath`.
+- Consumes: `notes.buildIndex`, `notes.pruneSeen`, `notesStore.read`, `notesStore.write`. No path translation — incoming keys are already wire keys.
 - Produces: `rebuildTeammateNotes(projectPath, entries, now) -> index|null`, exported from `lib/teammate-notes-store.js`. Later tasks read the file, never this function.
 
 - [ ] **Step 1: Write the failing test**
@@ -1122,26 +995,20 @@ Append to `lib/teammate-notes-store.js`, before `module.exports`, and add `repoR
 
 ```js
 // Called once per team pull (bin/membridge.js's teamTick). `entries` are the
-// decrypted teammate rows for ONE project, carrying REPO-ROOT-RELATIVE paths
-// (spec §7). They are translated back to this machine's tracked-relative
-// layout here, so every hook downstream can look up a path without doing any
-// arithmetic on the read path.
+// decrypted teammate rows for ONE project, already carrying WIRE KEYS (spec
+// §7). byFile is keyed by those same wire keys -- no translation happens here
+// or anywhere on the read path.
 //
 // Fail-open: a failure here leaves the PREVIOUS index in place and serving.
 function rebuildTeammateNotes(projectPath, entries, now) {
   try {
-    const local = (Array.isArray(entries) ? entries : []).map(row => {
-      if (!row || typeof row !== 'object') return row;
-      if (!Array.isArray(row.changes)) return row;
-      return {
-        ...row,
-        changes: row.changes.map(c => (c && typeof c === 'object'
-          ? { ...c, file: repoRoot.fromWirePath(projectPath, c.file) }
-          : c)),
-      };
-    });
+    // NO path translation on receive. Incoming keys are already wire keys
+    // (Task 3) and byFile stays keyed that way; the hook computes the wire key
+    // of the file it is about to read and looks it up directly (Task 8). An
+    // inverse mapping would have to guess WHICH local checkout a key refers to,
+    // which is unanswerable when the same repo is checked out several times.
     const prev = read(projectPath);
-    const built = notes.buildIndex(local, prev, now);
+    const built = notes.buildIndex(entries, prev, now);
     const pruned = notes.pruneSeen(built, now);
     write(projectPath, pruned);
     return pruned;
@@ -1235,9 +1102,9 @@ Registering the three new hook entries before the bodies exist keeps Tasks 8–1
 **Interfaces:**
 - Consumes: the existing `reconcileRecallHook` pattern in `lib/hooks.js`.
 - Produces:
-  - `reconcileNotesHooks()` in `lib/hooks.js` — registers `SessionStart`, `PostCompact` and (if Task 1 said GO) `FileChanged`.
+  - `reconcileNotesHooks()` in `lib/hooks.js` — registers `SessionStart` and `PostCompact`.
   - `isNotesEnabled(config) -> boolean` in `lib/teammate-notes.js`.
-  - CLI routes: `membridge hook notes-session-start`, `notes-post-compact`, `notes-file-changed`.
+  - CLI routes: `membridge hook notes-session-start`, `notes-post-compact`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1324,9 +1191,9 @@ In `lib/hooks.js`, read `reconcileRecallHook` first — it is the exact pattern 
 // touched), same absolute-command shape with a subcommand that
 // lib/membridge-hook.js routes on.
 //
-// FileChanged is registered ONLY if the Task 1 spike said GO -- see
-// docs/superpowers/spikes/2026-07-28-filechanged-findings.md. It is listed
-// here so the flip is a one-line change rather than a new reconciler.
+// FileChanged is deliberately absent: the Task 1 spike proved it suppresses
+// systemMessage and that its matcher rejects any filename containing '.' or
+// '-'. See docs/superpowers/spikes/2026-07-28-filechanged-findings.md.
 const NOTES_HOOKS = [
   { event: 'SessionStart', sub: 'notes-session-start', timeout: 5, matcher: null },
   { event: 'PostCompact', sub: 'notes-post-compact', timeout: 5, matcher: null },
@@ -1372,19 +1239,18 @@ Add `reconcileNotesHooks` to the module exports, and call it from the same launc
 
 - [ ] **Step 5: Route the subcommands**
 
-In `lib/membridge-hook.js`, find the existing routing that sends `recall` to `runRecall()` and add three cases mapping `notes-session-start`, `notes-post-compact` and `notes-file-changed` to `hooksNotes.runSessionStart()`, `runPostCompact()` and `runFileChanged()`. Those functions arrive in Tasks 8–10; add stubs now so registration is testable:
+In `lib/membridge-hook.js`, find the existing routing that sends `recall` to `runRecall()` and add two cases mapping `notes-session-start` and `notes-post-compact` to `hooksNotes.runSessionStart()` and `runPostCompact()`. Those functions arrive in Task 9; add stubs now so registration is testable:
 
 Create `lib/hooks-notes.js` with placeholders that will be filled in:
 
 ```js
 'use strict';
-// SessionStart / PostCompact / FileChanged hook bodies for teammate notes.
+// SessionStart / PostCompact hook bodies for teammate notes.
 // Every entry point follows lib/hooks-recall.js's fail-open contract: the
 // whole body is wrapped so any exception degrades to ordinary behaviour.
 function runSessionStart() {}
 function runPostCompact() {}
-function runFileChanged() {}
-module.exports = { runSessionStart, runPostCompact, runFileChanged };
+module.exports = { runSessionStart, runPostCompact };
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -1430,6 +1296,12 @@ The heart of the feature: prose on arrival and file notes on contact, both witho
 
 - [ ] **Step 1: Write the failing tests**
 
+Note every call below passes **both** `absPath` and `relPath`. `absPath` is what
+the wire-key lookup uses; `relPath` remains for the recall paths that already
+depend on it. In these fixtures the project is a git repo at its own root, so
+the two coincide — that is what makes the worktree assertion at the end
+meaningful rather than tautological.
+
 Append to `test/run-tests.js`:
 
 ```js
@@ -1451,7 +1323,7 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: prose is delivered on any read (arrival)', () => {
     fresh();
     const out = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/unrelated.js', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/unrelated.js'), relPath: 'lib/unrelated.js', sessionId: 's1', now: NOW, config: {},
     });
     assert.ok(out && out.text.includes('maxAttempts'));
   });
@@ -1459,7 +1331,7 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: file note is delivered on contact', () => {
     fresh();
     const out = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
     });
     assert.ok(out.text.includes('migration 018'));
   });
@@ -1467,11 +1339,11 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: prose is not re-delivered after commit', () => {
     fresh();
     const first = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/other.js', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's1', now: NOW, config: {},
     });
     first.commit();
     const second = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/other.js', sessionId: 's2', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's2', now: NOW, config: {},
     });
     assert.strictEqual(second, null);
   });
@@ -1479,15 +1351,15 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: a file note re-fires in a new session but not the same one', () => {
     fresh();
     const a = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
     });
     a.commit();
     const again = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
     });
     assert.strictEqual(again, null);
     const other = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's2', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's2', now: NOW, config: {},
     });
     assert.ok(other && other.text.includes('migration 018'));
   });
@@ -1495,14 +1367,14 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: nothing to say returns null', () => {
     notesStore.write(hp, notes.emptyIndex());
     assert.strictEqual(hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's9', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's9', now: NOW, config: {},
     }), null);
   });
 
   check('notes-hook: kill switch silences it', () => {
     fresh();
     assert.strictEqual(hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW,
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW,
       config: { teammateNotes: { enabled: false } },
     }), null);
   });
@@ -1511,7 +1383,7 @@ const hooksRecall = require('../lib/hooks-recall');
     fs.writeFileSync(notesStore.notesPath(hp), 'not json');
     assert.doesNotThrow(() => {
       assert.strictEqual(hooksRecall.buildNotesOutput({
-        projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
       }), null);
     });
   });
@@ -1531,6 +1403,7 @@ In `lib/hooks-recall.js`, add the requires alongside the existing ones:
 ```js
 const notes = require('./teammate-notes');
 const notesStore = require('./teammate-notes-store');
+const repoRootLib = require('./repo-root');
 ```
 
 Add the function above `doRunRecall`:
@@ -1546,14 +1419,22 @@ Add the function above `doRunRecall`:
 // written to stdout. Marking first would lose a note whenever a later write
 // threw -- the same pending/confirmation discipline the serve path uses for
 // its event rows.
-function buildNotesOutput({ projectPath, relPath, sessionId, now, config }) {
+function buildNotesOutput({ projectPath, absPath, relPath, sessionId, now, config }) {
   try {
     if (!notes.isNotesEnabled(config)) return null;
     const index = notesStore.read(projectPath);
     if (!index) return null;
 
+    // byFile is keyed by WIRE key (Task 3), never by the tracked-relative
+    // relPath the rest of this hook uses. For a session run from a worktree the
+    // two differ -- relPath carries the worktree prefix -- and looking up the
+    // wrong one is exactly the silent no-match this feature must not have.
+    // wireKeyFor is memoized per directory, so this is a Map hit after the
+    // first read in a tree.
+    const wireKey = repoRootLib.wireKeyFor(absPath);
+
     const { items: prose, overflow } = notes.selectProse(index, now);
-    const fileNotes = notes.selectFileNotes(index, relPath, sessionId, now);
+    const fileNotes = wireKey ? notes.selectFileNotes(index, wireKey, sessionId, now) : [];
     if (!prose.length && !fileNotes.length) return null;
 
     const parts = [];
@@ -1603,7 +1484,7 @@ Insert immediately **above** it:
   // parse -- no content hash, no ledger read -- so the ordering discipline the
   // comment on storeEntry describes still holds.
   const notesOut = buildNotesOutput({
-    projectPath, relPath, sessionId,
+    projectPath, absPath, relPath, sessionId,
     now: new Date().toISOString(),
     config,
   });
@@ -1774,8 +1655,9 @@ Replace the whole of `lib/hooks-notes.js`:
 
 ```js
 'use strict';
-// SessionStart / PostCompact / FileChanged hook bodies for teammate notes
-// (spec §3.1, delivery points 1, 4 and 5).
+// SessionStart / PostCompact hook bodies for teammate notes
+// (spec §3.1, delivery points 4 and 5). There is no human-facing hook: the
+// Task 1 spike ruled FileChanged out, so the dashboard carries that (Task 10).
 //
 // GOVERNING RULE, identical to lib/hooks-recall.js: every failure degrades to
 // ordinary agent behaviour. Each run* entry point wraps its whole body, so a
@@ -1864,10 +1746,7 @@ function runPostCompact() {
   }
 }
 
-// Delivery point 1 (the human line) lands in Task 10.
-function runFileChanged() {}
-
-module.exports = { runSessionStart, runPostCompact, runFileChanged, buildSessionOutput };
+module.exports = { runSessionStart, runPostCompact, buildSessionOutput };
 ```
 
 - [ ] **Step 4: Verify `resolveTrackedKey`'s calling convention**
@@ -1906,175 +1785,111 @@ git commit -m "feat(notes): SessionStart and PostCompact delivery of unseen deci
 
 ---
 
-## Task 10: Delivery point 1 — the human line
+## Task 10: Delivery point 1 — the human surface
 
-**Gated on Task 1.** If the spike returned NO-GO, do only Step 5 of this task (record the fallback) and skip the rest.
+Task 1 proved the in-terminal line impossible. This task is now: make a newly
+arrived teammate decision visible in the dashboard, which already polls every
+5 seconds. No hook, no `systemMessage`, no new mechanism.
 
 **Files:**
-- Modify: `lib/hooks-notes.js` (`runFileChanged`)
-- Modify: `lib/hooks.js` (add the `FileChanged` entry to `NOTES_HOOKS`)
+- Modify: `lib/server.js` (expose unseen teammate decisions on an existing payload)
+- Modify: `lib/dashboard/client.js` (render them)
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `notesStore.read`.
-- Produces: `buildHumanLine({ projectPath, since, now, config }) -> string|null` in `lib/hooks-notes.js`.
+- Consumes: `notesStore.read` from Task 5.
+- Produces: `teammateNotes: { fresh: [{author, ts, text}], total }` on the
+  payload the dashboard already polls.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
 Append to `test/run-tests.js`:
 
 ```js
-// ---- teammate notes: human line (spec §6) ----
+// ---- teammate notes: dashboard surface (spec §6) ----
 {
-  const fp = path.join(ROOT, 'projects', 'human-line-proj');
-  fs.mkdirSync(fp, { recursive: true });
+  const dp = path.join(ROOT, 'projects', 'dash-notes-proj');
+  fs.mkdirSync(dp, { recursive: true });
   const NOW3 = '2026-07-28T10:00:00Z';
 
-  check('notes-human: names the author and the newest decision', () => {
-    notesStore.write(fp, notes.buildIndex(
+  check('notes-dash: unseen decisions appear on the polled payload', () => {
+    notesStore.write(dp, notes.buildIndex(
       [{ author_name: 'Andrew', ts: '2026-07-28T09:55:00Z', decisions: 'do not touch validate.ts yet', gotchas: '' }],
       null, NOW3));
-    const line = hooksNotes.buildHumanLine({ projectPath: fp, since: '2026-07-28T09:00:00Z', now: NOW3, config: {} });
-    assert.ok(line.includes('Andrew'));
-    assert.ok(line.includes('validate.ts'));
-    assert.ok(line.startsWith('MemBridge'));
+    const out = notes.dashboardPayload(notesStore.read(dp), NOW3);
+    assert.strictEqual(out.total, 1);
+    assert.strictEqual(out.fresh[0].author, 'Andrew');
+    assert.ok(out.fresh[0].text.includes('validate.ts'));
   });
 
-  check('notes-human: nothing newer than `since` returns null', () => {
-    const line = hooksNotes.buildHumanLine({ projectPath: fp, since: '2026-07-28T09:59:00Z', now: NOW3, config: {} });
-    assert.strictEqual(line, null);
+  check('notes-dash: an empty index yields an empty payload, not null', () => {
+    notesStore.write(dp, notes.emptyIndex());
+    const out = notes.dashboardPayload(notesStore.read(dp), NOW3);
+    assert.deepStrictEqual(out, { fresh: [], total: 0 });
   });
 
-  check('notes-human: an empty index returns null', () => {
-    notesStore.write(fp, notes.emptyIndex());
-    assert.strictEqual(hooksNotes.buildHumanLine({
-      projectPath: fp, since: '2026-01-01T00:00:00Z', now: NOW3, config: {},
-    }), null);
-  });
-
-  check('notes-human: kill switch silences it', () => {
-    notesStore.write(fp, notes.buildIndex(
-      [{ author_name: 'A', ts: '2026-07-28T09:55:00Z', decisions: 'x', gotchas: '' }], null, NOW3));
-    assert.strictEqual(hooksNotes.buildHumanLine({
-      projectPath: fp, since: '2026-01-01T00:00:00Z', now: NOW3, config: { teammateNotes: { enabled: false } },
-    }), null);
+  check('notes-dash: a missing index yields an empty payload', () => {
+    assert.deepStrictEqual(notes.dashboardPayload(null, NOW3), { fresh: [], total: 0 });
   });
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "notes-human:"`
+Run: `node test/run-tests.js 2>&1 | grep "notes-dash:"`
 
-Expected: all `FAIL` with `hooksNotes.buildHumanLine is not a function`.
+Expected: all `FAIL` with `notes.dashboardPayload is not a function`.
 
-- [ ] **Step 3: Implement the human line**
+- [ ] **Step 3: Add the payload builder**
 
-In `lib/hooks-notes.js`, replace `function runFileChanged() {}` with:
+Append to `lib/teammate-notes.js`, before `module.exports`, and add
+`dashboardPayload` to the exports:
 
 ```js
-// Delivery point 1 (spec §6): the human line. This is the ONLY output in the
-// feature that never reaches the model -- `systemMessage` goes to the terminal
-// only -- so it costs no context and needs no seen-marking.
-//
-// `since` is the last time this hook reported, persisted next to the index. It
-// exists so a FileChanged firing for an unrelated reason cannot re-announce a
-// decision the user already read on screen.
-function humanStatePath(projectPath) {
-  return path.join(path.dirname(notesStore.notesPath(projectPath)), 'teammate-notes-seen-human.json');
-}
-
-function readHumanSince(projectPath) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(humanStatePath(projectPath), 'utf8'));
-    return typeof raw.since === 'string' ? raw.since : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeHumanSince(projectPath, since) {
-  try {
-    fs.mkdirSync(path.dirname(humanStatePath(projectPath)), { recursive: true });
-    fs.writeFileSync(humanStatePath(projectPath), JSON.stringify({ since }));
-  } catch { /* best-effort; a lost marker costs at most one repeat line */ }
-}
-
-function buildHumanLine({ projectPath, since, now, config }) {
-  try {
-    if (!notes.isNotesEnabled(config)) return null;
-    const index = notesStore.read(projectPath);
-    if (!index) return null;
-    const cutoff = since ? Date.parse(since) : 0;
-    const fresh = (index.prose || []).filter(p => Date.parse(p.ts) > (Number.isFinite(cutoff) ? cutoff : 0));
-    if (!fresh.length) return null;
-    const newest = fresh[0]; // buildIndex sorts newest-first
-    const more = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
-    return `MemBridge · ${newest.author} just decided: ${newest.text}${more}`;
-  } catch {
-    return null;
-  }
-}
-
-function runFileChanged() {
-  try {
-    let payload = {};
-    try { payload = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { return; }
-    const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : null;
-    if (!cwd) return;
-    const state = util.loadState();
-    const hit = projectResolve.resolveTrackedKey(state, path.join(cwd, 'x'));
-    if (!hit) return;
-    const projectPath = hit.key;
-    const now = new Date().toISOString();
-    const line = buildHumanLine({
-      projectPath, since: readHumanSince(projectPath), now, config: util.getConfig(),
-    });
-    if (!line) return;
-    process.stdout.write(JSON.stringify({ systemMessage: line }) + '\n');
-    writeHumanSince(projectPath, now);
-  } catch (err) {
-    try { util.log(`hook notes file-changed error: ${err && err.stack ? err.stack : err}`); } catch {}
-  }
+// Spec §6: the human surface. Deliberately independent of the `seen` markers
+// the agent surfaces use -- being shown a decision in the dashboard is not the
+// same event as an agent having consumed it, and conflating the two would let
+// a browser visit silently suppress an agent-side delivery.
+function dashboardPayload(index, now) {
+  const ix = index || emptyIndex();
+  const all = ix.prose || [];
+  return { fresh: all.slice(0, PROSE_CAP), total: all.length };
 }
 ```
 
-Add `buildHumanLine` to the module exports.
+- [ ] **Step 4: Run the tests to verify they pass**
 
-- [ ] **Step 4: Register the FileChanged hook**
+Run: `node test/run-tests.js 2>&1 | grep "notes-dash:"`
 
-In `lib/hooks.js`, add to `NOTES_HOOKS`, using the matcher form the Task 1 spike proved works:
+Expected: three `ok` lines.
 
-```js
-  { event: 'FileChanged', sub: 'notes-file-changed', timeout: 5, matcher: 'teammate-notes.json' },
+- [ ] **Step 5: Surface it in the dashboard**
+
+Add `teammateNotes: notes.dashboardPayload(notesStore.read(projectPath), new Date().toISOString())`
+to the payload `lib/dashboard/client.js` already polls, and render each entry as
+`<author> · <text>`. Follow the existing card markup; add no new poll and no new
+endpoint.
+
+**Hazard from project memory:** `lib/dashboard/client.js` is one large template
+literal. A backtick in any added comment or code breaks `require` — this has
+bitten twice. Smoke-check before committing:
+
+```bash
+node -e "require('./lib/dashboard/client.js'); console.log('client.js loads OK')"
 ```
-
-The `matcher` field is currently ignored by `reconcileNotesHooks`. Add it to the entry object it builds:
-
-```js
-      const entry = spec.matcher
-        ? { matcher: spec.matcher, hooks: [{ type: 'command', command, timeout: spec.timeout }] }
-        : { hooks: [{ type: 'command', command, timeout: spec.timeout }] };
-```
-
-- [ ] **Step 5: Record the outcome in the spec**
-
-Whatever the spike returned, update spec §11 to replace the open question with the answer, and §6 if the terminal line was dropped in favour of the dashboard. An unresolved "unverified" section in a shipped spec is a defect.
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `node test/run-tests.js 2>&1 | tail -5`
 
-Expected: previous count plus 4, zero failures.
+Expected: previous count plus 3, zero failures.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lib/hooks-notes.js lib/hooks.js docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md test/run-tests.js
-git commit -m "feat(notes): live human notification on new teammate decisions"
+git add lib/teammate-notes.js lib/server.js lib/dashboard/client.js test/run-tests.js
+git commit -m "feat(notes): surface newly arrived teammate decisions in the dashboard"
 ```
-
----
 
 ## Task 11: Token accounting
 
@@ -2397,7 +2212,7 @@ Expected: `lib/teammate-notes.js`, `lib/teammate-notes-store.js`, `lib/repo-root
 node bin/membridge.js setup-hooks && grep -c "notes-" ~/.claude/settings.json
 ```
 
-Expected: at least 2 (3 if Task 1 said GO for `FileChanged`).
+Expected: 2 — one `notes-session-start`, one `notes-post-compact`.
 
 - [ ] **Step 4: Watch it work**
 
@@ -2430,7 +2245,7 @@ Commit only genuine source changes. Build artefacts stay untracked.
 | §8 redaction; team-membership boundary | 4 (`clean`), 12 |
 | §9 token accounting outside the balance | 11 |
 | §10 failure modes, kill switch | 5, 7, 8, 9, 12 |
-| §11 unverified assumptions | 1, 10 (step 5) |
+| §11 assumptions (now resolved) | 1 — done, NO-GO; consequences applied to Tasks 7, 9, 10 |
 | §14 testing | every task, plus 12 |
 
 **Naming consistency check.** `buildNotesOutput` (file/read-scoped, Task 8) and `buildSessionOutput` (session-scoped, Task 9) are distinct on purpose; both return `{ text, commit }`. `notesStore` is the store module everywhere; `notes` is the pure module everywhere. `rebuildTeammateNotes` lives on the store, not the pure module, because it does fs work.
