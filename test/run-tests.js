@@ -19280,6 +19280,98 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // Hook registration is GLOBAL (one ~/.claude/settings.json) but the command
+  // written into it is an absolute path into whichever install happened to run
+  // setup-hooks last. Before this, reconcile rewrote any owned entry to the
+  // running install's own path unconditionally -- last writer wins. Two ways
+  // that hurts a real user:
+  //
+  //   1. A throwaway install steals the registration from their real one.
+  //      `npx @membridgeai/membridge setup-hooks` runs out of an npx cache; a
+  //      trial clone gets deleted; the app is launched from the DMG before
+  //      being dragged to /Applications.
+  //   2. When that throwaway location is cleaned up, the registered command
+  //      points at a path that no longer exists. The whole hook path fails
+  //      OPEN by design, so nothing errors -- summaries simply stop, silently,
+  //      and the user still believes MemBridge is running.
+  //
+  // The rule is now precedence by durability, not arrival order.
+  {
+    const durableDir = path.join(ROOT, 'durable-install', 'lib');
+    fs.mkdirSync(durableDir, { recursive: true });
+    const durableScript = path.join(durableDir, 'membridge-hook.js');
+    fs.writeFileSync(durableScript, '// stand-in for an installed copy\n');
+    const durableCmd = `"${process.execPath}" "${durableScript}"`;
+    // A REAL file in an npx cache layout. It must EXIST: 'dead' is checked
+    // before 'transient', so a path that merely looks throwaway but is already
+    // gone is dead — these cases are about a copy that exists now and will not
+    // later. `_npx` is npm's own directory name for a one-off package run.
+    const transientDir = path.join(ROOT, 'npm-cache', '_npx', 'a1b2c3', 'lib');
+    fs.mkdirSync(transientDir, { recursive: true });
+    const tmpScript = path.join(transientDir, 'membridge-hook.js');
+    fs.writeFileSync(tmpScript, '// stand-in for an npx-cache copy\n');
+
+    check('hooks: a transient install must not steal a live durable registration', () => {
+      assert.strictEqual(hooks.installKind(tmpScript), 'transient',
+        'a path under the OS temp dir is transient');
+      assert.strictEqual(hooks.installKind(durableScript), 'durable',
+        'an ordinary install directory is durable');
+      assert.strictEqual(hooks.shouldYieldTo(durableCmd, tmpScript), true,
+        'a transient install must leave a live durable registration alone');
+    });
+
+    check('hooks: a durable install still takes over from a transient one', () => {
+      const tmpCmd = `"${process.execPath}" "${tmpScript}"`;
+      assert.strictEqual(hooks.shouldYieldTo(tmpCmd, durableScript), false,
+        'a durable install must reclaim the registration from a transient one');
+    });
+
+    check('hooks: a dead registration is always healed, whoever finds it', () => {
+      const goneScript = path.join(ROOT, 'deleted-install', 'lib', 'membridge-hook.js');
+      const goneCmd = `"${process.execPath}" "${goneScript}"`;
+      assert.strictEqual(hooks.installKind(goneScript), 'dead', 'a missing script is dead');
+      assert.strictEqual(hooks.shouldYieldTo(goneCmd, tmpScript), false,
+        'even a transient install must repair a registration pointing nowhere');
+      assert.strictEqual(hooks.shouldYieldTo(goneCmd, durableScript), false,
+        'a durable install must repair it too');
+    });
+
+    check('hooks: two durable installs keep last-writer-wins, as before', () => {
+      const otherDir = path.join(ROOT, 'other-durable', 'lib');
+      fs.mkdirSync(otherDir, { recursive: true });
+      const otherScript = path.join(otherDir, 'membridge-hook.js');
+      fs.writeFileSync(otherScript, '// another installed copy\n');
+      assert.strictEqual(hooks.shouldYieldTo(durableCmd, otherScript), false,
+        'durable-vs-durable must not change behaviour — upgrading in place is how real upgrades land');
+    });
+
+    // End to end through the real reconcile, which is what actually runs at
+    // every app launch and every setup-hooks.
+    check('hooks: reconcile leaves a durable registration alone when running transient', () => {
+      const settingsFile = path.join(ROOT, 'claude-settings-durability.json');
+      fs.writeFileSync(settingsFile, JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: durableCmd, timeout: 10 }] }] },
+      }, null, 2));
+      const prevSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      const prevSelf = process.env.MEMBRIDGE_HOOK_SCRIPT;
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = settingsFile;
+      // Pretend this process IS the throwaway install.
+      process.env.MEMBRIDGE_HOOK_SCRIPT = tmpScript;
+      try {
+        const res = hooks.reconcileStopHook();
+        const after = JSON.parse(read(settingsFile));
+        assert.strictEqual(after.hooks.Stop[0].hooks[0].command, durableCmd,
+          'the user\'s real install was overwritten by a throwaway one');
+        assert.strictEqual(res.yielded, 1, 'reconcile should report that it stood down');
+      } finally {
+        if (prevSettings === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+        else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevSettings;
+        if (prevSelf === undefined) delete process.env.MEMBRIDGE_HOOK_SCRIPT;
+        else process.env.MEMBRIDGE_HOOK_SCRIPT = prevSelf;
+      }
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
