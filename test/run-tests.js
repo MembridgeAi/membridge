@@ -5794,6 +5794,46 @@ async function main() {
     assert.strictEqual(kept3.filter(e => e.kind === 'usage').length, 50, 'plumbing honours its own cap');
     assert.strictEqual(kept3.filter(e => e.kind === 'prompt').length, 30, 'narrative untouched by the plumbing cap');
   });
+  // Reads used to SHARE the plumbing budget with usage, and usage outnumbers
+  // them by ~47:1 in practice -- measured on a real project: 1,958 usage rows
+  // against 42 reads, exactly at the 2,000 cap, leaving reads 2% of the window
+  // and about 12 hours of history. That starves the one signal the recall
+  // layer runs on, because a cross-session repeat read can only be seen if the
+  // FIRST read is still in the window days later. Reads now get their own
+  // budget, so no volume of usage telemetry can evict them.
+  check('mergeEvents: a flood of usage events cannot evict reads', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'read-budget');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const evs = [];
+    for (let j = 0; j < 20; j++) {
+      evs.push({ ts: at(j), project, source: 'Claude Code', kind: 'read', session: 's1', file: `f${j}.js` });
+    }
+    // ...then bury them under far more usage than the plumbing cap allows.
+    for (let j = 0; j < 400; j++) {
+      evs.push({ ts: at(100 + j), project, source: 'Claude Code', kind: 'usage', session: 's1', messageId: 'm' + j });
+    }
+    digest.mergeEvents(state, evs, { maxStoredEvents: 100, maxPlumbingEvents: 50, maxReadEvents: 50 });
+    const kept = state.projects[path.resolve(project)].events;
+    assert.strictEqual(kept.filter(e => e.kind === 'usage').length, 50, 'usage still honours its own cap');
+    assert.strictEqual(kept.filter(e => e.kind === 'read').length, 20,
+      'every read must survive — usage volume must not consume the read budget');
+  });
+  check('mergeEvents: reads are bounded by their own cap, newest kept', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'read-budget-cap');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const evs = [];
+    for (let j = 0; j < 60; j++) {
+      evs.push({ ts: at(j), project, source: 'Claude Code', kind: 'read', session: 's1', file: `f${j}.js` });
+    }
+    digest.mergeEvents(state, evs, { maxReadEvents: 25 });
+    const reads = state.projects[path.resolve(project)].events.filter(e => e.kind === 'read');
+    assert.strictEqual(reads.length, 25, 'reads honour their own cap');
+    assert.strictEqual(reads[0].file, 'f35.js', 'the read cap must slice from the tail (newest kept)');
+  });
   // FINDING I3. One API request is written to the transcript as several sibling
   // records (same message id, different ts). 57% of persisted usage rows were
   // those duplicates. Dropping them at persistence is lossless for the ledger,
@@ -8770,13 +8810,22 @@ async function main() {
         'avoided must carry tokens only -- no dollar/cost field');
       assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
         'holdout must carry tokens only -- no dollar/cost field');
+      // Teammate-note injection cost (notes spec §9): a FLAT sibling of
+      // `avoided`, never a member of it, so nothing doing net arithmetic can
+      // reach it. This fixture's ledger predates the field entirely, which is
+      // also the check that an absent block defaults to zero rather than
+      // undefined -- the dashboard reads this straight off totals.
+      assert.strictEqual(payload.projects[0].notesInjectedTokens, 0);
+      assert.strictEqual(payload.totals.notesInjectedTokens, 0);
+      assert.ok(!('notesInjectedTokens' in payload.projects[0].avoided));
       // Whitelist: the payload is an explicit projection, so accumulation
-      // bookkeeping (dedupe keys, per-path reader sets) can never leak onto
-      // the wire just because it was added to ledger.json.
+      // bookkeeping (dedupe keys, per-path reader sets, notes.seenKeys) can
+      // never leak onto the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['avoided', 'holdout', 'hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
-      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['avoided', 'holdout', 'reads', 'requests', 'volume'],
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(),
+        ['avoided', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
@@ -19239,6 +19288,689 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(bad.stdout.trim(), '');
     });
   }
+
+  // ---- teammate notes: token accounting (spec §9) ----
+  // The property this whole block exists to defend is NOT "a number appears".
+  // It is that an injected note is counted as INPUT COST, on its own line,
+  // and never enters the avoided/net arithmetic -- and that the count survives
+  // the fold at all. The queue these rows land in is REWRITTEN by
+  // lib/ledger-fold-recall.js's commit() down to remainder+retained, and a
+  // notes_injected row is neither, so anything that reads events.jsonl after a
+  // fold pass finds nothing. "the fold's accumulator" was therefore never a
+  // free-standing reader; the tally has to happen in the same pass that
+  // consumes the rows. The 'a later reader finds nothing' check below pins
+  // exactly that, so the mistake cannot be reintroduced quietly.
+  {
+    const notesLib = require('../lib/teammate-notes');
+    const notesStoreLib = require('../lib/teammate-notes-store');
+    const hooksRecallLib = require('../lib/hooks-recall');
+    const hooksNotesLib = require('../lib/hooks-notes');
+    const ledgerStoreTok = require('../lib/ledger-store');
+    const { estimateTokens: estimateTokensLib } = require('../lib/token-estimate');
+    const NOWT = '2026-07-28T10:00:00Z';
+    const rowsOf = p => fs.readFileSync(hooksRecallLib.eventsPath(p), 'utf8')
+      .trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const injectedRows = p => (fs.existsSync(hooksRecallLib.eventsPath(p)) ? rowsOf(p) : [])
+      .filter(r => r.kind === 'notes_injected');
+    const seedNotes = (p, when) => notesStoreLib.write(p, notesLib.buildIndex(
+      [{ author_name: 'Andrew', ts: '2026-07-28T09:00:00Z',
+        decisions: 'renamed the retry cap to maxAttempts', gotchas: '' }],
+      null, when || NOWT));
+    const mkProj = name => {
+      const p = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(p, { recursive: true });
+      return p;
+    };
+
+    check('notes-tokens: an injection records its own token cost', () => {
+      const tp = mkProj('token-notes-proj');
+      seedNotes(tp);
+      const out = hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      });
+      out.commit();
+      const injected = injectedRows(tp);
+      assert.strictEqual(injected.length, 1);
+      // Not merely `> 0`: the row must price THIS injection, so the count has
+      // to track the text actually written. A hardcoded constant, or a tally
+      // of the wrong string, passes a bare positivity check.
+      assert.strictEqual(injected[0].tokens, estimateTokensLib(out.text));
+      assert.strictEqual(injected[0].relPath, 'lib/x.js');
+      assert.strictEqual(injected[0].sessionId, 's1');
+    });
+
+    check('notes-tokens: the fold reduces those rows onto the ledger and /api/savings reports them', () => {
+      const tp = mkProj('token-notes-fold');
+      seedNotes(tp);
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      const cost = injectedRows(tp)[0].tokens;
+      assert.ok(cost > 0);
+
+      const led = ledgerStoreTok.updateLedger(tp, [], {});
+      assert.strictEqual(led.notes.tokens, cost);
+      assert.strictEqual(led.notes.injections, 1);
+
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
+      const pay = savingsPayload();
+      const proj = pay.projects.find(x => x.path === tp);
+      assert.ok(proj, 'the project must appear in /api/savings');
+      assert.strictEqual(proj.notesInjectedTokens, cost);
+      assert.ok(pay.totals.notesInjectedTokens >= cost);
+      // A plain number on the wire: the dedupe evidence behind it is
+      // bookkeeping and stays off, exactly like holdout.seenKeys already does.
+      assert.strictEqual(typeof proj.notesInjectedTokens, 'number');
+      assert.ok(!JSON.stringify(pay).includes('seenKeys'), 'dedupe evidence must not reach the wire');
+    });
+
+    check('notes-tokens: a reader that waits until after the fold finds nothing — the tally must happen in the consuming pass', () => {
+      const tp = mkProj('token-notes-consumed');
+      seedNotes(tp);
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      assert.strictEqual(injectedRows(tp).length, 1, 'precondition: the row is queued');
+      ledgerStoreTok.updateLedger(tp, [], {});
+      // THIS is the broken implementation, made explicit: a separate pass over
+      // events.jsonl, run after the fold, is what the plan's Step 6 reads as
+      // describing. It sees zero rows, so it would report zero tokens forever
+      // while every test that only looked at the hook stayed green.
+      assert.strictEqual(injectedRows(tp).length, 0,
+        'commit() rewrites the queue to remainder+retained; a notes_injected row is neither');
+      assert.ok(ledgerStoreTok.readLedger(tp).notes.tokens > 0,
+        'so the tally has to have happened inside the pass that consumed it');
+    });
+
+    check('notes-tokens: a re-read of the same queued row never inflates the figure', () => {
+      const tp = mkProj('token-notes-dedupe');
+      seedNotes(tp);
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      const queued = fs.readFileSync(hooksRecallLib.eventsPath(tp), 'utf8');
+      const cost = ledgerStoreTok.updateLedger(tp, [], {}).notes.tokens;
+      assert.ok(cost > 0);
+      // Exactly the failure lib/ledger-fold-recall.js's commit() header
+      // documents for serves and holdout rows: the ledger write landed, the
+      // queue rewrite did not, so the identical row is read again next pass.
+      // An input-cost figure that climbs on its own is worse than none.
+      fs.writeFileSync(hooksRecallLib.eventsPath(tp), queued);
+      const again = ledgerStoreTok.updateLedger(tp, [], {});
+      assert.strictEqual(again.notes.tokens, cost);
+      assert.strictEqual(again.notes.injections, 1);
+    });
+
+    check('notes-tokens: a failed measurement row never costs the user the note', () => {
+      const tp = mkProj('token-notes-besteffort');
+      seedNotes(tp);
+      // appendEvent mkdirSync's this path; a FILE there makes every write fail
+      // (ENOTDIR/EEXIST), which is the closest deterministic stand-in for a
+      // full disk there is.
+      fs.mkdirSync(path.join(tp, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(tp, '.membridge', 'recall'), 'not a directory');
+      const out = hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      });
+      assert.ok(out.text.includes('maxAttempts'));
+      // Unwrapping the append is what this catches: the append genuinely
+      // fails here, so without its own try/catch the throw escapes commit()
+      // into the hook body. There it would be swallowed by runRecall()'s outer
+      // catch -- silently, with the note already on stdout and its marker
+      // never written, so the same note re-fires on every read forever.
+      assert.doesNotThrow(() => out.commit(), 'accounting must never throw out to the caller');
+      // The half that actually matters: the note was still marked delivered.
+      assert.strictEqual(hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's2', now: NOWT, config: {},
+      }), null, 'the seen-marking must have survived the failed measurement');
+    });
+
+    check('notes-tokens: a restated-only injection after a compaction is still counted', () => {
+      const tp = mkProj('token-notes-refire');
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
+      seedNotes(tp);
+      // Deliver once, so the decision is marked seen and has nothing new left
+      // to say -- the state a compacted session is in.
+      hooksNotesLib.buildSessionOutput({
+        projectPath: tp, sessionId: 's1', source: 'startup', now: NOWT, config: {},
+      }).commit();
+      const beforeRows = injectedRows(tp).length;
+      const restated = hooksNotesLib.buildSessionOutput({
+        projectPath: tp, sessionId: 's1', source: 'compact', now: NOWT, config: {},
+      });
+      assert.ok(restated && /still in force/.test(restated.text), 'precondition: this is a restatement');
+      restated.commit();
+      // buildSessionOutput's commit() returns early when there are no new ids
+      // to mark. Those tokens were still spent -- delivery point 4 is a
+      // RE-injection, its whole cost is input -- so the accounting row must be
+      // written BEFORE that return, not after it.
+      const after = injectedRows(tp);
+      assert.strictEqual(after.length, beforeRows + 1,
+        'a re-injection costs input tokens and must not be invisible to the ledger');
+      assert.strictEqual(after[after.length - 1].tokens, estimateTokensLib(restated.text));
+      assert.strictEqual(after[after.length - 1].relPath, null);
+    });
+
+    check('notes-tokens: the figure sits OUTSIDE the net — avoidance is untouched by an injection', () => {
+      const tp = mkProj('token-notes-outside');
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
+      seedNotes(tp);
+      // The ROLL-UP before anything is injected. A defect that nets the two
+      // only in `totals` -- leaving every per-project field honest -- is
+      // invisible to the per-project assertions below, and `totals` is the
+      // number the headline line is built from.
+      const avoidedBefore = JSON.parse(JSON.stringify(savingsPayload().totals.avoided));
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      const led = ledgerStoreTok.updateLedger(tp, [], {});
+      assert.ok(led.notes.tokens > 0);
+      assert.deepStrictEqual(savingsPayload().totals.avoided, avoidedBefore,
+        'injecting notes must not move the avoidance roll-up in either direction');
+      // Spec §9: an injected note is input SPENT. Netting it against avoidance
+      // would need a fabricated avoided figure, so every avoided field stays
+      // exactly zero here even though tokens were demonstrably injected.
+      assert.deepStrictEqual(led.avoided,
+        { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      const proj = savingsPayload().projects.find(x => x.path === tp);
+      assert.strictEqual(proj.avoided.tokens, 0);
+      assert.ok(proj.notesInjectedTokens > 0);
+      // A sibling of `avoided`, never a member of it: nesting it is the one
+      // shape that would put it within reach of the net arithmetic.
+      assert.ok(!('notesInjectedTokens' in proj.avoided));
+    });
+
+    check('notes-tokens: no net-savings expression references the injected-notes figure', () => {
+      // The plan asks for this to be confirmed by reading. Reading does not
+      // survive the next edit; this does. Every arithmetic operator applied to
+      // the figure anywhere in the two modules that own the savings surface is
+      // a spec §9 violation, so the check is on the source, not on a value.
+      const srcs = [
+        fs.readFileSync(path.join(__dirname, '..', 'lib', 'server.js'), 'utf8'),
+        require('../lib/dashboard/client')('', ''),
+      ];
+      for (const src of srcs) {
+        for (const raw of src.split('\n')) {
+          const line = raw.trim();
+          if (!/notesInjectedTokens/.test(line) || line.startsWith('//')) continue;
+          // It may never so much as SHARE A LINE with the avoidance figures.
+          // Broader than "no operator", and deliberately so: the shapes that
+          // would net the two (`totals.avoided.tokens -= notesInjectedTokens`,
+          // `pxSavingsPct(tokens - notesInjectedTokens, volume)`) all read the
+          // two names together, whatever operator sits between them.
+          assert.ok(!/avoided|volume|SavingsPct/.test(line),
+            `notesInjectedTokens must never meet the avoidance figures: ${line}`);
+          // Accumulating into ITSELF is the only compound assignment allowed.
+          if (/[-+*/]=/.test(line)) {
+            assert.ok(/^totals\.notesInjectedTokens \+=/.test(line),
+              `the only compound assignment allowed is into its own total: ${line}`);
+          }
+        }
+      }
+    });
+
+    check('notes-tokens: the dashboard line reports tokens outside the figure — never dollars, never "saved"', () => {
+      const src = require('../lib/dashboard/client')('', '');
+      const grab = (s, name) => {
+        const start = s.indexOf('function ' + name + '(');
+        if (start === -1) return null;
+        let i = s.indexOf('{', start), depth = 0, end = i;
+        for (; end < s.length; end++) {
+          if (s[end] === '{') depth++;
+          else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+        }
+        return s.slice(start, end);
+      };
+      const fmtBody = grab(src, 'pxFmtTokens');
+      const lineBody = grab(src, 'pxNotesInjectedLine');
+      assert.ok(lineBody, 'pxNotesInjectedLine is missing from the client bundle');
+      const fn = new Function('var pxFmtTokens = ' + fmtBody + ';\nreturn (' + lineBody + ')')();
+      assert.strictEqual(fn({ notesInjectedTokens: 0 }), '', 'nothing injected: no line at all');
+      assert.strictEqual(fn(null), '', 'a missing totals block must not throw');
+      const line = fn({ notesInjectedTokens: 4120 });
+      assert.ok(line.indexOf('Tokens injected as teammate notes: 4k') === 0, line);
+      // The three wording constraints, each asserted rather than assumed.
+      assert.ok(!/saved/i.test(line), 'must never say "saved"');
+      assert.ok(!/[$£€]|dollar|cost you|\bspend\b/i.test(line), 'must never price it in money');
+      // And the sentence that says why it sits outside -- without it the figure
+      // reads as an unexplained charge against the number above it.
+      assert.ok(/kept out of the figure above/.test(line), line);
+      assert.ok(/cannot measure/.test(line), line);
+    });
+  }
+
+  // ---- MCP wiring: install, launch, status, removal (plan Task 7) ----
+  //
+  // WHY THE FIXTURE HOME IS NOT UNDER ROOT. lib/mcp-register carries a guard
+  // rail that refuses to touch any agent config when MEMBRIDGE_HOME points
+  // into the system temp directory -- which is exactly where ROOT lives. That
+  // guard is what protects a check that FORGOT to inject a home; here it would
+  // make every check below pass vacuously, proving only that the guard works.
+  // So the fixture lives beside the repo, and isolation is instead guaranteed
+  // the honest way: HOME is injected into every child, so os.homedir() -- and
+  // with it ~/.claude.json, ~/.codex/config.toml and ~/.cursor/mcp.json --
+  // resolves inside the fixture. All three of those exist on real machines,
+  // and the last check in this block proves none of them was touched.
+  {
+    const W_ROOT = fs.mkdtempSync(path.join(__dirname, '..', '.mcp-wiring-'));
+    const mcpRegister = require('../lib/mcp-register');
+    const claudeBinMod = require('../lib/claude-bin');
+
+    const REAL_AGENT_FILES = [
+      path.join(os.homedir(), '.claude.json'),
+      path.join(os.homedir(), '.codex', 'config.toml'),
+      path.join(os.homedir(), '.cursor', 'mcp.json'),
+    ];
+    const snapshotReal = () => REAL_AGENT_FILES.map(f => {
+      try { return fs.readFileSync(f).toString('base64'); } catch (err) { return `absent:${err.code}`; }
+    });
+    const realBefore = snapshotReal();
+
+    // A stub `claude` that records the argv it was called with. Exit 1 on
+    // `mcp get` is the clean-machine answer (nothing registered yet).
+    const stubBinDir = path.join(W_ROOT, 'stubbin');
+    fs.mkdirSync(stubBinDir, { recursive: true });
+    const CLAUDE_LOG = path.join(W_ROOT, 'claude-argv.log');
+    const stubClaude = path.join(stubBinDir, 'claude');
+    fs.writeFileSync(stubClaude, [
+      '#!/bin/sh',
+      `printf '%s\\n' "$*" >> "${CLAUDE_LOG}"`,
+      'if [ "$2" = "get" ]; then exit 1; fi',
+      'exit 0',
+    ].join('\n'));
+    fs.chmodSync(stubClaude, 0o755);
+
+    // A stub login shell. Chatty on purpose: a real one prints nvm/motd noise
+    // around the answer, and that is what claude-bin's line scan exists for.
+    const stubShell = path.join(stubBinDir, 'stub-shell');
+    fs.writeFileSync(stubShell, ['#!/bin/sh', 'echo "Now using node v20.11.0"', `echo "${stubClaude}"`].join('\n'));
+    fs.chmodSync(stubShell, 0o755);
+    const deadShell = path.join(stubBinDir, 'dead-shell');
+    fs.writeFileSync(deadShell, ['#!/bin/sh', 'exit 1'].join('\n'));
+    fs.chmodSync(deadShell, 0o755);
+
+    let wSeq = 0;
+    const mkFixture = (dirs = ['.codex', '.cursor', '.claude']) => {
+      const home = path.join(W_ROOT, `home-${wSeq++}`);
+      fs.mkdirSync(path.join(home, '.membridge'), { recursive: true });
+      for (const d of dirs) fs.mkdirSync(path.join(home, d), { recursive: true });
+      return home;
+    };
+    const fixtureEnv = (home, extra = {}) => ({
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      MEMBRIDGE_HOME: path.join(home, '.membridge'),
+      MEMBRIDGE_CLAUDE_SETTINGS: path.join(home, 'claude-settings.json'),
+      MEMBRIDGE_PORT: String(P(46)),
+      SHELL: stubShell,
+      ...extra,
+    });
+    const runCli = (home, argv, extraEnv = {}) =>
+      spawnSync(process.execPath, [BIN, ...argv], { env: fixtureEnv(home, extraEnv), encoding: 'utf8', timeout: 60000 });
+    // The launch path, in a child so HOME injection is real rather than a
+    // temporarily-patched process.env.
+    const runLaunch = (home, extraEnv = {}) => spawnSync(process.execPath,
+      ['-e', 'require(process.argv[1]).ensureRegistered()', path.join(__dirname, '..', 'lib', 'mcp-register.js')],
+      { env: fixtureEnv(home, extraEnv), encoding: 'utf8', timeout: 60000 });
+    const claudeArgv = () => { try { return read(CLAUDE_LOG).trim().split('\n').filter(Boolean); } catch { return []; } };
+    const OUR_SCRIPT = path.join(__dirname, '..', 'bin', 'membridge.js');
+
+    // No system-wide `claude` on the probe list (CANDIDATES[0] is home-relative
+    // and therefore already inside the fixture). Where one exists, the
+    // "nothing found" checks below cannot be produced and are skipped rather
+    // than being quietly weakened into something that always passes.
+    const probeHit = claudeBinMod.CANDIDATES.slice(1).some(c => { try { return fs.statSync(c).isFile(); } catch { return false; } });
+
+    {
+      const home = mkFixture();
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '[mcp_servers.node_repl]\ncommand = "node"\n');
+      fs.writeFileSync(path.join(home, '.cursor', 'mcp.json'),
+        JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['x'] } } }, null, 2));
+      const out = runCli(home, ['mcp', 'register']);
+
+      check('mcp-wiring: `membridge mcp register` writes every installed agent and reports each one', () => {
+        assert.strictEqual(out.status, 0, out.stderr);
+        const toml = read(path.join(home, '.codex', 'config.toml'));
+        assert.ok(toml.includes('[mcp_servers.membridge]'), `codex was not registered: ${toml}`);
+        assert.ok(toml.includes('[mcp_servers.node_repl]'), 'their block must survive');
+        const json = JSON.parse(read(path.join(home, '.cursor', 'mcp.json')));
+        assert.deepStrictEqual(json.mcpServers.membridge.args, [OUR_SCRIPT, 'mcp']);
+        assert.ok(json.mcpServers.theirs, 'their server must survive');
+        for (const agent of ['claude-code', 'codex', 'cursor']) {
+          assert.ok(new RegExp(`^\\s+${agent}\\b`, 'm').test(out.stdout),
+            `every agent must get a line, ${agent} had none:\n${out.stdout}`);
+        }
+      });
+
+      check('mcp-wiring: install-time registration drives the claude CLI, and records the binary it found', () => {
+        // The whole reason registration happens in install.sh: that shell can
+        // resolve `claude` off the real PATH, and recording it is what keeps
+        // every later launch from paying the login-shell query again.
+        const argv = claudeArgv();
+        assert.deepStrictEqual(argv[0], 'mcp get membridge', `query first, got: ${JSON.stringify(argv)}`);
+        assert.ok(argv[1] && argv[1].startsWith('mcp add -s user membridge -- '), `then add, got: ${argv[1]}`);
+        assert.ok(argv[1].endsWith(`${OUR_SCRIPT} mcp`), `must register our own script: ${argv[1]}`);
+        const cfg = JSON.parse(read(path.join(home, '.membridge', 'config.json')));
+        assert.strictEqual(cfg.mcp.claudeBinRecorded, stubClaude,
+          'the resolved binary must be recorded, or every launch re-runs the login shell');
+        assert.ok(out.stdout.includes(stubClaude), 'and the install must say what it recorded');
+      });
+
+      check('mcp-wiring: `membridge status` reports every agent without re-running the claude CLI', () => {
+        // status is READ-ONLY and must stay instant. Re-registering to report
+        // would both write from a read and add `claude mcp get`'s ~2.1s to it.
+        const before = claudeArgv().length;
+        assert.ok(before > 0, 'fixture produced no CLI calls — the check would be vacuous');
+        const st = runCli(home, ['status']);
+        assert.strictEqual(st.status, 0, st.stderr);
+        assert.strictEqual(claudeArgv().length, before, '`status` must not shell out to the claude CLI');
+        assert.ok(/^MCP:/m.test(st.stdout), `status must carry an MCP section:\n${st.stdout}`);
+        for (const agent of ['claude-code', 'codex', 'cursor']) {
+          assert.ok(new RegExp(`^\\s+${agent}\\b`, 'm').test(st.stdout), `${agent} missing from status:\n${st.stdout}`);
+        }
+      });
+
+      check('mcp-wiring: a second launch reconcile is gated — nothing is re-read, nothing is re-spawned', () => {
+        // A reconcile is ~2s on a miss and ~6s on a repair, almost all of it
+        // `claude mcp get`. Paying that on every daemon launch to repair
+        // something that is almost never broken is the cost this gate exists
+        // to remove.
+        const before = claudeArgv().length;
+        const tomlBefore = read(path.join(home, '.codex', 'config.toml'));
+        const r = runLaunch(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.strictEqual(claudeArgv().length, before, 'the gated launch must spawn nothing');
+        assert.strictEqual(read(path.join(home, '.codex', 'config.toml')), tomlBefore);
+      });
+
+      check('mcp-wiring: installing another agent later re-opens the gate', () => {
+        // The gate must not be "run once, ever": the single likeliest reason a
+        // reconcile is needed is a tool installed after MemBridge was.
+        const newAgentDir = path.join(W_ROOT, `late-${wSeq}`);
+        fs.mkdirSync(newAgentDir, { recursive: true });
+        const cfgFile = path.join(home, '.membridge', 'config.json');
+        const raw = JSON.parse(read(cfgFile));
+        raw.mcp = { ...(raw.mcp || {}), 'late-tool': { configPath: path.join(newAgentDir, 'mcp.json'), format: 'json' } };
+        fs.writeFileSync(cfgFile, JSON.stringify(raw, null, 2));
+        const r = runLaunch(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        const written = JSON.parse(read(path.join(newAgentDir, 'mcp.json')));
+        assert.deepStrictEqual(written.mcpServers.membridge.args, [OUR_SCRIPT, 'mcp'],
+          'a newly-declared agent must be picked up by the next launch');
+      });
+
+      check('mcp-wiring: `remove-hooks` strips the MCP entries too', () => {
+        const rm = runCli(home, ['remove-hooks']);
+        assert.strictEqual(rm.status, 0, rm.stderr);
+        const toml = read(path.join(home, '.codex', 'config.toml'));
+        assert.ok(!toml.includes('mcp_servers.membridge'), `our block must be gone: ${toml}`);
+        assert.ok(toml.includes('[mcp_servers.node_repl]'), 'theirs must not be');
+        const json = JSON.parse(read(path.join(home, '.cursor', 'mcp.json')));
+        assert.deepStrictEqual(Object.keys(json.mcpServers), ['theirs']);
+        assert.ok(rm.stdout.includes('membridge mcp register'), 'and it must say how to get it back');
+      });
+
+      check('mcp-wiring: a launch after `remove-hooks` does not put it back behind the user', () => {
+        const r = runLaunch(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(!read(path.join(home, '.codex', 'config.toml')).includes('mcp_servers.membridge'),
+          'removing MemBridge from your tools must survive the next daemon launch');
+        const st = runCli(home, ['status']);
+        assert.ok(/^MCP:.*removed/m.test(st.stdout), `status must say so:\n${st.stdout}`);
+      });
+
+      check('mcp-wiring: an explicit `mcp register` is the way back in', () => {
+        const back = runCli(home, ['mcp', 'register']);
+        assert.strictEqual(back.status, 0, back.stderr);
+        assert.ok(read(path.join(home, '.codex', 'config.toml')).includes('[mcp_servers.membridge]'));
+      });
+    }
+
+    check('mcp-wiring: turning distillation off must NOT unregister the MCP server', () => {
+      // hooks.removeHooks() is what the dashboard's Settings toggle and the
+      // first-run consent prompt call when session summaries are switched off.
+      // The plan says to put unregisterAll() in the "remove-hooks path"; put
+      // literally inside that function, switching off Stop-hook summaries
+      // would silently tear MemBridge's MCP server out of Codex and Cursor --
+      // two unrelated features -- and would do it from inside an HTTP handler
+      // that then blocks on `claude mcp remove`.
+      const home = mkFixture();
+      const reg = runCli(home, ['mcp', 'register']);
+      assert.strictEqual(reg.status, 0, reg.stderr);
+      const toml = path.join(home, '.codex', 'config.toml');
+      assert.ok(read(toml).includes('[mcp_servers.membridge]'), 'fixture never registered — the check would be vacuous');
+      const r = spawnSync(process.execPath,
+        ['-e', 'require(process.argv[1]).removeHooks()', path.join(__dirname, '..', 'lib', 'hooks.js')],
+        { env: fixtureEnv(home), encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.ok(read(toml).includes('[mcp_servers.membridge]'),
+        'switching off session summaries removed the MCP server registration');
+    });
+
+    check('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it', () => {
+      // The non-negotiable: a silent skip is indistinguishable from the
+      // feature working, which is the exact bug this feature exists to fix.
+      if (probeHit) return; // a real claude on the probe list: cannot produce a miss here
+      const home = mkFixture(['.claude']);
+      const reg = runCli(home, ['mcp', 'register'], { SHELL: deadShell });
+      assert.strictEqual(reg.status, 0, reg.stderr);
+      const st = runCli(home, ['status'], { SHELL: deadShell });
+      const line = st.stdout.split('\n').find(l => /^\s+claude-code\b/.test(l));
+      assert.ok(line, `claude-code must appear in status:\n${st.stdout}`);
+      assert.ok(/skipped/.test(line), `and must say it was skipped, got: ${line}`);
+      assert.ok(/config\.mcp\.claudeBin/.test(line), `and name the fix, got: ${line}`);
+    });
+
+    check('mcp-wiring: only a login-shell resolution is recorded, never a probe guess', () => {
+      // A probe hit is a GUESS from a fixed list that cannot see nvm, volta or
+      // asdf. Caching one pins a stale binary forever -- it exists, so the
+      // stale-record check never discards it -- while the user's real one
+      // moves with their version manager. A wrong cached path is worse than
+      // none: the miss is loud, the wrong hit is silent.
+      const savedHome = process.env.MEMBRIDGE_HOME;
+      // Absent is the expected shape for the two that must NOT be recorded:
+      // nothing else in registerNow writes config.json.
+      const cfgOf = h => { try { return JSON.parse(read(path.join(h, 'config.json'))); } catch { return {}; } };
+      try {
+        for (const [source, expect] of [['probe', undefined], ['config', undefined], ['shell', stubClaude]]) {
+          const mbHome = path.join(W_ROOT, `rec-${source}`);
+          fs.mkdirSync(mbHome, { recursive: true });
+          process.env.MEMBRIDGE_HOME = mbHome;
+          const agentHome = mkFixture(['.claude']);
+          mcpRegister.registerNow({
+            home: agentHome, env: {}, platform: 'darwin', config: {},
+            command: { command: '/stub/node', args: ['/stub/bin/membridge.js', 'mcp'], env: {} },
+            spawn: (c, a) => ({ status: a[1] === 'get' ? 1 : 0, stdout: '', stderr: '' }),
+            resolveClaudeBin: () => ({ path: stubClaude, source }),
+          });
+          assert.strictEqual((cfgOf(mbHome).mcp || {}).claudeBinRecorded, expect,
+            `a '${source}' resolution must ${expect ? '' : 'not '}be recorded`);
+        }
+      } finally {
+        process.env.MEMBRIDGE_HOME = savedHome;
+      }
+    });
+
+    check('mcp-wiring: `membridge mcp` with no subcommand still starts the server, a typo never does', () => {
+      // Every entry we register runs exactly `<node> bin/membridge.js mcp`.
+      // A dispatch that swallowed an unknown verb into the server would hang
+      // a user's terminal on a stdio server no client will ever speak to.
+      assert.deepStrictEqual(mcpRegister.serverCommand().args, [OUR_SCRIPT, 'mcp']);
+      const home = mkFixture([]);
+      const r = runCli(home, ['mcp', 'nonsense']);
+      assert.notStrictEqual(r.status, 0, 'an unknown subcommand must fail, not start a server');
+      assert.ok(/register\|unregister/.test(r.stderr + r.stdout), `it must say what is valid: ${r.stderr}`);
+    });
+
+    check('mcp-wiring: install.sh registers, never aborts on it, and never eats the piped script', () => {
+      // `curl ... | sh` means stdin IS the rest of this script; a child that
+      // reads stdin swallows the remaining install steps.
+      for (const f of ['install.sh.tmpl', 'install.sh']) {
+        const sh = read(path.join(__dirname, '..', 'scripts', 'install', f));
+        assert.ok(/mcp register/.test(sh), `${f} must register the MCP server at install time`);
+        assert.ok(/mcp register\s*<\/dev\/null/.test(sh), `${f} must not let the child read the piped script`);
+        assert.ok(/mcp register[^\n]*\|\|/.test(sh), `${f} must warn, never abort, when registration fails`);
+      }
+    });
+
+    check('mcp-wiring: not one byte of the real agent configs was touched', () => {
+      // Three files that exist on this machine. Everything above injects HOME,
+      // and this is what proves it.
+      assert.deepStrictEqual(snapshotReal(), realBefore,
+        'a check reached the developer\'s own ~/.claude.json, ~/.codex or ~/.cursor');
+    });
+
+    try { fs.rmSync(W_ROOT, { recursive: true, force: true }); } catch {}
+  }
+
+  // Hook registration is GLOBAL (one ~/.claude/settings.json) but the command
+  // written into it is an absolute path into whichever install happened to run
+  // setup-hooks last. Before this, reconcile rewrote any owned entry to the
+  // running install's own path unconditionally -- last writer wins. Two ways
+  // that hurts a real user:
+  //
+  //   1. A throwaway install steals the registration from their real one.
+  //      `npx @membridgeai/membridge setup-hooks` runs out of an npx cache; a
+  //      trial clone gets deleted; the app is launched from the DMG before
+  //      being dragged to /Applications.
+  //   2. When that throwaway location is cleaned up, the registered command
+  //      points at a path that no longer exists. The whole hook path fails
+  //      OPEN by design, so nothing errors -- summaries simply stop, silently,
+  //      and the user still believes MemBridge is running.
+  //
+  // The rule is now precedence by durability, not arrival order.
+  {
+    const durableDir = path.join(ROOT, 'durable-install', 'lib');
+    fs.mkdirSync(durableDir, { recursive: true });
+    const durableScript = path.join(durableDir, 'membridge-hook.js');
+    fs.writeFileSync(durableScript, '// stand-in for an installed copy\n');
+    const durableCmd = `"${process.execPath}" "${durableScript}"`;
+    // A REAL file in an npx cache layout. It must EXIST: 'dead' is checked
+    // before 'transient', so a path that merely looks throwaway but is already
+    // gone is dead — these cases are about a copy that exists now and will not
+    // later. `_npx` is npm's own directory name for a one-off package run.
+    const transientDir = path.join(ROOT, 'npm-cache', '_npx', 'a1b2c3', 'lib');
+    fs.mkdirSync(transientDir, { recursive: true });
+    const tmpScript = path.join(transientDir, 'membridge-hook.js');
+    fs.writeFileSync(tmpScript, '// stand-in for an npx-cache copy\n');
+
+    check('hooks: a transient install must not steal a live durable registration', () => {
+      assert.strictEqual(hooks.installKind(tmpScript), 'transient',
+        'a path under the OS temp dir is transient');
+      assert.strictEqual(hooks.installKind(durableScript), 'durable',
+        'an ordinary install directory is durable');
+      assert.strictEqual(hooks.shouldYieldTo(durableCmd, tmpScript), true,
+        'a transient install must leave a live durable registration alone');
+    });
+
+    check('hooks: a durable install still takes over from a transient one', () => {
+      const tmpCmd = `"${process.execPath}" "${tmpScript}"`;
+      assert.strictEqual(hooks.shouldYieldTo(tmpCmd, durableScript), false,
+        'a durable install must reclaim the registration from a transient one');
+    });
+
+    check('hooks: a dead registration is always healed, whoever finds it', () => {
+      const goneScript = path.join(ROOT, 'deleted-install', 'lib', 'membridge-hook.js');
+      const goneCmd = `"${process.execPath}" "${goneScript}"`;
+      assert.strictEqual(hooks.installKind(goneScript), 'dead', 'a missing script is dead');
+      assert.strictEqual(hooks.shouldYieldTo(goneCmd, tmpScript), false,
+        'even a transient install must repair a registration pointing nowhere');
+      assert.strictEqual(hooks.shouldYieldTo(goneCmd, durableScript), false,
+        'a durable install must repair it too');
+    });
+
+    check('hooks: two durable installs keep last-writer-wins, as before', () => {
+      const otherDir = path.join(ROOT, 'other-durable', 'lib');
+      fs.mkdirSync(otherDir, { recursive: true });
+      const otherScript = path.join(otherDir, 'membridge-hook.js');
+      fs.writeFileSync(otherScript, '// another installed copy\n');
+      assert.strictEqual(hooks.shouldYieldTo(durableCmd, otherScript), false,
+        'durable-vs-durable must not change behaviour — upgrading in place is how real upgrades land');
+    });
+
+    // End to end through the real reconcile, which is what actually runs at
+    // every app launch and every setup-hooks.
+    check('hooks: reconcile leaves a durable registration alone when running transient', () => {
+      const settingsFile = path.join(ROOT, 'claude-settings-durability.json');
+      fs.writeFileSync(settingsFile, JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: durableCmd, timeout: 10 }] }] },
+      }, null, 2));
+      const prevSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      const prevSelf = process.env.MEMBRIDGE_HOOK_SCRIPT;
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = settingsFile;
+      // Pretend this process IS the throwaway install.
+      process.env.MEMBRIDGE_HOOK_SCRIPT = tmpScript;
+      try {
+        const res = hooks.reconcileStopHook();
+        const after = JSON.parse(read(settingsFile));
+        assert.strictEqual(after.hooks.Stop[0].hooks[0].command, durableCmd,
+          'the user\'s real install was overwritten by a throwaway one');
+        assert.strictEqual(res.yielded, 1, 'reconcile should report that it stood down');
+      } finally {
+        if (prevSettings === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+        else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevSettings;
+        if (prevSelf === undefined) delete process.env.MEMBRIDGE_HOOK_SCRIPT;
+        else process.env.MEMBRIDGE_HOOK_SCRIPT = prevSelf;
+      }
+    });
+  }
+
+  // The reporting half of the ownership bug. isHookInstalled's own contract is
+  // "installed means it will actually RUN", but it only checked that the
+  // RUNTIME resolved -- and the runtime is usually plain `node`, which always
+  // resolves. So a registration whose membridge-hook.js had been deleted (the
+  // trial clone removed, the worktree cleaned up) reported "hook installed"
+  // forever, in the app and in `membridge status`, while every stop silently
+  // did nothing. A user had no way to discover it: this check IS the discovery
+  // mechanism, and it was the thing lying.
+  check('hooks: a registration whose script is gone is NOT reported as installed', () => {
+    const f = path.join(ROOT, 'claude-settings-deadscript.json');
+    const gone = path.join(ROOT, 'removed-install', 'lib', 'membridge-hook.js');
+    assert.ok(!fs.existsSync(gone), 'fixture must not exist');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: `"${process.execPath}" "${gone}"` }] }] },
+    }));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isHookInstalled(), false,
+        'a hook whose script is missing must report NOT installed — node resolving is not enough');
+    } finally {
+      if (prev === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+
+  check('hooks: a registration whose script exists is still reported as installed', () => {
+    const f = path.join(ROOT, 'claude-settings-livescript.json');
+    const liveDir = path.join(ROOT, 'live-install', 'lib');
+    fs.mkdirSync(liveDir, { recursive: true });
+    const live = path.join(liveDir, 'membridge-hook.js');
+    fs.writeFileSync(live, '// present\n');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: `"${process.execPath}" "${live}"` }] }] },
+    }));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isHookInstalled(), true,
+        'a working registration must still report installed');
+    } finally {
+      if (prev === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);

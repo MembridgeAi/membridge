@@ -1,5 +1,9 @@
 node_modules/
 *.log
+# Test fixture homes. The MCP-registration checks need a home OUTSIDE the
+# system temp dir (lib/mcp-register refuses to touch agent configs under it),
+# so they mkdtemp here and clean up; this catches an interrupted run.
+.mcp-wiring-*/
 .DS_Store
 dist/
 app/lib/
