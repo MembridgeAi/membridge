@@ -11790,9 +11790,9 @@ async function main() {
     };
 
     const toolsList = await client.listTools();
-    check('mcp: exposes exactly the five read-only tools, all marked readOnlyHint', () => {
+    check('mcp: exposes exactly the six read-only tools, all marked readOnlyHint', () => {
       const names = toolsList.tools.map(t => t.name).sort();
-      assert.deepStrictEqual(names, ['get_project_memory', 'get_recent_activity', 'list_projects', 'search_memory', 'why']);
+      assert.deepStrictEqual(names, ['get_project_memory', 'get_recent_activity', 'list_projects', 'recall', 'search_memory', 'why']);
       assert.ok(toolsList.tools.every(t => t.annotations && t.annotations.readOnlyHint === true), 'a tool is missing readOnlyHint');
       assert.ok(toolsList.tools.every(t => t.annotations.destructiveHint === false), 'a tool is missing destructiveHint:false');
     });
@@ -11861,6 +11861,78 @@ async function main() {
       assert.deepStrictEqual(searchNone.results, []);
     });
 
+    // recall: the same Tier B "header + skeleton" body decide() would serve,
+    // but with NO session gating (an MCP caller manages its own context) --
+    // just freshness + a cached skeleton + the same floors. Never writes
+    // sessionState or events.jsonl: an MCP call is not an interception and
+    // must never count toward avoided totals.
+    const recallStoreForMcp = require('../lib/recall-store');
+    const eventsFileMcp = path.join(projMcp, '.membridge', 'recall', 'events.jsonl');
+    const sessionsDirMcp = path.join(projMcp, '.membridge', 'recall', 'sessions');
+    const bigSrc = Array.from({ length: 40 }, (_, i) => `function f${i}() {\n  doWork();\n  doWork();\n  doWork();\n}\n`).join('');
+    fs.writeFileSync(path.join(projMcp, 'big.js'), bigSrc);
+    await recallStoreForMcp.warm(projMcp, [{ file: 'big.js' }], util.getConfig());
+
+    const { data: recallHit } = await callJson('recall', { project: projMcp, path: 'big.js' });
+    check('mcp: recall serves the tier-B body for a warmed, fresh path with no session gating', () => {
+      assert.strictEqual(recallHit.available, true);
+      assert.ok(recallHit.body.includes('MemBridge structural summary of big.js'), `wrong body wording: ${recallHit.body}`);
+      assert.ok(recallHit.body.includes('f0('), 'signature missing from skeleton body');
+      assert.ok(!recallHit.body.includes('doWork();'), 'function bodies should be stripped from the skeleton');
+      assert.ok(recallHit.callTokens > 0 && recallHit.skeletonTokens > 0, 'callTokens/skeletonTokens missing');
+    });
+
+    // Below floors (the fixture that recall-store's own tests already proved
+    // warms successfully): tiny call size never clears MIN_CALL_TOKENS.
+    fs.writeFileSync(path.join(projMcp, 'tiny.js'), [
+      'function f() {', '  body();', '  moreBody();', '  evenMoreBody();', '}',
+      'function g() {', '  helper();', '  helper();', '  helper();', '}',
+      'function h() {', '  doStuff();', '  doStuff();', '  doStuff();', '}', '',
+    ].join('\n'));
+    await recallStoreForMcp.warm(projMcp, [{ file: 'tiny.js' }], util.getConfig());
+    const { data: recallBelowFloor } = await callJson('recall', { project: projMcp, path: 'tiny.js' });
+    check('mcp: recall returns a structured miss when the read is below the serve floors', () => {
+      assert.strictEqual(recallBelowFloor.available, false);
+      assert.strictEqual(recallBelowFloor.reason, 'below-floor');
+    });
+
+    fs.writeFileSync(path.join(projMcp, 'unwarmed.js'), 'function z() {\n  return 1;\n}\n');
+    const { data: recallNoEntry } = await callJson('recall', { project: projMcp, path: 'unwarmed.js' });
+    check('mcp: recall returns a structured miss when there is no cache entry for an existing file', () => {
+      assert.strictEqual(recallNoEntry.available, false);
+      assert.strictEqual(recallNoEntry.reason, 'no-entry');
+    });
+
+    const { data: recallNotFound } = await callJson('recall', { project: projMcp, path: 'nope-does-not-exist.js' });
+    check('mcp: recall returns a structured miss for a path that does not exist on disk', () => {
+      assert.strictEqual(recallNotFound.available, false);
+      assert.strictEqual(recallNotFound.reason, 'not-found');
+    });
+
+    fs.writeFileSync(path.join(projMcp, 'big.js'), bigSrc + '\n// changed on disk since warm\n');
+    const { data: recallStale } = await callJson('recall', { project: projMcp, path: 'big.js' });
+    check('mcp: recall returns a structured miss for a stale cache entry (file changed since warm)', () => {
+      assert.strictEqual(recallStale.available, false);
+      assert.strictEqual(recallStale.reason, 'stale');
+    });
+
+    const { data: recallUnknownProj } = await callJson('recall', { project: path.join(ROOT, 'projects', 'does-not-exist'), path: 'x.js' });
+    check('mcp: recall returns a structured miss for an unknown project', () => {
+      assert.strictEqual(recallUnknownProj.available, false);
+      assert.strictEqual(recallUnknownProj.reason, 'unknown-project');
+    });
+
+    const { data: recallPaused } = await callJson('recall', { project: projPaused, path: 'x.js' });
+    check('mcp: recall returns a structured miss for a paused project', () => {
+      assert.strictEqual(recallPaused.available, false);
+      assert.strictEqual(recallPaused.reason, 'project-paused');
+    });
+
+    check('mcp: recall never writes sessionState or events.jsonl (an MCP call is not an interception)', () => {
+      assert.ok(!fs.existsSync(eventsFileMcp), 'recall must never touch events.jsonl');
+      assert.ok(!fs.existsSync(sessionsDirMcp), 'recall must never write session state');
+    });
+
     await client.close();
   }
 
@@ -11878,9 +11950,10 @@ async function main() {
     await client.connect(transport);
     const tools = await client.listTools();
     check('mcp: `membridge mcp` starts a real stdio server and lists its tools', () => {
-      assert.strictEqual(tools.tools.length, 5);
+      assert.strictEqual(tools.tools.length, 6);
       assert.ok(tools.tools.some(t => t.name === 'list_projects'));
       assert.ok(tools.tools.some(t => t.name === 'why'));
+      assert.ok(tools.tools.some(t => t.name === 'recall'));
     });
     await client.close();
   }
