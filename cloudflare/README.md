@@ -118,7 +118,31 @@ Access check at the edge cannot be sidestepped.
 
 ### 5. Dashboard + Access
 
-- Deploy `ops-dashboard/` as a Cloudflare Pages project on `ops.membridge.me`.
+- Deploy **`ops-dashboard/public/`** — not the whole folder. `dev-server.js`
+  sits deliberately outside `public/` because it carries invented team names and
+  a directory-wide deploy would publish it alongside the panel.
+
+  ```bash
+  cd cloudflare/ops-dashboard
+  npx wrangler pages project create membridge-ops --production-branch main
+  npx wrangler pages deploy public --project-name membridge-ops --branch main
+  ```
+
+- **Close the `*.pages.dev` back door.** Every Pages project gets a public
+  `<project>.pages.dev` hostname, and it is *not* covered by an Access policy
+  scoped to `ops.membridge.me`. The design's claim — "no route reachable without
+  Access" — is false until this is handled. Either add a second Access
+  application for `membridge-ops.pages.dev`, or disable public access to the
+  `pages.dev` subdomain in the project's settings.
+
+  The exposure while unhandled is small but not nothing: the page ships no
+  secrets and its `/api` calls are relative, so on `pages.dev` they resolve to a
+  route that does not exist and the panel just reports "could not reach the ops
+  API". A visitor learns the panel exists and nothing else. Close it anyway.
+
+- Add `ops.membridge.me` as a custom domain **in the Cloudflare dashboard** —
+  Pages → the project → Custom domains. Wrangler has no `pages domain`
+  subcommand, so this step cannot be scripted with it.
 - Route `ops.membridge.me/api` to the `ops-api` Worker.
 
 > **Why `.me` and not `.app`.** `membridge.app` is on name.com nameservers, not
