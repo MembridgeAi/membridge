@@ -38,6 +38,9 @@ Every task's requirements implicitly include this section.
   impossible input but will happily swallow a real bug — exactly what happened
   with `trackedOffset` in Task 2 (symlinked paths). When a fallback fires in a
   case you did not expect, treat it as a defect, not as the design working.
+- **Tests go INSIDE `main()`, immediately before the `// --- summary ---` block** — never at the end of the file. The suite lives inside `async function main()`, whose summary block prints the count, `fs.rmSync(ROOT)`s the fixtures and may `process.exit(1)`. Appending after it puts your checks out of scope, after the fixtures are gone. "Append to `test/run-tests.js`" always means this insertion point.
+- **A test that cannot fail is worse than no test.** Task 5's "leaves no temp files behind" check passed against a plain `writeFileSync` — a non-atomic write never creates a temp file, so the assertion was vacuously true. Where a test claims a property, build the broken implementation and confirm the test catches it.
+- **Verify `node_modules` before trusting a baseline.** `test/run-tests.js` requires the MCP SDK at top level; a worktree missing it dies instantly with a friendly message and NO baseline. Check first. If it fails, give the worktree its own `node_modules` rather than running `npm install` in the shared main tree — those packages are `--no-save` there and a plain install PRUNES them, including the demo pipeline's `playwright-core`. That has already happened once.
 - **No test may touch the network or a live backend.** Everything runs under a throwaway `MEMBRIDGE_HOME`, matching `test/run-tests.js`.
 - **Atomic writes only:** tmp file + rename, matching `lib/util.js` `saveState`, `lib/ledger-store.js` `writeLedger`, `lib/recall-store.js` `put`.
 - **No `Date.now()` inside pure functions.** Every selection and expiry function takes an injected `now` (an ISO string or ms number), so tests are deterministic.
@@ -154,7 +157,20 @@ a worktree, which is nearly every session on this machine. Both now key as
 
 ---
 
-## Task 3: Emit wire keys from teamsync
+## Task 3: Emit wire keys from teamsync ✅ DONE (`a255cb1`, merged)
+
+**A failure mode this task's text never considered, found during implementation
+and now fixed in the shipped code.** The superseded `toWirePath` was string
+concatenation and could not fail. `wireKeyFor` returns **`null`** for a file
+outside any checkout — so without an explicit fallback, `files` ships as
+`[null]`: a row no teammate can match or render. The shipped implementation
+falls back to the original path (`wireKeyFor(...) || p`), with a test that first
+asserts the fixture really is outside a checkout so the case cannot pass
+vacuously, mutation-verified by deleting the fallback.
+
+Anywhere else a `wireKeyFor` result is used, the null case must be handled
+explicitly. It is not a theoretical branch.
+
 
 Task 2 shipped `wireKeyFor(absPath)`. This task makes the wire actually carry
 those keys instead of tracked-relative paths.
@@ -777,7 +793,21 @@ git commit -m "feat(notes): pure teammate-notes index, selection and repetition 
 
 ---
 
-## Task 5: The notes store — fs layer
+## Task 5: The notes store — fs layer ✅ DONE (`c9ff90e`, merged)
+
+**The plan's atomicity test was hollow and has been replaced.** "Leaves no temp
+files behind" passes against a plain `fs.writeFileSync` — a non-atomic write
+never creates a temp file, so the assertion is trivially true. It proved
+tidiness, not atomicity. The shipped suite adds a discriminating check that
+spies on `fs.renameSync` and asserts the bytes were staged in a `.tmp` in the
+target directory and arrived only via a rename; it fails against the naive
+implementation and passes against the shipped one.
+
+**One caveat for Task 6 onward:** `read()` returns whatever parses, without
+validating shape. That is safe today only because every selector in
+`lib/teammate-notes.js` defaults its fields (`ix.prose || []`, `ix.byFile || {}`).
+Do not assume `read()` hands back a well-formed index.
+
 
 **Files:**
 - Create: `lib/teammate-notes-store.js`
@@ -934,7 +964,76 @@ git commit -m "feat(notes): atomic fail-open store for the teammate-notes index"
 
 ---
 
-## Task 6: Build the index on every team pull
+## Task 6: Build the index on every team pull ✅ DONE (`feat/notes-task6`)
+
+**Both halves of this task's data source were fabricated, and one of its bugs
+would have silently broken every teammate note.** Read the shipped code, not the
+steps below.
+
+- **`memorydb.readEntries` does not exist**, and `memorydb` holds **local**
+  entries only. `origin` is not stored anywhere — `lib/feed.js` stamps it at
+  render time. The real source is `state.projects[key].teamEntries`, written by
+  `lib/teamsync.js`'s `pullProject`. The plan's `origin === 'team'` filter was
+  also redundant: the pull already excludes self rows server-side.
+
+- **The silent one: every note would have been attributed to "a teammate".** The
+  wire row carries `author_name`, but `pullProject` stores it as `author`.
+  `buildIndex` read only `author_name`, so against real daemon data it fell
+  through to its `'a teammate'` default on every row — and since the author is
+  part of `noteId`, **every id would have differed from the wire-shaped ones**,
+  keying the whole seen/dedupe layer on a shadow set. No test could catch it:
+  every fixture in Task 4 is a hand-written *wire* row. A fallback meant for
+  genuinely anonymous rows would have swallowed a systematic bug.
+
+- **"Fail-open" was untrue for the most likely failure.** `buildIndex(null, …)`
+  does not throw — it returns a valid **empty** index, which then overwrites a
+  good one, so an unreadable state file would quietly erase a project's notes.
+  Now a non-array input changes nothing, while an empty **array** still empties.
+
+- **On the seen-marker test:** it catches dropping `prev` entirely, but **passes**
+  an implementation that keeps `seen.prose` and drops `seen.file` — the worse
+  bug, since every file note then re-fires on every pull.
+
+- **Built under the long-term-first rule:** the rebuild runs on **both** pull
+  paths; the plan wired only the daemon, leaving anyone driving `membridge sync`
+  from cron with a permanently stale index.
+
+
+**Four things this task's text got wrong, all corrected in the shipped code.**
+
+1. **`memorydb.readEntries` does not exist, and neither does `origin === 'team'`
+   on a stored row.** `lib/memorydb.js` exports `loadDb` / `buildEntries` and
+   holds LOCAL entries only; `origin` is a field `lib/feed.js` invents at render
+   time (`normalizeLocal` / `normalizeTeam`). Pulled teammate rows live in
+   `state.projects[key].teamEntries`, written by `lib/teamsync.js`'s
+   `pullProject`. That pull already filters self rows server-side
+   (`author_id=neq.${creds.userId}`), so **no origin filter is needed at all**.
+2. **The stored row renames the author.** The wire row has `author_name`;
+   `pullProject`'s mapper stores it as `author`. `buildIndex` read only
+   `author_name`, so fed real daemon data every note would have come out as
+   "a teammate" — and since the author is part of `noteId`, every id would have
+   differed from the wire-shaped ones the unit tests used. Silent, and invisible
+   to every test in the suite. `buildIndex` now accepts both shapes.
+3. **A non-array `entries` wiped a good index.** `buildIndex(null, …)` does not
+   throw — it returns a valid EMPTY index — so the plan's "fail-open" comment
+   was untrue for the most likely failure (state unreadable). `rebuildTeammateNotes`
+   now returns the previous index untouched for a non-array, while an empty
+   ARRAY still legitimately empties it.
+4. **`const repoRoot = require('./repo-root')` in Step 3 is dead** — there is no
+   translation on receive, so nothing uses it. Not added. Likewise the "Files"
+   line below claiming `lib/server.js` needs a helper: it does not, `util.loadState`
+   already exposes what the daemon needs.
+
+**Also beyond the plan:** the rebuild is called from BOTH pull paths — the
+daemon's `teamTick` *and* `teamSyncPass` (manual/cron `membridge sync`), via one
+shared `rebuildNotesForChanged` — and it honours Task 7's `isNotesEnabled` kill
+switch, so a user who opted out gets no file written into their project.
+
+**On the "preserves seen markers" test:** the plan's version asserts only a
+prose marker. Mutation-verified: an implementation that carries `seen.prose`
+forward but silently drops `seen.file` passes the plan's test AND the entire
+rest of the suite, while re-firing every file note on every pull — the noisier
+of the two bugs. The shipped test asserts both halves plus id stability.
 
 **Files:**
 - Modify: `bin/membridge.js` (`teamTick`)
@@ -1090,7 +1189,28 @@ git commit -m "feat(notes): rebuild the teammate-notes index on every team pull"
 
 ---
 
-## Task 7: Kill switch and hook registration
+## Task 7: Kill switch and hook registration ✅ DONE (`9951286`, merged)
+
+**The sketch below silently deleted user hooks.** `isOwnNotesHook(entry, sub)`
+claims a whole **entry**, so the `others` filter discarded any entry containing
+one of our hooks — *including any user hook sitting in the same entry*.
+Reproduced directly: the user's hook is gone. That violates the first line of
+this plan's own Global Constraints. The shipped version walks the array in place
+the way `reconcileStopHook` does.
+
+Also: the `owned.length ? A : B` line is genuinely dead (both branches are
+identical); `withSettings` never existed (both reconcilers inline
+`readSettings` → mutate → `writeSettings`); `readSettings` shape-checks only
+`hooks.Stop`, so the "same refusal to copy" wasn't there to copy; and the plan
+wired only `ensureInstalled`, leaving `membridge setup-hooks` unable to install
+what `remove-hooks` removes.
+
+**The "leaves a foreign entry alone" test was vacuous** — the second reconcile
+converged and wrote nothing, so the assertion merely re-read what the test itself
+had written a line earlier. It passed against a reconciler that dropped every
+foreign hook. Re-seeded with a stale command so the pass actually rewrites the
+file; the mutant now fails.
+
 
 Registering the three new hook entries before the bodies exist keeps Tasks 8–10 to one concern each.
 
@@ -1282,7 +1402,51 @@ git commit -m "feat(notes): register teammate-notes hooks and add the kill switc
 
 ---
 
-## Task 8: Delivery points 2 and 3 — the PreToolUse path
+## Task 8: Delivery points 2 and 3 — the PreToolUse path ✅ DONE (`6a1fafc`, merged)
+
+**This task's wiring silently dropped every note on a hot file — the files that
+matter most.** The steps below emit only inside the `if (!storeEntry)` branch.
+When a skeleton *does* exist and `decide()` declines to serve (below the token
+floor, already served this session, holdout arm, stale hash), `notesOut` is
+built, found, and then thrown away: no output, and correctly not marked seen, so
+it is rebuilt and dropped again on every later read. A file with a cached
+skeleton is by definition a file someone works on — precisely where a teammate's
+warning belongs. Shipped fix: one `emitNotes()` helper called in **both** the
+no-skeleton branch and the fall-through after the holdout logging, so the
+"exactly one `allow` in this file" invariant is structural rather than something
+a future edit must remember.
+
+**The plan's tests could not have caught it, or the worktree bug either.** They
+call `buildNotesOutput` directly, which returns `{text, commit}` and cannot see a
+`permissionDecision` — so they proved text was produced, never that the read was
+allowed. And the fixture is a repo at its own root where `relPath` and the wire
+key are the identical string, so nothing could fail if the lookup used the wrong
+one. Worse, the fixture never runs `git init`, so `wireKeyFor` would have
+returned `null` and every file-note assertion would have failed for an unrelated
+reason. The shipped suite adds hook-level tests that spawn the real hook and
+assert on stdout, plus a genuine nested-worktree case that asserts `relPath` and
+the wire key **differ**, so it cannot pass tautologically.
+
+**Fixture timestamps must be live for hook-level tests** — `selectFileNotes`
+applies the 7-day window against the real clock, so a frozen `ts` makes notes
+undeliverable through the actual hook.
+
+### Open product decision, deliberately not made in Task 8
+
+**Disabling recall currently also silences file notes.** The notes lookup sits
+after the hook's recall gates, so `MEMBRIDGE_NO_RECALL=1` and
+`config.recall.enabled === false` both return before it. A user who turns recall
+off — perhaps because the interceptions annoyed them — silently loses every
+teammate warning on file contact, even though `teammateNotes.enabled` is a
+separate switch and the notes path never blocks a read.
+
+**Recommended split, for Task 9 or a follow-up:** `MEMBRIDGE_NO_RECALL=1` is the
+panic button — an env var meaning "stop touching my reads" — and should keep
+silencing everything in this hook, including notes. But
+`config.recall.enabled === false` is a *preference about recall*, and should not
+silence a different feature that has its own switch. Two switches that a user set
+independently should behave independently.
+
 
 The heart of the feature: prose on arrival and file notes on contact, both without denying the read.
 

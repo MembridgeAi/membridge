@@ -60,10 +60,23 @@ root-level `mcpServers`** in `~/.claude.json`; MCP config is per-project under
 `projects[path].mcpServers`, alongside `enabledMcpjsonServers` /
 `disabledMcpjsonServers`.
 
-Because the storage shape is an internal detail that has evidently already
-moved, **MemBridge must not write `~/.claude.json` directly.** Shelling out to
-`claude mcp add -s user` is version-proof: whatever the current version
-expects, the current version writes.
+**Correction (verified 2026-07-29, Task 6):** the reason stated here was wrong.
+`claude mcp add -s user` *does* write a root-level `mcpServers` — the key simply
+does not exist until a user-scope server is added, which is why probing a
+machine with none found nothing. The conclusion still holds for a better reason:
+the CLI owns scope semantics (`local` writes under `projects[cwd]`, `user`
+writes the root key) and those are exactly the details we would be guessing at.
+
+**MemBridge must not write `~/.claude.json` directly.** Shelling out to
+`claude mcp add -s user` is version-proof: whatever the current version expects,
+the current version writes.
+
+**Also verified:** `claude mcp add` **refuses an existing name** ("already
+exists") rather than updating it. So "already registered? stop" would leave a
+registration pointing at a path that no longer runs, forever and invisibly. The
+registrar queries with `claude mcp get <name>` — not `list`, which health-checks
+by spawning *every* configured server — and does remove+add when the entry is
+ours but stale.
 
 ### 3.2 Codex — no CLI, file surgery required
 

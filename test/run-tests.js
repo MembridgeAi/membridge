@@ -42,6 +42,41 @@ const proj1 = path.join(ROOT, 'projects', 'shop-app');
 const proj2 = path.join(ROOT, 'projects', 'excluded-app');
 const proj3 = path.join(ROOT, 'projects', 'marker-app');
 
+
+// ---- test ports: one shifted block per process ----
+// Every mock server here used to bind a hardcoded 179xx port. Two suites at
+// once -- routine now that work is fanned out across worktrees -- then crash
+// each other with EADDRINUSE. The failure SHAPE is what made it dangerous: a
+// collision aborts before the tally line ever prints, so a run that greps for
+// "FAIL" finds none and reads as success, and a measured baseline comes back
+// silently truncated.
+//
+// So the whole block moves together: P(n) = PORT_BASE + n, with PORT_BASE
+// picked per process. The probe below tries successive 100-wide blocks and
+// keeps the first whose endpoints are actually free, which also covers a
+// leaked server from an interrupted earlier run.
+const PORT_BASE = (() => {
+  const net = require('net');
+  const free = port => {
+    try {
+      const s = net.createServer();
+      s.listen(port, '127.0.0.1');
+      const r = s.listening;
+      s.close();
+      return r;
+    } catch { return false; }
+  };
+  const start = 17900 + ((process.pid % 40) * 100);
+  for (let i = 0; i < 40; i++) {
+    const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
+    // 41 and 85 bracket the range actually used; a block free at both ends is
+    // in practice a free block.
+    if (free(base + 41) && free(base + 85)) return base;
+  }
+  return start; // nothing free anywhere: proceed and let the real bind report it
+})();
+const P = n => PORT_BASE + n;
+
 const results = [];
 // Supports both sync and async fn. Sync callers (the vast majority) ignore
 // the return value, exactly as before. Async callers must `await check(...)`
@@ -1286,13 +1321,13 @@ async function main() {
       }
     });
   });
-  await new Promise(r => mockApi.listen(17944, '127.0.0.1', r));
+  await new Promise(r => mockApi.listen(P(44), '127.0.0.1', r));
 
-  const PORT = 17941;
+  const PORT = P(41);
   const apiClaudeSettings = path.join(ROOT, 'claude-settings-api.json');
   const child = spawn(process.execPath, [BIN, 'daemon'], {
     env: {
-      ...process.env, MEMBRIDGE_PORT: String(PORT), MEMBRIDGE_API_BASE: 'http://127.0.0.1:17944',
+      ...process.env, MEMBRIDGE_PORT: String(PORT), MEMBRIDGE_API_BASE: `http://127.0.0.1:${P(44)}`,
       MEMBRIDGE_CLAUDE_SETTINGS: apiClaudeSettings,
     },
     stdio: 'ignore',
@@ -3397,7 +3432,7 @@ async function main() {
       assert.ok(!p.prompts.some(e => e.text.includes('Dropped while deleted')), 'gate-dropped prompt resurfaced');
     });
 
-    process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17944'; // in-process advisor -> the same mock
+    process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(44)}`; // in-process advisor -> the same mock
     const briefNoKey = await advisorLib.generateBriefing('', 'claude-sonnet-5', { since: null, teammates: [] });
     const briefOk = await advisorLib.generateBriefing(GOOD_KEY, 'claude-sonnet-5', {
       since: '2026-07-10T00:00:00.000Z', until: '2026-07-14T00:00:00.000Z',
@@ -3420,7 +3455,7 @@ async function main() {
     });
 
     await check('advisors/anthropic: generate returns text + normalized usage', async () => {
-      process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17944'; // existing Anthropic mock
+      process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(44)}`; // existing Anthropic mock
       const a = advisors.byId('anthropic');
       const r = await a.generate({ apiKey: GOOD_KEY, model: 'claude-sonnet-5', system: 'sys', prompt: 'hi', schema: null, maxTokens: 200 });
       assert.ok(r.text && typeof r.text === 'string', 'no text');
@@ -3430,26 +3465,26 @@ async function main() {
 
     await check('advisors/openai: chat-completions request shape + normalized usage', async () => {
       let seen = null;
-      const srv = await startJsonMock(17960, (req, body, send) => {
+      const srv = await startJsonMock(P(60), (req, body, send) => {
         seen = { url: req.url, body };
         if (req.method === 'GET' && /\/models$/.test(req.url)) return send(200, { data: [{ id: 'gpt-4o' }] });
         send(200, { choices: [{ message: { content: '{"summary":"ok","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
       });
       try {
         const a = advisors.byId('openai');
-        const r = await a.generate({ apiKey: 'sk-x', baseUrl: 'http://127.0.0.1:17960/v1', model: 'gpt-4o', system: 's', prompt: 'p', schema: { type: 'object' }, maxTokens: 300 });
+        const r = await a.generate({ apiKey: 'sk-x', baseUrl: `http://127.0.0.1:${P(60)}/v1`, model: 'gpt-4o', system: 's', prompt: 'p', schema: { type: 'object' }, maxTokens: 300 });
         assert.strictEqual(seen.body.response_format.type, 'json_schema');
         assert.strictEqual(seen.body.messages[0].role, 'system');
         assert.strictEqual(r.usage.input_tokens, 10);
         assert.strictEqual(r.usage.output_tokens, 5);
-        const test = await a.testKey({ apiKey: 'sk-x', baseUrl: 'http://127.0.0.1:17960/v1' });
+        const test = await a.testKey({ apiKey: 'sk-x', baseUrl: `http://127.0.0.1:${P(60)}/v1` });
         assert.strictEqual(test.ok, true);
       } finally { srv.close(); }
     });
 
     await check('advisors/google: generateContent shape + schema sanitized + usage', async () => {
       let seen = null;
-      const srv = await startJsonMock(17961, (req, body, send) => {
+      const srv = await startJsonMock(P(61), (req, body, send) => {
         seen = { url: req.url, body };
         if (req.method === 'GET' && /\/models/.test(req.url)) return send(200, { models: [] });
         send(200, { candidates: [{ content: { parts: [{ text: '{"summary":"ok","phases":[],"risks":[],"questions":[]}' }] } }], usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 7 } });
@@ -3457,7 +3492,7 @@ async function main() {
       try {
         const a = advisors.byId('google');
         const schema = { type: 'object', properties: { x: { type: 'string' } }, required: ['x'], additionalProperties: false };
-        const r = await a.generate({ apiKey: 'g-x', baseUrl: 'http://127.0.0.1:17961', model: 'gemini-2.0-flash', system: 's', prompt: 'p', schema, maxTokens: 300 });
+        const r = await a.generate({ apiKey: 'g-x', baseUrl: `http://127.0.0.1:${P(61)}`, model: 'gemini-2.0-flash', system: 's', prompt: 'p', schema, maxTokens: 300 });
         assert.ok(!JSON.stringify(seen.body.generationConfig.responseSchema).includes('additionalProperties'));
         assert.strictEqual(seen.body.generationConfig.responseMimeType, 'application/json');
         assert.strictEqual(r.usage.input_tokens, 12);
@@ -3484,11 +3519,11 @@ async function main() {
       const noBase = await a.generate({ apiKey: '', baseUrl: '', model: 'llama3.1', system: 's', prompt: 'p', schema: null, maxTokens: 100 });
       assert.ok(noBase.error && /base URL/i.test(noBase.error), 'should demand a base URL');
 
-      const srv = await startJsonMock(17962, (req, body, send) => {
+      const srv = await startJsonMock(P(62), (req, body, send) => {
         send(200, { choices: [{ message: { content: 'here you go {"summary":"ok","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 3, completion_tokens: 4 } });
       });
       try {
-        const r = await a.generate({ apiKey: '', baseUrl: 'http://127.0.0.1:17962/v1', model: 'llama3.1', system: 's', prompt: 'p', schema: null, maxTokens: 100 });
+        const r = await a.generate({ apiKey: '', baseUrl: `http://127.0.0.1:${P(62)}/v1`, model: 'llama3.1', system: 's', prompt: 'p', schema: null, maxTokens: 100 });
         assert.ok(r.text.includes('summary'), 'returns raw text');
         assert.strictEqual(r.usage.input_tokens, 3);
       } finally { srv.close(); }
@@ -3522,12 +3557,12 @@ async function main() {
       assert.strictEqual(a.source, 'config');
     });
     await check('advisor: generatePlan routes to the selected provider', async () => {
-      const srv = await startJsonMock(17963, (req, body, send) => {
+      const srv = await startJsonMock(P(63), (req, body, send) => {
         if (req.method === 'GET') return send(200, { data: [] });
         send(200, { choices: [{ message: { content: '{"summary":"S","phases":[],"risks":[],"questions":[]}' } }], usage: { prompt_tokens: 8, completion_tokens: 9 } });
       });
       try {
-        const r = await advisorLib.generatePlan('sk-oai', 'gpt-4o', { projectName: 'p', goal: 'g', recentAsks: [] }, { provider: 'openai', baseUrl: 'http://127.0.0.1:17963/v1' });
+        const r = await advisorLib.generatePlan('sk-oai', 'gpt-4o', { projectName: 'p', goal: 'g', recentAsks: [] }, { provider: 'openai', baseUrl: `http://127.0.0.1:${P(63)}/v1` });
         assert.strictEqual(r.ok, true);
         assert.strictEqual(r.plan.summary, 'S');
         assert.ok(r.costUsd >= 0);
@@ -3540,7 +3575,7 @@ async function main() {
   await new Promise(r => setTimeout(r, 300));
 
   // --- 6. CLI start/stop lifecycle ---
-  const env2 = { ...process.env, MEMBRIDGE_PORT: '17942' };
+  const env2 = { ...process.env, MEMBRIDGE_PORT: String(P(42)) };
   const startOut = spawnSync(process.execPath, [BIN, 'start'], { env: env2, encoding: 'utf8' });
   await new Promise(r => setTimeout(r, 1500));
   const statusOut = spawnSync(process.execPath, [BIN, 'status'], { env: env2, encoding: 'utf8' });
@@ -3566,7 +3601,7 @@ async function main() {
       const home = path.join(ROOT, 'status-states', name);
       fs.mkdirSync(home, { recursive: true });
       if (over.running) fs.writeFileSync(path.join(home, 'membridge.pid'), String(process.pid));
-      const env = { ...process.env, MEMBRIDGE_HOME: home, MEMBRIDGE_PORT: '17944' };
+      const env = { ...process.env, MEMBRIDGE_HOME: home, MEMBRIDGE_PORT: String(P(44)) };
       if (over.state) fs.writeFileSync(path.join(home, 'state.json'), JSON.stringify(over.state));
       if (over.claudeDir !== undefined) env.MEMBRIDGE_CLAUDE_DIR = over.claudeDir;
       if (over.codexDir !== undefined) env.MEMBRIDGE_CODEX_DIR = over.codexDir;
@@ -3631,7 +3666,7 @@ async function main() {
     fs.writeFileSync(path.join(offHome, 'config.json'), JSON.stringify({
       adapters: { 'claude-code': { enabled: false }, codex: { enabled: false }, custom: [] },
     }));
-    const noAdapters = runStatus({ ...process.env, MEMBRIDGE_HOME: offHome, MEMBRIDGE_PORT: '17944' });
+    const noAdapters = runStatus({ ...process.env, MEMBRIDGE_HOME: offHome, MEMBRIDGE_PORT: String(P(44)) });
     check('status: every adapter disabled is reported as such, not as a missing tool', () => {
       const out = noAdapters.stdout;
       assert.ok(/No session adapters are enabled/.test(out), `silent about a disabled adapter set: ${out}`);
@@ -3675,7 +3710,7 @@ async function main() {
   // A fast stop→start can find the port still held by the dying daemon: the
   // server must retry the bind instead of leaving a daemon with no dashboard.
   {
-    const PORT3 = 17943;
+    const PORT3 = P(43);
     const blocker = net.createServer();
     await new Promise(r => blocker.listen(PORT3, '127.0.0.1', r));
     const srv = startServer(PORT3, { retries: 40, retryDelayMs: 100 });
@@ -3694,8 +3729,8 @@ async function main() {
 
   // --- 8. team sync (mock Supabase: GoTrue + PostgREST + membership checks) ---
   const mock = createMockSupabase();
-  await new Promise(r => mock.server.listen(17945, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17945';
+  await new Promise(r => mock.server.listen(P(45), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(45)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   const HOME_A = process.env.MEMBRIDGE_HOME; // homeDir() reads env per call
   const sameKey = (a, b) => a.toLowerCase() === path.resolve(b).toLowerCase();
@@ -3721,7 +3756,7 @@ async function main() {
 
   check('team: oauthAuthorizeUrl targets the backend with the redirect encoded', () => {
     const u = teamsync.oauthAuthorizeUrl(util.getConfig(), 'http://127.0.0.1:7437/team/oauth/callback');
-    assert.ok(u.startsWith('http://127.0.0.1:17945/auth/v1/authorize?provider=github'), u);
+    assert.ok(u.startsWith(`http://127.0.0.1:${P(45)}/auth/v1/authorize?provider=github`), u);
     assert.ok(u.includes(encodeURIComponent('http://127.0.0.1:7437/team/oauth/callback')), 'redirect not encoded');
   });
 
@@ -3789,7 +3824,7 @@ async function main() {
       // raw RPC columns are preserved for older consumers
       assert.ok('member_count' in t && 'created_at' in t, 'raw RPC columns dropped');
     });
-    const PORT4 = 17946;
+    const PORT4 = P(46);
     const srv4 = startServer(PORT4, { retries: 0 });
     try {
       const base4 = `http://127.0.0.1:${PORT4}`;
@@ -4153,7 +4188,7 @@ async function main() {
     });
 
     // ----- team v2 (002_team_v2.sql): invite links, roles, feed, auto-link -----
-    const MOCK_URL = 'http://127.0.0.1:17945';
+    const MOCK_URL = `http://127.0.0.1:${P(45)}`;
     // Direct RPC helper for endpoints teamsync has no wrapper for (web-only).
     const rpcAs = async (home, fn, args) => {
       const saved = process.env.MEMBRIDGE_HOME;
@@ -4318,7 +4353,7 @@ async function main() {
 
     // The same reads over the local dashboard API (in-process server; the mock
     // backend is async in this process too, so no event-loop deadlock).
-    const HUB_PORT = 17947;
+    const HUB_PORT = P(47);
     const hubSrv = startServer(HUB_PORT, { retries: 0 });
     await waitForHttp(`http://127.0.0.1:${HUB_PORT}/api/status`);
     const hubBase = `http://127.0.0.1:${HUB_PORT}`;
@@ -4520,8 +4555,8 @@ async function main() {
         }));
       });
     });
-    await new Promise(r => briefMock.listen(17948, '127.0.0.1', r));
-    process.env.MEMBRIDGE_API_BASE = 'http://127.0.0.1:17948';
+    await new Promise(r => briefMock.listen(P(48), '127.0.0.1', r));
+    process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(48)}`;
 
     await post(`${hubBase}/api/settings`, { apiKey: '' });
     const briefDegraded = await (await post(`${hubBase}/api/briefing/generate`, {})).json();
@@ -4782,7 +4817,7 @@ async function main() {
     stDana.projects = { ...(stDana.projects || {}), [danaClone]: { events: [] } };
     util.saveState(stDana);
     await teamsync.linkProject(util.getConfig(), danaClone, team.team_id, 'Acme'); // same project row
-    const MEMBER_PORT = 17948;
+    const MEMBER_PORT = P(48);
     const memberSrv = startServer(MEMBER_PORT, { retries: 0 });
     await waitForHttp(`http://127.0.0.1:${MEMBER_PORT}/api/status`);
     const memberDel = await (await fetch(`http://127.0.0.1:${MEMBER_PORT}/api/team/archive-project`, {
@@ -4801,7 +4836,7 @@ async function main() {
     // The owner deletes the shared project over the route: archived for the
     // team AND fully cleaned up locally (team.json gone, project out of state).
     process.env.MEMBRIDGE_HOME = HOME_A;
-    const OWNER_PORT = 17949;
+    const OWNER_PORT = P(49);
     const ownerSrv = startServer(OWNER_PORT, { retries: 0 });
     await waitForHttp(`http://127.0.0.1:${OWNER_PORT}/api/status`);
     const ownerDel = await (await fetch(`http://127.0.0.1:${OWNER_PORT}/api/team/archive-project`, {
@@ -4893,14 +4928,14 @@ async function main() {
     const HOME_CLI = path.join(ROOT, 'home-cli');
     const envT = { ...process.env, MEMBRIDGE_HOME: HOME_CLI };
     const setupOut = spawnSync(process.execPath,
-      [BIN, 'team', 'setup', '--url', 'http://127.0.0.1:17945', '--anon-key', 'anon-test'],
+      [BIN, 'team', 'setup', '--url', `http://127.0.0.1:${P(45)}`, '--anon-key', 'anon-test'],
       { env: envT, encoding: 'utf8' });
     process.env.MEMBRIDGE_HOME = HOME_A;
     const logoutOut = spawnSync(process.execPath, [BIN, 'logout'], { env: { ...process.env }, encoding: 'utf8' });
     check('CLI: team setup persists the backend, logout clears credentials', () => {
       assert.ok(/team backend saved/i.test(setupOut.stdout), `setup said: ${setupOut.stdout} ${setupOut.stderr}`);
       const cfg = JSON.parse(read(path.join(HOME_CLI, 'config.json')));
-      assert.strictEqual(cfg.team.url, 'http://127.0.0.1:17945');
+      assert.strictEqual(cfg.team.url, `http://127.0.0.1:${P(45)}`);
       assert.ok(/Logged out/.test(logoutOut.stdout), `logout said: ${logoutOut.stdout}`);
       assert.ok(!fs.existsSync(teamsync.credentialsPath()), 'credentials survive logout');
     });
@@ -5165,13 +5200,44 @@ async function main() {
       return s.slice(start, end);
     };
     const fmtBody = grab(src, 'pxFmtTokens');
+    const repeatBody = grab(src, 'pxRepeatReads');
+    const zeroBody = grab(src, 'pxSavingsZeroLine');
     const lineBody = grab(src, 'pxProjectSavingsLine');
     assert.ok(lineBody, 'pxProjectSavingsLine is missing from the client bundle');
-    const pxProjectSavingsLine = new Function('var pxFmtTokens = ' + fmtBody + ';\nreturn (' + lineBody + ')')();
+    assert.ok(repeatBody, 'pxRepeatReads is missing from the client bundle');
+    assert.ok(zeroBody, 'pxSavingsZeroLine is missing from the client bundle');
+    const projPreamble = 'var pxFmtTokens = ' + fmtBody + ';\n'
+      + 'var pxRepeatReads = ' + repeatBody + ';\n'
+      + 'var pxSavingsZeroLine = ' + zeroBody + ';\n';
+    const pxProjectSavingsLine = new Function(projPreamble + 'return (' + lineBody + ')')();
     assert.strictEqual(pxProjectSavingsLine({ tokens: 0, serves: 0 }), 'no repeat reads yet');
     assert.strictEqual(pxProjectSavingsLine(null), 'no repeat reads yet', 'a missing avoided block must not throw');
     assert.strictEqual(pxProjectSavingsLine({ tokens: 3830, serves: 1 }), '4k avoided · 1 reads answered');
     assert.ok(!/saved/i.test(pxProjectSavingsLine({ tokens: 3830, serves: 1 })), 'must never say "saved"');
+    // The bug this pair pins: "no repeat reads yet" gated on avoided.tokens,
+    // which is what the RECALL layer served -- not whether repeat reads were
+    // DETECTED. A project whose ledger has found repeat reads but has avoided
+    // nothing (recall not serving, e.g. every hot path declined by the
+    // skeletonizer) was being told it had no repeat reads, which is false.
+    // Spec §8.3's honest zero survives untouched for the genuine zero below.
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 0, serves: 0 }, { first: 10, sameSession: 5, crossSession: 1 }),
+      '6 repeat reads · nothing avoided yet',
+      'repeat reads found but nothing served must report the reads, not deny them');
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 0, serves: 0 }, { first: 3, sameSession: 1, crossSession: 0 }),
+      '1 repeat read · nothing avoided yet',
+      'a single repeat read must read in the singular');
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 0, serves: 0 }, { first: 9, sameSession: 0, crossSession: 0 }),
+      'no repeat reads yet',
+      'first reads alone are not repeat reads -- spec §8.3 honest zero stands');
+    assert.strictEqual(
+      pxProjectSavingsLine(null, null), 'no repeat reads yet',
+      'a missing reads block must not throw');
+    assert.ok(
+      !/saved/i.test(pxProjectSavingsLine({ tokens: 0 }, { sameSession: 5, crossSession: 1 })),
+      'the new state must never say "saved" either');
   });
   check('dashboard: pxHomeSavingsLine reads "<total> tokens of file reading avoided · <pct>% of context loaded"', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5190,7 +5256,9 @@ async function main() {
     const lineBody = grab(src, 'pxHomeSavingsLine');
     assert.ok(pctBody, 'pxSavingsPct is missing from the client bundle');
     assert.ok(lineBody, 'pxHomeSavingsLine is missing from the client bundle');
-    const preamble = 'var pxFmtTokens = ' + fmtBody + ';\nvar pxSavingsPct = ' + pctBody + ';\n';
+    const preamble = 'var pxFmtTokens = ' + fmtBody + ';\nvar pxSavingsPct = ' + pctBody + ';\n'
+      + 'var pxRepeatReads = ' + grab(src, 'pxRepeatReads') + ';\n'
+      + 'var pxSavingsZeroLine = ' + grab(src, 'pxSavingsZeroLine') + ';\n';
     const pxSavingsPct = new Function(preamble + 'return (' + pctBody + ')')();
     const pxHomeSavingsLine = new Function(preamble + 'return (' + lineBody + ')')();
     assert.strictEqual(pxSavingsPct(0, 0), 0, 'no denominator must not throw or read NaN');
@@ -5201,6 +5269,23 @@ async function main() {
       '1.4M tokens of file reading avoided · 6.1% of context loaded');
     assert.ok(!/saved/i.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'must never say "saved"');
     assert.ok(!/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 1400000 }, volume: 21540983 })), 'no dollar figure');
+    // Same three-state contract as the per-project line above: the roll-up
+    // may not claim "no repeat reads" when totals.reads says otherwise.
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 210495091, reads: { first: 10, sameSession: 5, crossSession: 1 } }),
+      '6 repeat reads · nothing avoided yet',
+      'the roll-up must report detected repeat reads even when nothing was served');
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { first: 4, sameSession: 0, crossSession: 1 } }),
+      '1 repeat read · nothing avoided yet',
+      'a single repeat read must read in the singular');
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { first: 4, sameSession: 0, crossSession: 0 } }),
+      'no repeat reads yet',
+      'spec §8.3 honest zero stands when there really are no repeat reads');
+    assert.ok(
+      !/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { sameSession: 5, crossSession: 1 } })),
+      'no dollar figure in the new state either');
   });
   check('dashboard: the Projects grid row renders the per-project savings line from pxData.savingsByPath', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5208,6 +5293,11 @@ async function main() {
     const body = row.slice(0, row.indexOf('\nfunction pxNewCount'));
     assert.ok(/pxProjectSavingsLine\(/.test(body), 'pxRowHtml must render the savings line via pxProjectSavingsLine');
     assert.ok(/pxData\.savingsByPath/.test(body), 'pxRowHtml must read the per-project savings entry from pxData.savingsByPath');
+    // Passing only `avoided` is exactly the bug: pxProjectSavingsLine then
+    // sees no read tiers and reports "no repeat reads yet" for every project
+    // that has repeat reads but no serves yet.
+    assert.ok(/pxProjectSavingsLine\([^)]*savingsEntry\s*&&\s*savingsEntry\.reads/.test(body),
+      'pxRowHtml must pass the entry\'s reads block, not just avoided');
   });
   check('dashboard: the Projects index renders the Home savings stat and fetches /api/savings', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5550,8 +5640,8 @@ async function main() {
 
   // Team push carries the redacted summary (fresh mock: section 8's is gone).
   const mock2 = createMockSupabase();
-  await new Promise(r => mock2.server.listen(17946, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17946';
+  await new Promise(r => mock2.server.listen(P(46), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(46)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'rich@test.dev', 'pw-r', 'Rich');
@@ -6043,7 +6133,7 @@ async function main() {
     assert.deepStrictEqual(migrated, Object.assign({}, fresh, { updatedAt: migrated.updatedAt }),
       'an un-versioned ledger with totals but no evidence must fold exactly like a fresh (null) ledger');
     assert.strictEqual(migrated.requests, window.length, 'the old poisoned totals are discarded, not carried forward');
-    assert.strictEqual(migrated.version, 4, 'the reset ledger is stamped with the current version');
+    assert.strictEqual(migrated.version, require('../lib/ledger-fold').LEDGER_VERSION, 'the reset ledger is stamped with the current version');
   });
   check('ledger-fold: BLOCKING 2 -- a current-version ledger round-trips untouched (no reset)', () => {
     const store = require('../lib/ledger-store');
@@ -6053,14 +6143,14 @@ async function main() {
       { kind: 'usage', ts: new Date(T0).toISOString(), session: 's1', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
     ];
     const built = store.foldProjectLedger(null, window);
-    assert.strictEqual(built.version, 4, 'every fold stamps the current version');
+    assert.strictEqual(built.version, require('../lib/ledger-fold').LEDGER_VERSION, 'every fold stamps the current version');
     // Round-trip through JSON (as it would through disk) and fold the SAME
     // window again: real dedupe evidence plus the current version must
     // dedupe, not reset, unlike the unmigrated case above.
     const reloaded = JSON.parse(JSON.stringify(built));
     const refolded = store.foldProjectLedger(reloaded, window);
     assert.strictEqual(refolded.requests, 1, 'a versioned ledger with real evidence dedupes instead of resetting');
-    assert.strictEqual(refolded.version, 4);
+    assert.strictEqual(refolded.version, require('../lib/ledger-fold').LEDGER_VERSION);
   });
   // H1 (BLOCKER, fix round 1). The producer (this fold, fed by
   // lib/adapters/claude-code.js) used to key fileReaders/hotPaths by the read
@@ -6110,7 +6200,7 @@ async function main() {
       { kind: 'read', ts: '2026-07-28T10:00:00.000Z', session: 'a', toolUseId: 'tu1', file: path.join(proj, 'src', 'x.js'), tool: 'Read' },
     ];
     const next = store.foldProjectLedger(prev, events, undefined, proj);
-    assert.strictEqual(next.version, 4, 'the key-shape change gets its own schema version');
+    assert.strictEqual(next.version, require('../lib/ledger-fold').LEDGER_VERSION, 'the key-shape change gets its own schema version');
     assert.deepStrictEqual(Object.keys(next.fileReaders), ['src/x.js'], 'no absolute key may survive alongside the new relative ones');
     // MEDIUM (fix round 3): this used to reset requests/volume/cost to zero
     // right alongside the key-shaped fields -- exactly the regression the
@@ -6151,7 +6241,7 @@ async function main() {
     // No events at all this pass -- isolates the migration itself from any
     // newly-folded activity.
     const next = store.foldProjectLedger(prev, []);
-    assert.strictEqual(next.version, 4, 'stamped with the current version');
+    assert.strictEqual(next.version, require('../lib/ledger-fold').LEDGER_VERSION, 'stamped with the current version');
     assert.strictEqual(next.requests, 900, 'requests must not be zeroed by the key-shape migration');
     assert.strictEqual(next.volume, 54000000, 'volume must not be zeroed by the key-shape migration');
     assert.strictEqual(next.inCost, 12.5, 'inCost must not be zeroed by the key-shape migration');
@@ -6187,6 +6277,77 @@ async function main() {
     assert.strictEqual(next.volume, 0);
     assert.strictEqual(next.sessions, 0);
     assert.deepStrictEqual(next.reads, { first: 0, sameSession: 0, crossSession: 0 });
+  });
+  // The repeat-reads-are-always-zero bug. readKeyFor keyed a read against the
+  // TRACKED PROJECT, so the same file read from the main checkout and from a
+  // nested linked worktree occupied two fileReaders rows and both scored
+  // 'first' -- a project doing all its work in worktrees (MemBridge's own
+  // layout) could never register a repeat read. Measured on the live ledger
+  // before the fix: 12/12 rows worktree-prefixed, two files present twice.
+  // Pre-fix this fold returns { first: 2, sameSession: 0, crossSession: 0 }.
+  {
+    const wtRepo = path.join(ROOT, 'projects', 'wt-repeat');
+    fs.mkdirSync(path.join(wtRepo, 'lib'), { recursive: true });
+    spawnSync('git', ['init', '-q', wtRepo], { encoding: 'utf8' });
+    fs.writeFileSync(path.join(wtRepo, 'lib', 'scan.js'), 'module.exports = 1;\n');
+    for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+      spawnSync('git', ['-C', wtRepo, ...args], { encoding: 'utf8' });
+    }
+    const wtLinked = path.join(wtRepo, '.claude', 'worktrees', 'feature-y');
+    spawnSync('git', ['-C', wtRepo, 'worktree', 'add', '-q', '-b', 'feature-y', wtLinked], { encoding: 'utf8' });
+    // The repo-root memo caches misses too, and this fixture is git-init'ed
+    // long after other tests may have probed these paths.
+    require('../lib/repo-root').clearCache();
+    const wtEvents = [
+      { ts: '2026-07-29T01:00:00.000Z', kind: 'read', session: 's1', toolUseId: 'a', file: path.join(wtRepo, 'lib', 'scan.js') },
+      { ts: '2026-07-29T02:00:00.000Z', kind: 'read', session: 's2', toolUseId: 'b', file: path.join(wtLinked, 'lib', 'scan.js') },
+    ];
+
+    check('ledger-fold: a worktree read of an already-read file tiers as a repeat, not a first read', () => {
+      const store = require('../lib/ledger-store');
+      const led = store.foldProjectLedger(null, wtEvents, undefined, wtRepo);
+      assert.deepStrictEqual(led.reads, { first: 1, sameSession: 0, crossSession: 1 },
+        'the worktree read is the SAME file -- it must tier crossSession');
+      assert.deepStrictEqual(Object.keys(led.fileReaders), ['lib/scan.js'],
+        'one file must occupy exactly one reader row, with no worktree prefix');
+    });
+
+    check('ledger-fold: the collapsed key is one warm() can still resolve', () => {
+      const store = require('../lib/ledger-store');
+      const led = store.foldProjectLedger(null, wtEvents, undefined, wtRepo);
+      assert.strictEqual(led.hotPaths.length, 1, 'two readers of one path makes it hot');
+      assert.strictEqual(led.hotPaths[0].file, 'lib/scan.js');
+      // lib/recall-store.js's warm() resolves a hot path by joining it onto
+      // projectPath. A key relative to anything ABOVE projectPath would make
+      // that join miss every time, which is why the collapse stops at
+      // worktrees (see lib/repo-root.js's ledgerKeyFor).
+      assert.ok(fs.existsSync(path.join(wtRepo, led.hotPaths[0].file)),
+        'join(projectPath, hotPath.file) must land on the real file');
+    });
+  }
+  check('ledger-fold: a pre-v5 ledger drops worktree-shaped reader rows but keeps every cumulative total', () => {
+    const { normalize } = require('../lib/ledger-fold-state');
+    const st = normalize({
+      version: 4, requests: 985, volume: 210495091, inCost: 12, outCost: 34, sessions: 5,
+      sessionIds: ['s1'], seenKeys: ['k1'],
+      reads: { first: 10, sameSession: 5, crossSession: 1 },
+      readKeys: ['r1'],
+      fileReaders: {
+        '.claude/worktrees/x/lib/scan.js': { sessions: ['s1'], reads: 1, lastTs: '', firstTs: '', firstSession: 's1' },
+      },
+    });
+    // Same contract the v2->v3 bump above holds: only the key-SHAPED fields
+    // reset. Past tier counts stay as they were observed -- the evidence
+    // needed to re-tier them is long gone from the event window, and this
+    // module's whole point is that cumulative totals never move backwards.
+    assert.strictEqual(st.requests, 985, 'requests must survive the key-shape migration');
+    assert.strictEqual(st.volume, 210495091, 'volume must survive');
+    assert.strictEqual(st.sessionsTotal, 5, 'the session total must survive');
+    assert.deepStrictEqual(st.reads, { first: 10, sameSession: 5, crossSession: 1 },
+      'tier totals are cumulative and must survive');
+    assert.deepStrictEqual(st.seenKeys, ['k1'], 'request dedupe evidence must survive');
+    assert.deepStrictEqual(st.fileReaders, {}, 'worktree-shaped reader rows must be cleared');
+    assert.deepStrictEqual(st.readKeys, [], 'their dedupe list is cleared alongside them');
   });
   // MINOR A. Incremental tiering processes reads pass-by-pass; a path's
   // reads can arrive across passes with INVERTED timestamps (an earlier
@@ -6552,6 +6713,90 @@ async function main() {
     assert.ok(!out.text.includes('inner();'), 'bodies gone');
     assert.ok(out.tokens < estimateTokens(src) / 2.25, 'clears the compression floor on this fixture');
     assert.strictEqual(estimateTokens('abcd'.repeat(100)), 100);
+  });
+
+  // Markdown had NO engine: tree-sitter has no grammar for it and the strip
+  // engine finds no brace/indent signatures, so every prose doc came back
+  // ok:false, lib/recall-store.js's warm() bumped noStructure and stored
+  // nothing, and a project whose hot paths are docs could never serve a
+  // skeleton -- so its avoided-token total could never leave zero. Measured
+  // live: the only hot path was a plan doc and noStructure had reached 61.
+  const MD_DOC = [
+    '# Live teammate decisions',
+    '',
+    'Introductory prose that is not structure and should not survive.',
+    'More background prose padding.',
+    '',
+    '## Goals',
+    '',
+    '- ship the thing',
+    'Prose padding.',
+    'Prose padding.',
+    'Prose padding.',
+    '',
+    '```js',
+    '// a fenced code block',
+    '# this hash is NOT a heading, it is inside a fence',
+    'const x = 1;',
+    '```',
+    '',
+    '### Non-goals',
+    '',
+    'Prose. Prose. Prose.',
+    'Prose. Prose. Prose.',
+    'Prose. Prose. Prose.',
+    '',
+    'Setext Heading',
+    '==============',
+    '',
+    'Closing prose.',
+    'Closing prose.',
+    'Closing prose.',
+    '',
+  ].join('\n');
+
+  await check('skeleton: a markdown doc outlines to its headings instead of being refused', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    const out = await skeletonize('/repo/plan.md', MD_DOC);
+    assert.strictEqual(out.ok, true, 'ok:false here is the bug -- warm() would store nothing');
+    assert.strictEqual(out.engine, 'markdown');
+    for (const h of ['# Live teammate decisions', '## Goals', '### Non-goals']) {
+      assert.ok(out.text.includes(h), 'heading must survive: ' + h);
+    }
+    assert.ok(out.text.includes('Setext Heading'), 'setext headings count as structure too');
+    assert.ok(!out.text.includes('Introductory prose'), 'prose must be elided');
+    assert.ok(!out.text.includes('const x = 1'), 'fenced code bodies must be elided');
+    assert.ok(!out.text.includes('this hash is NOT a heading'),
+      'fence tracking is required, or code comments leak in as document structure');
+    assert.ok(out.text.split('\n').length < MD_DOC.split('\n').length * 0.6,
+      'must clear the same compression floor as every other engine');
+  });
+
+  await check('skeleton: a markdown doc with no headings is refused honestly', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    const prose = Array.from({ length: 30 }, (_, i) => 'Just prose line ' + i + '.').join('\n');
+    const out = await skeletonize('/repo/notes.md', prose);
+    assert.strictEqual(out.ok, false,
+      'no headings means genuinely no structure -- refuse rather than cache a body of ellipses');
+  });
+
+  // The exact shape that kept the live install's only hot path refused: two
+  // NUL characters inside a fenced code block (documenting a hash delimiter)
+  // in 100KB of ordinary prose. computeOk()'s binary guard reads the INPUT, so
+  // one NUL anywhere vetoed the whole document. The markdown branch checks
+  // degeneracy against its OUTPUT instead -- an outline of matched heading
+  // lines provably carries none of it.
+  await check('skeleton: a NUL inside a fenced code block does not veto the whole document', async () => {
+    const { skeletonize } = require('../lib/skeleton');
+    // Built with fromCharCode so the fixture carries a real NUL without this
+    // source file itself containing an invisible control character.
+    const NUL = String.fromCharCode(0);
+    const withNul = MD_DOC.replace('const x = 1;', 'const sep = "a' + NUL + 'b' + NUL + 'c";');
+    assert.ok(withNul.includes(NUL), 'the fixture must actually contain the NUL it is testing');
+    const out = await skeletonize('/repo/plan.md', withNul);
+    assert.strictEqual(out.ok, true, 'a NUL buried in a fence must not refuse the document');
+    assert.strictEqual(out.engine, 'markdown');
+    assert.strictEqual(out.text.indexOf(NUL), -1, 'and it must never reach the stored skeleton');
   });
 
   await check('recall-store: round-trips entries, redacts secrets, warms the hot set', async () => {
@@ -8467,7 +8712,7 @@ async function main() {
     const built = store.buildProjectLedger([]);
     const p = store.writeLedger(proj, built);
     assert.ok(fs.existsSync(p), 'ledger.json is written');
-    assert.strictEqual(store.readLedger(proj).version, 4, 'the write round-trips through the same path readLedger uses');
+    assert.strictEqual(store.readLedger(proj).version, require('../lib/ledger-fold').LEDGER_VERSION, 'the write round-trips through the same path readLedger uses');
     const dir = path.dirname(p);
     const leftovers = fs.readdirSync(dir).filter(f => f.startsWith('.ledger.json.') && f.endsWith('.tmp'));
     assert.deepStrictEqual(leftovers, [], 'no temp file survives a successful write');
@@ -8537,10 +8782,12 @@ async function main() {
       fs.writeFileSync(util.statePath(), savedState);
     }
   });
-  // Task 8 (dashboard savings panel): the panel branches on
-  // `avoided.tokens === 0` to show "no repeat reads yet" instead of a
-  // count. That honest zero must ride the wire as a real 0, not be dropped
-  // or coerced to null/undefined by the projection.
+  // Task 8 (dashboard savings panel): with avoided.tokens === 0 the panel
+  // falls through to pxSavingsZeroLine, which needs BOTH numbers -- the zero
+  // itself and the `reads` tier block that says whether any repeat reads were
+  // detected. Both must ride the wire as real values, not be dropped or
+  // coerced to null/undefined by the projection: a missing `reads` block
+  // silently re-creates the "no repeat reads yet" lie this pins against.
   check('api: /api/savings serves an honest zero for a project with no avoided tokens yet', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'savings-zero-proj');
@@ -8560,6 +8807,10 @@ async function main() {
       assert.strictEqual(payload.projects[0].avoided.tokens, 0, 'a real 0, not dropped/undefined');
       assert.strictEqual(payload.projects[0].avoided.serves, 0);
       assert.strictEqual(payload.totals.volume, 1200, 'volume still rides the wire for the % of context loaded denominator');
+      assert.deepStrictEqual(payload.projects[0].reads, { first: 3, sameSession: 0, crossSession: 0 },
+        'the per-project read tiers must ride the wire -- pxSavingsZeroLine reads them');
+      assert.deepStrictEqual(payload.totals.reads, { first: 3, sameSession: 0, crossSession: 0 },
+        'and so must the roll-up tiers -- pxHomeSavingsLine reads them');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
     }
@@ -9429,8 +9680,8 @@ async function main() {
 
   // Team push: the pushed summary field is the Distilled text, redacted.
   const mock3 = createMockSupabase();
-  await new Promise(r => mock3.server.listen(17947, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17947';
+  await new Promise(r => mock3.server.listen(P(47), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(47)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'distill@test.dev', 'pw-x', 'Distill');
@@ -9469,8 +9720,8 @@ async function main() {
   // change model (buildEntries' e.changes) ships inside the `files` column
   // instead of a plain filename list, when present.
   const mockG = createMockSupabase();
-  await new Promise(r => mockG.server.listen(17949, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  await new Promise(r => mockG.server.listen(P(49), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(49)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     const projG = path.join(ROOT, 'projects', 'goal-app');
@@ -9620,8 +9871,8 @@ async function main() {
   // session's rows with the verbatim prompt forced on (backfill) or off
   // (scrub), overwriting already-synced rows via merge-duplicates.
   const mockRS = createMockSupabase();
-  await new Promise(r => mockRS.server.listen(17955, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17955';
+  await new Promise(r => mockRS.server.listen(P(55), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(55)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     const projRS = path.join(ROOT, 'projects', 'reshare-app');
@@ -9706,8 +9957,8 @@ async function main() {
   {
     const tc = require('../lib/teamcrypto');
     const mockRE = createMockSupabase();
-    await new Promise(r => mockRE.server.listen(17956, '127.0.0.1', r));
-    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17956';
+    await new Promise(r => mockRE.server.listen(P(56), '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(56)}`;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
     try {
       const projRE = path.join(ROOT, 'projects', 'reshare-enc-app');
@@ -9797,8 +10048,8 @@ async function main() {
   // re-pushed on the next cycle.
   {
     const mockWP = createMockSupabase();
-    await new Promise(r => mockWP.server.listen(17959, '127.0.0.1', r));
-    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17959';
+    await new Promise(r => mockWP.server.listen(P(59), '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(59)}`;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
     try {
       const projWP = path.join(ROOT, 'projects', 'wire-parity-app');
@@ -9886,7 +10137,7 @@ async function main() {
   // backfill (share=true) or scrub (share=false) already-synced rows.
   {
     const mockSE = createMockSupabase();
-    const MOCK_PORT_SE = 17958, SRV_PORT_SE = 17957;
+    const MOCK_PORT_SE = P(58), SRV_PORT_SE = P(57);
     await new Promise(r => mockSE.server.listen(MOCK_PORT_SE, '127.0.0.1', r));
     process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_SE;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
@@ -9953,7 +10204,7 @@ async function main() {
   // reads (GET) are never blocked. We assert against /api/projects/add because it
   // 400s on a missing path, so a passed guard is observable as 400 (not a mutation).
   {
-    const CSRF_PORT = 17983;
+    const CSRF_PORT = P(83);
     const srvCsrf = startServer(CSRF_PORT, { retries: 0 });
     try {
       const base = 'http://127.0.0.1:' + CSRF_PORT;
@@ -10023,7 +10274,7 @@ async function main() {
   // directory MemBridge has never seen.
   // =====================================================================
   {
-    const SEC_PORT = 17984, ATTACKER_PORT = 17985;
+    const SEC_PORT = P(84), ATTACKER_PORT = P(85);
     // Stands in for the attacker's collection server. Records every request
     // it receives — URL, headers and body — so a leaked key is observable.
     const captured = [];
@@ -10415,7 +10666,7 @@ async function main() {
   // dashboard must surface a share failure inline, never via the offline pill.
   {
     const mockLV = createMockSupabase();
-    const MOCK_PORT_LV = 17961, SRV_PORT_LV = 17962;
+    const MOCK_PORT_LV = P(61), SRV_PORT_LV = P(62);
     await new Promise(r => mockLV.server.listen(MOCK_PORT_LV, '127.0.0.1', r));
     process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_LV;
     process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
@@ -10530,8 +10781,8 @@ async function main() {
   // Task 8: ship decisions/gotchas to teammates end to end, and pull must
   // survive a backend still missing goal/changes (or any optional column).
   const mockS = createMockSupabase();
-  await new Promise(r => mockS.server.listen(17951, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17951';
+  await new Promise(r => mockS.server.listen(P(51), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(51)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     const projS = path.join(ROOT, 'projects', 'summary-app');
@@ -10923,8 +11174,8 @@ async function main() {
   });
 
   const mock4 = createMockSupabase();
-  await new Promise(r => mock4.server.listen(17948, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17948';
+  await new Promise(r => mock4.server.listen(P(48), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(48)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'seq@test.dev', 'pw-s', 'Seq');
@@ -10998,8 +11249,8 @@ async function main() {
   // Every assertion inspects the rows the mock server actually received: the
   // gate is about what crosses the wire, not what the client believes it sent.
   const mockPg = createMockSupabase();
-  await new Promise(r => mockPg.server.listen(17950, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17950';
+  await new Promise(r => mockPg.server.listen(P(50), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(50)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   const pgTs = sec => new Date(Date.now() - sec * 1000).toISOString();
   const projPg = path.join(ROOT, 'projects', 'prompt-gate-app');
@@ -11675,10 +11926,10 @@ async function main() {
     // before the wiring exists).
     {
       const mockE = createMockSupabase();
-      await new Promise(r => mockE.server.listen(17952, '127.0.0.1', r));
+      await new Promise(r => mockE.server.listen(P(52), '127.0.0.1', r));
       const savedEnvUrl = process.env.MEMBRIDGE_TEAM_URL;
       const savedEnvKey = process.env.MEMBRIDGE_TEAM_ANON_KEY;
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17952';
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(52)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
       const projE = path.join(ROOT, 'projects', 'encrypt-app');
       fs.mkdirSync(projE, { recursive: true });
@@ -11909,8 +12160,8 @@ async function main() {
     const mockE2E = createMockSupabase();
     let e2eErr = null, resAlice = null, resBob = null, bobEntries = null, origRows = null;
     try {
-      await new Promise(r => mockE2E.server.listen(17953, '127.0.0.1', r));
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17953';
+      await new Promise(r => mockE2E.server.listen(P(53), '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(53)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
       // Alice: account, team, linked project.
@@ -12034,8 +12285,8 @@ async function main() {
       let tErr = null, eveEntriesClosed = null, eveEntriesHatch = null, resEveClosed = null, feedEve = null, feedEveStale = null;
       let fpEve = null, trustRes = null, pinsAfterTrust = null, danaId = null, danaNewPub = null;
       try {
-        await new Promise(r => mockT.server.listen(17955, '127.0.0.1', r));
-        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17955';
+        await new Promise(r => mockT.server.listen(P(55), '127.0.0.1', r));
+        process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(55)}`;
         process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
         process.env.MEMBRIDGE_HOME = homeD;
@@ -12206,8 +12457,8 @@ async function main() {
       // would be a brand-new identity that cannot unseal the epoch-1 key.
       const kcCarol = mkMemKeychain();
       try {
-        await new Promise(r => mockPre.server.listen(17954, '127.0.0.1', r));
-        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17954';
+        await new Promise(r => mockPre.server.listen(P(54), '127.0.0.1', r));
+        process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(54)}`;
         process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
         process.env.MEMBRIDGE_HOME = homeCarol;
         setTeamCfg();
@@ -12370,8 +12621,8 @@ async function main() {
   });
 
   const mock5 = createMockSupabase();
-  await new Promise(r => mock5.server.listen(17949, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17949';
+  await new Promise(r => mock5.server.listen(P(49), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(49)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   try {
     await teamsync.signup(util.getConfig(), 'red@test.dev', 'pw-r', 'Red');
@@ -13169,11 +13420,18 @@ async function main() {
       console.log('UNREACHABLE');
     `;
     const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
-    check('mcp: a missing @modelcontextprotocol/sdk or zod produces exactly the friendly message on stderr and a non-zero exit', () => {
+    check('mcp: a broken install surfaces the real module error and a non-zero exit, with no stale opt-in advice', () => {
       assert.notStrictEqual(out.status, 0, `expected non-zero exit, got ${out.status}`);
-      assert.strictEqual(out.stderr.trim(), mcpMod.MISSING_DEPS_MESSAGE.trim(), `stderr was: ${out.stderr}`);
-      assert.ok(out.stderr.includes('npm install @modelcontextprotocol/sdk zod'), 'missing the actionable install command');
-      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past process.exit');
+      assert.ok(
+        out.stderr.includes("Cannot find module '@modelcontextprotocol/sdk/server/mcp.js'"),
+        `the real module error must reach stderr; stderr was: ${out.stderr}`
+      );
+      assert.ok(!/opt-in/i.test(out.stderr), `must not claim the deps are opt-in; stderr was: ${out.stderr}`);
+      assert.ok(
+        !/npm install @modelcontextprotocol\/sdk zod/.test(out.stderr),
+        'must not advise an install that a plain `npm install` already performs'
+      );
+      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past the throw');
     });
   }
 
@@ -15493,8 +15751,8 @@ async function main() {
     let bobStaleDropped = null, bobRecovered = null, rekeyRes = null, rekeyEpoch = null;
     let nonOwnerRekey = null, aliceUserId = null, bobUserId = null;
     try {
-      await new Promise(r => mockR.server.listen(17961, '127.0.0.1', r));
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17961';
+      await new Promise(r => mockR.server.listen(P(61), '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(61)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
       // Alice owns the team; Bob joins and bootstraps his ORIGINAL identity.
@@ -15602,8 +15860,8 @@ async function main() {
     const mockM = createMockSupabase();
     let err = null, bobUserId = null, openEpochs = null, teamId = null;
     try {
-      await new Promise(r => mockM.server.listen(17974, '127.0.0.1', r));
-      process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:17974';
+      await new Promise(r => mockM.server.listen(P(74), '127.0.0.1', r));
+      process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(74)}`;
       process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
       process.env.MEMBRIDGE_HOME = hA; setCfg();
@@ -16078,6 +16336,46 @@ const repoRoot = require('../lib/repo-root');
     assert.strictEqual(repoRoot.wireKeyFor(path.join(mono, 'src', 'root.ts')), 'src/root.ts');
   });
 
+  // ---- ledgerKeyFor: the repeat-read bug ----
+  // The ledger keyed reads against the TRACKED PROJECT, so the same file read
+  // from a nested worktree and from the main checkout produced two different
+  // keys and could never tier as a repeat read. Measured on a live ledger:
+  // every one of 12 fileReaders keys carried a .claude/worktrees/<name>/
+  // prefix, with two files present TWICE under different worktrees -- genuine
+  // cross-session repeat reads both scored 'first'.
+  check('ledger-key: a worktree read and a main-checkout read of one file share a key', () => {
+    const main = repoRoot.ledgerKeyFor(mono, path.join(mono, 'src', 'root.ts'));
+    const fromWt = repoRoot.ledgerKeyFor(mono, path.join(wt, 'src', 'root.ts'));
+    assert.strictEqual(main, 'src/root.ts');
+    assert.strictEqual(fromWt, 'src/root.ts', 'the worktree prefix must be stripped, not baked into the key');
+    assert.strictEqual(main, fromWt, 'same file, one key -- this equality IS the repeat-read fix');
+  });
+
+  check('ledger-key: a file outside the tracked project is dropped, as before', () => {
+    const outside = path.join(ROOT, 'projects', 'not-a-repo', 'a.js');
+    assert.strictEqual(repoRoot.ledgerKeyFor(mono, outside), null,
+      'containment is still the gate -- another repo is not this ledger\'s business');
+  });
+
+  check('ledger-key: a monorepo sub-project keeps project-relative keys', () => {
+    // Only a LINKED WORKTREE collapses. A normal clone above the tracked root
+    // must not, or lib/recall-store.js's warm() -- which joins projectPath
+    // onto the key -- would resolve every hot path to a non-existent file.
+    const proj = path.join(mono, 'packages', 'api');
+    assert.strictEqual(repoRoot.ledgerKeyFor(proj, path.join(api, 'validate.ts')), 'src/validate.ts');
+  });
+
+  check('ledger-key: a project that IS a worktree keys relative to itself', () => {
+    assert.strictEqual(repoRoot.ledgerKeyFor(wt, path.join(wt, 'src', 'root.ts')), 'src/root.ts');
+  });
+
+  check('ledger-key: warm() can resolve every key it is handed', () => {
+    // The contract recall-store.warm() depends on: path.join(projectPath, key)
+    // must land on the real file for a main-checkout read.
+    const key = repoRoot.ledgerKeyFor(mono, path.join(mono, 'src', 'root.ts'));
+    assert.ok(fs.existsSync(path.join(mono, key)), 'join(projectPath, key) must resolve');
+  });
+
   // ---- teamsync emits wire keys (spec §7) ----
   // Reuses the `mono` / `wt` fixture above: one repo, a monorepo subdirectory,
   // and a worktree nested inside it — the three shapes entryToRow has to agree
@@ -16142,7 +16440,6 @@ const repoRoot = require('../lib/repo-root');
   });
 }
 
-// --- summary ---
   // ---- teammate notes: pure index logic (spec §4, §5) ----
   const notes = require('../lib/teammate-notes');
 
@@ -16400,6 +16697,2062 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(path.dirname(renamedFrom), path.dirname(notesStore.notesPath(np)),
         'the temp file must sit in the target directory so the rename is atomic');
     });
+  }
+
+// ---- teammate notes: kill switch + hook registration (plan Task 7) ----
+  {
+    check('notes: enabled by default', () => {
+      assert.strictEqual(notes.isNotesEnabled({}), true);
+    });
+
+    check('notes: kill switch disables the feature', () => {
+      assert.strictEqual(notes.isNotesEnabled({ teammateNotes: { enabled: false } }), false);
+    });
+
+    check('notes: an unrelated config key does not disable it', () => {
+      assert.strictEqual(notes.isNotesEnabled({ teammateNotes: {} }), true);
+    });
+
+    // Every registration check drives its OWN settings file. reconcileNotesHooks
+    // writes wherever MEMBRIDGE_CLAUDE_SETTINGS points, and the suite sets that
+    // globally much earlier (the API block), so sharing it would let these
+    // checks scribble over another block's fixture.
+    const withNotesSettings = (basename, seed, fn) => {
+      const f = path.join(ROOT, basename);
+      fs.writeFileSync(f, JSON.stringify(seed, null, 2));
+      const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+      try {
+        return fn(f);
+      } finally {
+        process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+      }
+    };
+    const cmdsOf = arr => (arr || []).flatMap(e => (e.hooks || []).map(h => h.command));
+    const countSub = (arr, re) => cmdsOf(arr).filter(c => re.test(c)).length;
+
+    check('hooks: reconcileNotesHooks registers SessionStart and PostCompact', () => {
+      withNotesSettings('claude-settings-notes-fresh.json', { model: 'opus' }, () => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, true, 'the first reconcile must write');
+        const settings = JSON.parse(read(r.file));
+        assert.ok(cmdsOf(settings.hooks.SessionStart).some(c => /notes-session-start/.test(c)));
+        assert.ok(cmdsOf(settings.hooks.PostCompact).some(c => /notes-post-compact/.test(c)));
+        assert.strictEqual(settings.model, 'opus', 'an unrelated settings key was lost');
+        // FileChanged is deliberately NOT registered: the Task 1 spike proved it
+        // suppresses systemMessage and that its matcher rejects any filename
+        // containing '.' or '-'. Registering it would be a silent no-op surface.
+        assert.strictEqual(settings.hooks.FileChanged, undefined, 'FileChanged must never be registered');
+      });
+    });
+
+    check('hooks: reconcileNotesHooks is idempotent', () => {
+      withNotesSettings('claude-settings-notes-idempotent.json', {}, f => {
+        hooks.reconcileNotesHooks();
+        const after1 = read(f);
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, false, 'a converged second reconcile must not rewrite the file');
+        assert.strictEqual(read(f), after1, 'the second reconcile changed the file');
+        const settings = JSON.parse(read(r.file));
+        assert.strictEqual(countSub(settings.hooks.SessionStart, /notes-session-start/), 1);
+        assert.strictEqual(countSub(settings.hooks.PostCompact, /notes-post-compact/), 1);
+      });
+    });
+
+    // The fixture seeds a STALE command of ours next to the user's entries, so
+    // the reconcile pass under test is one that actually REWRITES the file.
+    // Prepending to an already-converged install (the obvious way to write this)
+    // proves nothing: that second reconcile is a no-op that writes nothing at
+    // all, so the user's entry survives on disk however badly the reconciler
+    // mangles it in memory — a mutant that deletes every foreign hook passes.
+    check('hooks: reconcileNotesHooks leaves a foreign SessionStart entry alone', () => {
+      const mineStart = { hooks: [{ type: 'command', command: 'echo mine' }] };
+      const minePost = { matcher: 'manual', hooks: [{ type: 'command', command: 'echo mine-compact' }] };
+      const stale = sub => ({ hooks: [{ type: 'command', command: `"/old/node" "/old/lib/membridge-hook.js" ${sub}`, timeout: 5 }] });
+      const seed = {
+        hooks: {
+          SessionStart: [mineStart, stale('notes-session-start')],
+          PostCompact: [minePost, stale('notes-post-compact')],
+        },
+      };
+      withNotesSettings('claude-settings-notes-foreign.json', seed, f => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, true, 'the fixture must force a real write, or this check proves nothing');
+        assert.strictEqual(r.upgraded, 2, 'both stale notes commands should have been recognized and upgraded');
+        const s1 = JSON.parse(read(f));
+        // Not merely "still present somewhere": still FIRST, byte-identical and
+        // not duplicated. A reconcile that rebuilt the array around its own
+        // entry, or reordered foreign entries behind it, sails through a bare
+        // includes() check.
+        assert.deepStrictEqual(s1.hooks.SessionStart[0], mineStart, "the user's SessionStart entry was moved, rewritten or dropped");
+        assert.deepStrictEqual(s1.hooks.PostCompact[0], minePost, "the user's PostCompact entry was moved, rewritten or dropped");
+        assert.strictEqual(countSub(s1.hooks.SessionStart, /^echo mine$/), 1, "the user's entry was duplicated");
+        assert.strictEqual(countSub(s1.hooks.SessionStart, /notes-session-start/), 1, 'our entry was duplicated');
+        assert.strictEqual(s1.hooks.SessionStart.length, 2);
+        assert.strictEqual(s1.hooks.PostCompact.length, 2);
+        // And the converged pass after it is a true no-op: nothing rewritten,
+        // nothing appended alongside what it just upgraded.
+        const before = read(f);
+        assert.strictEqual(hooks.reconcileNotesHooks().wrote, false, 'the pass after an upgrade must be a no-op');
+        assert.strictEqual(read(f), before);
+      });
+    });
+
+    // The destructive case a per-ENTRY ownership test cannot see: a user hook
+    // sharing one entry object with ours. Claiming the whole entry as ours
+    // deletes the user's hook along with it.
+    check('hooks: reconcileNotesHooks upgrades a stale command without touching a user hook in the same entry', () => {
+      const userHook = { type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mystart.js' };
+      const seed = {
+        hooks: {
+          SessionStart: [{
+            hooks: [userHook, { type: 'command', command: '"/old/node" "/old/lib/membridge-hook.js" notes-session-start', timeout: 5 }],
+          }],
+        },
+      };
+      withNotesSettings('claude-settings-notes-mixed.json', seed, f => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.upgraded, 1, 'the stale notes command was not recognized as ours');
+        const s = JSON.parse(read(f));
+        assert.strictEqual(s.hooks.SessionStart.length, 1, 'the mixed entry was split, dropped or duplicated');
+        const inner = s.hooks.SessionStart[0].hooks;
+        assert.strictEqual(inner.length, 2, 'the stale hook was appended alongside instead of upgraded in place');
+        assert.deepStrictEqual(inner[0], userHook, "the user's hook inside our entry was rewritten or dropped");
+        assert.strictEqual(inner[1].command, `${hooks.hookCommand()} notes-session-start`, 'the stale install path was not upgraded');
+        assert.strictEqual(inner[1].timeout, 5, 'sibling fields lost in the upgrade');
+      });
+    });
+
+    check('hooks: remove-hooks strips the notes entries and leaves foreign ones alone', () => {
+      const mineStart = { hooks: [{ type: 'command', command: 'echo my-session-start' }] };
+      const minePost = { hooks: [{ type: 'command', command: 'echo my-post-compact' }] };
+      const seed = { hooks: { SessionStart: [mineStart], PostCompact: [minePost] } };
+      const f = path.join(ROOT, 'claude-settings-notes-remove.json');
+      fs.writeFileSync(f, JSON.stringify(seed, null, 2));
+      const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const before = JSON.parse(read(f));
+      assert.strictEqual(countSub(before.hooks.SessionStart, /notes-session-start/), 1, 'setup-hooks did not register the notes SessionStart hook');
+      assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 1, 'setup-hooks did not register the notes PostCompact hook');
+      const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(rm.status, 0, rm.stderr);
+      const after = JSON.parse(read(f));
+      assert.deepStrictEqual(after.hooks.SessionStart, [mineStart], "remove-hooks left our SessionStart entry behind, or ate the user's");
+      assert.deepStrictEqual(after.hooks.PostCompact, [minePost], "remove-hooks left our PostCompact entry behind, or ate the user's");
+    });
+  }
+
+  // ---- MCP JSON config merge (mcp spec §5.3) ----
+  const mcpJson = require('../lib/mcp-json');
+
+  {
+    const jRoot = path.join(ROOT, 'mcpjson');
+    fs.mkdirSync(jRoot, { recursive: true });
+    const ENTRY = { command: '/usr/bin/node', args: ['/opt/membridge/bin/membridge.js', 'mcp'] };
+
+    check('mcp-json: a missing file reads as empty-but-writable', () => {
+      const r = mcpJson.readConfig(path.join(jRoot, 'absent.json'));
+      assert.ok(r, 'a missing file is writable, not a refusal');
+      assert.strictEqual(r.existed, false);
+      assert.deepStrictEqual(r.data, {});
+    });
+
+    check('mcp-json: invalid JSON is a REFUSAL (null), never treated as empty', () => {
+      const f = path.join(jRoot, 'broken.json');
+      fs.writeFileSync(f, '{not json');
+      assert.strictEqual(mcpJson.readConfig(f), null);
+    });
+
+    check('mcp-json: mcpServers present but not an object is a refusal', () => {
+      const f = path.join(jRoot, 'wrongshape.json');
+      fs.writeFileSync(f, JSON.stringify({ mcpServers: ['nope'] }));
+      assert.strictEqual(mcpJson.readConfig(f), null);
+    });
+
+    check('mcp-json: a file holding literally null is a refusal', () => {
+      const f = path.join(jRoot, 'null.json');
+      fs.writeFileSync(f, 'null\n');
+      assert.strictEqual(mcpJson.readConfig(f), null);
+    });
+
+    check('mcp-json: a config with no mcpServers key at all is usable, not a refusal', () => {
+      const f = path.join(jRoot, 'nokey.json');
+      fs.writeFileSync(f, JSON.stringify({ somethingElse: true }));
+      const r = mcpJson.readConfig(f);
+      assert.ok(r, 'an absent mcpServers key is a config we can add to');
+      assert.strictEqual(r.existed, true);
+      assert.strictEqual(r.data.somethingElse, true);
+      const { data, changed } = mcpJson.upsertServer(r.data, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.strictEqual(data.somethingElse, true, 'the rest of their config must survive');
+      assert.deepStrictEqual(data.mcpServers.membridge, ENTRY);
+    });
+
+    // The clobber this module exists to prevent. readConfig must not decide
+    // "missing" from "readFileSync threw" — only ENOENT is missing. A config
+    // we cannot READ can still be renamed over (rename needs the directory
+    // writable, not the file), so mis-reading it as {} destroys it.
+    check('mcp-json: an existing but unreadable config is a refusal, never "missing"', () => {
+      const asDir = path.join(jRoot, 'isdir.json');
+      fs.mkdirSync(asDir, { recursive: true });
+      assert.strictEqual(mcpJson.readConfig(asDir), null, 'a directory in the config slot is not an absent file');
+
+      const locked = path.join(jRoot, 'locked.json');
+      fs.writeFileSync(locked, JSON.stringify({ mcpServers: { theirs: { command: 'x' } } }));
+      fs.chmodSync(locked, 0o000);
+      let unreadable = false;
+      try { fs.readFileSync(locked, 'utf8'); } catch { unreadable = true; }
+      try {
+        // root can read anything, so only assert where the OS actually denied us
+        if (unreadable) assert.strictEqual(mcpJson.readConfig(locked), null, 'an unreadable config must never read as empty-and-writable');
+      } finally {
+        fs.chmodSync(locked, 0o600);
+      }
+    });
+
+    check('mcp-json: upsert adds ours and preserves foreign servers', () => {
+      const { data, changed } = mcpJson.upsertServer({ mcpServers: { other: { command: 'x' } }, unrelated: 7 }, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.deepStrictEqual(data.mcpServers.other, { command: 'x' });
+      assert.strictEqual(data.unrelated, 7, 'unrelated top-level keys must survive');
+      assert.deepStrictEqual(data.mcpServers.membridge, ENTRY);
+    });
+
+    check('mcp-json: upsert is idempotent', () => {
+      const first = mcpJson.upsertServer({}, 'membridge', ENTRY);
+      const second = mcpJson.upsertServer(first.data, 'membridge', ENTRY);
+      assert.strictEqual(second.changed, false);
+    });
+
+    check('mcp-json: upsert updates a stale command', () => {
+      const stale = { mcpServers: { membridge: { command: '/old/node', args: [] } } };
+      const { data, changed } = mcpJson.upsertServer(stale, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.strictEqual(data.mcpServers.membridge.command, '/usr/bin/node');
+    });
+
+    check('mcp-json: upsert leaves the caller\'s config untouched', () => {
+      const theirs = Object.freeze({ mcpServers: Object.freeze({ other: Object.freeze({ command: 'x' }) }) });
+      const { changed } = mcpJson.upsertServer(theirs, 'membridge', ENTRY);
+      assert.strictEqual(changed, true);
+      assert.deepStrictEqual(theirs.mcpServers, { other: { command: 'x' } }, 'a caller that then refuses to write must be holding what it started with');
+    });
+
+    check('mcp-json: removeServer only removes what isOurs approves', () => {
+      // The real shape: node is the command, OUR path lives in argv. Ownership
+      // therefore has to look at the whole invocation (mcp spec §5.4).
+      const isOurs = e => [e.command, ...(e.args || [])].some(s => /(^|\/)bin\/membridge\.js$/.test(String(s)));
+
+      const unrelated = { command: '/somebody/elses/thing' };
+      const kept = mcpJson.removeServer({ mcpServers: { membridge: unrelated, other: { command: 'x' } } }, 'membridge', isOurs);
+      assert.strictEqual(kept.changed, false, 'a foreign server merely NAMED membridge must survive');
+      assert.deepStrictEqual(kept.data.mcpServers.membridge, unrelated, 'and must still be present in the returned config');
+
+      // The nastier foreign case: it name-drops membridge but is not our binary.
+      const lookalike = { command: '/usr/bin/node', args: ['/home/them/my-membridge-helper.js'] };
+      const kept2 = mcpJson.removeServer({ mcpServers: { membridge: lookalike } }, 'membridge', isOurs);
+      assert.strictEqual(kept2.changed, false, 'merely mentioning membridge is not ownership');
+      assert.deepStrictEqual(kept2.data.mcpServers.membridge, lookalike);
+
+      const ours = mcpJson.removeServer({ mcpServers: { membridge: ENTRY, other: { command: 'x' } } }, 'membridge', isOurs);
+      assert.strictEqual(ours.changed, true);
+      assert.strictEqual(ours.data.mcpServers.membridge, undefined);
+      assert.deepStrictEqual(ours.data.mcpServers.other, { command: 'x' }, 'removing ours must not disturb theirs');
+    });
+
+    // Asserting "no strays" alone proves nothing — a plain writeFileSync never
+    // makes a temp file either, so that test passes against the non-atomic
+    // implementation (measured). Watch the rename instead: the complete bytes
+    // must already be staged in a SIBLING temp when it fires, and the
+    // destination must not have been touched before then.
+    check('mcp-json: write stages the whole file in a sibling temp and lands it by rename', () => {
+      const f = path.join(jRoot, 'out.json');
+      const payload = { mcpServers: { membridge: ENTRY } };
+      const expected = `${JSON.stringify(payload, null, 2)}\n`;
+      const realRename = fs.renameSync;
+      const renames = [];
+      fs.renameSync = (from, to) => {
+        renames.push({ from, to, staged: fs.readFileSync(from, 'utf8'), destExisted: fs.existsSync(to) });
+        return realRename(from, to);
+      };
+      try {
+        mcpJson.writeConfig(f, payload);
+      } finally {
+        fs.renameSync = realRename;
+      }
+      assert.strictEqual(renames.length, 1, 'the config must arrive via exactly one rename, not a direct write');
+      assert.strictEqual(renames[0].to, f);
+      assert.strictEqual(path.dirname(renames[0].from), path.dirname(f), 'the temp must be a sibling — a cross-filesystem rename is not atomic');
+      assert.ok(/\.tmp$/.test(renames[0].from), `temp file should be marked .tmp, got ${renames[0].from}`);
+      assert.strictEqual(renames[0].staged, expected, 'every byte must be staged BEFORE the rename');
+      assert.strictEqual(renames[0].destExisted, false, 'nothing may be written at the destination before the rename');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(f, 'utf8')).mcpServers.membridge, ENTRY);
+      const strays = fs.readdirSync(jRoot).filter(n => n.includes('.tmp'));
+      assert.deepStrictEqual(strays, []);
+    });
+
+    check('mcp-json: write creates missing parent directories', () => {
+      const f = path.join(jRoot, 'deep', 'nested', 'mcp.json');
+      mcpJson.writeConfig(f, { mcpServers: {} });
+      assert.ok(fs.existsSync(f));
+    });
+  }
+
+  // ---- Codex TOML block surgery (mcp spec §5.2) ----
+  const mcpToml = require('../lib/mcp-toml');
+
+  {
+    // A fixture with the shapes that actually break naive parsers.
+    const REAL = [
+      '# my codex config',
+      '[plugins."github@openai-curated"]',
+      'enabled = true',
+      '',
+      '[projects."/Users/marco/Documents/AI Shit/CopyNigga"]',
+      'trust = "full"',
+      '',
+      '[mcp_servers.node_repl]',
+      'command = "node"',
+      '',
+      '[mcp_servers.node_repl.env]',
+      'FOO = "bar"',
+      '',
+    ].join('\n');
+
+    const BLOCK = ['command = "/usr/bin/node"', 'args = ["/opt/membridge/bin/membridge.js", "mcp"]'];
+
+    check('mcp-toml: appends a new block and leaves every other byte alone', () => {
+      const { text, changed } = mcpToml.upsertBlock(REAL, 'mcp_servers.membridge', BLOCK);
+      assert.strictEqual(changed, true);
+      assert.ok(text.startsWith(REAL), 'existing content must be a byte-identical prefix');
+      assert.ok(text.includes('[mcp_servers.membridge]'));
+      assert.ok(text.includes('args = ["/opt/membridge/bin/membridge.js", "mcp"]'));
+    });
+
+    check('mcp-toml: quoted keys with spaces, slashes and @ survive verbatim', () => {
+      const { text } = mcpToml.upsertBlock(REAL, 'mcp_servers.membridge', BLOCK);
+      assert.ok(text.includes('[plugins."github@openai-curated"]'), 'the @ key must be untouched');
+      assert.ok(text.includes('[projects."/Users/marco/Documents/AI Shit/CopyNigga"]'), 'the spaced path key must be untouched');
+      assert.ok(text.includes('# my codex config'), 'comments must survive');
+    });
+
+    check('mcp-toml: replaces only our block, keeping neighbours', () => {
+      const once = mcpToml.upsertBlock(REAL, 'mcp_servers.membridge', BLOCK).text;
+      const twice = mcpToml.upsertBlock(once, 'mcp_servers.membridge', ['command = "/new/node"']);
+      assert.strictEqual(twice.changed, true);
+      assert.strictEqual((twice.text.match(/\[mcp_servers\.membridge\]/g) || []).length, 1, 'exactly one block');
+      assert.ok(twice.text.includes('command = "/new/node"'));
+      assert.ok(!twice.text.includes('/usr/bin/node'), 'the old body must be gone');
+      assert.ok(twice.text.includes('[mcp_servers.node_repl]'), 'the neighbouring server must survive');
+      assert.ok(twice.text.includes('FOO = "bar"'), 'its sub-table must survive');
+    });
+
+    check('mcp-toml: re-running with identical content reports changed:false', () => {
+      const once = mcpToml.upsertBlock(REAL, 'mcp_servers.membridge', BLOCK).text;
+      const again = mcpToml.upsertBlock(once, 'mcp_servers.membridge', BLOCK);
+      assert.strictEqual(again.changed, false, 'idempotent: no rewrite when nothing differs');
+      assert.strictEqual(again.text, once);
+    });
+
+    check('mcp-toml: a block at end of file replaces cleanly', () => {
+      const atEnd = REAL + '\n[mcp_servers.membridge]\ncommand = "old"\n';
+      const { text } = mcpToml.upsertBlock(atEnd, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.includes('command = "new"'));
+      assert.ok(!text.includes('command = "old"'));
+      assert.strictEqual((text.match(/\[mcp_servers\.membridge\]/g) || []).length, 1);
+    });
+
+    check('mcp-toml: our own sub-table is replaced with the block, not orphaned', () => {
+      const withSub = REAL + '\n[mcp_servers.membridge]\ncommand = "old"\n\n[mcp_servers.membridge.env]\nA = "1"\n\n[other]\nx = 1\n';
+      const { text } = mcpToml.upsertBlock(withSub, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(!text.includes('A = "1"'), 'our stale sub-table must not survive');
+      assert.ok(text.includes('[other]'), 'a foreign table after it must survive');
+    });
+
+    check('mcp-toml: findBlock returns null when absent', () => {
+      assert.strictEqual(mcpToml.findBlock(REAL, 'mcp_servers.membridge'), null);
+    });
+
+    check('mcp-toml: removeBlock strips only ours', () => {
+      const once = mcpToml.upsertBlock(REAL, 'mcp_servers.membridge', BLOCK).text;
+      const { text, changed } = mcpToml.removeBlock(once, 'mcp_servers.membridge');
+      assert.strictEqual(changed, true);
+      assert.ok(!text.includes('[mcp_servers.membridge]'));
+      assert.ok(text.includes('[mcp_servers.node_repl]'));
+    });
+
+    check('mcp-toml: empty input yields just our block', () => {
+      const { text } = mcpToml.upsertBlock('', 'mcp_servers.membridge', BLOCK);
+      assert.ok(text.trim().startsWith('[mcp_servers.membridge]'));
+    });
+
+    // ---- shapes a real config contains that naive line-scanning gets wrong ----
+
+    // Windows is explicitly in scope (Global Constraints: "Cover Linux (XDG)
+    // and Windows"). A CRLF file whose header we fail to SEE is not a cosmetic
+    // bug: we append a second [mcp_servers.membridge], and a duplicate table is
+    // a TOML parse error -- we would break the config we were registering into.
+    check('mcp-toml: CRLF line endings -- our block is replaced, not duplicated', () => {
+      const crlf = '# c\r\n[mcp_servers.membridge]\r\ncommand = "old"\r\n\r\n[other]\r\nx = 1\r\n';
+      const { text, changed } = mcpToml.upsertBlock(crlf, 'mcp_servers.membridge', ['command = "new"']);
+      assert.strictEqual(changed, true);
+      assert.strictEqual((text.match(/\[mcp_servers\.membridge\]/g) || []).length, 1, 'exactly one block, not an appended duplicate');
+      assert.ok(!text.includes('command = "old"'), 'the old body must be gone');
+      assert.ok(text.includes('[other]\r\nx = 1\r\n'), "the neighbour's CRLF bytes must survive");
+      assert.ok(!/[^\r]\n/.test(text), 'no bare LF may be introduced into a CRLF file');
+      const again = mcpToml.upsertBlock(text, 'mcp_servers.membridge', ['command = "new"']);
+      assert.strictEqual(again.changed, false, 'CRLF upsert must be idempotent too');
+    });
+
+    // The whole point of the module: bytes we did not write are not ours to
+    // reformat. A user's double blank line is a byte outside our block.
+    check('mcp-toml: blank-line runs elsewhere in the file are not reflowed', () => {
+      const spaced = '[alpha]\na = 1\n\n\n[beta]\nb = 2\n\n[mcp_servers.membridge]\ncommand = "old"\n\n[gamma]\ng = 1\n';
+      const { text } = mcpToml.upsertBlock(spaced, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.includes('a = 1\n\n\n[beta]'), "the user's double blank line must survive untouched");
+      assert.ok(text.startsWith('[alpha]\na = 1\n\n\n[beta]\nb = 2\n\n'), 'everything before our block must be a byte-identical prefix');
+      assert.ok(text.endsWith('[gamma]\ng = 1\n'), 'everything after our block must be byte-identical');
+    });
+
+    // A header we fail to RECOGNISE is swallowed into our span and deleted.
+    // Both of these are legal TOML and both terminate our block.
+    check('mcp-toml: a trailing comment on the next header does not swallow it', () => {
+      const src = '[mcp_servers.membridge]\ncommand = "old"\n\n[keepme] # do not touch\nk = 1\n';
+      const { text } = mcpToml.upsertBlock(src, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.includes('[keepme] # do not touch'), 'a commented header must survive verbatim');
+      assert.ok(text.includes('k = 1'), 'its body must survive');
+    });
+
+    check('mcp-toml: an indented next header does not swallow it', () => {
+      const src = '[mcp_servers.membridge]\ncommand = "old"\n\n  [keepme]\n  k = 1\n';
+      const { text } = mcpToml.upsertBlock(src, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.includes('  [keepme]'), 'an indented header must survive verbatim');
+      assert.ok(text.includes('  k = 1'), 'its body must survive');
+    });
+
+    // The dot boundary is what makes prefix matching safe; without a test the
+    // comment claiming it is just a comment.
+    check('mcp-toml: a name that merely shares our prefix is not ours', () => {
+      const src = '[mcp_servers.membridge]\ncommand = "old"\n\n[mcp_servers.membridgeous]\nmine = false\n';
+      const { text } = mcpToml.upsertBlock(src, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.includes('[mcp_servers.membridgeous]'), 'a lookalike server must not be absorbed');
+      assert.ok(text.includes('mine = false'));
+      assert.strictEqual(mcpToml.findBlock('[mcp_servers.membridgeous]\nx = 1\n', 'mcp_servers.membridge'), null);
+    });
+
+    // A `[` at the start of a line inside a multi-line array is not a table.
+    check('mcp-toml: a multi-line array in a neighbour is not mistaken for a table', () => {
+      const arr = '[neighbour]\nmatrix = [\n  ["a", "b"],\n  ["c", "d"]\n]\n\n[mcp_servers.membridge]\ncommand = "old"\n';
+      const { text } = mcpToml.upsertBlock(arr, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.includes('matrix = [\n  ["a", "b"],\n  ["c", "d"]\n]'), 'the array must survive verbatim');
+      assert.ok(text.includes('command = "new"'));
+      assert.ok(!text.includes('command = "old"'));
+    });
+
+    check('mcp-toml: a file with no trailing newline is replaced cleanly', () => {
+      const noNl = '[alpha]\na = 1\n\n[mcp_servers.membridge]\ncommand = "old"';
+      const { text } = mcpToml.upsertBlock(noNl, 'mcp_servers.membridge', ['command = "new"']);
+      assert.ok(text.startsWith('[alpha]\na = 1\n\n'), 'the neighbour must survive byte-identically');
+      assert.strictEqual((text.match(/\[mcp_servers\.membridge\]/g) || []).length, 1);
+      assert.ok(text.includes('command = "new"'));
+      assert.ok(!text.includes('command = "old"'));
+    });
+  }
+
+  // ---- MCP dependencies ship by default (mcp spec §7) ----
+  {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+
+    check('mcp-deps: the SDK and zod are real dependencies, not opt-in', () => {
+      assert.ok(pkg.dependencies['@modelcontextprotocol/sdk'], '@modelcontextprotocol/sdk must be a dependency');
+      assert.ok(pkg.dependencies.zod, 'zod must be a dependency');
+    });
+
+    check('mcp-deps: prepublishOnly no longer side-installs them', () => {
+      const pre = pkg.scripts.prepublishOnly || '';
+      assert.ok(!/modelcontextprotocol/.test(pre), 'prepublishOnly must not --no-save install the SDK');
+      assert.ok(!/\bzod\b/.test(pre), 'prepublishOnly must not --no-save install zod');
+    });
+
+    check('mcp-deps: they resolve from a plain install', () => {
+      assert.doesNotThrow(() => require.resolve('@modelcontextprotocol/sdk/server/mcp.js'));
+      assert.doesNotThrow(() => require.resolve('zod'));
+    });
+
+    check('mcp-deps: lib/mcp.js no longer calls them opt-in', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(!/opt-in/i.test(src), 'the opt-in message is now false and must be gone');
+    });
+  }
+
+  // ---- claude binary resolution (mcp spec §5.1.1) ----
+  const claudeBin = require('../lib/claude-bin');
+
+  {
+    const cbRoot = path.join(ROOT, 'claudebin');
+    fs.mkdirSync(cbRoot, { recursive: true });
+    const mk = name => {
+      const f = path.join(cbRoot, name);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, '#!/bin/sh\n');
+      return f;
+    };
+    const real = mk('bin/claude');
+    const other = mk('elsewhere/claude');
+
+    check('claude-bin: config override wins over everything', () => {
+      const r = claudeBin.resolveClaudeBin({
+        config: { mcp: { claudeBin: real } },
+        recorded: other, env: {}, runShell: () => other,
+      });
+      assert.strictEqual(r.source, 'config');
+      assert.strictEqual(r.path, real);
+    });
+
+    check('claude-bin: a recorded path is used when it still exists', () => {
+      const r = claudeBin.resolveClaudeBin({ config: {}, recorded: real, env: {}, runShell: () => other });
+      assert.strictEqual(r.source, 'recorded');
+      assert.strictEqual(r.path, real);
+    });
+
+    check('claude-bin: a STALE recorded path is discarded, not returned', () => {
+      const gone = path.join(cbRoot, 'deleted', 'claude');
+      const r = claudeBin.resolveClaudeBin({ config: {}, recorded: gone, env: {}, runShell: () => other });
+      assert.notStrictEqual(r && r.path, gone, 'a deleted binary must never be returned');
+      assert.strictEqual(r.source, 'shell');
+    });
+
+    check('claude-bin: falls back to asking the login shell', () => {
+      const r = claudeBin.resolveClaudeBin({ config: {}, recorded: null, env: {}, runShell: () => other });
+      assert.strictEqual(r.source, 'shell');
+      assert.strictEqual(r.path, other);
+    });
+
+    check('claude-bin: a shell that hangs or errors does not throw', () => {
+      assert.doesNotThrow(() => {
+        const r = claudeBin.resolveClaudeBin({
+          config: {}, recorded: null, env: {},
+          runShell: () => { throw new Error('timed out'); },
+          candidates: [],
+        });
+        assert.strictEqual(r, null);
+      });
+    });
+
+    check('claude-bin: probe list is the LAST resort, after the shell', () => {
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: {},
+        runShell: () => null,
+        candidates: [other],
+      });
+      assert.strictEqual(r.source, 'probe');
+      assert.strictEqual(r.path, other);
+    });
+
+    check('claude-bin: nothing found is null, never a bare "claude" guess', () => {
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: {}, runShell: () => null, candidates: [],
+      });
+      assert.strictEqual(r, null);
+    });
+
+    check('claude-bin: the probe list is exported and non-empty', () => {
+      assert.ok(Array.isArray(claudeBin.CANDIDATES) && claudeBin.CANDIDATES.length > 0);
+    });
+
+    // A hanging rc file is a DIFFERENT failure mode from a throwing shell: the
+    // spawn returns normally with error/status set. Exercise the real
+    // defaultRunShell against a stub shell so the timeout branch is covered.
+    check('claude-bin: defaultRunShell returns null when the shell times out (never hangs the daemon)', () => {
+      const slow = path.join(cbRoot, 'slow-shell.sh');
+      fs.writeFileSync(slow, '#!/bin/sh\nsleep 30\n');
+      fs.chmodSync(slow, 0o755);
+      const t0 = Date.now();
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: { SHELL: slow }, candidates: [],
+      });
+      assert.strictEqual(r, null, 'a shell that never answers must resolve to null');
+      // The bound must sit BETWEEN the 5s timeout and the stub's 30s sleep: under
+      // 30s proves the timeout actually fired rather than the sleep completing.
+      // 20s looked like a comfortable 4x margin and still flaked under parallel
+      // suites -- spawn plus node startup stretch a long way on a loaded box.
+      // 25s keeps the discrimination (a missing timeout takes 30s+) without
+      // failing for load.
+      assert.ok(Date.now() - t0 < 25000, 'the shell query must be bounded by its timeout');
+    });
+
+    // A GUI-launched .app is the case this module exists for, and launchd does
+    // not reliably export SHELL. Falling to /bin/sh there reads ~/.profile,
+    // never ~/.zshrc -- losing exactly the version-manager shims we came for.
+    check('claude-bin: with no SHELL in the env, the user record picks the shell, not /bin/sh', () => {
+      assert.strictEqual(claudeBin.loginShell({ SHELL: '/opt/fish' }), '/opt/fish');
+      let recorded = null;
+      try { recorded = os.userInfo().shell; } catch { recorded = null; }
+      assert.strictEqual(claudeBin.loginShell({}), recorded || '/bin/sh');
+    });
+
+    check('claude-bin: a chatty rc file cannot displace the resolved path', () => {
+      const chatty = path.join(cbRoot, 'chatty-shell.sh');
+      // Emits rc-file noise on both sides of the answer, as a real .zshrc can.
+      fs.writeFileSync(chatty, `#!/bin/sh\necho "nvm: using v20"\necho "${other}"\necho "welcome back"\n`);
+      fs.chmodSync(chatty, 0o755);
+      const r = claudeBin.resolveClaudeBin({
+        config: {}, recorded: null, env: { SHELL: chatty }, candidates: [],
+      });
+      assert.ok(r, 'a path printed among rc-file noise must still be found');
+      assert.strictEqual(r.source, 'shell');
+      assert.strictEqual(r.path, other);
+    });
+  }
+
+  // ---- MCP agent config discovery (mcp spec §4.1) ----
+  const agentConfig = require('../lib/agent-config');
+
+  {
+    const acRoot = path.join(ROOT, 'agentcfg');
+    const mkHome = name => {
+      const h = path.join(acRoot, name);
+      fs.mkdirSync(h, { recursive: true });
+      return h;
+    };
+
+    check('agent-config: default locations under a bare home', () => {
+      const home = mkHome('bare');
+      fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('codex', { home, env: {}, config: {} });
+      assert.strictEqual(r.source, 'default');
+      assert.strictEqual(r.file, path.join(home, '.codex', 'config.toml'));
+      assert.strictEqual(r.exists, true);
+    });
+
+    check('agent-config: a missing agent directory reports exists:false, not null', () => {
+      const home = mkHome('empty');
+      const r = agentConfig.resolveAgentConfig('cursor', { home, env: {}, config: {} });
+      assert.ok(r, 'must still resolve a candidate path');
+      assert.strictEqual(r.exists, false);
+    });
+
+    check('agent-config: the tool\'s own env var beats the default', () => {
+      const home = mkHome('envvar');
+      const moved = path.join(acRoot, 'moved-codex');
+      fs.mkdirSync(moved, { recursive: true });
+      const r = agentConfig.resolveAgentConfig('codex', { home, env: { CODEX_HOME: moved }, config: {} });
+      assert.strictEqual(r.source, 'env');
+      assert.strictEqual(r.dir, moved);
+      assert.strictEqual(r.exists, true);
+    });
+
+    check('agent-config: MemBridge config override beats everything', () => {
+      const home = mkHome('override');
+      const custom = path.join(acRoot, 'custom', 'my.toml');
+      fs.mkdirSync(path.dirname(custom), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('codex', {
+        home, env: { CODEX_HOME: path.join(acRoot, 'moved-codex') },
+        config: { mcp: { codex: { configPath: custom } } },
+      });
+      assert.strictEqual(r.source, 'config');
+      assert.strictEqual(r.file, custom);
+    });
+
+    check('agent-config: XDG_CONFIG_HOME is honoured on linux', () => {
+      const home = mkHome('xdg');
+      const xdg = path.join(acRoot, 'xdgroot');
+      fs.mkdirSync(path.join(xdg, 'cursor'), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('cursor', {
+        home, env: { XDG_CONFIG_HOME: xdg }, config: {}, platform: 'linux',
+      });
+      assert.strictEqual(r.source, 'xdg');
+      assert.strictEqual(r.dir, path.join(xdg, 'cursor'));
+    });
+
+    check('agent-config: XDG is ignored on darwin (it is not the convention there)', () => {
+      const home = mkHome('xdgmac');
+      const xdg = path.join(acRoot, 'xdgroot');
+      const r = agentConfig.resolveAgentConfig('cursor', {
+        home, env: { XDG_CONFIG_HOME: xdg }, config: {}, platform: 'darwin',
+      });
+      assert.strictEqual(r.source, 'default');
+      assert.strictEqual(r.dir, path.join(home, '.cursor'));
+    });
+
+    check('agent-config: installedAgents lists only agents whose dir exists', () => {
+      const home = mkHome('mixed');
+      fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+      const list = agentConfig.installedAgents({ home, env: {}, config: {}, platform: 'darwin' });
+      const names = list.map(a => a.agent).sort();
+      assert.deepStrictEqual(names, ['codex']);
+    });
+
+    check('agent-config: an unknown agent is null, never a guessed path', () => {
+      assert.strictEqual(agentConfig.resolveAgentConfig('nonesuch', { home: mkHome('u'), env: {}, config: {} }), null);
+    });
+
+    check('agent-config: every known agent resolves to a file, never a bare dir', () => {
+      const home = mkHome('all');
+      for (const a of agentConfig.AGENTS) {
+        const r = agentConfig.resolveAgentConfig(a, { home, env: {}, config: {}, platform: 'darwin' });
+        assert.ok(r && r.file && path.isAbsolute(r.file), `${a} must resolve an absolute file path`);
+      }
+    });
+
+    // --- regressions for defects found while verifying the plan's SPECS table ---
+
+    // util.homeDir() is MEMBRIDGE's home (~/.membridge, or MEMBRIDGE_HOME), NOT
+    // the OS home. Falling back to it would resolve ~/.membridge/.codex/config.toml
+    // in production -- a path Codex will never read. Tests always inject `home`,
+    // so only a test that omits it can catch this. The suite sets MEMBRIDGE_HOME
+    // to a temp dir, which makes the wrong answer trivially detectable.
+    check('agent-config: the real-home fallback is the OS home, not MemBridge home', () => {
+      assert.ok(process.env.MEMBRIDGE_HOME, 'suite must have MEMBRIDGE_HOME set for this to mean anything');
+      const r = agentConfig.resolveAgentConfig('codex', { env: {}, config: {}, platform: 'darwin' });
+      assert.strictEqual(r.dir, path.join(os.homedir(), '.codex'));
+      assert.ok(!r.dir.startsWith(process.env.MEMBRIDGE_HOME), 'must not resolve under MemBridge home');
+    });
+
+    // Verified behaviourally 2026-07-29: `CLAUDE_CONFIG_DIR=<d> claude mcp list`
+    // creates <d>/.claude.json. The dotted name is the real one; the plan's
+    // table said `claude.json`.
+    check('agent-config: CLAUDE_CONFIG_DIR holds a dot-prefixed .claude.json', () => {
+      const dir = path.join(acRoot, 'ccd');
+      fs.mkdirSync(dir, { recursive: true });
+      const r = agentConfig.resolveAgentConfig('claude-code', {
+        home: mkHome('ccdhome'), env: { CLAUDE_CONFIG_DIR: dir }, config: {}, platform: 'darwin',
+      });
+      assert.strictEqual(r.source, 'env');
+      assert.strictEqual(r.file, path.join(dir, '.claude.json'));
+    });
+
+    // By default Claude Code's config is ~/.claude.json -- a SIBLING of ~/.claude,
+    // not a file inside it. ~/.claude is still the right install-detection
+    // directory, so dir and file legitimately diverge here.
+    check('agent-config: claude-code defaults to ~/.claude.json beside ~/.claude, not inside it', () => {
+      const home = mkHome('claudedefault');
+      fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('claude-code', { home, env: {}, config: {}, platform: 'darwin' });
+      assert.strictEqual(r.source, 'default');
+      assert.strictEqual(r.dir, path.join(home, '.claude'));
+      assert.strictEqual(r.file, path.join(home, '.claude.json'));
+      assert.strictEqual(r.exists, true);
+    });
+
+    // Verified 2026-07-29 against the real binary: with XDG_CONFIG_HOME set,
+    // `codex doctor` still reported CODEX_HOME as ~/.codex. Codex has no XDG
+    // support for its own home, so writing $XDG_CONFIG_HOME/codex/config.toml on
+    // Linux would leave a file Codex never reads.
+    check('agent-config: codex ignores XDG even on linux (it has no XDG support)', () => {
+      const home = mkHome('codexxdg');
+      const xdg = path.join(acRoot, 'xdgroot');
+      // The XDG codex dir must EXIST, or the exists-guard in step 3 would make
+      // this pass even for a spec that wrongly claimed xdg: 'codex'.
+      fs.mkdirSync(path.join(xdg, 'codex'), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('codex', {
+        home, env: { XDG_CONFIG_HOME: xdg }, config: {}, platform: 'linux',
+      });
+      assert.strictEqual(r.source, 'default');
+      assert.strictEqual(r.file, path.join(home, '.codex', 'config.toml'));
+    });
+
+    // Every envVar left in the table must be one a tool actually honours.
+    check('agent-config: no fabricated env var survives in SPECS', () => {
+      const verified = { 'claude-code': 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', cursor: 'CURSOR_CONFIG_DIR' };
+      for (const a of agentConfig.AGENTS) {
+        assert.strictEqual(agentConfig.SPECS[a].envVar, verified[a] || null, `${a} envVar must be verified or null`);
+      }
+    });
+
+    // A tool that gains an env var later, or renames one and keeps the old
+    // name alive, must be a one-line data edit -- never a code change.
+    check('agent-config: envVar accepts a list, first one set wins', () => {
+      const home = mkHome('envlist');
+      const moved = path.join(acRoot, 'moved-legacy');
+      fs.mkdirSync(moved, { recursive: true });
+      const saved = agentConfig.SPECS.codex.envVar;
+      try {
+        agentConfig.SPECS.codex.envVar = ['CODEX_HOME_NEW', 'CODEX_HOME'];
+        const r = agentConfig.resolveAgentConfig('codex', { home, env: { CODEX_HOME: moved }, config: {} });
+        assert.strictEqual(r.source, 'env');
+        assert.strictEqual(r.dir, moved);
+      } finally { agentConfig.SPECS.codex.envVar = saved; }
+    });
+
+    // A null envVar (the honest answer for a tool with none) must simply fall
+    // through, not throw and not read a variable literally named "null".
+    check('agent-config: a null envVar falls through to the default', () => {
+      const home = mkHome('nullenv');
+      const saved = agentConfig.SPECS.codex.envVar;
+      try {
+        agentConfig.SPECS.codex.envVar = null;
+        const r = agentConfig.resolveAgentConfig('codex', { home, env: { CODEX_HOME: '/nope' }, config: {} });
+        assert.strictEqual(r.source, 'default');
+        assert.strictEqual(r.dir, path.join(home, '.codex'));
+      } finally { agentConfig.SPECS.codex.envVar = saved; }
+    });
+
+    // A Linux user with XDG_CONFIG_HOME set (most of them) but Cursor installed
+    // at ~/.cursor must still be found. Resolving an empty XDG path would report
+    // exists:false and silently skip the agent forever.
+    check('agent-config: XDG is skipped when the XDG dir does not exist, so ~/.cursor still wins', () => {
+      const home = mkHome('xdgmissing');
+      fs.mkdirSync(path.join(home, '.cursor'), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('cursor', {
+        home, env: { XDG_CONFIG_HOME: path.join(acRoot, 'no-such-xdg') }, config: {}, platform: 'linux',
+      });
+      assert.strictEqual(r.source, 'default');
+      assert.strictEqual(r.dir, path.join(home, '.cursor'));
+      assert.strictEqual(r.exists, true);
+    });
+
+    // The registrar must dispatch on data, never on `switch (agent)`.
+    check('agent-config: every resolution carries a format', () => {
+      const home = mkHome('fmt');
+      const want = { 'claude-code': 'claude-cli', codex: 'toml', cursor: 'json' };
+      for (const a of agentConfig.AGENTS) {
+        const r = agentConfig.resolveAgentConfig(a, { home, env: {}, config: {}, platform: 'darwin' });
+        assert.strictEqual(r.format, want[a], `${a} must carry its write format`);
+      }
+    });
+
+    // There will always be more agents than MemBridge has been taught. Someone
+    // on a tool we have not added should not be stuck waiting for a release.
+    check('agent-config: a user can declare an agent MemBridge has never heard of', () => {
+      const home = mkHome('windsurf');
+      const dir = path.join(acRoot, 'windsurf-cfg');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, 'mcp_config.json');
+      const config = { mcp: { windsurf: { configPath: file } } };
+      const r = agentConfig.resolveAgentConfig('windsurf', { home, env: {}, config, platform: 'darwin' });
+      assert.strictEqual(r.source, 'config');
+      assert.strictEqual(r.file, file);
+      assert.strictEqual(r.format, 'json', 'format must be inferred from the extension');
+      assert.strictEqual(r.exists, true);
+      assert.ok(agentConfig.knownAgents({ config }).includes('windsurf'));
+      assert.ok(agentConfig.installedAgents({ home, env: {}, config, platform: 'darwin' })
+        .some(a => a.agent === 'windsurf'), 'a declared, present agent must be installed');
+      assert.deepStrictEqual(agentConfig.AGENTS, ['claude-code', 'codex', 'cursor'],
+        'AGENTS stays the built-in list; user agents arrive via knownAgents');
+    });
+
+    // An extension we cannot read is format:null, not a guess. The registrar
+    // reports it rather than writing a file in the wrong syntax.
+    check('agent-config: a declared agent with an unknown extension gets format:null, never a guess', () => {
+      const home = mkHome('weirdext');
+      const file = path.join(acRoot, 'weird-cfg', 'servers.conf');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const r = agentConfig.resolveAgentConfig('zed', { home, env: {}, config: { mcp: { zed: { configPath: file } } } });
+      assert.strictEqual(r.format, null);
+      const explicit = agentConfig.resolveAgentConfig('zed', {
+        home, env: {}, config: { mcp: { zed: { configPath: file, format: 'json' } } },
+      });
+      assert.strictEqual(explicit.format, 'json', 'an explicit format must be honoured');
+    });
+
+    // config.mcp also holds plain knobs (autoRegister, claudeBin). None of them
+    // may be mistaken for a user-declared agent.
+    check('agent-config: non-agent keys under config.mcp are not treated as agents', () => {
+      const config = { mcp: { autoRegister: false, claudeBin: '/usr/local/bin/claude' } };
+      assert.deepStrictEqual(agentConfig.knownAgents({ config }), ['claude-code', 'codex', 'cursor']);
+      assert.strictEqual(agentConfig.resolveAgentConfig('autoRegister', { home: mkHome('knobs'), env: {}, config }), null);
+    });
+  }
+
+  // ---- teammate notes: rebuild the index on every team pull (plan Task 6) ----
+  {
+    const rp = path.join(ROOT, 'projects', 'rebuild-proj');
+    fs.mkdirSync(rp, { recursive: true });
+
+    // THE SHAPE THE DAEMON ACTUALLY HAS IN HAND. The plan assumed
+    // `memorydb.readEntries(key).filter(e => e.origin === 'team')`; neither
+    // exists. memorydb holds LOCAL entries, and `origin` is invented by
+    // lib/feed.js at render time. Pulled teammate rows live in
+    // state.projects[key].teamEntries, mapped by lib/teamsync.js's pull -- and
+    // that mapping renames author_name to `author`. A fixture written in the
+    // wire shape would pass while the real daemon fed every note through as
+    // "a teammate", so these rows are deliberately the STORED shape.
+    const pulledRows = [{
+      author: 'Andrew', ts: '2026-07-28T09:00:00Z', source: 'Claude Code', session: 's1',
+      decisions: 'Renamed the retry cap to maxAttempts.', gotchas: null,
+      files: ['packages/api/src/validate.ts'],
+      changes: [{ file: 'packages/api/src/validate.ts', note: 'blocked pending migration 018' }],
+    }];
+
+    check('notes-rebuild: writes an index readable by the store', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      const ix = notesStore.read(rp);
+      assert.strictEqual(ix.prose.length, 1);
+      assert.ok(ix.byFile['packages/api/src/validate.ts']);
+      assert.strictEqual(ix.byFile['packages/api/src/validate.ts'][0].note, 'blocked pending migration 018');
+    });
+
+    check('notes-rebuild: keeps the pulled row author, never "a teammate"', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      const ix = notesStore.read(rp);
+      assert.strictEqual(ix.prose[0].author, 'Andrew',
+        'stored rows key the author as `author`; reading only author_name silently anonymises every note');
+      assert.strictEqual(ix.byFile['packages/api/src/validate.ts'][0].author, 'Andrew');
+    });
+
+    check('notes-rebuild: byFile keeps the incoming wire key, untranslated', () => {
+      // rp is not a checkout and has no packages/ directory. The key must
+      // survive verbatim: incoming keys ARE wire keys and the read path
+      // computes the wire key of the file it is about to touch. Any inverse
+      // mapping here would mangle or drop this.
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      assert.deepStrictEqual(Object.keys(notesStore.read(rp).byFile), ['packages/api/src/validate.ts']);
+    });
+
+    check('notes-rebuild: preserves prose AND file seen markers across a rebuild', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      const before = notesStore.read(rp);
+      const proseId = before.prose[0].id;
+      const fileId = before.byFile['packages/api/src/validate.ts'][0].id;
+      notesStore.update(rp, ix => notes.markProseSeen(ix, [proseId], '2026-07-28T09:06:00Z'));
+      notesStore.update(rp, ix => notes.markFileSeen(ix, 'sess-A', [fileId], '2026-07-28T09:06:00Z'));
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:07:00Z');
+      const after = notesStore.read(rp);
+      // Both halves matter and fail independently: carrying `prose` alone would
+      // re-fire every file note at the next pull, which is the noisier bug.
+      assert.ok(after.seen.prose[proseId], 'a delivered decision would be delivered again after the next pull');
+      assert.ok(after.seen.file['sess-A'] && after.seen.file['sess-A'][fileId],
+        'a file note already shown to this session would re-fire after the next pull');
+      // The ids must also be the SAME ids -- a rebuild that changed them would
+      // keep the markers and still re-deliver everything.
+      assert.strictEqual(after.prose[0].id, proseId);
+    });
+
+    check('notes-rebuild: an empty pull empties the index', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      notesStore.rebuildTeammateNotes(rp, [], '2026-07-28T09:08:00Z');
+      const ix = notesStore.read(rp);
+      assert.deepStrictEqual(ix.prose, []);
+      assert.deepStrictEqual(ix.byFile, {});
+    });
+
+    check('notes-rebuild: never throws on malformed input', () => {
+      assert.doesNotThrow(() => notesStore.rebuildTeammateNotes(rp, null, '2026-07-28T09:05:00Z'));
+      assert.doesNotThrow(() => notesStore.rebuildTeammateNotes(rp, 'nope', '2026-07-28T09:05:00Z'));
+      assert.doesNotThrow(() => notesStore.rebuildTeammateNotes(null, pulledRows, '2026-07-28T09:05:00Z'));
+    });
+
+    check('notes-rebuild: malformed input leaves the previous index serving', () => {
+      // Beyond the plan. `buildIndex(null, ...)` does not throw -- it returns an
+      // EMPTY index -- so a caller that failed to produce entries would quietly
+      // wipe a good index instead of failing open. An empty ARRAY is a real
+      // "the teammate has nothing" and must still empty it (checked above); a
+      // non-array is a broken caller and must change nothing.
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      notesStore.rebuildTeammateNotes(rp, null, '2026-07-28T09:09:00Z');
+      const ix = notesStore.read(rp);
+      assert.strictEqual(ix.prose.length, 1, 'a broken caller wiped the last good index');
+      assert.ok(ix.byFile['packages/api/src/validate.ts']);
+    });
+
+    check('notes-rebuild: an undecryptable row contributes nothing but does not break the pull', () => {
+      // teamsync renders a row it cannot decrypt as all-null content. It must
+      // not crash the rebuild and must not surface an empty note.
+      const opaque = [{ author: 'Andrew', ts: '2026-07-28T09:00:00Z', source: 'Claude Code',
+        ask: null, decisions: null, gotchas: null, summary: null, files: [], changes: null, undecryptable: true }];
+      notesStore.rebuildTeammateNotes(rp, opaque, '2026-07-28T09:10:00Z');
+      const ix = notesStore.read(rp);
+      assert.deepStrictEqual(ix.prose, []);
+      assert.deepStrictEqual(ix.byFile, {});
+    });
+  }
+
+  // ---- teammate notes: PreToolUse delivery (spec §3.1, §4.1) ----
+  // Two layers, deliberately. The buildNotesOutput checks below pin the
+  // selection/marking contract in isolation; the hook-level checks after them
+  // are the ones that can actually prove the property that matters -- that a
+  // note NEVER costs the agent its read. A unit check on the returned text
+  // cannot see the permissionDecision the hook writes, so on its own it would
+  // prove only that some words were produced.
+  {
+    const hooksRecall = require('../lib/hooks-recall');
+    const recallStoreLib = require('../lib/recall-store');
+    const ledgerStoreLib = require('../lib/ledger-store');
+    const recallLib = require('../lib/recall');
+    const cryptoLib = require('crypto');
+    const NOTES_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+    const runNotesHook = (payload, env) => spawnSync(process.execPath, [NOTES_ENTRY, 'recall'], {
+      input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const trackProject = dir => {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [dir]: { events: [] } } });
+    };
+    // Same deterministic scan the recall hook's own tests use: pick a session
+    // id outside the 3% holdout bucket so "recall serves" is not a coin flip.
+    const nonHoldout = (relPath, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        const bucket = cryptoLib.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+        if (bucket >= recallLib.HOLDOUT_PCT) return sid;
+      }
+      throw new Error(`no non-holdout session id for ${relPath}`);
+    };
+
+    const hp = path.join(ROOT, 'projects', 'hook-notes-proj');
+    fs.mkdirSync(path.join(hp, 'lib'), { recursive: true });
+    // The fixture MUST be a real checkout. byFile is keyed by WIRE key, and
+    // wireKeyFor answers null outside a checkout -- without this git init every
+    // file-note assertion below would fail for a reason that has nothing to do
+    // with the code under test.
+    spawnSync('git', ['init', '-q', hp], { encoding: 'utf8' });
+    repoRoot.clearCache();
+
+    const NOW = '2026-07-28T10:00:00Z';
+    const rows = [{
+      author_name: 'Andrew', ts: '2026-07-28T09:00:00Z',
+      decisions: 'Renamed the retry cap to maxAttempts.', gotchas: '',
+      changes: [{ file: 'lib/validate.ts', note: 'blocked pending migration 018' }],
+    }];
+
+    const fresh = () => { notesStore.write(hp, notes.buildIndex(rows, null, NOW)); };
+
+    check('notes-hook: the fixture is a real checkout, so wire keys resolve (guards the file-note checks)', () => {
+      assert.strictEqual(repoRoot.wireKeyFor(path.join(hp, 'lib/validate.ts')), 'lib/validate.ts');
+    });
+
+    check('notes-hook: prose is delivered on any read (arrival)', () => {
+      fresh();
+      const out = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/unrelated.js'), relPath: 'lib/unrelated.js', sessionId: 's1', now: NOW, config: {},
+      });
+      assert.ok(out && out.text.includes('maxAttempts'));
+    });
+
+    check('notes-hook: file note is delivered on contact', () => {
+      fresh();
+      const out = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      });
+      assert.ok(out.text.includes('migration 018'));
+    });
+
+    check('notes-hook: prose is not re-delivered after commit', () => {
+      fresh();
+      const first = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's1', now: NOW, config: {},
+      });
+      first.commit();
+      const second = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's2', now: NOW, config: {},
+      });
+      assert.strictEqual(second, null);
+    });
+
+    check('notes-hook: a file note re-fires in a new session but not the same one', () => {
+      fresh();
+      const a = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      });
+      a.commit();
+      const again = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      });
+      assert.strictEqual(again, null);
+      const other = hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's2', now: NOW, config: {},
+      });
+      assert.ok(other && other.text.includes('migration 018'));
+    });
+
+    check('notes-hook: nothing to say returns null', () => {
+      notesStore.write(hp, notes.emptyIndex());
+      assert.strictEqual(hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's9', now: NOW, config: {},
+      }), null);
+    });
+
+    check('notes-hook: kill switch silences it', () => {
+      fresh();
+      assert.strictEqual(hooksRecall.buildNotesOutput({
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW,
+        config: { teammateNotes: { enabled: false } },
+      }), null);
+    });
+
+    check('notes-hook: a corrupt index yields null, never a throw', () => {
+      fs.writeFileSync(notesStore.notesPath(hp), 'not json');
+      assert.doesNotThrow(() => {
+        assert.strictEqual(hooksRecall.buildNotesOutput({
+          projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+        }), null);
+      });
+    });
+
+    // ---- the hook itself: a note must never cost the agent its read ----
+    // Every fixture below carries ONLY a file note (no decisions, no gotchas).
+    // With prose in the index the output would be non-empty even if the
+    // file-keyed lookup missed entirely, and the wire-key check further down
+    // would prove nothing.
+    const ep = path.join(ROOT, 'projects', 'notes-e2e-proj');
+    fs.mkdirSync(path.join(ep, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(ep, 'lib', 'validate.ts'), 'export const a = 1;\n');
+    spawnSync('git', ['init', '-q', ep], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(ep);
+    // The hook's clock is the real one, and selectFileNotes drops anything
+    // older than the 7-day re-fire window -- a frozen fixture timestamp would
+    // make these silently undeliverable.
+    const liveTs = new Date().toISOString();
+    const fileNoteRow = (file, note) => ({
+      author_name: 'Andrew', ts: liveTs, decisions: '', gotchas: '',
+      changes: [{ file, note }],
+    });
+    notesStore.write(ep, notes.buildIndex([fileNoteRow('lib/validate.ts', 'blocked pending migration 018')], null, liveTs));
+
+    const allowPayload = {
+      session_id: 'notes-e2e-allow', cwd: ep, tool_name: 'Read',
+      tool_input: { file_path: path.join(ep, 'lib', 'validate.ts'), limit: 100 },
+    };
+    const outAllow = runNotesHook(allowPayload);
+
+    check('notes-hook: the read is ALLOWED, never denied, when a note is all there is', () => {
+      assert.strictEqual(outAllow.status, 0, outAllow.stderr);
+      assert.strictEqual(outAllow.stderr, '', 'hook wrote to stderr');
+      assert.ok(outAllow.stdout.trim(), 'no output at all — the note never reached the agent');
+      const hso = JSON.parse(outAllow.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.hookEventName, 'PreToolUse');
+      assert.strictEqual(hso.permissionDecision, 'allow', 'THE property: this feature may never block a read');
+      assert.ok(!('permissionDecisionReason' in hso), 'a note must not masquerade as a decision reason');
+      assert.ok(hso.additionalContext.includes('migration 018'), 'the note text never made it into additionalContext');
+      assert.ok(!outAllow.stdout.includes('deny'), 'the notes path emitted a denial');
+    });
+
+    check('notes-hook: commit() ran on the allow path, so the same session is not told twice', () => {
+      // Without this precondition the check passes vacuously against an
+      // unimplemented feature: nothing delivered twice is nothing delivered.
+      assert.ok(outAllow.stdout.trim(), 'precondition: the first read never produced a note');
+      const again = runNotesHook(allowPayload);
+      assert.strictEqual(again.status, 0, again.stderr);
+      assert.strictEqual(again.stdout, '', 'the note re-fired inside the same session');
+    });
+
+    // ---- recall's OFF switch must not silence teammate notes ----
+    // config.recall.enabled is a preference about SERVING skeletons. Teammate
+    // notes have their own switch and never block a read, so for anyone in a
+    // team a "don't touch this yet" must survive the token-saving feature
+    // having been turned off months earlier. MEMBRIDGE_NO_RECALL=1 is a
+    // different thing -- the panic button, "stop touching my reads" -- and
+    // must still silence everything this hook does, notes included.
+    const rp = path.join(ROOT, 'projects', 'notes-recalloff-proj');
+    fs.mkdirSync(path.join(rp, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(rp, 'lib', 'validate.ts'), 'export const a = 1;\n');
+    spawnSync('git', ['init', '-q', rp], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(rp);
+    notesStore.write(rp, notes.buildIndex(
+      [fileNoteRow('lib/validate.ts', 'blocked pending migration 018')], null, liveTs));
+    const recallOffPayload = sid => ({
+      session_id: sid, cwd: rp, tool_name: 'Read',
+      tool_input: { file_path: path.join(rp, 'lib', 'validate.ts'), limit: 100 },
+    });
+    const cfgBeforeRecallOff = util.getConfig();
+    util.saveUserConfig({
+      ...cfgBeforeRecallOff,
+      recall: { ...(cfgBeforeRecallOff.recall || {}), enabled: false },
+    });
+    const outRecallOff = runNotesHook(recallOffPayload('notes-recalloff-1'));
+    const outPanic = runNotesHook(recallOffPayload('notes-recalloff-2'), { MEMBRIDGE_NO_RECALL: '1' });
+    util.saveUserConfig(cfgBeforeRecallOff);
+
+    check('notes-hook: recall.enabled=false stops serving but NOT teammate notes', () => {
+      assert.strictEqual(outRecallOff.status, 0, outRecallOff.stderr);
+      assert.ok(outRecallOff.stdout.trim(),
+        'turning recall off silently lost the teammate note — two independent switches must behave independently');
+      const hso = JSON.parse(outRecallOff.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'allow');
+      assert.ok(hso.additionalContext.includes('migration 018'), 'the note text never reached the agent');
+    });
+
+    check('notes-hook: MEMBRIDGE_NO_RECALL=1 is the panic button and silences notes too', () => {
+      assert.strictEqual(outPanic.status, 0, outPanic.stderr);
+      assert.strictEqual(outPanic.stdout, '',
+        'the panic switch must stop every output from this hook, notes included');
+    });
+
+    // A file hot enough to have a cached skeleton is exactly where a teammate
+    // note is most likely to land. decide() refusing to serve it must not
+    // swallow the note.
+    const hotRel = 'lib/hot.ts';
+    const hotFile = path.join(ep, hotRel);
+    const hotBody = 'export const c = 3;\n';
+    fs.writeFileSync(hotFile, hotBody);
+    recallStoreLib.put(ep, hotRel, {
+      contentHash: cryptoLib.createHash('sha1').update(hotBody).digest('hex'),
+      skeleton: 'SKELETON_FOR_HOT', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    notesStore.write(ep, notes.buildIndex(
+      [fileNoteRow('lib/validate.ts', 'blocked pending migration 018'), fileNoteRow(hotRel, 'do not touch until 019 lands')],
+      notesStore.read(ep), liveTs));
+    // limit 5 -> 60 call tokens, far under recall's 400-token floor: a real
+    // cache entry, a refused serve.
+    const outHot = runNotesHook({
+      session_id: 'notes-e2e-hot', cwd: ep, tool_name: 'Read',
+      tool_input: { file_path: hotFile, limit: 5 },
+    });
+
+    check('notes-hook: a note on a cached file still arrives when recall declines to serve', () => {
+      assert.strictEqual(outHot.status, 0, outHot.stderr);
+      assert.ok(outHot.stdout.trim(), 'the note was dropped because the file happened to have a skeleton');
+      const hso = JSON.parse(outHot.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'allow');
+      assert.ok(hso.additionalContext.includes('do not touch until 019 lands'));
+      assert.ok(!hso.additionalContext.includes('SKELETON_FOR_HOT'), 'a refused skeleton leaked into the note');
+    });
+
+    // Co-occurrence: recall was ALREADY denying this read on its own account,
+    // so the note rides on that one output rather than becoming a second,
+    // conflicting one.
+    const servedRel = 'lib/served.ts';
+    const servedFile = path.join(ep, servedRel);
+    const servedBody = ['const KEY = 1;', 'function one() {', '  work();', '}', ''].join('\n');
+    fs.writeFileSync(servedFile, servedBody);
+    recallStoreLib.put(ep, servedRel, {
+      contentHash: cryptoLib.createHash('sha1').update(servedBody).digest('hex'),
+      skeleton: 'SKELETON_FOR_SERVED', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(ep, {
+      fileReaders: { [servedRel]: { sessions: ['someone-else'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'someone-else' } },
+    });
+    notesStore.write(ep, notes.buildIndex(
+      [fileNoteRow(servedRel, 'this one is mid-migration')], notesStore.read(ep), liveTs));
+    const servedSession = nonHoldout(servedRel, 'notes-e2e-serve');
+    const outServe = runNotesHook({
+      session_id: servedSession, cwd: ep, tool_name: 'Read',
+      tool_input: { file_path: servedFile, limit: 100 },
+    });
+
+    check('notes-hook: when recall already denies the read, the note rides on that ONE output', () => {
+      assert.strictEqual(outServe.status, 0, outServe.stderr);
+      const lines = outServe.stdout.trim().split('\n').filter(Boolean);
+      assert.strictEqual(lines.length, 1, `two conflicting hook outputs were written: ${outServe.stdout}`);
+      const hso = JSON.parse(lines[0]).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'deny', 'the recall serve itself regressed — fixture no longer proves co-occurrence');
+      assert.ok(hso.permissionDecisionReason.includes('SKELETON_FOR_SERVED'), 'the skeleton was lost');
+      assert.ok(hso.permissionDecisionReason.includes('this one is mid-migration'), 'the note was dropped on the deny path');
+      assert.ok(!('additionalContext' in hso), 'the note opened a second, conflicting channel on a denied read');
+    });
+
+    check('notes-hook: the note delivered on the deny path is marked seen', () => {
+      const seen = ((notesStore.read(ep).seen || {}).file || {})[servedSession];
+      assert.ok(seen && Object.keys(seen).length === 1, 'commit() never ran on the co-occurrence path');
+    });
+
+    // ---- a team-linked project always serves, whatever config.recall says ----
+    // Product call (2026-07-29): sharing context with teammates IS the point of
+    // the product, so a recall preference set months ago -- probably before the
+    // project was ever linked -- must not quietly opt a team member out. Solo
+    // projects keep their off switch, which is the other half of this pair.
+    const tlProj = path.join(ROOT, 'projects', 'notes-teamlink-proj');
+    fs.mkdirSync(path.join(tlProj, 'lib'), { recursive: true });
+    const tlRel = 'lib/served.ts';
+    const tlFile = path.join(tlProj, tlRel);
+    fs.writeFileSync(tlFile, servedBody);
+    spawnSync('git', ['init', '-q', tlProj], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(tlProj);
+    recallStoreLib.put(tlProj, tlRel, {
+      contentHash: cryptoLib.createHash('sha1').update(servedBody).digest('hex'),
+      skeleton: 'SKELETON_FOR_TEAMLINK', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+    });
+    ledgerStoreLib.writeLedger(tlProj, {
+      fileReaders: { [tlRel]: { sessions: ['someone-else'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'someone-else' } },
+    });
+    const cfgBeforeTl = util.getConfig();
+    util.saveUserConfig({ ...cfgBeforeTl, recall: { ...(cfgBeforeTl.recall || {}), enabled: false } });
+    // Solo first -- same project, same warmed entry, no team.json yet.
+    const outTlSolo = runNotesHook({
+      session_id: nonHoldout(tlRel, 'notes-tl-solo'), cwd: tlProj, tool_name: 'Read',
+      tool_input: { file_path: tlFile, limit: 100 },
+    });
+    fs.mkdirSync(path.join(tlProj, '.membridge'), { recursive: true });
+    fs.writeFileSync(path.join(tlProj, '.membridge', 'team.json'),
+      JSON.stringify({ teamId: 't1', projectId: 'p1', teamName: 'T' }));
+    const outTlTeam = runNotesHook({
+      session_id: nonHoldout(tlRel, 'notes-tl-team'), cwd: tlProj, tool_name: 'Read',
+      tool_input: { file_path: tlFile, limit: 100 },
+    });
+    util.saveUserConfig(cfgBeforeTl);
+
+    check('notes-hook: recall.enabled=false still stops serving on a SOLO project', () => {
+      assert.strictEqual(outTlSolo.status, 0, outTlSolo.stderr);
+      assert.ok(!outTlSolo.stdout.includes('SKELETON_FOR_TEAMLINK'),
+        'a solo project must keep its recall off switch');
+    });
+
+    check('notes-hook: a TEAM-LINKED project serves regardless of recall.enabled', () => {
+      assert.strictEqual(outTlTeam.status, 0, outTlTeam.stderr);
+      assert.ok(outTlTeam.stdout.trim(), 'no output at all — the team-linked serve never happened');
+      const hso = JSON.parse(outTlTeam.stdout.trim().split('\n')[0]).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'deny', 'recall did not serve for a team-linked project');
+      assert.ok(hso.permissionDecisionReason.includes('SKELETON_FOR_TEAMLINK'), 'the skeleton was lost');
+    });
+
+    // ---- worktrees: the silent no-match this feature cannot have ----
+    const wtMain = path.join(ROOT, 'projects', 'notes-wt-main');
+    fs.mkdirSync(path.join(wtMain, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(wtMain, 'src', 'root.ts'), 'export const b = 2;\n');
+    spawnSync('git', ['init', '-q', wtMain], { encoding: 'utf8' });
+    for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+      spawnSync('git', ['-C', wtMain, ...args], { encoding: 'utf8' });
+    }
+    const wtDir = path.join(wtMain, '.claude', 'worktrees', 'notes-feature');
+    spawnSync('git', ['-C', wtMain, 'worktree', 'add', '-q', '-b', 'notes-feature', wtDir], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(wtMain);
+    notesStore.write(wtMain, notes.buildIndex([fileNoteRow('src/root.ts', 'renamed here in the worktree too')], null, liveTs));
+    const wtFile = path.join(wtDir, 'src', 'root.ts');
+    const outWt = runNotesHook({
+      session_id: 'notes-e2e-wt', cwd: wtDir, tool_name: 'Read',
+      tool_input: { file_path: wtFile, limit: 100 },
+    });
+
+    check('notes-hook: a worktree session matches a note keyed to the main checkout', () => {
+      assert.ok(fs.existsSync(wtFile), 'worktree fixture missing — git worktree add failed');
+      // Not tautological: the hook resolves a nested worktree to its MAIN repo,
+      // so its own relPath here carries the worktree prefix and a relPath-keyed
+      // lookup finds nothing at all.
+      assert.strictEqual(path.relative(wtMain, wtFile).split(path.sep).join('/'),
+        '.claude/worktrees/notes-feature/src/root.ts');
+      assert.strictEqual(repoRoot.wireKeyFor(wtFile), 'src/root.ts');
+      assert.strictEqual(outWt.status, 0, outWt.stderr);
+      assert.ok(outWt.stdout.trim(), 'no output — the lookup used the tracked-relative path, not the wire key');
+      const hso = JSON.parse(outWt.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'allow');
+      assert.ok(hso.additionalContext.includes('renamed here in the worktree too'));
+    });
+
+    check('notes-hook: buildNotesOutput itself looks up by wire key, not relPath', () => {
+      const out = hooksRecall.buildNotesOutput({
+        projectPath: wtMain, absPath: wtFile,
+        relPath: '.claude/worktrees/notes-feature/src/root.ts',
+        sessionId: 'unit-wt', now: liveTs, config: {},
+      });
+      assert.ok(out && out.text.includes('renamed here in the worktree too'),
+        'a relPath lookup would return null here — that is the bug this guards');
+    });
+
+    check('notes-hook: a file outside any checkout yields no note, never a throw', () => {
+      const plain = path.join(ROOT, 'projects', 'notes-not-a-repo');
+      fs.mkdirSync(plain, { recursive: true });
+      repoRoot.clearCache();
+      assert.strictEqual(repoRoot.wireKeyFor(path.join(plain, 'a.js')), null,
+        'fixture is inside a checkout — this check would pass vacuously');
+      notesStore.write(plain, notes.buildIndex([fileNoteRow('a.js', 'unreachable')], null, liveTs));
+      assert.strictEqual(hooksRecall.buildNotesOutput({
+        projectPath: plain, absPath: path.join(plain, 'a.js'), relPath: 'a.js',
+        sessionId: 'unit-plain', now: liveTs, config: {},
+      }), null);
+    });
+  }
+
+  // ---- MCP registrar (mcp spec §5, §6; plan Task 6) ----
+  const mcpRegister = require('../lib/mcp-register');
+
+  {
+    const rRoot = path.join(ROOT, 'mcpreg');
+    fs.mkdirSync(rRoot, { recursive: true });
+    let regHomeSeq = 0;
+
+    // EVERY call below injects both `home` and `env`. That is not
+    // belt-and-braces: this machine has a real ~/.claude.json,
+    // ~/.codex/config.toml and ~/.cursor/mcp.json, and one call that fell
+    // through to os.homedir()/process.env would edit a developer's own agents.
+    const mkHome = (dirs = []) => {
+      const home = path.join(rRoot, `home-${regHomeSeq++}`);
+      fs.mkdirSync(home, { recursive: true });
+      for (const d of dirs) fs.mkdirSync(path.join(home, d), { recursive: true });
+      return home;
+    };
+
+    // The shapes that actually break naive parsers -- the same fixture the
+    // spec's §5.2 byte-identity requirement names, verbatim.
+    const CODEX_REAL = [
+      '# my codex config',
+      '[plugins."github@openai-curated"]',
+      'enabled = true',
+      '',
+      '[projects."/Users/marco/Documents/AI Shit/CopyNigga"]',
+      'trust = "full"',
+      '',
+      '[mcp_servers.node_repl]',
+      'command = "node"',
+      '',
+      '[mcp_servers.node_repl.env]',
+      'FOO = "bar"',
+      '',
+    ].join('\n');
+
+    const CMD = {
+      command: '/stub/node',
+      args: ['/stub/membridge/bin/membridge.js', 'mcp'],
+      env: {},
+    };
+
+    const spawnStub = handler => {
+      const calls = [];
+      const fn = (command, args, options) => {
+        calls.push({ command, args, options });
+        return (handler && handler(command, args, options)) || { status: 0, stdout: '', stderr: '' };
+      };
+      fn.calls = calls;
+      return fn;
+    };
+
+    // A clean machine: `claude mcp get membridge` exits 1.
+    const CLAUDE_ABSENT = (command, args) =>
+      (args[1] === 'get' ? { status: 1, stdout: '', stderr: 'No MCP server named "membridge".' } : null);
+
+    // Real `claude mcp get` output, copied from the shipped CLI (2.1.220).
+    const claudeGetOut = (cmd, args, env) => [
+      'membridge:',
+      '  Scope: User config (available in all your projects)',
+      '  Status: ✔ Connected',
+      '  Type: stdio',
+      `  Command: ${cmd}`,
+      `  Args: ${args.join(' ')}`,
+      ...(env && Object.keys(env).length
+        ? ['  Environment:', ...Object.entries(env).map(([k, v]) => `    ${k}=${v}`)]
+        : []),
+    ].join('\n');
+
+    const CLAUDE_PRESENT = (out) => (command, args) =>
+      (args[1] === 'get' ? { status: 0, stdout: out, stderr: '' } : null);
+
+    const STUB_CLAUDE = path.join(rRoot, 'stub-claude');
+    const base = (home, extra = {}) => ({
+      home,
+      env: {},
+      platform: 'darwin',
+      config: {},
+      command: CMD,
+      spawn: spawnStub(CLAUDE_ABSENT),
+      resolveClaudeBin: () => ({ path: STUB_CLAUDE, source: 'config' }),
+      ...extra,
+    });
+    const rowFor = (rows, agent) => rows.find(r => r.agent === agent);
+
+    check('mcp-register: the server command is absolute and points at bin/membridge.js mcp', () => {
+      const c = mcpRegister.serverCommand();
+      assert.strictEqual(c.command, process.execPath);
+      assert.deepStrictEqual(c.args, [path.join(__dirname, '..', 'bin', 'membridge.js'), 'mcp']);
+      assert.ok(fs.existsSync(c.args[0]), 'the script we register must actually exist');
+      assert.ok(path.isAbsolute(c.args[0]));
+    });
+
+    check('mcp-register: ELECTRON_RUN_AS_NODE rides in an env field, never as a command prefix', () => {
+      // hookCommand() prefixes a SHELL STRING. An MCP entry is spawned
+      // directly ({command, args}) -- a command of
+      // "ELECTRON_RUN_AS_NODE=1 /path/to/Electron" is a filename no execve
+      // will ever find. Carrying the plan's wording across would register a
+      // server that can never start.
+      //
+      // The suite runs under plain node, so asserting against the ambient
+      // process.versions.electron would exercise the EMPTY branch and pass
+      // whatever the Electron branch does. Drive the branch explicitly.
+      const c = mcpRegister.serverCommand({ electron: true });
+      assert.ok(!/ELECTRON_RUN_AS_NODE/.test(c.command), 'the command must be a bare executable path');
+      assert.ok(!c.args.some(a => /ELECTRON_RUN_AS_NODE/.test(a)), 'nor an argument');
+      assert.strictEqual(c.command, process.execPath);
+      assert.strictEqual(c.env.ELECTRON_RUN_AS_NODE, '1', 'it must ride in an env field');
+      const plain = mcpRegister.serverCommand({ electron: false });
+      assert.deepStrictEqual(plain.env, {}, 'and must be absent off Electron, so a re-run compares equal');
+    });
+
+    check('mcp-register: codex gains our block and every other byte is unchanged', () => {
+      const home = mkHome(['.codex']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CODEX_REAL);
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered');
+      const after = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      assert.ok(after.startsWith(CODEX_REAL), 'the original file must be a byte-identical prefix');
+      assert.ok(after.includes('[plugins."github@openai-curated"]'), 'the @ key must be untouched');
+      assert.ok(after.includes('[projects."/Users/marco/Documents/AI Shit/CopyNigga"]'), 'the spaced path key must be untouched');
+      assert.ok(after.includes('[mcp_servers.membridge]'));
+      assert.ok(after.includes('args = ["/stub/membridge/bin/membridge.js", "mcp"]'));
+    });
+
+    check('mcp-register: a windows path is TOML-escaped, not written raw', () => {
+      // C:\Users\... in a TOML basic string is a run of escape sequences
+      // (\U, \m) -- writing it raw makes the file we registered into
+      // unparseable, on the one platform we cannot test end to end here.
+      const home = mkHome(['.codex']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '');
+      mcpRegister.registerAll(base(home, {
+        command: { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\Users\\me\\membridge\\bin\\membridge.js', 'mcp'], env: {} },
+      }));
+      const after = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      assert.ok(after.includes('command = "C:\\\\Program Files\\\\nodejs\\\\node.exe"'),
+        `backslashes must be doubled, got: ${after.trim()}`);
+      assert.ok(!/[^\\]\\[Um]/.test(after), 'no bare \\U or \\m escape may reach the file');
+    });
+
+    check('mcp-register: cursor keeps a foreign server and gains ours', () => {
+      const home = mkHome(['.cursor']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      fs.writeFileSync(file, JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['their-server'] } } }, null, 2));
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'registered');
+      const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.deepStrictEqual(after.mcpServers.theirs, { command: 'npx', args: ['their-server'] }, 'their server must survive verbatim');
+      assert.deepStrictEqual(after.mcpServers.membridge, { command: '/stub/node', args: ['/stub/membridge/bin/membridge.js', 'mcp'] });
+    });
+
+    check('mcp-register: claude code is registered through its own CLI, with the argv we intend', () => {
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_ABSENT);
+      const rows = mcpRegister.registerAll(base(home, { spawn }));
+      assert.strictEqual(rowFor(rows, 'claude-code').status, 'registered');
+      const argvs = spawn.calls.map(c => [c.command, ...c.args]);
+      assert.deepStrictEqual(argvs[0], [STUB_CLAUDE, 'mcp', 'get', 'membridge'], 'query first');
+      assert.deepStrictEqual(argvs[1], [STUB_CLAUDE, 'mcp', 'add', '-s', 'user', 'membridge', '--', '/stub/node', '/stub/membridge/bin/membridge.js', 'mcp']);
+      assert.strictEqual(spawn.calls[1].options.timeout, 5000, 'bounded: it must never block a launch');
+      assert.strictEqual(spawn.calls[1].options.windowsHide, true, 'no console window may flash');
+      // Nothing was written: the CLI owns that file, we never do.
+      assert.ok(!fs.existsSync(path.join(home, '.claude.json')), 'we must never write ~/.claude.json ourselves');
+    });
+
+    check('mcp-register: the electron env reaches the claude CLI as -e, not as a prefix', () => {
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_ABSENT);
+      mcpRegister.registerAll(base(home, {
+        spawn,
+        command: { command: '/stub/Electron', args: ['/stub/bin/membridge.js', 'mcp'], env: { ELECTRON_RUN_AS_NODE: '1' } },
+      }));
+      const add = spawn.calls.find(c => c.args[1] === 'add');
+      assert.deepStrictEqual(add.args,
+        ['mcp', 'add', '-s', 'user', 'membridge', '-e', 'ELECTRON_RUN_AS_NODE=1', '--', '/stub/Electron', '/stub/bin/membridge.js', 'mcp']);
+    });
+
+    check('mcp-register: an already-correct claude registration is unchanged, never re-added', () => {
+      // `claude mcp add` EXITS 1 on an existing name (verified against the
+      // shipped CLI) -- so skipping the query would turn every reconcile into
+      // a reported failure.
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut(CMD.command, CMD.args, {})));
+      const rows = mcpRegister.registerAll(base(home, { spawn }));
+      assert.strictEqual(rowFor(rows, 'claude-code').status, 'unchanged');
+      assert.deepStrictEqual(spawn.calls.map(c => c.args[1]), ['get'], 'nothing beyond the query may run');
+    });
+
+    check('mcp-register: a STALE registration of ours is repaired, not left to rot', () => {
+      // The path moves (reinstall, new node, app upgrade) and `claude mcp add`
+      // cannot update in place. "Already registered? stop." leaves a server
+      // that can never start -- the exact silent failure this feature exists
+      // to fix.
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut('/old/node', ['/old/membridge/bin/membridge.js', 'mcp'], {})));
+      const rows = mcpRegister.registerAll(base(home, { spawn }));
+      assert.strictEqual(rowFor(rows, 'claude-code').status, 'registered');
+      assert.deepStrictEqual(spawn.calls.map(c => c.args.slice(0, 2).join(' ')), ['mcp get', 'mcp remove', 'mcp add']);
+      assert.deepStrictEqual(spawn.calls[1].args, ['mcp', 'remove', 'membridge', '-s', 'user']);
+    });
+
+    check('mcp-register: a stale codex block is replaced in place, keeping its neighbours', () => {
+      const home = mkHome(['.codex']);
+      const file = path.join(home, '.codex', 'config.toml');
+      fs.writeFileSync(file, `${CODEX_REAL}\n[mcp_servers.membridge]\ncommand = "/old/node"\nargs = ["/old/bin/membridge.js", "mcp"]\n`);
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered');
+      const after = fs.readFileSync(file, 'utf8');
+      assert.strictEqual((after.match(/\[mcp_servers\.membridge\]/g) || []).length, 1, 'exactly one block');
+      assert.ok(!after.includes('/old/node'), 'the stale body must be gone');
+      assert.ok(after.includes('[mcp_servers.node_repl]') && after.includes('FOO = "bar"'), 'neighbours survive');
+    });
+
+    check('mcp-register: an agent that is not installed is reported, and no file is conjured', () => {
+      const home = mkHome(['.codex']); // no .cursor, no .claude
+      const rows = mcpRegister.registerAll(base(home));
+      const cursor = rowFor(rows, 'cursor');
+      assert.ok(cursor, 'an uninstalled agent must still produce a ROW -- a silent skip is indistinguishable from success');
+      assert.strictEqual(cursor.status, 'skipped');
+      assert.ok(/config\.mcp\.cursor\.configPath/.test(cursor.detail), `the detail must name the key that fixes it, got: ${cursor.detail}`);
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor')), false, 'no directory may be conjured');
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor', 'mcp.json')), false, 'the default path must still be ABSENT');
+      assert.strictEqual(fs.existsSync(path.join(home, '.claude.json')), false);
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'the installed one is unaffected');
+    });
+
+    check('mcp-register: a relocated codex config leaves the default path absent', () => {
+      const home = mkHome([]);
+      const moved = path.join(rRoot, `moved-${regHomeSeq}`);
+      fs.mkdirSync(moved, { recursive: true });
+      const rows = mcpRegister.registerAll(base(home, { env: { CODEX_HOME: moved } }));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered');
+      assert.ok(fs.existsSync(path.join(moved, 'config.toml')), 'it must land where the tool says it lives');
+      assert.strictEqual(fs.existsSync(path.join(home, '.codex')), false, 'and nowhere else');
+    });
+
+    check('mcp-register: a missing claude binary is skipped, names its config key, and stops nothing else', () => {
+      const home = mkHome(['.claude', '.codex']);
+      const rows = mcpRegister.registerAll(base(home, { resolveClaudeBin: () => null }));
+      const cc = rowFor(rows, 'claude-code');
+      assert.strictEqual(cc.status, 'skipped');
+      assert.ok(/config\.mcp\.claudeBin/.test(cc.detail), `must name the fix, got: ${cc.detail}`);
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'codex must still be registered');
+    });
+
+    check('mcp-register: invalid cursor JSON fails and leaves the file byte-identical', () => {
+      const home = mkHome(['.cursor', '.codex']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      const GARBAGE = '{ this is not json, and it is the user\'s\n';
+      fs.writeFileSync(file, GARBAGE);
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'failed');
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), GARBAGE, 'refuse rather than clobber');
+      assert.deepStrictEqual(fs.readdirSync(path.join(home, '.cursor')), ['mcp.json'], 'no stray temp file');
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'one bad config must not stop the others');
+    });
+
+    check('mcp-register: a text config that exists but cannot be read is a REFUSAL, not emptiness', () => {
+      // The Task 4 defect, one format over: classifying an unreadable config
+      // as "missing, safe to create" destroys it, because rename needs only
+      // the DIRECTORY writable.
+      //
+      // Asserted on the classifier DIRECTLY. Driven only through registerAll
+      // this is untestable: the same fixture that makes the read fail also
+      // makes the write fail, so a swallow-everything catch still ends at
+      // 'failed' and the check passes for the wrong reason. (Measured: it did.)
+      const home = mkHome(['.codex']);
+      const dirInItsPlace = path.join(home, '.codex', 'config.toml');
+      fs.mkdirSync(dirInItsPlace);
+      assert.strictEqual(mcpRegister.readTextConfig(dirInItsPlace), null,
+        'EISDIR means something IS there that we cannot see');
+      assert.deepStrictEqual(mcpRegister.readTextConfig(path.join(home, '.codex', 'nope.toml')),
+        { text: '', existed: false }, 'only a genuinely absent file is safe to create');
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
+      assert.ok(fs.statSync(dirInItsPlace).isDirectory(), 'whatever was there must still be there');
+    });
+
+    check('mcp-register: a mode-000 codex config is refused, not overwritten', () => {
+      // The consequence, end to end: here the DIRECTORY is writable, so a
+      // read-as-empty would rename straight over the user's servers.
+      const home = mkHome(['.codex']);
+      const file = path.join(home, '.codex', 'config.toml');
+      const THEIRS = '[mcp_servers.node_repl]\ncommand = "node"\n';
+      fs.writeFileSync(file, THEIRS);
+      fs.chmodSync(file, 0o000);
+      let readable = true;
+      try { fs.readFileSync(file, 'utf8'); } catch { readable = false; }
+      if (!readable) { // root, and Windows' chmod, cannot produce this
+        const rows = mcpRegister.registerAll(base(home));
+        assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
+        fs.chmodSync(file, 0o600);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), THEIRS, 'their servers must still be there');
+      } else {
+        fs.chmodSync(file, 0o600);
+      }
+    });
+
+    check('mcp-register: a write that throws costs one agent, never the launch', () => {
+      // The only things that THROW out of these modules are the write
+      // syscalls -- a locked-down config directory, a full disk. Registration
+      // is a convenience; nothing may let one of them escape and take the
+      // daemon launch (or the other agents) with it.
+      const home = mkHome(['.codex', '.cursor']);
+      const locked = path.join(home, '.codex');
+      fs.chmodSync(locked, 0o500);
+      let writable = true;
+      try { fs.writeFileSync(path.join(locked, '.probe'), 'x'); fs.unlinkSync(path.join(locked, '.probe')); }
+      catch { writable = false; }
+      let rows;
+      assert.doesNotThrow(() => { rows = mcpRegister.registerAll(base(home)); },
+        'registerAll must never propagate a write error');
+      // Windows chmod and a root uid cannot lock a directory; there the check
+      // still proves registerAll returns a full report without throwing.
+      if (!writable) assert.strictEqual(rowFor(rows, 'codex').status, 'failed', JSON.stringify(rowFor(rows, 'codex')));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'registered', 'the next agent must still be registered');
+      fs.chmodSync(locked, 0o700);
+    });
+
+    check('mcp-register: autoRegister:false writes nothing for any agent', () => {
+      const home = mkHome(['.codex', '.cursor', '.claude']);
+      const spawn = spawnStub(CLAUDE_ABSENT);
+      const rows = mcpRegister.registerAll(base(home, { spawn, config: { mcp: { autoRegister: false } } }));
+      assert.ok(rows.length >= 3 && rows.every(r => r.status === 'skipped'), JSON.stringify(rows));
+      assert.strictEqual(spawn.calls.length, 0, 'not even the query may run');
+      assert.strictEqual(fs.existsSync(path.join(home, '.codex', 'config.toml')), false);
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor', 'mcp.json')), false);
+    });
+
+    check('mcp-register: only the literal false disables it', () => {
+      const home = mkHome(['.codex']);
+      const rows = mcpRegister.registerAll(base(home, { config: { mcp: { autoRegister: 'false' } } }));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'a truthy string must not read as off');
+    });
+
+    check('mcp-register: running twice reports unchanged and rewrites nothing', () => {
+      const home = mkHome(['.codex', '.cursor', '.claude']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CODEX_REAL);
+      const first = mcpRegister.registerAll(base(home));
+      assert.deepStrictEqual(
+        [rowFor(first, 'codex').status, rowFor(first, 'cursor').status],
+        ['registered', 'registered']);
+      const tomlAfter = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      const jsonAfter = fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8');
+      const second = mcpRegister.registerAll(base(home));
+      assert.deepStrictEqual(
+        [rowFor(second, 'codex').status, rowFor(second, 'cursor').status],
+        ['unchanged', 'unchanged']);
+      assert.strictEqual(fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8'), tomlAfter);
+      assert.strictEqual(fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'), jsonAfter);
+    });
+
+    check('mcp-register: a foreign server named membridge is never overwritten', () => {
+      const home = mkHome(['.cursor', '.codex']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      const THEIRS = { command: '/usr/bin/python3', args: ['/Users/x/Membridge/tools/serve.py'] };
+      fs.writeFileSync(file, JSON.stringify({ mcpServers: { membridge: THEIRS } }, null, 2));
+      const tomlFile = path.join(home, '.codex', 'config.toml');
+      fs.writeFileSync(tomlFile, '[mcp_servers.membridge]\ncommand = "python3"\nargs = ["/Users/x/Membridge/serve.py"]\n');
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'skipped');
+      assert.strictEqual(rowFor(rows, 'codex').status, 'skipped');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers.membridge, THEIRS);
+      assert.ok(fs.readFileSync(tomlFile, 'utf8').includes('/Users/x/Membridge/serve.py'), 'theirs survives');
+    });
+
+    check('mcp-register: a foreign server named membridge survives unregisterAll', () => {
+      const home = mkHome(['.cursor', '.codex', '.claude']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      const THEIRS = { command: '/usr/bin/python3', args: ['/Users/x/Membridge/tools/serve.py'] };
+      const before = JSON.stringify({ mcpServers: { membridge: THEIRS } }, null, 2);
+      fs.writeFileSync(file, before);
+      const tomlFile = path.join(home, '.codex', 'config.toml');
+      const tomlBefore = '[mcp_servers.membridge]\ncommand = "python3"\nargs = ["/Users/x/Membridge/serve.py"]\n';
+      fs.writeFileSync(tomlFile, tomlBefore);
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut('/usr/bin/python3', ['/Users/x/Membridge/tools/serve.py'], {})));
+      const rows = mcpRegister.unregisterAll(base(home, { spawn }));
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'their JSON entry is byte-identical');
+      assert.strictEqual(fs.readFileSync(tomlFile, 'utf8'), tomlBefore, 'their TOML block is byte-identical');
+      assert.deepStrictEqual(spawn.calls.map(c => c.args[1]), ['get'], 'claude mcp remove must never run on a foreign server');
+      assert.deepStrictEqual(
+        [rowFor(rows, 'cursor').status, rowFor(rows, 'codex').status, rowFor(rows, 'claude-code').status],
+        ['skipped', 'skipped', 'skipped']);
+    });
+
+    check('mcp-register: unregisterAll strips exactly our own entries', () => {
+      const home = mkHome(['.cursor', '.codex', '.claude']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CODEX_REAL);
+      fs.writeFileSync(path.join(home, '.cursor', 'mcp.json'),
+        JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['x'] } } }, null, 2));
+      mcpRegister.registerAll(base(home));
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut(CMD.command, CMD.args, {})));
+      const rows = mcpRegister.unregisterAll(base(home, { spawn }));
+      assert.deepStrictEqual(
+        [rowFor(rows, 'codex').status, rowFor(rows, 'cursor').status, rowFor(rows, 'claude-code').status],
+        ['removed', 'removed', 'removed']);
+      const toml = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      assert.ok(!toml.includes('mcp_servers.membridge'));
+      assert.ok(toml.includes('[plugins."github@openai-curated"]'), 'removal must not disturb the rest either');
+      const json = JSON.parse(fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'));
+      assert.deepStrictEqual(Object.keys(json.mcpServers), ['theirs']);
+      assert.deepStrictEqual(spawn.calls[1].args, ['mcp', 'remove', 'membridge', '-s', 'user']);
+    });
+
+    check('mcp-register: unregisterAll ignores the autoRegister kill switch', () => {
+      // Turning auto-registration off must not strand an entry we already
+      // wrote, and `membridge remove-hooks` must clean up regardless.
+      const home = mkHome(['.codex']);
+      mcpRegister.registerAll(base(home));
+      const rows = mcpRegister.unregisterAll(base(home, { config: { mcp: { autoRegister: false } } }));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'removed');
+      assert.ok(!fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8').includes('mcp_servers.membridge'));
+    });
+
+    check('mcp-register: a user-declared agent on a tool we have never heard of works', () => {
+      const home = mkHome([]);
+      const theirDir = path.join(rRoot, `zed-${regHomeSeq}`);
+      fs.mkdirSync(theirDir, { recursive: true });
+      const theirFile = path.join(theirDir, 'settings.json');
+      fs.writeFileSync(theirFile, JSON.stringify({ mcpServers: {} }, null, 2));
+      const config = { mcp: { 'some-new-tool': { configPath: theirFile, format: 'json' } } };
+      const rows = mcpRegister.registerAll(base(home, { config }));
+      const r = rowFor(rows, 'some-new-tool');
+      assert.ok(r, 'a declared agent must appear in the report');
+      assert.strictEqual(r.status, 'registered');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(theirFile, 'utf8')).mcpServers.membridge,
+        { command: '/stub/node', args: ['/stub/membridge/bin/membridge.js', 'mcp'] });
+    });
+
+    check('mcp-register: a declared agent with a format we cannot write is reported, not guessed at', () => {
+      const home = mkHome([]);
+      const theirDir = path.join(rRoot, `weird-${regHomeSeq}`);
+      fs.mkdirSync(theirDir, { recursive: true });
+      const theirFile = path.join(theirDir, 'servers.ini');
+      const config = { mcp: { 'weird-tool': { configPath: theirFile } } };
+      const rows = mcpRegister.registerAll(base(home, { config }));
+      const r = rowFor(rows, 'weird-tool');
+      assert.strictEqual(r.status, 'skipped');
+      assert.ok(/config\.mcp\.weird-tool\.format/.test(r.detail), `must name the key, got: ${r.detail}`);
+      assert.strictEqual(fs.existsSync(theirFile), false, 'and must not have written a file it cannot format');
+    });
+
+    check('mcp-register: a test-harness MEMBRIDGE_HOME writes nothing anywhere', () => {
+      // The suite's own guard rail (mcp spec §6): a future check that forgets
+      // to inject `home` must not reach a developer's real ~/.codex.
+      const home = mkHome(['.codex', '.cursor']);
+      const rows = mcpRegister.registerAll(base(home, {
+        env: { MEMBRIDGE_HOME: path.join(os.tmpdir(), 'membridge-test-fake', 'home') },
+      }));
+      assert.ok(rows.length >= 3 && rows.every(r => r.status === 'skipped'), JSON.stringify(rows));
+      assert.strictEqual(fs.existsSync(path.join(home, '.codex', 'config.toml')), false);
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor', 'mcp.json')), false);
+    });
+
+    check('mcp-register: isOurs is anchored, not a substring match on "membridge"', () => {
+      assert.strictEqual(mcpRegister.isOurs({ command: '/n', args: ['/a/bin/membridge.js', 'mcp'] }), true);
+      assert.strictEqual(mcpRegister.isOurs({ command: '/usr/local/bin/membridge', args: ['mcp'] }), true);
+      // A user's own script that merely lives under a directory named
+      // Membridge -- the exact over-broad match that made setup-hooks
+      // overwrite a user's command and remove-hooks delete it (lib/hooks.js).
+      assert.strictEqual(mcpRegister.isOurs({ command: 'python3', args: ['/Users/x/Membridge/tools/serve.py'] }), false);
+      assert.strictEqual(mcpRegister.isOurs({ command: 'node', args: ['/a/membridge-proxy.js', 'mcp'] }), false);
+      assert.strictEqual(mcpRegister.isOurs({ url: 'https://membridge.app/mcp' }), false);
+      assert.strictEqual(mcpRegister.isOurs(null), false);
+      assert.strictEqual(mcpRegister.isOurs('[mcp_servers.membridge]\ncommand = "node"\nargs = ["/a/bin/membridge.js", "mcp"]'), true);
+    });
+
+    check('mcp-register: nothing in the registrar branches on an agent name', () => {
+      // Task 2 put every per-agent difference in SPECS as DATA and gave every
+      // resolution a `format`. A `switch (agent)` here would quietly undo
+      // that, and a user-declared agent would stop working.
+      //
+      // Comments are stripped first and the match is on the bare WORD: an
+      // earlier version keyed on quotes alone and sailed straight past
+      // `const LEGACY = { codex: 'toml' }` -- an unquoted object key is
+      // exactly the shape this drift takes.
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp-register.js'), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .map(l => l.replace(/(^|[^:])\/\/.*$/, '$1'))
+        .join('\n');
+      assert.ok(/HANDLERS/.test(src), 'the stripper must not have eaten the code itself');
+      for (const name of ['codex', 'cursor', 'claude-code']) {
+        assert.ok(!new RegExp(`\\b${name}\\b`, 'i').test(src),
+          `lib/mcp-register.js must not name the agent ${name} outside a comment`);
+      }
+    });
+  }
+
+  // ---- teammate notes: the human surface (spec §6) ----
+  // Task 1 proved the in-terminal line impossible, so the dashboard IS the
+  // human surface. That makes the wiring the whole point: dashboardPayload
+  // could be flawless and still reach nobody. Three layers, deliberately —
+  // the pure builder, the payload the page actually polls, and the markup a
+  // human actually sees. Only the last two can fail for the reason that
+  // matters.
+  {
+    const dashDir = path.join(ROOT, 'projects', 'dash-notes-proj');
+    fs.mkdirSync(dashDir, { recursive: true });
+    const NOW3 = '2026-07-28T10:00:00Z';
+    const decisionRow = (author, ts, text) => ({ author_name: author, ts, decisions: text, gotchas: '' });
+    const trackDashProject = dir => {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [dir]: { events: [] } } });
+    };
+
+    check('notes-dash: unseen decisions appear on the polled payload', () => {
+      notesStore.write(dashDir, notes.buildIndex(
+        [{ author_name: 'Andrew', ts: '2026-07-28T09:55:00Z', decisions: 'do not touch validate.ts yet', gotchas: '' }],
+        null, NOW3));
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.strictEqual(out.total, 1);
+      assert.strictEqual(out.fresh[0].author, 'Andrew');
+      assert.ok(out.fresh[0].text.includes('validate.ts'));
+    });
+
+    check('notes-dash: an empty index yields an empty payload, not null', () => {
+      notesStore.write(dashDir, notes.emptyIndex());
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.deepStrictEqual(out, { fresh: [], total: 0 });
+    });
+
+    check('notes-dash: a missing index yields an empty payload', () => {
+      assert.deepStrictEqual(notes.dashboardPayload(null, NOW3), { fresh: [], total: 0 });
+    });
+
+    // `ts` is not decoration. This payload has no age filter by design (spec
+    // §5: absence is not a reason to lose information), so a decision from
+    // three months ago can sit at the top of the card — and without a
+    // timestamp it would read as something that just landed. The internal id
+    // and kind stay internal: the browser has no use for them.
+    check('notes-dash: every entry carries author, ts and text, and nothing else', () => {
+      notesStore.write(dashDir, notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'renamed the retry cap')], null, NOW3));
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.deepStrictEqual(Object.keys(out.fresh[0]).sort(), ['author', 'text', 'ts']);
+      assert.strictEqual(out.fresh[0].ts, '2026-07-28T09:55:00Z');
+    });
+
+    check('notes-dash: newest first, capped at PROSE_CAP, with total counting the rest', () => {
+      const many = [];
+      for (let i = 0; i < 6; i++) many.push(decisionRow('Andrew', `2026-07-2${i + 1}T09:00:00Z`, `decision ${i}`));
+      notesStore.write(dashDir, notes.buildIndex(many, null, NOW3));
+      const out = notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      assert.strictEqual(out.fresh.length, notes.PROSE_CAP, 'the card must not grow without bound');
+      assert.strictEqual(out.total, 6);
+      assert.strictEqual(out.fresh[0].text, 'decision 5', 'newest must lead');
+      assert.strictEqual(out.fresh[2].text, 'decision 3');
+    });
+
+    // Spec §6's deliberate separation, asserted in BOTH directions. Being
+    // shown a decision in a browser is not the same event as an agent having
+    // consumed it. Wiring the two together would let a browser visit silently
+    // suppress an agent-side delivery — these two checks are what catches
+    // that if someone later "simplifies" dashboardPayload into selectProse.
+    check('notes-dash: the payload ignores the agent-side seen markers', () => {
+      const built = notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'renamed the retry cap')], null, NOW3);
+      const before = notes.dashboardPayload(built, NOW3);
+      assert.strictEqual(before.total, 1, 'fixture produced no prose — the check would be vacuous');
+      const allSeen = notes.markProseSeen(built, built.prose.map(p => p.id), NOW3);
+      assert.strictEqual(Object.keys(allSeen.seen.prose).length, 1, 'nothing was marked seen — vacuous');
+      assert.strictEqual(notes.selectProse(allSeen, NOW3).items.length, 0,
+        'the agent surface still offers it — the fixture does not exercise the difference');
+      assert.deepStrictEqual(notes.dashboardPayload(allSeen, NOW3), before,
+        'the dashboard hid a decision because an agent had already consumed it');
+    });
+
+    // The same rule at the level where it can actually be broken: the browser
+    // hits projectDetail, not dashboardPayload, so a "mark it read while we
+    // are here" line in the ROUTE would slip past a pure-function check.
+    check('notes-dash: polling the project payload never marks anything seen for the agent', () => {
+      const built = notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'renamed the retry cap')], null, NOW3);
+      trackDashProject(dashDir);
+      notesStore.write(dashDir, built);
+      notes.dashboardPayload(notesStore.read(dashDir), NOW3);
+      projectDetail(dashDir);
+      projectDetail(dashDir); // a second poll, as the page does every 5s
+      const onDisk = notesStore.read(dashDir);
+      assert.deepStrictEqual(onDisk.seen, { prose: {}, file: {} }, 'a browser poll wrote seen markers');
+      assert.strictEqual(notes.selectProse(onDisk, NOW3).items.length, 1,
+        'a dashboard poll suppressed the agent-side delivery');
+    });
+
+    // Layer 2: the payload the project page actually polls every 5 seconds.
+    // Without this the three checks above pass against a function nothing
+    // calls.
+    check('notes-dash: /api/project, which the page polls, carries the notes', () => {
+      trackDashProject(dashDir);
+      notesStore.write(dashDir, notes.buildIndex(
+        [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'do not touch validate.ts yet')], null, NOW3));
+      const detail = projectDetail(dashDir);
+      assert.ok(detail, 'fixture project is not tracked — the check would be vacuous');
+      assert.ok(detail.teammateNotes, 'the polled payload does not carry teammateNotes at all');
+      assert.strictEqual(detail.teammateNotes.total, 1);
+      assert.ok(detail.teammateNotes.fresh[0].text.includes('validate.ts'));
+    });
+
+    check('notes-dash: a project with no notes still carries an empty payload, never undefined', () => {
+      const bare = path.join(ROOT, 'projects', 'dash-notes-bare');
+      fs.mkdirSync(bare, { recursive: true });
+      trackDashProject(bare);
+      assert.deepStrictEqual(projectDetail(bare).teammateNotes, { fresh: [], total: 0 });
+    });
+
+    // The index's own redaction (lib/teammate-notes.js's clean) is
+    // DEFAULTS-ONLY. Everything else on this payload — teamEntries' ask,
+    // summary, decisions, gotchas — is re-run through the user's configured
+    // patterns before it crosses the local HTTP boundary. A new surface that
+    // skipped that would quietly exempt itself from a rule the user set.
+    check('notes-dash: a user redaction pattern applies to notes on the way to the browser', () => {
+      const saved = util.loadUserConfig();
+      try {
+        util.saveUserConfig({ ...saved, redactExtra: ['CODENAME-\\w+'] });
+        notesStore.write(dashDir, notes.buildIndex(
+          [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'ship CODENAME-BLUEJAY on Friday')], null, NOW3));
+        const raw = notesStore.read(dashDir).prose[0].text;
+        assert.ok(raw.includes('CODENAME-BLUEJAY'),
+          'the index already stripped it — this check cannot see the boundary it guards');
+        const text = projectDetail(dashDir).teammateNotes.fresh[0].text;
+        assert.ok(!text.includes('CODENAME-BLUEJAY'), `user pattern not applied -> ${text}`);
+        assert.ok(text.includes('[redacted]'));
+      } finally {
+        util.saveUserConfig(saved);
+      }
+    });
+
+    // Layer 3: the markup. A payload nobody draws is not a human surface, so
+    // pull the real card renderer out of the served bundle and run it — the
+    // same sandbox technique the pxFmtTokens / pxHasSummary checks use.
+    {
+      const src = require('../lib/dashboard/client')('', '');
+      const grab = (s, name) => {
+        const start = s.indexOf('function ' + name + '(');
+        if (start === -1) return null;
+        let i = s.indexOf('{', start), depth = 0, end = i;
+        for (; end < s.length; end++) {
+          if (s[end] === '{') depth++;
+          else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+        }
+        return s.slice(start, end);
+      };
+      // esc and ago are var-assigned expressions, not declarations, so slice
+      // them out by their own boundaries and hand the REAL ones to the
+      // sandbox — a stubbed esc would make the escaping check meaningless.
+      const escSrc = src.slice(src.indexOf('var esc = function'), src.indexOf('var ago = function'));
+      const agoSrc = src.slice(src.indexOf('var ago = function'), src.indexOf('// Tool colors'));
+      const cardSrc = grab(src, 'pjTeammateNotesHtml');
+      const render = cardSrc
+        ? new Function(escSrc + agoSrc + 'return (' + cardSrc + ')')()
+        : null;
+      const ANDREW = { author: 'Andrew', ts: '2026-07-28T09:55:00Z', text: 'do not touch validate.ts yet' };
+
+      check('notes-dash: the project page draws each decision as author, text and when', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        const html = render({ fresh: [ANDREW], total: 1 });
+        assert.ok(html.includes('Andrew'), 'no author in the markup');
+        assert.ok(html.includes('do not touch validate.ts yet'), 'no decision text in the markup');
+        // data-ago is the dashboard's own live-relative-time hook, so this is
+        // deterministic AND proves the card keeps ticking over on the poll.
+        assert.ok(html.includes('data-ago="2026-07-28T09:55:00Z"'),
+          'the card never says WHEN — an old decision would read as one that just landed');
+      });
+
+      check('notes-dash: no notes draws nothing at all, and never throws', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        assert.strictEqual(render({ fresh: [], total: 0 }), '', 'an empty card is a row of nothing');
+        assert.strictEqual(render(null), '');
+        assert.strictEqual(render(undefined), '');
+      });
+
+      check('notes-dash: past the cap the card points at the rest instead of hiding them', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        const three = [ANDREW, { ...ANDREW, text: 'second' }, { ...ANDREW, text: 'third' }];
+        assert.ok(!/more/.test(render({ fresh: three, total: 3 })), 'nothing is hidden, so say nothing');
+        assert.ok(/11 more/.test(render({ fresh: three, total: 14 })),
+          'the card silently drops 11 decisions with no pointer to them');
+      });
+
+      check('notes-dash: teammate text is escaped, never injected as markup', () => {
+        assert.ok(render, 'pjTeammateNotesHtml is missing from the client bundle');
+        const html = render({
+          fresh: [{ author: '<img src=x onerror=alert(1)>', ts: '2026-07-28T09:55:00Z', text: '<script>alert(2)</script>' }],
+          total: 1,
+        });
+        // Escaping neutralises the DELIMITERS; the payload's own words survive
+        // as text, so assert on what can form an element, not on substrings.
+        assert.ok(!html.includes('<script>'), 'teammate text lands in the page as live markup');
+        assert.ok(!html.includes('<img'), 'an author name lands in the page as live markup');
+        assert.ok(html.includes('&lt;script&gt;'), 'the text was dropped rather than escaped');
+        assert.ok(html.includes('&lt;img'), 'the author was dropped rather than escaped');
+      });
+
+      // The link that makes every check above non-vacuous.
+      check('notes-dash: renderProject actually draws the card from the polled payload', () => {
+        const body = grab(src, 'renderProject');
+        assert.ok(body, 'renderProject is missing from the client bundle');
+        assert.ok(/pjTeammateNotesHtml\(/.test(body),
+          'the card renderer is never called — the payload reaches nobody');
+        assert.ok(/teammateNotes/.test(body),
+          'renderProject never reads teammateNotes off the polled payload');
+      });
+    }
   }
 
   // The same clobber lib/mcp-json.js's readConfig exists to prevent, in the
