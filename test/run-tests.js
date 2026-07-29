@@ -20037,6 +20037,47 @@ const repoRoot = require('../lib/repo-root');
     }
   });
 
+  // ---- teammate notes: first-install backfill (Task 13 dogfood finding) ----
+  // The daemon only rebuilt the index for projects whose pull brought NEW rows,
+  // so teammate decisions already sitting in state when this feature arrives
+  // stayed invisible until a teammate happened to push again. Measured live:
+  // 65 team entries, 7 with decisions, no index. backfillProjects closes it.
+  {
+    const bfRoot = path.join(ROOT, 'projects', 'backfill-proj');
+    fs.mkdirSync(bfRoot, { recursive: true });
+    const storedRow = { author: 'Andrew', ts: '2026-07-28T09:00:00Z', decisions: 'upgraded users must still see this', gotchas: '', changes: [{ file: 'lib/x.js', note: 'careful here' }] };
+    const bfState = { projects: {
+      [bfRoot]: { teamEntries: [storedRow] },
+      [path.join(ROOT, 'projects', 'no-team')]: { events: [] },
+      [path.join(ROOT, 'projects', 'empty-team')]: { teamEntries: [] },
+    } };
+
+    check('notes-backfill: builds an index for existing entries with no index file', () => {
+      const rebuilt = notesStore.backfillProjects(bfState, '2026-07-28T10:00:00Z');
+      assert.deepStrictEqual(rebuilt, [bfRoot], 'exactly the project with team entries and no index');
+      const ix = notesStore.read(bfRoot);
+      assert.strictEqual(ix.prose[0].author, 'Andrew', 'the stored-shape author must survive');
+      assert.ok(ix.byFile['lib/x.js'], 'file notes must ride along');
+    });
+
+    check('notes-backfill: an existing index is never rewritten by the backfill', () => {
+      const before = fs.statSync(notesStore.notesPath(bfRoot)).mtimeMs;
+      const again = notesStore.backfillProjects(bfState, '2026-07-28T11:00:00Z');
+      assert.deepStrictEqual(again, [], 'a project with an index must be left alone');
+      assert.strictEqual(fs.statSync(notesStore.notesPath(bfRoot)).mtimeMs, before, 'the index file was rewritten');
+    });
+
+    check('notes-backfill: no teamEntries means no file conjured', () => {
+      assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'no-team'))));
+      assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'empty-team'))));
+    });
+
+    check('notes-backfill: malformed state yields [] and never throws', () => {
+      assert.deepStrictEqual(notesStore.backfillProjects(null, 'x'), []);
+      assert.deepStrictEqual(notesStore.backfillProjects({ projects: 'nope' }, 'x'), []);
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

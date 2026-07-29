@@ -88,7 +88,6 @@ function cmdSync() {
 // Fail-open throughout: a project that throws keeps its previous index and the
 // loop continues.
 function rebuildNotesForChanged(changed) {
-  if (!changed || !changed.length) return;
   const config = util.getConfig();
   if (!notes.isNotesEnabled(config)) return; // kill switch: write nothing at all
   const nowIso = new Date().toISOString();
@@ -99,6 +98,17 @@ function rebuildNotesForChanged(changed) {
     util.log(`teammate notes: cannot read state (${err.message})`);
     return;
   }
+  // First-install backfill: teammate entries that predate this feature (or a
+  // deleted index) never appear in `changed`, so without this a user upgrades
+  // into permanent silence until a teammate happens to push again. Runs every
+  // pass; costs one existsSync per project when there is nothing to do.
+  try {
+    const rebuilt = notesStore.backfillProjects(state, nowIso);
+    if (rebuilt.length) util.log(`teammate notes: backfilled ${rebuilt.length} project(s) with existing team entries`);
+  } catch (err) {
+    util.log(`teammate notes backfill: ${err.message}`);
+  }
+  if (!changed || !changed.length) return;
   for (const key of changed) {
     try {
       const proj = (state.projects || {})[key];
