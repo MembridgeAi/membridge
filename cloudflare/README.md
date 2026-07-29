@@ -142,26 +142,45 @@ deliberate: authentication bugs cannot exist in code nobody wrote. Cloudflare
 Access challenges the request at the edge, before the page is served, and the
 panel only ever sees an already-verified identity.
 
-Set it up once, in **Zero Trust → Access → Applications**:
+Set it up once. **Order matters** — the login method has to exist before an
+application can use it.
 
-1. **Add an application** → Self-hosted → domain `ops.membridge.me`.
-2. **Session duration** — 24 hours is a reasonable default. Shorter means
-   re-authenticating more often; longer widens the window on a stolen laptop.
-3. **Add a policy** → Action: *Allow* → Include: *Emails* → your address.
-   This list, and `ALLOWED_EMAILS` in `ops-api/wrangler.toml`, must BOTH contain
-   anyone who should get in. Two lists is not redundancy for its own sake: the
-   Access policy is what stops the request, the Worker check is what stops a
-   request that reached the Worker another way.
-4. **Choose a login method** (Zero Trust → Settings → Authentication):
-   - **One-time PIN** — zero setup, works immediately. Cloudflare emails a code
-     on each sign-in. Start here.
+1. **Add a login method.** **Zero Trust → Integrations → Identity providers** →
+   *Add new*. (Not Settings → Authentication; Cloudflare moved it, and most
+   older guides still point at the old path.)
+
+   **One-time PIN is no longer added automatically.** It used to be, which is
+   why so many walkthroughs skip this step. Miss it and you end up with a
+   correctly configured application and no way to sign into it — and the
+   failure reads as a broken app, not a missing identity provider.
+
+   - **One-time PIN** — nothing to configure beyond adding it. Cloudflare emails
+     a code on each sign-in. Start here.
    - **GitHub or Google** — nicer day to day, needs an OAuth app registered with
      Cloudflare once. Worth doing if you use the panel daily.
 
-   Note this is entirely separate from the GitHub sign-in inside the product.
-   That one is Supabase auth for customers; this one is Cloudflare auth for the
-   operator. They share nothing, which is correct — a bug in customer auth must
-   not be able to open the admin panel.
+   This is entirely separate from the GitHub sign-in inside the product. That
+   one is Supabase auth for customers; this is Cloudflare auth for the operator.
+   They share nothing, which is correct — a bug in customer auth must not be
+   able to open the admin panel.
+
+2. **Add an application.** **Zero Trust → Access → Applications** → *Add an
+   application* → subdomain `ops`, domain `membridge.me`, no path.
+
+   Cloudflare removed the explicit "Self-hosted" tile from this flow; the
+   Destinations screen you land on already *is* the self-hosted path (its own
+   help text says "per self-hosted application").
+
+3. **Session duration** — 24 hours is a reasonable default. Shorter means
+   re-authenticating more often; longer widens the window on a stolen laptop.
+
+4. **Add a policy** → Action: *Allow* → Include: *Emails* → your address.
+
+   This list, and `ALLOWED_EMAILS` in `ops-api/wrangler.toml`, must BOTH contain
+   anyone who should get in. Two lists is not redundancy for its own sake: the
+   Access policy is what stops the request at the edge, the Worker check is what
+   stops a request that reached the Worker another way.
+
 5. **Copy the application's AUD tag** into `ACCESS_AUD` in
    `ops-api/wrangler.toml` and redeploy the Worker.
 
