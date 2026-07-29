@@ -16114,7 +16114,6 @@ const repoRoot = require('../lib/repo-root');
   });
 }
 
-// --- summary ---
   // ---- teammate notes: pure index logic (spec §4, §5) ----
   const notes = require('../lib/teammate-notes');
 
