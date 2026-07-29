@@ -20072,6 +20072,39 @@ const repoRoot = require('../lib/repo-root');
       assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'empty-team'))));
     });
 
+    // afterTeamPull is the shared post-pull entry point BOTH sync loops call
+    // (bin daemon + tray app). Guard the two properties the loops rely on:
+    // the kill switch is inside it, and app/main.js actually invokes it.
+    check('notes-backfill: afterTeamPull honours the kill switch', () => {
+      const kp = path.join(ROOT, 'projects', 'backfill-killed');
+      fs.mkdirSync(kp, { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [kp]: { teamEntries: [{ author: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'x', gotchas: '' }] } } });
+      const cfg = util.getConfig();
+      util.saveUserConfig({ ...cfg, teammateNotes: { enabled: false } });
+      try {
+        notesStore.afterTeamPull([]);
+        assert.ok(!fs.existsSync(notesStore.notesPath(kp)), 'the kill switch must stop the backfill too');
+      } finally {
+        util.saveUserConfig(cfg);
+      }
+      notesStore.afterTeamPull([]);
+      assert.ok(fs.existsSync(notesStore.notesPath(kp)), 'with the switch back on, the backfill must run');
+    });
+
+    check('notes-backfill: the tray app loop calls afterTeamPull (both loops share it)', () => {
+      // Source-shape check with teeth: the app has its OWN sync loop, and the
+      // first version of this feature lived only in bin/ glue — app users
+      // never got an index while everything was green. Pin the call site.
+      const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'main.js'), 'utf8');
+      const i = appSrc.indexOf('async function runSync');
+      assert.ok(i !== -1, 'app/main.js runSync not found');
+      const body = appSrc.slice(i, appSrc.indexOf('\nfunction tick', i));
+      assert.ok(/afterTeamPull\s*\(/.test(body), "the tray app's runSync no longer calls afterTeamPull");
+      const binSrc = fs.readFileSync(path.join(__dirname, '..', 'bin', 'membridge.js'), 'utf8');
+      assert.ok(/afterTeamPull\s*\(/.test(binSrc), 'the CLI loop no longer calls afterTeamPull');
+    });
+
     check('notes-backfill: malformed state yields [] and never throws', () => {
       assert.deepStrictEqual(notesStore.backfillProjects(null, 'x'), []);
       assert.deepStrictEqual(notesStore.backfillProjects({ projects: 'nope' }, 'x'), []);
