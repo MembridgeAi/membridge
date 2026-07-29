@@ -7133,6 +7133,44 @@ async function main() {
       assert.strictEqual(hasPending, true, 'the pending row must rotate together WITH its confirmation, not be dropped and orphan it');
     });
 
+    // FLOOR GUARD (fix round 4): pairing safety's retreat can pin `cut` at
+    // exactly 0 -- forced whenever line 0 ITSELF is a still-open pending row
+    // whose confirmation only shows up later in the kept tail. Left alone,
+    // rotation becomes a PERMANENT no-op on that file: the identical
+    // straddling pair sits at the identical position (line 0) on every
+    // future rotation call too, so a file already well past MAX_EVENTS_BYTES
+    // never shrinks. Places the pending row AT LINE 0, its confirmation well
+    // past the naive midpoint (mirroring the pairing test above, just with
+    // the pending row moved to the very front) and asserts the file still
+    // shrinks -- resolved by dropping that one straddling pair TOGETHER
+    // (never orphaning one end without the other) instead of retreating to
+    // protect it.
+    const zeroProj = path.join(ROOT, 'projects', 'recall-rotate-floor-guard-proj');
+    fs.mkdirSync(hooksRecall.recallDir(zeroProj), { recursive: true });
+    const zeroFillerRow = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', callTokens: 401, skeletonTokens: 1, holdout: false }) + '\n';
+    const zeroTotalRows = Math.ceil((2 * 1024 * 1024 * 1.3) / zeroFillerRow.length);
+    const zeroPendingRow = JSON.stringify({
+      ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-zero', relPath: 'src/zero.js',
+      tier: 'B', callTokens: 999, skeletonTokens: 99, holdout: false, committed: false,
+    }) + '\n';
+    const zeroConfirmRow = JSON.stringify({ ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-zero', relPath: 'src/zero.js', committed: true }) + '\n';
+    const zeroGapCount = Math.floor(zeroTotalRows * 0.6);   // confirmation lands well past the naive ~50% cut
+    const zeroTailCount = zeroTotalRows - zeroGapCount;
+    const zeroFile = hooksRecall.eventsPath(zeroProj);
+    fs.writeFileSync(zeroFile, zeroPendingRow + zeroFillerRow.repeat(zeroGapCount) + zeroConfirmRow + zeroFillerRow.repeat(zeroTailCount));
+    const zeroSizeBefore = fs.statSync(zeroFile).size;
+    check('recall hook: hooks-recall-rotate FLOOR GUARD -- a pathological file (straddling pair anchored at line 0) still shrinks, never a permanent no-op', () => {
+      assert.ok(zeroSizeBefore > 2 * 1024 * 1024, 'test setup must actually exceed the rotation threshold');
+      hooksRecall.rotateEvents(zeroFile);
+      const after = fs.readFileSync(zeroFile, 'utf8');
+      assert.ok(after.length < zeroSizeBefore, `the file must shrink even though line 0 is a straddling pending row (${zeroSizeBefore} -> ${after.length})`);
+      const rows = after.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+      const hasPending = rows.some(r => r.relPath === 'src/zero.js' && r.committed === false);
+      const hasConfirm = rows.some(r => r.relPath === 'src/zero.js' && r.committed === true);
+      assert.strictEqual(hasPending, false, 'the offending pair is dropped TOGETHER once keeping it would mean zero progress');
+      assert.strictEqual(hasConfirm, false, 'still never split -- the confirmation goes with its pending row, never orphaned');
+    });
+
     // L7: saveSessionState used to commit BEFORE the event write, so an
     // events.jsonl failure marked the path served and burned an interception
     // for a serve the agent never received -- locking that path out for the
@@ -7468,12 +7506,22 @@ async function main() {
       assert.strictEqual(ledAcc.openServes[0].correctedBy.length, 2);
     });
 
-    // FINDING 3 (restructured for revisable settlement): a failed queue
-    // rewrite must not lose a settlement the ledger write already durably
-    // recorded -- and since the row is left ON the queue for a retry, the
-    // NEXT successful pass re-reads and re-settles it, an accepted one-time
-    // OVER-count (never a loss), exactly mirroring the tradeoff
-    // lib/ledger-fold-state.js's own header already accepts elsewhere.
+    // FINDINGS 1+2 (fix round 4 -- CORRECTED, was an anti-requirement pin):
+    // this block used to assert `serves:2` / `openServes.length:2` /
+    // `avoided.tokens:7660` after one failed queue rewrite + a retry --
+    // encoding the exact bug the review flagged: settlement re-triggering on
+    // every pass that still finds a confirmed row on the queue, because a
+    // failed rewrite is PERSISTENT (ENOSPC, a read-only dir), not transient.
+    // Reproduced against the pre-fix code: 4 failed rewrite passes over one
+    // physical serve produced 5 receipts, rejections=5, and burned through
+    // REJECTION_LIMIT=3 after just two failed passes -- permanently
+    // disabling recall for a working path from a single real follow-up read.
+    // settleRows is now idempotent on serveId (skips a confirmed row whose
+    // serveId is already durable evidence in prevLedger.openServes -- see
+    // lib/ledger-fold-recall-settle.js's own header), so a failed rewrite
+    // delays draining the queue but never re-settles what is already on
+    // record. Corrected numbers: serves stays 1, openServes.length stays 1,
+    // avoided is UNCHANGED by the retry (not doubled).
     {
       const proj3cT6 = seedT6Project('t6-queue-rewrite-failure');
       const rel3c = 'src/g.js';
@@ -7518,12 +7566,78 @@ async function main() {
       // PENDING_CONFIRM_GRACE_MS that rel3d (still never confirmed) is now a
       // genuine phantom too -- so this pass empties the queue completely.
       const ledRetry = ledgerStoreT6.updateLedger(proj3cT6, [], util.getConfig(), () => now3c + 61000);
-      check('ledger-fold-recall (FINDING 3): a subsequent successful rewrite consumes the queue, at the cost of the accepted one-time over-count', () => {
+      check('ledger-fold-recall (FINDINGS 1+2, corrected pin): a subsequent successful rewrite drains the queue WITHOUT re-settling -- idempotent on serveId', () => {
         assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj3cT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8') === '',
-          'the retried pass must finally consume the queue (rel3c re-settles, rel3d finally ages out as a phantom)');
-        assert.deepStrictEqual(ledRetry.avoided, { tokens: 7660, serves: 2, tierA: 0, tierB: 2, partialWins: 0, netNegatives: 0 },
-          'rel3c settled twice (once per pass that saw it still queued) -- documented residual, matches the retained-row precedent elsewhere in this codebase');
-        assert.strictEqual(ledRetry.openServes.length, 2, 'two open-serve receipts, one per settle -- both remain independently correctable');
+          'the retried pass must finally consume the queue (rel3c\'s already-settled row is skipped, not re-settled; rel3d finally ages out as a phantom)');
+        assert.deepStrictEqual(ledRetry.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+          'rel3c must NOT settle a second time just because its confirmed row was still sitting on the queue -- avoided is unchanged by the retry');
+        assert.strictEqual(ledRetry.openServes.length, 1, 'exactly one receipt -- serveId dedupe means the retry never creates a duplicate');
+      });
+    }
+
+    // FINDINGS 1+2 (fix round 4): the realistic failure shape is not one
+    // failed rewrite but a PERSISTENT one -- ENOSPC or a read-only recall
+    // dir does not clear itself after a single retry. Three consecutive
+    // failed passes over the SAME physical serve, followed by a pass whose
+    // rewrite finally succeeds and which also carries a net-negative
+    // follow-up read, must settle exactly once and bump rejection exactly
+    // once -- not once per failed pass.
+    {
+      const projMulti = seedT6Project('t6-idempotent-settlement-multipass');
+      const relMulti = 'src/multipass.js';
+      const companionRelMulti = 'src/multipass-companion.js';
+      recallStoreT6.put(projMulti, relMulti, { contentHash: 'hmp', skeleton: 'SKELMP', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsMulti = '2026-07-28T10:00:00.000Z';
+      const tMulti = Date.parse(tsMulti);
+      writeServeRows(projMulti, tsMulti, 'sess-multi', relMulti, 'B', 4210, 380);
+      // Companion pending row, always young enough (< PENDING_CONFIRM_GRACE_MS)
+      // across every failed pass below, so commit() always has real content
+      // to (fail to) write back -- keeps the mock's failure path exercised
+      // on every pass rather than falling into the empty-queue rmSync branch.
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(projMulti), jsonl([
+        { ts: new Date(tMulti - 500).toISOString(), sessionId: 'sess-multi-companion', relPath: companionRelMulti, tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSyncMulti = fs.writeFileSync;
+      const recallDirTagMulti = path.join(memorydb.DIR_NAME, 'recall');
+      let failMultiWrites = true;
+      fs.writeFileSync = function (p, ...rest) {
+        if (failMultiWrites && typeof p === 'string' && p.includes(recallDirTagMulti)) {
+          throw new Error('simulated persistent queue rewrite failure');
+        }
+        return realWriteFileSyncMulti.call(fs, p, ...rest);
+      };
+      let ledMulti;
+      try {
+        ledMulti = ledgerStoreT6.updateLedger(projMulti, [], util.getConfig(), () => tMulti + 10); // pass 1: settles, rewrite fails
+        ledMulti = ledgerStoreT6.updateLedger(projMulti, [], util.getConfig(), () => tMulti + 20); // pass 2: rewrite fails again
+        ledMulti = ledgerStoreT6.updateLedger(projMulti, [], util.getConfig(), () => tMulti + 30); // pass 3: rewrite fails again
+      } finally {
+        failMultiWrites = false;
+        fs.writeFileSync = realWriteFileSyncMulti;
+      }
+      check('ledger-fold-recall (FINDINGS 1+2): three consecutive failed queue rewrites never re-settle the same physical serve', () => {
+        assert.deepStrictEqual(ledMulti.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+          'still exactly one settle worth of avoided.tokens/serves after 3 failed passes, not 3 (or 4)');
+        assert.strictEqual(ledMulti.openServes.length, 1, 'still exactly one receipt -- no duplicate per failed pass');
+      });
+
+      // Pass 4: the rewrite finally succeeds AND a net-negative follow-up
+      // (full re-read, no limit -> 20000/4=5000 tokens > 3830) arrives in the
+      // same pass -- must correct the SINGLE surviving receipt to negative
+      // and bump rejection exactly once, proving the old per-pass rejection
+      // inflation (measured: rejections=5 from one physical serve after 4
+      // failed passes, pre-fix) is gone.
+      fs.writeFileSync(path.join(projMulti, relMulti), 'x'.repeat(20000));
+      const followUpMulti = readEvent('sess-multi', relMulti, new Date(tMulti + 40000).toISOString(), projMulti, { toolUseId: 'fu-multi' });
+      const ledMultiFinal = ledgerStoreT6.updateLedger(projMulti, [followUpMulti], util.getConfig(), () => tMulti + 40000 + 100);
+      check('ledger-fold-recall (FINDINGS 1+2): once the rewrite succeeds, a net-negative follow-up corrects the single receipt and bumps rejection exactly once', () => {
+        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: -1170, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 },
+          'net = 4210 - (380 + 5000); serves/tierB stay at 1 -- one physical serve, one receipt, one correction');
+        assert.strictEqual(ledMultiFinal.openServes.length, 1);
+        assert.strictEqual(ledMultiFinal.openServes[0].classified, 'negative');
+        assert.strictEqual(recallStoreT6.get(projMulti, relMulti).rejections, 1,
+          'exactly one rejection bump for one physical serve, regardless of how many failed passes preceded it');
       });
     }
 
@@ -7609,16 +7723,21 @@ async function main() {
       });
     }
 
-    // Fix round 3: at-most-one-rejection-bump-per-LOGICAL-serve must hold
-    // even when a failed queue rewrite causes a retry to re-settle an
-    // already-settled serve into a SECOND open-serve record sharing the same
-    // serveId (the accepted over-count residual pinned just above). Without
-    // the bumpedServeIds guard in applyCorrections, a single follow-up read
-    // that pushes both duplicate records negative in the SAME pass would
-    // call recallStore.bumpRejection twice for what is really one physical
-    // serve -- a durable, hard-to-undo double-penalty. This pins that it
-    // does not: the rejection counter moves exactly once, even though both
-    // duplicate records correctly transition to 'negative'.
+    // CORRECTED (fix round 4 -- was an anti-requirement pin, same cluster as
+    // the FINDINGS 1+2 correction above): fix round 3 introduced a
+    // bumpedServeIds guard so that a follow-up read landing in the SAME pass
+    // as a queue-rewrite retry never double-bumped rejection for what was,
+    // at the time, an ACCEPTED duplicate open-serve record. Fix round 4
+    // removes the duplication at the source (settleRows now skips a
+    // confirmed row whose serveId is already durable evidence in
+    // prevLedger.openServes -- see lib/ledger-fold-recall-settle.js), which
+    // also removes the need for bumpedServeIds entirely (deleted from
+    // lib/ledger-fold-recall-open-serves.js's applyCorrections). This test's
+    // ORIGINAL assertion (`openServes.length, 2`, `avoided.tokens, -2340`)
+    // pinned the old duplicate-record shape; corrected below to the single-
+    // receipt idempotent shape -- the rejection bump still fires exactly
+    // once, now because there is only ever one receipt to correct, not
+    // because a guard suppressed a second bump on a second one.
     {
       const projIdem = seedT6Project('t6-idempotent-rejection-bump');
       const relIdem = 'src/idem.js';
@@ -7660,17 +7779,21 @@ async function main() {
       // pushes net negative in ONE shot: 20000/4=5000 > 3830.
       fs.writeFileSync(path.join(projIdem, relIdem), 'x'.repeat(20000));
       const followUpIdem = readEvent('sess-idem', relIdem, '2026-07-28T10:05:00.000Z', projIdem, { toolUseId: 'fu-idem' });
-      // This pass BOTH re-settles the still-queued row (real fs restored,
-      // queue untouched) into a second open-serve record AND applies the
-      // negative-crossing follow-up in the same pass -- the exact compound
-      // scenario the bumpedServeIds guard exists for.
+      // This pass sees relIdem's confirmed row STILL on the queue (real fs
+      // restored, but the row was never consumed by the earlier failed
+      // rewrite) AND carries the negative-crossing follow-up in the same
+      // pass. serveId dedupe (fix round 4) means the still-queued row is
+      // recognized as already-settled and skipped -- no second open-serve
+      // record -- so the correction below applies to the ONE existing
+      // receipt, and the rejection bump fires exactly once because there was
+      // only ever one thing to correct.
       const ledIdem2 = ledgerStoreT6.updateLedger(projIdem, [followUpIdem], util.getConfig(), () => now0Idem + 100);
       check('ledger-fold-recall-open-serves: a queue-rewrite-failure retry never double-bumps rejection for one logical serve', () => {
-        assert.strictEqual(ledIdem2.openServes.length, 2, 'both duplicate receipts remain on record (the accepted over-count residual)');
-        assert.ok(ledIdem2.openServes.every(s => s.classified === 'negative'), 'both duplicates are correctly corrected to negative');
+        assert.strictEqual(ledIdem2.openServes.length, 1, 'idempotent settlement: the still-queued row never creates a second receipt');
+        assert.strictEqual(ledIdem2.openServes[0].classified, 'negative');
         assert.strictEqual(recallStoreT6.get(projIdem, relIdem).rejections, 1,
-          'exactly ONE bump for one physical follow-up read, despite two open-serve records sharing the same serve');
-        assert.strictEqual(ledIdem2.avoided.tokens, -2340, 'documented over-count math: 3830(prev) + 3830(re-settle) - 5000 - 5000 (both duplicates corrected)');
+          'exactly ONE bump for one physical follow-up read correcting the one receipt on record');
+        assert.strictEqual(ledIdem2.avoided.tokens, -1170, 'net = 4210 - (380 + 5000); one settle, one correction, no duplicate');
       });
     }
 
@@ -7709,6 +7832,134 @@ async function main() {
       check('ledger-fold-recall-open-serves (FINDING 2): a re-presented already-applied read does not re-correct', () => {
         assert.strictEqual(ledEvict3.avoided.tokens, 3230, 'no double-application');
         assert.strictEqual(ledEvict3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // FINDING 3 (fix round 4): a malformed openServes record used to freeze
+    // the project's ledger forever -- normalizeOpenServes only checked
+    // object-ness, so a receipt missing `correctedBy` made applyCorrections'
+    // unguarded `current.correctedBy.includes(...)` throw, which lib/scan.js
+    // catches and logs, but the SAME malformed ledger.json is read back and
+    // re-thrown on every later pass, freezing requests/volume/warm too (not
+    // just avoided). PIN: a ledger.json with a receipt missing correctedBy
+    // (and a foreign `classified` value, and string-typed numeric fields --
+    // all coerced by the same fix) folds cleanly and the project keeps
+    // accumulating.
+    {
+      const projMalformed = seedT6Project('t6-malformed-open-serve-record');
+      const relMalformed = 'src/malformed.js';
+      recallStoreT6.put(projMalformed, relMalformed, { contentHash: 'hmal', skeleton: 'SKELMAL', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsMalformed = '2026-07-28T10:00:00.000Z';
+      const tMalformed = Date.parse(tsMalformed);
+      // A hand-edited/foreign ledger.json: an openServes entry missing
+      // `correctedBy` entirely, a `classified` value that isn't one of
+      // full/partial/negative, and a missing numeric field (netRecorded) --
+      // exercising the SAME num() helper every other field in
+      // lib/ledger-fold-state.js already normalizes through, which coerces
+      // any non-finite-number value (including a missing one) to 0.
+      ledgerStoreT6.writeLedger(projMalformed, {
+        version: 4,
+        avoided: { tokens: 100, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        openServes: [{
+          serveId: `${tsMalformed}|sess-malformed|${relMalformed}`,
+          ts: tsMalformed, sessionId: 'sess-malformed', relPath: relMalformed,
+          callTokens: 4210, skeletonTokens: 380,
+          classified: 'bogus-status',
+          // netRecorded and correctedBy deliberately omitted
+        }],
+      });
+      let ledMalformedThrew = false;
+      let ledMalformed;
+      try {
+        ledMalformed = ledgerStoreT6.updateLedger(projMalformed, [], util.getConfig(), () => tMalformed + 1000);
+      } catch {
+        ledMalformedThrew = true;
+      }
+      check('ledger-fold-state (FINDING 3): a receipt missing correctedBy folds cleanly instead of throwing', () => {
+        assert.strictEqual(ledMalformedThrew, false, 'a malformed openServes record must never freeze the fold');
+        assert.strictEqual(ledMalformed.openServes.length, 1);
+        assert.deepStrictEqual(ledMalformed.openServes[0].correctedBy, [], 'coerced to an empty array, not left undefined');
+        assert.strictEqual(ledMalformed.openServes[0].classified, 'full', 'a foreign classification value defaults to full');
+        assert.strictEqual(ledMalformed.openServes[0].netRecorded, 0, 'a missing numeric field coerces through num() to 0, not undefined');
+        assert.strictEqual(ledMalformed.openServes[0].callTokens, 4210, 'a well-formed numeric field passes through num() unchanged');
+      });
+      // The project must keep accumulating afterward -- a second pass over
+      // the same (now-normalized) ledger must not throw either, proving this
+      // isn't just a one-time survival but a real, ongoing recovery.
+      const ledMalformed2 = ledgerStoreT6.updateLedger(projMalformed, [], util.getConfig(), () => tMalformed + 2000);
+      check('ledger-fold-state (FINDING 3): the project keeps accumulating on later passes too, not just the first recovery pass', () => {
+        assert.strictEqual(ledMalformed2.openServes.length, 1);
+        assert.strictEqual(ledMalformed2.openServes[0].classified, 'full');
+      });
+    }
+
+    // FINDING 4 (fix round 4): correctionKeyFor used to collapse two
+    // genuinely distinct same-session, same-ts, same-file follow-up reads
+    // onto one key whenever neither carried a toolUseId -- the second read's
+    // dedupe check then read "already applied" even though it never was,
+    // silently dropping its followTokens. PIN: two 300/600-token follow-ups
+    // of the same path, same ts, neither with a toolUseId, must accumulate
+    // to the honest net (2930), not the overstated one (3530) a collapsed
+    // key would produce.
+    {
+      const projOcc = seedT6Project('t6-correction-key-occurrence-index');
+      const relOcc = 'src/occ.js';
+      const tsOcc = '2026-07-28T10:00:00.000Z';
+      const tOcc = Date.parse(tsOcc);
+      writeServeRows(projOcc, tsOcc, 'sess-occ', relOcc, 'B', 4210, 380);
+      ledgerStoreT6.updateLedger(projOcc, [], util.getConfig(), () => tOcc + 10);
+      const sameTs = '2026-07-28T10:01:00.000Z';
+      // Deliberately NO toolUseId on either -- the exact case FINDING 4
+      // covers. opts.toolUseId is left undefined by omitting it.
+      const occRead1 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 25 }); // 25*12=300
+      const occRead2 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 50 }); // 50*12=600
+      const ledOcc = ledgerStoreT6.updateLedger(projOcc, [occRead1, occRead2], util.getConfig(), () => tOcc + 20);
+      check('ledger-fold-recall-open-serves (FINDING 4): two toolUseId-less same-ts follow-ups both apply via the occurrence index', () => {
+        // net = 4210 - (380 + 300 + 600) = 2930 -- the honest total, not the
+        // 3530 a collapsed key would produce by dropping the second read.
+        assert.strictEqual(ledOcc.avoided.tokens, 2930);
+        assert.strictEqual(ledOcc.openServes[0].correctedBy.length, 2, 'both reads earned distinct correction keys');
+        assert.notStrictEqual(ledOcc.openServes[0].correctedBy[0], ledOcc.openServes[0].correctedBy[1],
+          'the occurrence index must make the two keys distinct');
+      });
+      // Idempotency: re-folding the SAME two reads on a later pass must not
+      // apply either one a second time (proving the occurrence index is
+      // stable across passes, not just within one).
+      const ledOcc2 = ledgerStoreT6.updateLedger(projOcc, [occRead1, occRead2], util.getConfig(), () => tOcc + 30);
+      check('ledger-fold-recall-open-serves (FINDING 4): the occurrence-indexed keys stay stable across a later re-fold -- no double-application', () => {
+        assert.strictEqual(ledOcc2.avoided.tokens, 2930);
+        assert.strictEqual(ledOcc2.openServes[0].correctedBy.length, 2);
+      });
+    }
+
+    // FINDING 5 (fix round 4): a follow-up read whose ts exactly TIES the
+    // serve's ts used to be dropped (`byTs <= 0` excluded it) on the theory
+    // that it might be the serve's own intercepted call echoing back. That
+    // reasoning doesn't hold (see applyCorrections' own header) -- the
+    // serve's ts is always stamped LATER than any transcript entry for the
+    // intercepted call itself, so a genuine tie can only be a separate,
+    // later, second-precision follow-up. PIN: a read stamped exactly on the
+    // serve's own whole second (serve ts carries :00.000, read ts carries no
+    // millis at all -- both parse to the identical epoch millisecond) must
+    // still correct the serve.
+    {
+      const projTie = seedT6Project('t6-tie-ts-follow-up');
+      const relTie = 'src/tie.js';
+      const tsTieServe = '2026-07-28T10:00:05.000Z'; // exactly on a whole second
+      const tTieServe = Date.parse(tsTieServe);
+      writeServeRows(projTie, tsTieServe, 'sess-tie', relTie, 'B', 4210, 380);
+      const ledTie1 = ledgerStoreT6.updateLedger(projTie, [], util.getConfig(), () => tTieServe + 10);
+      check('ledger-fold-recall-open-serves (FINDING 5): settles full before any follow-up is in evidence', () => {
+        assert.strictEqual(ledTie1.avoided.tokens, 3830);
+      });
+      // Parses to the IDENTICAL epoch millisecond as tsTieServe -- a true
+      // tie, not merely a close call.
+      const tieRead = readEvent('sess-tie', relTie, '2026-07-28T10:00:05Z', projTie, { toolUseId: 'fu-tie', limit: 50 });
+      assert.strictEqual(Date.parse('2026-07-28T10:00:05Z'), tTieServe, 'test setup must produce a genuine tie, not an off-by-one');
+      const ledTie2 = ledgerStoreT6.updateLedger(projTie, [tieRead], util.getConfig(), () => tTieServe + 20);
+      check('ledger-fold-recall-open-serves (FINDING 5): a read whose ts TIES the serve\'s ts counts as a follow-up, not a self-reference', () => {
+        assert.strictEqual(ledTie2.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledTie2.openServes[0].correctedBy.length, 1);
       });
     }
 
