@@ -112,7 +112,7 @@ Rejected alternatives:
 | 1 | Daemon pulls a new decision | *(none — dashboard poll)* | Human | One line in the dashboard, no hook (§6, §11) |
 | 2 | Next tool call after arrival | `PreToolUse` | Agent | Prose decisions, `additionalContext` |
 | 3 | Agent reads/edits an affected file | `PreToolUse` | Agent | That file's note, `additionalContext` |
-| 4 | After compaction | `PostCompact` | Agent | Still-live decisions, re-injected |
+| 4 | After compaction | `SessionStart` (source `compact`) | Agent | Still-live decisions, re-injected |
 | 5 | Session start | `SessionStart` | Agent | Anything unseen, incl. catch-up brief |
 
 Delivery point 4 is what makes the feature hold up on a long session: without it, a decision delivered in hour one is summarized away by hour four.

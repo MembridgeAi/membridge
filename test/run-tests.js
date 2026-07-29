@@ -16696,18 +16696,49 @@ const repoRoot = require('../lib/repo-root');
     const cmdsOf = arr => (arr || []).flatMap(e => (e.hooks || []).map(h => h.command));
     const countSub = (arr, re) => cmdsOf(arr).filter(c => re.test(c)).length;
 
-    check('hooks: reconcileNotesHooks registers SessionStart and PostCompact', () => {
+    check('hooks: reconcileNotesHooks registers SessionStart and never PostCompact', () => {
       withNotesSettings('claude-settings-notes-fresh.json', { model: 'opus' }, () => {
         const r = hooks.reconcileNotesHooks();
         assert.strictEqual(r.wrote, true, 'the first reconcile must write');
         const settings = JSON.parse(read(r.file));
         assert.ok(cmdsOf(settings.hooks.SessionStart).some(c => /notes-session-start/.test(c)));
-        assert.ok(cmdsOf(settings.hooks.PostCompact).some(c => /notes-post-compact/.test(c)));
+        // PostCompact must NEVER be registered: it carries no additionalContext,
+        // so an entry there could never reach the model while still costing the
+        // user a hook run after every compaction. SessionStart's `compact`
+        // source covers compaction instead.
+        assert.strictEqual(settings.hooks.PostCompact, undefined, 'PostCompact must never be registered');
         assert.strictEqual(settings.model, 'opus', 'an unrelated settings key was lost');
         // FileChanged is deliberately NOT registered: the Task 1 spike proved it
         // suppresses systemMessage and that its matcher rejects any filename
         // containing '.' or '-'. Registering it would be a silent no-op surface.
         assert.strictEqual(settings.hooks.FileChanged, undefined, 'FileChanged must never be registered');
+      });
+    });
+
+    // Upgrade path. Earlier builds registered `notes-post-compact`; PostCompact
+    // carries no additionalContext, so it was retired. The entry survives in an
+    // installed settings.json, and the hook entry point's fallthrough is the
+    // STOP hook -- so a retired subcommand that is neither inert nor removed
+    // would run session distillation on every compaction.
+    check('hooks: reconcileNotesHooks strips a retired notes hook and spares the user\'s', () => {
+      const theirs = { hooks: [{ type: 'command', command: 'echo their-compact-thing' }] };
+      const ourStale = { hooks: [{ type: 'command', command: '"/old/node" "/old/lib/membridge-hook.js" notes-post-compact', timeout: 5 }] };
+      const seed = { hooks: { PostCompact: [theirs, ourStale] } };
+      withNotesSettings('claude-settings-notes-retired.json', seed, f => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, true, 'a stale retired entry must force a write');
+        assert.strictEqual(r.retired, 1, 'the retired entry was not counted as stripped');
+        const s = JSON.parse(read(f));
+        assert.deepStrictEqual(s.hooks.PostCompact, [theirs], "the retired entry survived, or the user's was eaten");
+      });
+    });
+
+    check('hooks: reconcileNotesHooks drops the PostCompact key when only ours was there', () => {
+      const ourStale = { hooks: [{ type: 'command', command: '"/old/node" "/old/lib/membridge-hook.js" notes-post-compact', timeout: 5 }] };
+      withNotesSettings('claude-settings-notes-retired-only.json', { hooks: { PostCompact: [ourStale] } }, f => {
+        hooks.reconcileNotesHooks();
+        const s = JSON.parse(read(f));
+        assert.strictEqual(s.hooks.PostCompact, undefined, 'an empty PostCompact array was left behind');
       });
     });
 
@@ -16720,7 +16751,7 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(read(f), after1, 'the second reconcile changed the file');
         const settings = JSON.parse(read(r.file));
         assert.strictEqual(countSub(settings.hooks.SessionStart, /notes-session-start/), 1);
-        assert.strictEqual(countSub(settings.hooks.PostCompact, /notes-post-compact/), 1);
+        assert.strictEqual(settings.hooks.PostCompact, undefined, 'PostCompact must never be registered');
       });
     });
 
@@ -16737,24 +16768,28 @@ const repoRoot = require('../lib/repo-root');
       const seed = {
         hooks: {
           SessionStart: [mineStart, stale('notes-session-start')],
-          PostCompact: [minePost, stale('notes-post-compact')],
+          PostCompact: [minePost],
         },
       };
       withNotesSettings('claude-settings-notes-foreign.json', seed, f => {
         const r = hooks.reconcileNotesHooks();
         assert.strictEqual(r.wrote, true, 'the fixture must force a real write, or this check proves nothing');
-        assert.strictEqual(r.upgraded, 2, 'both stale notes commands should have been recognized and upgraded');
+        // One stale command now, not two: PostCompact was retired, so the only
+        // subcommand we still register is notes-session-start.
+        assert.strictEqual(r.upgraded, 1, 'the stale notes command should have been recognized and upgraded');
         const s1 = JSON.parse(read(f));
         // Not merely "still present somewhere": still FIRST, byte-identical and
         // not duplicated. A reconcile that rebuilt the array around its own
         // entry, or reordered foreign entries behind it, sails through a bare
         // includes() check.
         assert.deepStrictEqual(s1.hooks.SessionStart[0], mineStart, "the user's SessionStart entry was moved, rewritten or dropped");
-        assert.deepStrictEqual(s1.hooks.PostCompact[0], minePost, "the user's PostCompact entry was moved, rewritten or dropped");
+        // Stronger than before: PostCompact is an event we do not own AT ALL,
+        // so the whole array must come back byte-identical.
+        assert.deepStrictEqual(s1.hooks.PostCompact, [minePost], "an event we never register was modified");
         assert.strictEqual(countSub(s1.hooks.SessionStart, /^echo mine$/), 1, "the user's entry was duplicated");
         assert.strictEqual(countSub(s1.hooks.SessionStart, /notes-session-start/), 1, 'our entry was duplicated');
         assert.strictEqual(s1.hooks.SessionStart.length, 2);
-        assert.strictEqual(s1.hooks.PostCompact.length, 2);
+        assert.strictEqual(s1.hooks.PostCompact.length, 1, 'we added an entry to an event we do not own');
         // And the converged pass after it is a true no-op: nothing rewritten,
         // nothing appended alongside what it just upgraded.
         const before = read(f);
@@ -16799,12 +16834,15 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(out.status, 0, out.stderr);
       const before = JSON.parse(read(f));
       assert.strictEqual(countSub(before.hooks.SessionStart, /notes-session-start/), 1, 'setup-hooks did not register the notes SessionStart hook');
-      assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 1, 'setup-hooks did not register the notes PostCompact hook');
+      assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 0, 'setup-hooks registered a PostCompact hook that can never deliver');
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
       assert.strictEqual(rm.status, 0, rm.stderr);
       const after = JSON.parse(read(f));
       assert.deepStrictEqual(after.hooks.SessionStart, [mineStart], "remove-hooks left our SessionStart entry behind, or ate the user's");
-      assert.deepStrictEqual(after.hooks.PostCompact, [minePost], "remove-hooks left our PostCompact entry behind, or ate the user's");
+      // PostCompact is retired: reconcile already stripped ours before this ran,
+      // so the user's entry is all that can be there — and remove-hooks must
+      // leave an event we no longer register completely alone.
+      assert.deepStrictEqual(after.hooks.PostCompact, [minePost], "remove-hooks touched an event we do not register");
     });
   }
 
