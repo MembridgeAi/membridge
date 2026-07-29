@@ -16167,6 +16167,72 @@ async function main() {
     });
   }
 
+  // ---- teammate notes: store (spec §4) ----
+  const notesStore = require('../lib/teammate-notes-store');
+
+  {
+    const np = path.join(ROOT, 'projects', 'notes-proj');
+    fs.mkdirSync(np, { recursive: true });
+
+    check('notes-store: read of a missing file is null, not a throw', () => {
+      assert.strictEqual(notesStore.read(np), null);
+    });
+
+    check('notes-store: write then read round-trips', () => {
+      const ix = notes.buildIndex(
+        [{ author_name: 'Andrew', ts: '2026-07-28T09:00:00Z', decisions: 'renamed the cap', gotchas: '' }],
+        null, '2026-07-28T09:00:00Z');
+      notesStore.write(np, ix);
+      const back = notesStore.read(np);
+      assert.strictEqual(back.prose.length, 1);
+      assert.strictEqual(back.prose[0].text, 'renamed the cap');
+    });
+
+    check('notes-store: a corrupt file reads as null', () => {
+      fs.writeFileSync(notesStore.notesPath(np), '{not json');
+      assert.strictEqual(notesStore.read(np), null);
+    });
+
+    check('notes-store: update applies the function and persists', () => {
+      notesStore.write(np, notes.emptyIndex());
+      notesStore.update(np, ix => notes.markProseSeen(ix, ['abc'], '2026-07-28T10:00:00Z'));
+      assert.ok(notesStore.read(np).seen.prose.abc);
+    });
+
+    check('notes-store: update on a corrupt file starts from empty, never throws', () => {
+      fs.writeFileSync(notesStore.notesPath(np), 'garbage');
+      const out = notesStore.update(np, ix => notes.markProseSeen(ix, ['zzz'], '2026-07-28T10:00:00Z'));
+      assert.ok(out.seen.prose.zzz);
+    });
+
+    check('notes-store: write leaves no temp files behind', () => {
+      notesStore.write(np, notes.emptyIndex());
+      const strays = fs.readdirSync(path.dirname(notesStore.notesPath(np))).filter(f => f.includes('.tmp'));
+      assert.deepStrictEqual(strays, []);
+    });
+
+    // Beyond the plan (Task 5 review): "leaves no temp files behind" passes
+    // just as happily against a plain, NON-atomic fs.writeFileSync -- verified
+    // against a naive variant -- so on its own it proves tidiness, not
+    // atomicity. Spying on the rename is the part a half-written index could
+    // actually fail: it asserts the bytes land in a temp file first and arrive
+    // at the target only via a rename.
+    check('notes-store: write lands in a temp file and renames into place', () => {
+      const realRename = fs.renameSync;
+      let renamedFrom = null;
+      fs.renameSync = (from, to) => { renamedFrom = from; return realRename(from, to); };
+      try {
+        notesStore.write(np, notes.emptyIndex());
+      } finally {
+        fs.renameSync = realRename;
+      }
+      assert.ok(renamedFrom && renamedFrom.includes('.tmp'),
+        'write must stage into a temp file and rename, never write the target in place');
+      assert.strictEqual(path.dirname(renamedFrom), path.dirname(notesStore.notesPath(np)),
+        'the temp file must sit in the target directory so the rename is atomic');
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
