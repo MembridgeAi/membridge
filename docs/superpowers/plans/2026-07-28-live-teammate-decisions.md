@@ -59,7 +59,7 @@ Expected: all three files exist. If they do not, stop and merge the recall branc
 
 | File | Responsibility |
 |---|---|
-| `lib/repo-root.js` | Repo-root discovery and the tracked-dir↔repo-root path offset. Nothing else. |
+| `lib/repo-root.js` | One function: a file's cross-machine wire key = its path relative to the checkout containing it. Closes monorepo depth and worktrees together. |
 | `lib/teammate-notes.js` | Pure logic: build the index from pulled entries, select what to deliver, mark seen, prune, format. No fs, no clock. |
 | `lib/teammate-notes-store.js` | The fs layer for `.membridge/teammate-notes.json`: atomic read/write/update. |
 | `lib/hooks-notes.js` | The `SessionStart` and `PostCompact` hook bodies. |
@@ -100,347 +100,170 @@ Nothing here blocks Tasks 2–9, 11 or 12.
 
 ---
 
-## Task 2: Repo-root path translation ✅ DONE (`cf20d4c`, `feat/live-teammate-notes`)
+## Task 2: Cross-machine file keys ✅ DONE (`cf20d4c` → `2ea3f94`, `feat/live-teammate-notes`)
 
-**Correction applied after implementation.** The original implementation below
-compared `git rev-parse --show-toplevel` against `path.resolve()`. Git resolves
-symlinks and `path.resolve` does not, so on macOS (`/var` -> `/private/var`) and
-under any symlinked home or volume the comparison produced a `..`-leading path,
-`trackedOffset` returned `''`, and translation silently did nothing — monorepo
-paths would have shipped untranslated with no error anywhere. The code below now
-carries the `realPath` fix that shipped. Verified independently.
+**Shipped, then reworked. The original design in this task was wrong twice; both
+corrections are in `2ea3f94` and the module's own header explains them.**
 
-
-The monorepo fix (spec §7), as a standalone module with no knowledge of teams or notes.
-
-> **⚠ ADDENDUM 2026-07-28 — read before Step 1.** Raised by the recall hot-path
-> investigation (session `6821ee52`, worktree `hook-firing-sessions-90332c`). Not a
-> re-litigation of §2.3 or §7; a third case neither of them covers.
->
-> `repoRoot()` as specced uses `git rev-parse --show-toplevel`, which **returns the
-> worktree itself, not the main repo**. Verified on this machine:
->
-> ```
-> git -C <main>/.claude/worktrees/projects-1c rev-parse --show-toplevel
->   → /Users/marco/Documents/Membridge/.claude/worktrees/projects-1c
-> git -C <main>/.claude/worktrees/projects-1c rev-parse --git-common-dir
->   → /Users/marco/Documents/Membridge/.git          ← the main repo
-> ```
->
-> Three distinct file-identity axes, only two of which are handled:
-> §2.3 closes **attribution** (which project owns a worktree file — correct, genuinely no
-> work needed); §7 fixes **depth** (`packages/api/`); nothing addresses **same file,
-> different worktree**.
->
-> Measured against live state (`resolveTrackedKey` + `readKeyFor`, real `state.json`):
-> every worktree file resolves to the main project but keeps a distinct key —
->
-> ```
-> <main>/lib/scan.js                              → lib/scan.js
-> <main>/.claude/worktrees/projects-1c/lib/scan.js → .claude/worktrees/projects-1c/lib/scan.js
-> <main>/.claude/worktrees/notes-index/lib/scan.js → .claude/worktrees/notes-index/lib/scan.js
-> ```
->
-> Because the tracked dir *is* the repo root here, `trackedOffset()` returns `''` and
-> `toWirePath()` is the identity function — a worktree path crosses the wire verbatim.
-> **A note keyed `.claude/worktrees/<name>/lib/scan.js` can never match a teammate's
-> `lib/scan.js`.** That defeats file-keyed matching (§4.1, Tasks 6 and 8) for any session
-> run from a worktree — on this machine, nearly all of them.
->
-> **Suggested fix, inside this task:** resolve the root via `git rev-parse --git-common-dir`,
-> strip a trailing `/.git`, and fall back to `--show-toplevel` when the two agree (i.e. not
-> a worktree). A worktree and the main checkout then yield the same root, and `toWirePath()`
-> maps both to `lib/scan.js`.
->
-> **Add to Step 1's tests:**
-> - `repoRoot()` on a linked worktree returns the *main* repo root, not the worktree path.
-> - `toWirePath(<worktree>, 'lib/scan.js') === 'lib/scan.js'`, identical to the main checkout.
-> - Every non-worktree case above stays byte-identical.
->
-> Same defect independently strands the recall layer: `hotPathsOf` requires
-> `sessions.length > 1` on one key, so per-session worktrees never accumulate a hot set and
-> `.membridge/recall/` is never created. Not this task's job to fix, but one normalization
-> closes both.
-
-**Files:**
-- Create: `lib/repo-root.js`
-- Test: `test/run-tests.js` (append a new section)
-
-**Interfaces:**
-- Consumes: nothing.
-- Produces:
-  - `repoRoot(projectPath) -> string|null` — absolute path to the git top-level, or `null` if not a repo. Memoized per process.
-  - `trackedOffset(projectPath) -> string` — POSIX prefix from repo root to the tracked dir, `''` when they are the same, e.g. `'packages/api/'`.
-  - `toWirePath(projectPath, relPath) -> string` — tracked-relative → repo-root-relative.
-  - `fromWirePath(projectPath, wirePath) -> string` — repo-root-relative → tracked-relative, falling back to `wirePath` unchanged when it does not sit under the offset.
-  - `clearCache()` — test-only.
-
-- [ ] **Step 1: Write the failing tests**
-
-Append to `test/run-tests.js`, immediately before the results tally at the end of the file:
+**What shipped:** `lib/repo-root.js`, exporting one meaningful function.
 
 ```js
-// ---- repo-root path translation (teammate notes, spec §7) ----
-const repoRoot = require('../lib/repo-root');
-
-{
-  const rr = path.join(ROOT, 'projects', 'mono');
-  const api = path.join(rr, 'packages', 'api');
-  fs.mkdirSync(api, { recursive: true });
-  spawnSync('git', ['init', '-q', rr], { encoding: 'utf8' });
-  repoRoot.clearCache();
-
-  check('repo-root: resolves the git top-level from a subdirectory', () => {
-    assert.strictEqual(fs.realpathSync(repoRoot.repoRoot(api)), fs.realpathSync(rr));
-  });
-
-  check('repo-root: offset is empty at the repo root', () => {
-    assert.strictEqual(repoRoot.trackedOffset(rr), '');
-  });
-
-  check('repo-root: offset is the posix prefix for a tracked subdirectory', () => {
-    assert.strictEqual(repoRoot.trackedOffset(api), 'packages/api/');
-  });
-
-  check('repo-root: toWirePath prefixes a tracked-relative path', () => {
-    assert.strictEqual(repoRoot.toWirePath(api, 'src/validate.ts'), 'packages/api/src/validate.ts');
-  });
-
-  check('repo-root: toWirePath is identity at the repo root', () => {
-    assert.strictEqual(repoRoot.toWirePath(rr, 'src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: fromWirePath strips the offset', () => {
-    assert.strictEqual(repoRoot.fromWirePath(api, 'packages/api/src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: fromWirePath leaves a non-matching path alone (legacy row)', () => {
-    assert.strictEqual(repoRoot.fromWirePath(api, 'src/validate.ts'), 'src/validate.ts');
-  });
-
-  check('repo-root: a non-repo directory yields null root and empty offset', () => {
-    const plain = path.join(ROOT, 'projects', 'not-a-repo');
-    fs.mkdirSync(plain, { recursive: true });
-    repoRoot.clearCache();
-    assert.strictEqual(repoRoot.repoRoot(plain), null);
-    assert.strictEqual(repoRoot.trackedOffset(plain), '');
-    assert.strictEqual(repoRoot.toWirePath(plain, 'a/b.js'), 'a/b.js');
-  });
-}
+wireKeyFor(absFile) -> 'packages/api/src/validate.ts' | null
+checkoutRoot(dir)   -> absolute root of the checkout containing dir | null
+clearCache()        -> test-only
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+**The rule:** a file's cross-machine key is its path relative to **the checkout
+that contains it**. That single rule closes both identity problems at once —
+monorepo depth (§7) and worktrees — because both were the same mistake: keying
+against the *tracked project directory* rather than the checkout.
 
-Run: `node test/run-tests.js 2>&1 | tail -20`
+**Correction 1 — a silent no-op.** The original compared
+`git rev-parse --show-toplevel` against `path.resolve()`. Git resolves symlinks
+and `path.resolve` does not, so on macOS (`/var` → `/private/var`) and under any
+symlinked home the comparison produced a `..`-leading path, the guard treated it
+as impossible input and returned `''`, and translation silently did nothing.
 
-Expected: the run **aborts** with `Error: Cannot find module '../lib/repo-root'`
-and exit 1. Note it does NOT print per-check `FAIL` lines: the tests live inside
-the suite's `async main()`, so a missing top-level `require` throws before any
-check registers. That is the correct failure for the right reason — confirm the
-module name in the error, then continue. The same applies to Tasks 4, 5 and 7,
-which also add new top-level requires.
+**Correction 2 — worktrees, raised by the recall hot-path investigation.**
+`--show-toplevel` returns the *worktree*, not the main repo, and a linked
+worktree nested inside its main repo resolves to the main repo as its project.
+So the key came out carrying the worktree prefix. Measured on live state before
+the fix:
 
-- [ ] **Step 3: Write the implementation**
-
-Create `lib/repo-root.js`:
-
-```js
-'use strict';
-// Repo-root discovery and the tracked-dir <-> repo-root path offset.
-//
-// WHY THIS EXISTS: lib/ledger-fold.js's readKeyFor and lib/hooks-recall.js's
-// relFile both key paths against the TRACKED project directory, which
-// lib/project-resolve.js deliberately allows to be a monorepo subdirectory.
-// Two teammates on one remote tracking different depths therefore land on the
-// same team project row (lib/teamsync.js's repoUrl) while producing
-// incompatible path keys. Local structures keep their tracked-relative keys --
-// they never leave the machine. Everything that CROSSES THE WIRE is translated
-// through here, so both sides speak repo-root-relative.
-//
-// See docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md §7.
-const fs = require('fs');
-const path = require('path');
-const { spawnSync } = require('child_process');
-
-const toPosix = p => p.split(path.sep).join('/');
-
-// CRITICAL (found while implementing Task 2): `git rev-parse --show-toplevel`
-// returns a path with symlinks RESOLVED; path.resolve() does not. On macOS the
-// temp dir alone diverges (/var -> /private/var), and any real project under a
-// symlinked home or volume hits the same thing. Comparing the two directly
-// yields a '..'-leading relative path, which trackedOffset() below then treats
-// as impossible input and answers '' -- a SILENT no-op that ships monorepo
-// paths untranslated so the teammate never matches. Resolve both sides the way
-// git does before comparing. A path that does not exist yet cannot be
-// realpath'd, so fall back to plain resolution for it.
-const realPath = p => {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return path.resolve(p);
-  }
-};
-
-// Memoized: teamsync already spawns git per project for repoUrl(), and the
-// top-level of a project cannot change while the daemon runs. A null result
-// is cached too -- a non-repo stays a non-repo, and re-spawning git on every
-// read would defeat the point.
-const cache = new Map();
-
-function repoRoot(projectPath) {
-  const key = path.resolve(projectPath);
-  if (cache.has(key)) return cache.get(key);
-  let out = null;
-  try {
-    const r = spawnSync('git', ['-C', key, 'rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', timeout: 5000,
-    });
-    if (r.status === 0) {
-      const s = String(r.stdout || '').trim();
-      if (s) out = s;
-    }
-  } catch {
-    out = null;
-  }
-  cache.set(key, out);
-  return out;
-}
-
-// '' when the tracked dir IS the repo root (the common case, and byte-identical
-// to pre-translation behaviour). 'packages/api/' when it sits below. '' as well
-// for a non-repo, or for the impossible case of a tracked dir outside its own
-// reported root -- in both, translation must be a no-op rather than a guess.
-function trackedOffset(projectPath) {
-  const root = repoRoot(projectPath);
-  if (!root) return '';
-  try {
-    const rel = path.relative(realPath(root), realPath(projectPath));
-    if (!rel) return '';
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return '';
-    return `${toPosix(rel)}/`;
-  } catch {
-    return '';
-  }
-}
-
-function toWirePath(projectPath, relPath) {
-  const rel = String(relPath || '');
-  if (!rel) return rel;
-  return trackedOffset(projectPath) + rel;
-}
-
-// The inverse, with the legacy fallback spec §7 requires: rows already on the
-// wire were written tracked-relative, so a path that does not sit under this
-// project's offset is returned unchanged rather than mangled. Harmless when
-// the offset is '' -- every path trivially "matches" and passes through.
-function fromWirePath(projectPath, wirePath) {
-  const wire = String(wirePath || '');
-  if (!wire) return wire;
-  const offset = trackedOffset(projectPath);
-  if (!offset) return wire;
-  return wire.startsWith(offset) ? wire.slice(offset.length) : wire;
-}
-
-// Test-only: the memo is keyed on absolute paths that outlive a single test
-// fixture, and a suite that git-inits a directory after a miss was cached
-// would otherwise read the stale null.
-function clearCache() { cache.clear(); }
-
-module.exports = { repoRoot, trackedOffset, toWirePath, fromWirePath, clearCache };
+```
+<main>/lib/scan.js                        -> lib/scan.js
+<main>/.claude/worktrees/x/lib/scan.js    -> .claude/worktrees/x/lib/scan.js
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+Same file, two keys — file-keyed notes could never match for a session run from
+a worktree, which is nearly every session on this machine. Both now key as
+`lib/scan.js`, verified against the live repo.
 
-Run: `node test/run-tests.js 2>&1 | grep "repo-root"`
+**Consequences for every later task:**
 
-Expected: eight `ok repo-root: ...` lines, no `FAIL`.
-
-- [ ] **Step 5: Run the whole suite for regressions**
-
-Run: `node test/run-tests.js 2>&1 | tail -5`
-
-Expected: the existing pass count plus 8, zero failures. Note the pre-existing count before you start so you can compare.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add lib/repo-root.js test/run-tests.js
-git commit -m "feat(paths): repo-root-relative translation for cross-machine file identity"
-```
+- **There is no inverse.** `toWirePath` / `fromWirePath` / `trackedOffset` are
+  gone. Notes stay keyed in wire form; the hook computes the wire key of the
+  file it is about to read (Task 8). No legacy-format fallback either.
+- **No subprocess on the read path.** Walking up to the nearest `.git` is what
+  `--show-toplevel` does anyway, costs one `statSync` per level, and is memoized
+  across every directory walked — which matters because this runs ahead of the
+  recall hook's `storeEntry` gate inside a 150 ms budget.
+- **`.git` as a FILE is a valid stop.** That is what a linked worktree and a
+  submodule have, and in both cases that directory is the correct key basis.
+- **Tests use a real nested `git worktree add`**, not a simulation.
 
 ---
 
-## Task 3: Wire path translation into teamsync
+## Task 3: Emit wire keys from teamsync
+
+Task 2 shipped `wireKeyFor(absPath)`. This task makes the wire actually carry
+those keys instead of tracked-relative paths.
 
 **Files:**
-- Modify: `lib/teamsync.js` (`entryToRow`, and the pull-side content mapping)
+- Modify: `lib/teamsync.js` (`entryToRow`)
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `repoRoot.toWirePath`, `repoRoot.fromWirePath` from Task 2.
-- Produces: `entryToRow(e, projectId, creds, share, regexes, projectPath)` — one new trailing parameter, `projectPath`, optional. When omitted, translation is skipped and behaviour is exactly as today.
+- Consumes: `repoRoot.wireKeyFor(absPath)` from Task 2.
+- Produces: `entryToRow(e, projectId, creds, share, regexes, projectPath)` — one
+  new trailing parameter, `projectPath`, optional. When supplied, `files` and
+  `changes[].file` ship as wire keys. When omitted, output is byte-identical to
+  today, so every existing caller keeps working untouched.
+
+**There is no inverse.** Incoming teammate notes stay keyed in wire form and the
+hook computes the wire key of the file it is about to read (Task 8). Nothing
+translates back, so there is no pull-side mapping and no legacy fallback.
+
+**Why entries need `projectPath` at all:** a local entry's `files` are relative
+to the tracked project directory, which is exactly the identity that is wrong.
+Joining them onto `projectPath` recovers the absolute path, and `wireKeyFor`
+re-keys that against the checkout it actually lives in.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `test/run-tests.js` after the Task 2 block:
+Append to `test/run-tests.js` after the Task 2 block (the fixture repo `mono`
+and its nested worktree `wt` from Task 2 are reused — keep this block after it):
 
 ```js
-// ---- teamsync path translation (spec §7) ----
+// ---- teamsync emits wire keys (spec §7) ----
 {
-  const rr2 = path.join(ROOT, 'projects', 'mono2');
-  const api2 = path.join(rr2, 'packages', 'api');
-  fs.mkdirSync(api2, { recursive: true });
-  spawnSync('git', ['init', '-q', rr2], { encoding: 'utf8' });
-  repoRoot.clearCache();
-
   const entry = {
     ts: '2026-07-28T09:00:00Z', source: 'Claude Code', session: 's1',
     ask: null, goal: null, decisions: 'Renamed the retry cap to maxAttempts.',
-    gotchas: '', files: ['src/validate.ts'],
-    changes: [{ file: 'src/validate.ts', status: 'edited', add: 3, del: 1, note: 'blocked pending 018', dep: false }],
+    gotchas: '', files: ['packages/api/src/validate.ts'],
+    changes: [{ file: 'packages/api/src/validate.ts', status: 'edited', add: 3, del: 1, note: 'blocked pending 018', dep: false }],
     summary: 'did a thing', headline: 'a thing', distilled: true,
   };
   const creds = { userId: 'u1', displayName: 'Andrew' };
 
-  check('teamsync: push translates files to repo-root-relative', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], api2);
+  check('teamsync: a repo-root project ships its paths unchanged', () => {
+    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], mono);
     assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
-  });
-
-  check('teamsync: push translates changes[].file to repo-root-relative', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], api2);
     assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
     assert.strictEqual(row.changes[0].note, 'blocked pending 018');
   });
 
-  check('teamsync: push without a projectPath is unchanged (back-compat)', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, []);
-    assert.deepStrictEqual(row.files, ['src/validate.ts']);
-    assert.strictEqual(row.changes[0].file, 'src/validate.ts');
+  check('teamsync: a worktree session ships MAIN-checkout keys', () => {
+    // THE CASE THAT WAS BROKEN. A session run from a nested worktree records
+    // its files relative to the main repo, i.e. carrying the worktree prefix.
+    // Those must leave as plain repo paths or no teammate can ever match them.
+    const wtEntry = {
+      ...entry,
+      files: ['.claude/worktrees/feature-x/packages/api/src/validate.ts'],
+      changes: [{ ...entry.changes[0], file: '.claude/worktrees/feature-x/packages/api/src/validate.ts' }],
+    };
+    const row = teamsync.entryToRow(wtEntry, 'p1', creds, false, [], mono);
+    assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
+    assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
   });
 
-  check('teamsync: push at the repo root is identity', () => {
-    const row = teamsync.entryToRow(entry, 'p1', creds, false, [], rr2);
-    assert.deepStrictEqual(row.files, ['src/validate.ts']);
+  check('teamsync: a tracked monorepo subdirectory ships repo-root keys', () => {
+    const sub = path.join(mono, 'packages', 'api');
+    const subEntry = {
+      ...entry,
+      files: ['src/validate.ts'],
+      changes: [{ ...entry.changes[0], file: 'src/validate.ts' }],
+    };
+    const row = teamsync.entryToRow(subEntry, 'p1', creds, false, [], sub);
+    assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
+  });
+
+  check('teamsync: omitting projectPath leaves paths untouched (back-compat)', () => {
+    const row = teamsync.entryToRow(entry, 'p1', creds, false, []);
+    assert.deepStrictEqual(row.files, ['packages/api/src/validate.ts']);
+    assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
+  });
+
+  check('teamsync: a path outside any checkout is kept, never dropped', () => {
+    const odd = { ...entry, files: ['../outside/x.ts'], changes: null };
+    const row = teamsync.entryToRow(odd, 'p1', creds, false, [], mono);
+    assert.deepStrictEqual(row.files, ['../outside/x.ts']);
   });
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "teamsync: push"`
+Run: `node test/run-tests.js 2>&1 | grep -a "teamsync: "`
 
-Expected: the first two `FAIL` (paths come back untranslated); the two back-compat checks already pass.
+Expected: the two wire-key cases (`worktree session`, `monorepo subdirectory`)
+report `FAIL` with the untranslated path; the three back-compat cases already
+pass. Unlike Tasks 2 and 4 this adds no new top-level `require`, so per-check
+`FAIL` lines DO appear here.
 
-- [ ] **Step 3: Implement the push side**
+**Use `grep -a`.** This plan file and the suite output can contain a non-UTF8
+byte, and plain `grep` treats such a file as binary and silently reports
+nothing — which reads exactly like "no failures".
 
-In `lib/teamsync.js`, add the require near the other local requires at the top of the file:
+- [ ] **Step 3: Implement**
+
+In `lib/teamsync.js`, add the require alongside the other local ones:
 
 ```js
 const repoRootLib = require('./repo-root');
 ```
 
-Change the `entryToRow` signature and the two path-bearing fields. Find:
+Find:
 
 ```js
 function entryToRow(e, projectId, creds, share, regexes) {
@@ -450,11 +273,19 @@ Replace with:
 
 ```js
 // projectPath is optional and trailing so every existing caller keeps working
-// untouched. When supplied, `files` and `changes[].file` ship repo-root-relative
-// so a monorepo teammate tracking a different depth of the same remote agrees
-// on file identity (spec §7). Omitted -> no translation, byte-identical output.
+// untouched. When supplied, `files` and `changes[].file` ship as WIRE KEYS --
+// each path re-keyed against the checkout it actually lives in, which is what
+// makes a monorepo teammate and a worktree session agree on file identity
+// (spec §7). Omitted -> no re-keying, byte-identical output.
+//
+// A path that resolves to nothing (outside any checkout, or already odd) is
+// kept verbatim rather than dropped: a slightly wrong path a human can still
+// read beats a silently missing file list.
 function entryToRow(e, projectId, creds, share, regexes, projectPath) {
-  const wire = p => (projectPath ? repoRootLib.toWirePath(projectPath, p) : p);
+  const wire = p => {
+    if (!projectPath || typeof p !== 'string' || !p) return p;
+    return repoRootLib.wireKeyFor(path.resolve(projectPath, p)) || p;
+  };
 ```
 
 Then find:
@@ -473,33 +304,35 @@ Replace with:
       : null,
 ```
 
+Confirm `path` is already required at the top of `lib/teamsync.js`; add it if not.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `node test/run-tests.js 2>&1 | grep "teamsync: push"`
+Run: `node test/run-tests.js 2>&1 | grep -a "teamsync: "`
 
-Expected: four `ok` lines.
+Expected: five `ok` lines.
 
 - [ ] **Step 5: Pass the project path at every push call site**
 
-Find every call to `entryToRow` in `lib/teamsync.js`. Each sits inside a loop or function that already has the local project path in scope (the same value passed to `repoUrl()`). Add it as the sixth argument. Verify none were missed:
-
 ```bash
-grep -n "entryToRow(" lib/teamsync.js
+grep -an "entryToRow(" lib/teamsync.js
 ```
 
-Expected: every call site passes six arguments. A call with five is a missed site — the row will ship untranslated and a monorepo teammate silently will not match it.
+Every call must pass six arguments. A five-argument call is a missed site: that
+row ships untranslated and a worktree or monorepo teammate silently never
+matches it.
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `node test/run-tests.js 2>&1 | tail -5`
 
-Expected: previous count plus 4, zero failures.
+Expected: the baseline plus 5, with only the known dependency failures.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add lib/teamsync.js test/run-tests.js
-git commit -m "feat(teamsync): ship file paths repo-root-relative"
+git commit -m "feat(teamsync): ship file paths as checkout-relative wire keys"
 ```
 
 ---
@@ -1109,7 +942,7 @@ git commit -m "feat(notes): atomic fail-open store for the teammate-notes index"
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `notes.buildIndex`, `notes.pruneSeen`, `notesStore.read`, `notesStore.write`, `repoRoot.fromWirePath`.
+- Consumes: `notes.buildIndex`, `notes.pruneSeen`, `notesStore.read`, `notesStore.write`. No path translation — incoming keys are already wire keys.
 - Produces: `rebuildTeammateNotes(projectPath, entries, now) -> index|null`, exported from `lib/teammate-notes-store.js`. Later tasks read the file, never this function.
 
 - [ ] **Step 1: Write the failing test**
@@ -1162,26 +995,20 @@ Append to `lib/teammate-notes-store.js`, before `module.exports`, and add `repoR
 
 ```js
 // Called once per team pull (bin/membridge.js's teamTick). `entries` are the
-// decrypted teammate rows for ONE project, carrying REPO-ROOT-RELATIVE paths
-// (spec §7). They are translated back to this machine's tracked-relative
-// layout here, so every hook downstream can look up a path without doing any
-// arithmetic on the read path.
+// decrypted teammate rows for ONE project, already carrying WIRE KEYS (spec
+// §7). byFile is keyed by those same wire keys -- no translation happens here
+// or anywhere on the read path.
 //
 // Fail-open: a failure here leaves the PREVIOUS index in place and serving.
 function rebuildTeammateNotes(projectPath, entries, now) {
   try {
-    const local = (Array.isArray(entries) ? entries : []).map(row => {
-      if (!row || typeof row !== 'object') return row;
-      if (!Array.isArray(row.changes)) return row;
-      return {
-        ...row,
-        changes: row.changes.map(c => (c && typeof c === 'object'
-          ? { ...c, file: repoRoot.fromWirePath(projectPath, c.file) }
-          : c)),
-      };
-    });
+    // NO path translation on receive. Incoming keys are already wire keys
+    // (Task 3) and byFile stays keyed that way; the hook computes the wire key
+    // of the file it is about to read and looks it up directly (Task 8). An
+    // inverse mapping would have to guess WHICH local checkout a key refers to,
+    // which is unanswerable when the same repo is checked out several times.
     const prev = read(projectPath);
-    const built = notes.buildIndex(local, prev, now);
+    const built = notes.buildIndex(entries, prev, now);
     const pruned = notes.pruneSeen(built, now);
     write(projectPath, pruned);
     return pruned;
@@ -1469,6 +1296,12 @@ The heart of the feature: prose on arrival and file notes on contact, both witho
 
 - [ ] **Step 1: Write the failing tests**
 
+Note every call below passes **both** `absPath` and `relPath`. `absPath` is what
+the wire-key lookup uses; `relPath` remains for the recall paths that already
+depend on it. In these fixtures the project is a git repo at its own root, so
+the two coincide — that is what makes the worktree assertion at the end
+meaningful rather than tautological.
+
 Append to `test/run-tests.js`:
 
 ```js
@@ -1490,7 +1323,7 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: prose is delivered on any read (arrival)', () => {
     fresh();
     const out = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/unrelated.js', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/unrelated.js'), relPath: 'lib/unrelated.js', sessionId: 's1', now: NOW, config: {},
     });
     assert.ok(out && out.text.includes('maxAttempts'));
   });
@@ -1498,7 +1331,7 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: file note is delivered on contact', () => {
     fresh();
     const out = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
     });
     assert.ok(out.text.includes('migration 018'));
   });
@@ -1506,11 +1339,11 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: prose is not re-delivered after commit', () => {
     fresh();
     const first = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/other.js', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's1', now: NOW, config: {},
     });
     first.commit();
     const second = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/other.js', sessionId: 's2', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/other.js'), relPath: 'lib/other.js', sessionId: 's2', now: NOW, config: {},
     });
     assert.strictEqual(second, null);
   });
@@ -1518,15 +1351,15 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: a file note re-fires in a new session but not the same one', () => {
     fresh();
     const a = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
     });
     a.commit();
     const again = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
     });
     assert.strictEqual(again, null);
     const other = hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's2', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's2', now: NOW, config: {},
     });
     assert.ok(other && other.text.includes('migration 018'));
   });
@@ -1534,14 +1367,14 @@ const hooksRecall = require('../lib/hooks-recall');
   check('notes-hook: nothing to say returns null', () => {
     notesStore.write(hp, notes.emptyIndex());
     assert.strictEqual(hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's9', now: NOW, config: {},
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's9', now: NOW, config: {},
     }), null);
   });
 
   check('notes-hook: kill switch silences it', () => {
     fresh();
     assert.strictEqual(hooksRecall.buildNotesOutput({
-      projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW,
+      projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW,
       config: { teammateNotes: { enabled: false } },
     }), null);
   });
@@ -1550,7 +1383,7 @@ const hooksRecall = require('../lib/hooks-recall');
     fs.writeFileSync(notesStore.notesPath(hp), 'not json');
     assert.doesNotThrow(() => {
       assert.strictEqual(hooksRecall.buildNotesOutput({
-        projectPath: hp, relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
+        projectPath: hp, absPath: path.join(hp, 'lib/validate.ts'), relPath: 'lib/validate.ts', sessionId: 's1', now: NOW, config: {},
       }), null);
     });
   });
@@ -1570,6 +1403,7 @@ In `lib/hooks-recall.js`, add the requires alongside the existing ones:
 ```js
 const notes = require('./teammate-notes');
 const notesStore = require('./teammate-notes-store');
+const repoRootLib = require('./repo-root');
 ```
 
 Add the function above `doRunRecall`:
@@ -1585,14 +1419,22 @@ Add the function above `doRunRecall`:
 // written to stdout. Marking first would lose a note whenever a later write
 // threw -- the same pending/confirmation discipline the serve path uses for
 // its event rows.
-function buildNotesOutput({ projectPath, relPath, sessionId, now, config }) {
+function buildNotesOutput({ projectPath, absPath, relPath, sessionId, now, config }) {
   try {
     if (!notes.isNotesEnabled(config)) return null;
     const index = notesStore.read(projectPath);
     if (!index) return null;
 
+    // byFile is keyed by WIRE key (Task 3), never by the tracked-relative
+    // relPath the rest of this hook uses. For a session run from a worktree the
+    // two differ -- relPath carries the worktree prefix -- and looking up the
+    // wrong one is exactly the silent no-match this feature must not have.
+    // wireKeyFor is memoized per directory, so this is a Map hit after the
+    // first read in a tree.
+    const wireKey = repoRootLib.wireKeyFor(absPath);
+
     const { items: prose, overflow } = notes.selectProse(index, now);
-    const fileNotes = notes.selectFileNotes(index, relPath, sessionId, now);
+    const fileNotes = wireKey ? notes.selectFileNotes(index, wireKey, sessionId, now) : [];
     if (!prose.length && !fileNotes.length) return null;
 
     const parts = [];
@@ -1642,7 +1484,7 @@ Insert immediately **above** it:
   // parse -- no content hash, no ledger read -- so the ordering discipline the
   // comment on storeEntry describes still holds.
   const notesOut = buildNotesOutput({
-    projectPath, relPath, sessionId,
+    projectPath, absPath, relPath, sessionId,
     now: new Date().toISOString(),
     config,
   });
