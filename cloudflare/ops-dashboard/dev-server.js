@@ -1,5 +1,5 @@
 'use strict';
-// Local review server for the ops panel. Serves index.html plus a stubbed API
+// Local review server for the ops panel. Serves public/index.html plus a stubbed API
 // that mirrors cloudflare/ops-api/src/index.js — including the WRITE actions,
 // held in memory — so the panel can be clicked through end to end before
 // anything is deployed. The page exercises its real fetch paths, not a demo
@@ -7,6 +7,10 @@
 //
 // Keep the shapes in sync with ops-api and with supabase/migrations/020-022,
 // or this will prove a panel production cannot feed.
+//
+// public/ is the ONLY thing deployed. This file lives outside it deliberately:
+// it carries invented team names and would otherwise be published alongside the
+// panel by a directory-wide `pages deploy`.
 //
 // The stub numbers are those of a real early-stage startup, not a showcase:
 // mostly solo accounts, two stalled signups, several teams drifting, and a
@@ -185,7 +189,7 @@ http.createServer((req, res) => {
   }
 
   if (url === '/' || url === '/index.html') {
-    return fs.readFile(path.join(__dirname, 'index.html'), (err, buf) => {
+    return fs.readFile(path.join(__dirname, 'public', 'index.html'), (err, buf) => {
       if (err) { res.writeHead(500); return res.end(String(err.message)); }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(buf);
