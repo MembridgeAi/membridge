@@ -3162,7 +3162,7 @@ async function main() {
     const stFresh = await (await fetch(`${base}/api/settings`)).json();
     check('settings: hookInstalled + distill fields are reported', () => {
       assert.strictEqual(stFresh.hookInstalled, true, 'daemon should auto-register the Stop hook at boot');
-      assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 4 });
+      assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 12 });
     });
     const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
     check('settings: enabling summaries installs the Claude Code Stop hook and grants consent', () => {
@@ -10682,15 +10682,27 @@ async function main() {
   });
   const ckBlocked = out => out.status === 0 && !!out.stdout.trim() && JSON.parse(out.stdout).decision === 'block';
 
+  // checkpointEvery is pinned explicitly here rather than leaning on the
+  // default, so this stays a test of the n-th-threshold ARITHMETIC and does
+  // not have to be rewritten every time the default is retuned. The default
+  // itself is pinned separately, on fresh config.
   check('checkpoint: re-blocks only when checkpointEvery further edits accrue (minEdits 1, every 4)', () => {
-    writeCkLines(0); setCkEdits(1); // 0 lines, due at minEdits (1)
-    assert.ok(ckBlocked(runCk()), 'first checkpoint did not block at minEdits');
-    writeCkLines(1); setCkEdits(2); // 1 line, next due at 1+1*4=5
-    assert.ok(!ckBlocked(runCk()), 'blocked too early (minEdits+1 with 1 line)');
-    setCkEdits(5); // reaches the 2nd threshold
-    assert.ok(ckBlocked(runCk()), 'did not block at minEdits+4 with 1 line');
-    writeCkLines(2); setCkEdits(9); // 2 lines, next due at 1+2*4=9
-    assert.ok(ckBlocked(runCk()), 'did not block again at minEdits+8 with 2 lines');
+    const rawCfg = util.loadUserConfig();
+    rawCfg.distill = { enabled: true, minEdits: 1, checkpointEvery: 4 };
+    util.saveUserConfig(rawCfg);
+    try {
+      writeCkLines(0); setCkEdits(1); // 0 lines, due at minEdits (1)
+      assert.ok(ckBlocked(runCk()), 'first checkpoint did not block at minEdits');
+      writeCkLines(1); setCkEdits(2); // 1 line, next due at 1+1*4=5
+      assert.ok(!ckBlocked(runCk()), 'blocked too early (minEdits+1 with 1 line)');
+      setCkEdits(5); // reaches the 2nd threshold
+      assert.ok(ckBlocked(runCk()), 'did not block at minEdits+4 with 1 line');
+      writeCkLines(2); setCkEdits(9); // 2 lines, next due at 1+2*4=9
+      assert.ok(ckBlocked(runCk()), 'did not block again at minEdits+8 with 2 lines');
+    } finally {
+      delete rawCfg.distill;
+      util.saveUserConfig(rawCfg);
+    }
   });
   check('checkpoint: loop guard short-circuits even when a checkpoint is due', () => {
     writeCkLines(0); setCkEdits(5);
@@ -10709,6 +10721,20 @@ async function main() {
     assert.ok(!/only the work done since/i.test(later), 'delta scoping must be gone');
     const one = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', 1);
     assert.ok(one.includes('1 earlier line ') && !/1 earlier lines/.test(one), 'n=1 uses singular "earlier line"');
+  });
+  // Claude Code prints every Stop-hook block under a fixed, alarming header
+  // ("Stop hook blocking error from command: ..."), and nothing a synchronous
+  // hook sends can change it. The reason text is the first thing the user
+  // reads after that header, so it must open by naming MemBridge and saying
+  // this is normal -- otherwise a working product looks like it crashed, once
+  // per checkpoint, in front of every user.
+  check('checkpoint: blockReason opens by naming MemBridge and defusing the error framing', () => {
+    for (const n of [0, 3]) {
+      const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', n);
+      assert.ok(r.startsWith('MemBridge'), `n=${n}: reason must lead with the product name, got: ${r.slice(0, 40)}`);
+      assert.ok(/this is not an error/i.test(r.slice(0, 200)),
+        `n=${n}: the opening must say this is not a failure, got: ${r.slice(0, 120)}`);
+    }
   });
   check('checkpoint: blockReason demands outcome phrasing and the discreet append command', () => {
     const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'sess-x', 0);
@@ -10819,15 +10845,15 @@ async function main() {
     assert.strictEqual(out.status, 0);
     assert.strictEqual(out.stdout, '');
   });
-  check('checkpoint: checkpointEvery below 1 or non-finite falls back to 4', () => {
+  check('checkpoint: checkpointEvery below 1 or non-finite falls back to the default', () => {
     const rawCfg = util.loadUserConfig();
     rawCfg.distill = { enabled: true, minEdits: 1, checkpointEvery: 0 };
     util.saveUserConfig(rawCfg);
-    writeCkLines(1); setCkEdits(2); // with every=4 → threshold 5 → no block; with a bad every=0 → threshold 1 → block
+    writeCkLines(1); setCkEdits(2); // with the default every → threshold 13 → no block; with a bad every=0 → threshold 1 → block
     const out = runCk();
     delete rawCfg.distill;
     util.saveUserConfig(rawCfg);
-    assert.ok(!ckBlocked(out), 'checkpointEvery 0 was not clamped to the default 4');
+    assert.ok(!ckBlocked(out), 'checkpointEvery 0 was not clamped to the default');
   });
   check('checkpoint: sessionSummaries returns only Distilled when both tiers exist, time-ordered', () => {
     const evs = [

@@ -155,8 +155,11 @@ the Copy-for-AI digest, and the team feed. The feed your teammates read is
 written by the agent that did the work.
 
 Long sessions get checkpoints rather than one shot: the hook re-asks every
-few edits (defaults: first summary after 1 edit, then every 4), and the
-newest line wins while `memory.md` keeps the full history. The hook is
+so many edits (defaults: first summary after 1 edit, then every 12), and the
+newest line wins while `memory.md` keeps the full history. Only that newest
+line is ever displayed or shared, so the re-asks exist mainly so a session
+that dies without a clean stop still leaves a recent summary behind — lower
+`checkpointEvery` for fresher checkpoints, raise it for fewer interruptions. The hook is
 strictly fail-open: any error, a paused project, or a too-small session
 means Claude Code stops normally. Nothing is installed silently, and
 turning it off removes exactly what was added.
@@ -300,7 +303,7 @@ Settings covers the common options. Under the hood it's
   "redactExtra": [],                     // additive, same syntax
   "maxPrompts": 8,
   "maxFiles": 10,
-  "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 4 },
+  "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 12 },
   "adapters": {
     "claude-code": { "enabled": true },
     "codex": { "enabled": true },
