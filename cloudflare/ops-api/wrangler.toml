@@ -8,15 +8,19 @@ compatibility_date = "2026-07-01"
 # itself (src/index.js) — this is the belt, that is the braces.
 workers_dev = false
 
-# [[routes]]
-# pattern = "ops.membridge.me/api"
-# custom_domain = true
+# A PATH route, not a custom_domain: ops.membridge.me already belongs to the
+# Pages project, and the panel calls /api on its own origin because same-origin
+# is half the CSRF defence (see src/index.js). Workers routes take precedence
+# over Pages on the same hostname, so this claims /api* and Pages keeps the rest.
+[[routes]]
+pattern = "ops.membridge.me/api*"
+zone_name = "membridge.me"
 
 # Non-secret config.
 [vars]
 ACCESS_TEAM_DOMAIN = "weathered-sky-8f4e.cloudflareaccess.com"
 ACCESS_AUD = "ce8ae1ef05b71f3245bd11441a382d6f2c9bbbd0b7a23840e96b34dfc3a66646"
-ALLOWED_EMAILS = "marco@melika.com"
+ALLOWED_EMAILS = "marco@melika.me,marco@melika.com,andrewludwigbrown@gmail.com"
 # Not secrets, so they live here rather than as `wrangler secret put` prompts.
 # The account id appears in every dashboard URL; the Supabase project URL already
 # ships publicly in lib/backend.json. Treating non-secrets as secrets just adds
