@@ -120,10 +120,51 @@ Access check at the edge cannot be sidestepped.
 
 - Deploy `ops-dashboard/` as a Cloudflare Pages project on `ops.membridge.app`.
 - Route `ops.membridge.app/api` to the `ops-api` Worker.
-- Put a **Cloudflare Access** application in front of `ops.membridge.app`,
-  allowing only the operator's identity. Copy its AUD tag into `ACCESS_AUD`.
 - Confirm the page is excluded from `sitemap.xml` and `llms.txt`. It already
   carries `noindex`.
+
+### 5a. How you actually sign in
+
+There is no login form, no password and no session code in the panel. That is
+deliberate: authentication bugs cannot exist in code nobody wrote. Cloudflare
+Access challenges the request at the edge, before the page is served, and the
+panel only ever sees an already-verified identity.
+
+Set it up once, in **Zero Trust → Access → Applications**:
+
+1. **Add an application** → Self-hosted → domain `ops.membridge.app`.
+2. **Session duration** — 24 hours is a reasonable default. Shorter means
+   re-authenticating more often; longer widens the window on a stolen laptop.
+3. **Add a policy** → Action: *Allow* → Include: *Emails* → your address.
+   This list, and `ALLOWED_EMAILS` in `ops-api/wrangler.toml`, must BOTH contain
+   anyone who should get in. Two lists is not redundancy for its own sake: the
+   Access policy is what stops the request, the Worker check is what stops a
+   request that reached the Worker another way.
+4. **Choose a login method** (Zero Trust → Settings → Authentication):
+   - **One-time PIN** — zero setup, works immediately. Cloudflare emails a code
+     on each sign-in. Start here.
+   - **GitHub or Google** — nicer day to day, needs an OAuth app registered with
+     Cloudflare once. Worth doing if you use the panel daily.
+
+   Note this is entirely separate from the GitHub sign-in inside the product.
+   That one is Supabase auth for customers; this one is Cloudflare auth for the
+   operator. They share nothing, which is correct — a bug in customer auth must
+   not be able to open the admin panel.
+5. **Copy the application's AUD tag** into `ACCESS_AUD` in
+   `ops-api/wrangler.toml` and redeploy the Worker.
+
+   Do not skip this. `aud` pins a token to *this* application; without it, a
+   valid Access token for any other app on the same team would be accepted here.
+
+**Adding a second person later** means adding their email in two places: the
+Access policy and `ALLOWED_EMAILS`. There is no user table to manage, no
+invitations, and nothing to revoke beyond removing the address.
+
+**Cost:** Cloudflare Access is free up to 50 users.
+
+**Check it worked:** open `ops.membridge.app` in a private window — you should be
+challenged before seeing any page content. Then request the Worker directly
+without an Access session; it must return 401.
 
 ---
 
