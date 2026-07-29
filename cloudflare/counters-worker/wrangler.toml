@@ -1,0 +1,24 @@
+name = "membridge-counters"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Anonymous product-health counters. Writes to Analytics Engine only — this
+# Worker holds no secrets and no binding to Supabase, deliberately (see
+# src/index.js's header and spec §2).
+[[analytics_engine_datasets]]
+binding = "COUNTERS"
+dataset = "membridge_counters"
+
+# Deploy on its own hostname so a rate-limit or firewall rule can target it
+# without touching the marketing site:
+#   wrangler deploy
+#   (then add the route in the Cloudflare dashboard, or uncomment below)
+#
+# [[routes]]
+# pattern = "counters.membridge.app"
+# custom_domain = true
+
+# RECOMMENDED, set in the dashboard rather than here (rate limiting rules are
+# not expressible in wrangler.toml): a rate limit on this hostname of ~10
+# requests per minute per IP. A healthy install sends at most one request per
+# state change and one per day; anything above that is a bug or an attack.

@@ -1,0 +1,38 @@
+name = "membridge-ops-api"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# CRITICAL: no workers.dev route. The only way in is the Cloudflare
+# Access-protected hostname, so the Access edge check cannot be bypassed by
+# hitting a *.workers.dev URL directly. The Worker also verifies the Access JWT
+# itself (src/index.js) — this is the belt, that is the braces.
+workers_dev = false
+
+# [[routes]]
+# pattern = "ops.membridge.app/api"
+# custom_domain = true
+
+# Non-secret config.
+[vars]
+ACCESS_TEAM_DOMAIN = "REPLACE.cloudflareaccess.com"
+ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD"
+ALLOWED_EMAILS = "marco@melika.com"
+# Team ids to leave out of every business figure — the operator's own
+# dogfooding teams. JSON array of uuids, or [] for everything.
+EXCLUDE_TEAMS = "[]"
+
+# Secrets — NEVER put these in this file. Set with `wrangler secret put <NAME>`:
+#   CF_ACCOUNT_ID         Cloudflare account id
+#   CF_API_TOKEN          scoped to Account Analytics: Read, nothing else
+#   SUPABASE_URL          https://<project>.supabase.co
+#   SUPABASE_SERVICE_KEY  service role key
+#
+# On SUPABASE_SERVICE_KEY, stated plainly rather than hidden: this is the one
+# high-privilege credential in the design. It is required because ops_snapshot()
+# is granted to service_role only (migration 019) — anon is the public internet
+# and authenticated is every signed-in customer, so neither can be used. The
+# mitigations are that it lives only as a Worker secret, this Worker is the sole
+# holder, it is used for exactly one RPC that returns aggregates, and the Worker
+# has no route reachable without Access. If this Worker is ever compromised,
+# rotate this key first. A dedicated read-only Postgres role would be strictly
+# better and is the natural next hardening step.

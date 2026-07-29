@@ -24,6 +24,7 @@ const { startServer } = require('../lib/server');
 const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
 const hooks = require('../lib/hooks');
+const counters = require('../lib/counters');
 const prompts = require('../lib/prompts');
 const pkg = require('../package.json');
 
@@ -117,7 +118,7 @@ function cmdDaemon() {
   // Auto-register the Claude Code Stop hook on every daemon boot, so it lands
   // however MemBridge was installed (git clone, npm, curl) without a manual
   // `setup-hooks` step. Silent and fail-open — never blocks the daemon.
-  hooks.ensureInstalled();
+  const { registration } = hooks.ensureInstalled() || {};
 
   const cleanup = () => {
     try {
@@ -147,9 +148,23 @@ function cmdDaemon() {
         util.log(`sync: ${r.newEvents} new event(s) -> ${r.changes.map(c => c.file).join('; ')}`);
       }
       teamTick();
+      countersTick();
     } catch (err) {
       util.log(`sync error: ${err.stack || err}`);
     }
+  };
+  // Anonymous product-health counters, on the same tick and guarded the same
+  // way. emitCounters decides internally whether anything is actually worth
+  // sending (state change, or once a day) — calling it every pass is cheap and
+  // keeps the cadence logic in one place. Cannot block or fail the sync: it
+  // swallows its own errors and this adds a second net.
+  let countersBusy = false;
+  const countersTick = () => {
+    if (countersBusy) return;
+    countersBusy = true;
+    counters.emitCounters(util.loadState(), util.getConfig(), { registration })
+      .catch(err => util.log(`counters error: ${err && err.message}`))
+      .finally(() => { countersBusy = false; });
   };
   // Team sync rides the same tick, guarded so a slow network round cannot
   // overlap the next one. Best-effort: errors are logged, local sync is never

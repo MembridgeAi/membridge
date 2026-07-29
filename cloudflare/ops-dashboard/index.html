@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>MemBridge Ops</title>
+<style>
+  /* Design tokens lifted verbatim from membridge.app so this page reads as the
+     same product, not a bolted-on admin tool. Only --red is an addition: the
+     site has green and orange but no failure colour, and recall states need a
+     third step. It is tuned to sit beside --orange rather than shout over it. */
+  :root {
+    --blue: #2F4FE0; --blue-dark: #2440C4;
+    --ink: #10182B; --muted: #5D6B85; --faint: #8A96AC;
+    --bg: #FFFFFF; --bg-alt: #F7F9FE; --tint: #EDF1FD; --tint-border: #D9E2FA;
+    --border: #E6EAF3;
+    --green: #1D8A5F; --orange: #C97A1E; --red: #C0392E;
+    --term-bg: #0E1526; --term-border: #1D2740; --term-text: #D7E0F2;
+    --term-muted: #6B7A99; --term-green: #4ADE9C; --term-blue: #7FA3FF; --term-amber: #F5C97B;
+    --radius: 14px;
+    --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans);
+    padding: 40px 24px 80px; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+
+  /* --- header ------------------------------------------------------------ */
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font: 11.5px/1 var(--mono); letter-spacing: 1.38px; text-transform: uppercase;
+    color: var(--blue); background: var(--tint); border: 1px solid var(--tint-border);
+    border-radius: 999px; padding: 9px 16px; margin-bottom: 22px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
+  .dot.live { background: var(--green); }
+  .dot.bad { background: var(--red); }
+  h1 {
+    font: 500 40px/1.15 var(--serif); letter-spacing: -0.4px; margin: 0 0 14px;
+  }
+  h1 em { font-style: italic; color: var(--blue); }
+  .recency { color: var(--muted); font-size: 15px; margin: 0 0 44px; max-width: 60ch; }
+  .recency strong { color: var(--ink); font-weight: 600; }
+  .recency.stale strong { color: var(--red); }
+
+  /* --- sections ---------------------------------------------------------- */
+  h2 { font: 500 24px/1.25 var(--serif); letter-spacing: -0.2px; margin: 46px 0 4px; }
+  h2 em { font-style: italic; color: var(--blue); }
+  .lede { color: var(--muted); font-size: 14px; margin: 0 0 16px; max-width: 62ch; }
+
+  .panel { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; }
+  .panel.alt { background: var(--bg-alt); }
+
+  /* The engine-room panel borrows the site's terminal styling — same palette
+     the landing page uses for its demo block. */
+  .term {
+    background: var(--term-bg); border: 1px solid var(--term-border);
+    border-radius: var(--radius); padding: 22px 24px; color: var(--term-text);
+  }
+  .term .caption { font: 11.5px/1 var(--mono); letter-spacing: 1.2px; text-transform: uppercase; color: var(--term-muted); margin-bottom: 16px; }
+  .term .row .lbl { color: var(--term-text); }
+  .term .row .val { color: var(--term-muted); }
+  .term .track { background: rgba(255,255,255,.07); }
+
+  /* --- bars -------------------------------------------------------------- */
+  .row { display: grid; grid-template-columns: 148px 1fr 66px; gap: 14px; align-items: center; padding: 7px 0; }
+  .row .lbl { font: 12.5px/1.3 var(--mono); color: var(--ink); }
+  .row .val { font: 12.5px/1 var(--mono); color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .track { background: var(--tint); border-radius: 999px; height: 10px; overflow: hidden; }
+  .fill { display: block; height: 100%; background: var(--blue); border-radius: 999px; }
+  .fill.good { background: var(--green); }
+  .fill.warn { background: var(--orange); }
+  .fill.bad { background: var(--red); }
+  .fill.tgood { background: var(--term-green); }
+  .fill.twarn { background: var(--term-amber); }
+  .fill.tbad { background: #E8776A; }
+  .fill.tblue { background: var(--term-blue); }
+
+  /* --- stat cards -------------------------------------------------------- */
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .card .n { font: 500 34px/1 var(--serif); letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+  .card .k { font: 11.5px/1 var(--mono); letter-spacing: 1.1px; text-transform: uppercase; color: var(--blue); margin-top: 10px; }
+  .card .sub { font-size: 13px; color: var(--muted); margin-top: 8px; }
+
+  .cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+  .note { color: var(--muted); font-size: 13px; margin: 16px 0 0; max-width: 68ch; }
+  .note b { color: var(--ink); font-weight: 600; }
+  .err { color: var(--red); font-size: 13px; margin-top: 10px; }
+
+  footer { margin-top: 56px; border-top: 1px solid var(--border); padding-top: 22px; color: var(--muted); font-size: 13px; max-width: 74ch; }
+  footer p { margin: 0 0 12px; }
+  footer b { color: var(--ink); font-weight: 600; }
+  code { font: 12px var(--mono); background: var(--tint); color: var(--blue-dark); padding: 2px 6px; border-radius: 6px; }
+
+  @media (max-width: 560px) { .row { grid-template-columns: 108px 1fr 54px; } h1 { font-size: 32px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow"><span class="dot" id="dot"></span><span id="mode">loading</span></div>
+  <h1>Ops &mdash; <em>is it working?</em></h1>
+  <p class="recency" id="recency">&nbsp;</p>
+
+  <h2>The engine <em>room</em></h2>
+  <p class="lede">Anonymous per-install counters. These are the only numbers that say whether recall does its job on real machines.</p>
+  <div class="term">
+    <div class="caption">recall state &middot; last 30 days</div>
+    <div id="recall"></div>
+    <p class="note" id="recallNote" style="color:var(--term-muted)"></p>
+  </div>
+
+  <div style="height:14px"></div>
+  <div class="cols">
+    <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">checkout shape</span><span></span><span></span></div><div id="env"></div></div>
+    <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">hook registration</span><span></span><span></span></div><div id="reg"></div></div>
+  </div>
+
+  <h2>Who is <em>using it</em></h2>
+  <p class="lede">Derived from data the backend already holds for team sync. No new collection, and never joined to the counters above.</p>
+  <div class="grid" id="biz"></div>
+
+  <div style="height:14px"></div>
+  <div class="cols">
+    <div class="panel"><div class="row"><span class="lbl" style="color:var(--muted)">team size</span><span></span><span></span></div><div id="sizes"></div></div>
+    <div class="panel"><div class="row"><span class="lbl" style="color:var(--muted)">tool mix &middot; 30d</span><span></span><span></span></div><div id="tools"></div></div>
+  </div>
+
+  <div style="height:14px"></div>
+  <div class="panel alt"><div class="row"><span class="lbl" style="color:var(--muted)">installs by version</span><span></span><span></span></div><div id="versions"></div></div>
+
+  <footer id="footer"></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const num = n => (n === null || n === undefined ? '—' : Number(n).toLocaleString());
+
+// Bars scale to the largest value in their OWN group, not a global max, so a
+// small group stays legible beside a large one.
+function bars(rows, tone) {
+  if (!rows.length) return '<p class="note">No data yet.</p>';
+  const max = Math.max(...rows.map(r => r.total), 1);
+  return rows.map(r => {
+    const cls = typeof tone === 'function' ? (tone(r.label) || '') : (tone || '');
+    const pct = Math.max(2, Math.round((r.total / max) * 100));
+    return `<div class="row">
+      <span class="lbl">${esc(r.label)}</span>
+      <span class="track"><span class="fill ${cls}" style="width:${pct}%"></span></span>
+      <span class="val">${num(r.total)}</span>
+    </div>`;
+  }).join('');
+}
+
+function group(rows, name, dimKey) {
+  const acc = new Map();
+  for (const r of rows) {
+    if (r.name !== name) continue;
+    if (dimKey && r.dim_key !== dimKey) continue;
+    const key = dimKey ? r.dim_value : r.version;
+    acc.set(key, (acc.get(key) || 0) + Number(r.total || 0));
+  }
+  return [...acc.entries()].map(([label, total]) => ({ label, total })).sort((a, b) => b.total - a.total);
+}
+
+const RECALL_TONE = { serving: 'tgood', ready_unserved: 'twarn', no_hot_paths: 'tbad', empty_store: 'tbad', all_rejected: 'tbad' };
+const REG_TONE = { current: 'good', wrote: '', failed: 'bad' };
+
+function render(data) {
+  const rows = (data.counters && data.counters.rows) || [];
+  const biz = data.business || {};
+  const events = rows.reduce((a, r) => a + Number(r.total || 0), 0);
+
+  $('mode').textContent = data.viewer ? `live · ${data.viewer}` : 'live';
+  $('dot').className = 'dot live';
+
+  // Recency leads, deliberately. Every other number on this page looks
+  // identical whether the product is healthy or the pipeline is dead.
+  const gen = biz.generated_at ? new Date(biz.generated_at) : null;
+  const ageMin = gen ? Math.round((Date.now() - gen.getTime()) / 60000) : null;
+  const stale = ageMin === null || ageMin > 120;
+  $('recency').className = 'recency' + (stale ? ' stale' : '');
+  $('recency').innerHTML = events === 0
+    ? 'No counters received. <strong>That means nothing is reporting</strong> — not that everything is healthy.'
+    : `Business data generated <strong>${gen ? (ageMin < 1 ? 'just now' : ageMin + ' min ago') : 'never'}</strong>, from ${num(events)} counter events in the last 30 days.`;
+
+  const recall = group(rows, 'recall_state', 'state');
+  $('recall').innerHTML = bars(recall, l => RECALL_TONE[l]);
+  const serving = recall.find(r => r.label === 'serving');
+  const total = recall.reduce((a, r) => a + r.total, 0);
+  $('recallNote').innerHTML = total
+    ? `<b style="color:var(--term-text)">${serving ? Math.round((serving.total / total) * 100) : 0}%</b> of reporting installs have recall actually serving. The failures are not interchangeable: <b style="color:var(--term-text)">no_hot_paths</b> is the file-identity split, <b style="color:var(--term-text)">all_rejected</b> is the skeletonizer refusing every file, <b style="color:var(--term-text)">empty_store</b> is neither.`
+    : 'Nothing reported yet.';
+
+  $('env').innerHTML = bars(group(rows, 'environment', 'shape'), 'tblue'.replace('tblue', ''));
+  $('reg').innerHTML = bars(group(rows, 'hook_registration', 'result'), l => REG_TONE[l]);
+  $('versions').innerHTML = bars(group(rows, 'heartbeat', null));
+
+  const t = biz.teams || {}, d = biz.developers || {}, p = biz.projects || {}, e = biz.entries || {};
+  $('biz').innerHTML = [
+    { n: t.total, k: 'teams', sub: `${num(t.created_7d)} created this week` },
+    { n: t.active_7d, k: 'active 7d', sub: `${num(t.dormant_7d)} dormant · ${num(t.never_active)} never used` },
+    { n: d.active_7d, k: 'developers 7d', sub: `${num(d.active_30d)} over 30 days` },
+    { n: p.total, k: 'projects', sub: `${num(p.teams_with_multiple)} teams with more than one` },
+    { n: e.last_7d, k: 'entries this week', sub: `${num(e.total)} all time` },
+  ].map(c => `<div class="card"><div class="n">${num(c.n)}</div><div class="k">${esc(c.k)}</div><div class="sub">${esc(c.sub)}</div></div>`).join('');
+
+  const s = biz.team_sizes || {};
+  $('sizes').innerHTML = bars([
+    { label: 'solo', total: s.solo || 0 },
+    { label: '2–3', total: s.two_to_three || 0 },
+    { label: '4–9', total: s.four_to_nine || 0 },
+    { label: '10+', total: s.ten_plus || 0 },
+  ]);
+  $('tools').innerHTML = bars(Object.entries(biz.tool_mix || {}).map(([label, total]) => ({ label, total })).sort((a, b) => b.total - a.total));
+
+  const errs = [data.counters && data.counters.error, data.business && data.business.error].filter(Boolean);
+  $('footer').innerHTML =
+    (errs.length ? `<p class="err">Source errors: ${esc(errs.join(' · '))}</p>` : '') +
+    `<p><b>What these numbers cannot tell you.</b> Counters are self-reported, so an install broken enough not to
+      run the daemon reports nothing — this can never measure total install base. Compare against release
+      download counts. They are also forgeable, since the client ships as readable JavaScript, so treat a spike as
+      a question rather than a fact.</p>
+     <p>There is deliberately no tokens-saved figure. The A/B test to date found the effect real but not yet
+      estimable, so any percentage here would be invented. Wording stays <code>avoided</code>, never
+      <code>saved</code>.</p>
+     <p>Anonymous install counters and account data are never joined — they live in separate systems that
+      cannot query each other.</p>`;
+}
+
+(async function () {
+  try {
+    const res = await fetch('/api', { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error('api ' + res.status);
+    render(await res.json());
+  } catch (err) {
+    // No sample-data fallback on purpose: a page that invents numbers when its
+    // source is down looks exactly like a healthy product with nothing wrong.
+    $('mode').textContent = 'unreachable';
+    $('dot').className = 'dot bad';
+    $('recency').className = 'recency stale';
+    $('recency').innerHTML = `<strong>Could not reach the ops API.</strong> ${esc(err.message)} — showing nothing rather than stale or invented data.`;
+  }
+})();
+</script>
+</body>
+</html>

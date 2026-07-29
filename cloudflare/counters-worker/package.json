@@ -1,0 +1,5 @@
+{
+  "name": "membridge-counters-worker",
+  "private": true,
+  "type": "module"
+}
