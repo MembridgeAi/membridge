@@ -18007,6 +18007,496 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- MCP registrar (mcp spec §5, §6; plan Task 6) ----
+  const mcpRegister = require('../lib/mcp-register');
+
+  {
+    const rRoot = path.join(ROOT, 'mcpreg');
+    fs.mkdirSync(rRoot, { recursive: true });
+    let regHomeSeq = 0;
+
+    // EVERY call below injects both `home` and `env`. That is not
+    // belt-and-braces: this machine has a real ~/.claude.json,
+    // ~/.codex/config.toml and ~/.cursor/mcp.json, and one call that fell
+    // through to os.homedir()/process.env would edit a developer's own agents.
+    const mkHome = (dirs = []) => {
+      const home = path.join(rRoot, `home-${regHomeSeq++}`);
+      fs.mkdirSync(home, { recursive: true });
+      for (const d of dirs) fs.mkdirSync(path.join(home, d), { recursive: true });
+      return home;
+    };
+
+    // The shapes that actually break naive parsers -- the same fixture the
+    // spec's §5.2 byte-identity requirement names, verbatim.
+    const CODEX_REAL = [
+      '# my codex config',
+      '[plugins."github@openai-curated"]',
+      'enabled = true',
+      '',
+      '[projects."/Users/marco/Documents/AI Shit/CopyNigga"]',
+      'trust = "full"',
+      '',
+      '[mcp_servers.node_repl]',
+      'command = "node"',
+      '',
+      '[mcp_servers.node_repl.env]',
+      'FOO = "bar"',
+      '',
+    ].join('\n');
+
+    const CMD = {
+      command: '/stub/node',
+      args: ['/stub/membridge/bin/membridge.js', 'mcp'],
+      env: {},
+    };
+
+    const spawnStub = handler => {
+      const calls = [];
+      const fn = (command, args, options) => {
+        calls.push({ command, args, options });
+        return (handler && handler(command, args, options)) || { status: 0, stdout: '', stderr: '' };
+      };
+      fn.calls = calls;
+      return fn;
+    };
+
+    // A clean machine: `claude mcp get membridge` exits 1.
+    const CLAUDE_ABSENT = (command, args) =>
+      (args[1] === 'get' ? { status: 1, stdout: '', stderr: 'No MCP server named "membridge".' } : null);
+
+    // Real `claude mcp get` output, copied from the shipped CLI (2.1.220).
+    const claudeGetOut = (cmd, args, env) => [
+      'membridge:',
+      '  Scope: User config (available in all your projects)',
+      '  Status: ✔ Connected',
+      '  Type: stdio',
+      `  Command: ${cmd}`,
+      `  Args: ${args.join(' ')}`,
+      ...(env && Object.keys(env).length
+        ? ['  Environment:', ...Object.entries(env).map(([k, v]) => `    ${k}=${v}`)]
+        : []),
+    ].join('\n');
+
+    const CLAUDE_PRESENT = (out) => (command, args) =>
+      (args[1] === 'get' ? { status: 0, stdout: out, stderr: '' } : null);
+
+    const STUB_CLAUDE = path.join(rRoot, 'stub-claude');
+    const base = (home, extra = {}) => ({
+      home,
+      env: {},
+      platform: 'darwin',
+      config: {},
+      command: CMD,
+      spawn: spawnStub(CLAUDE_ABSENT),
+      resolveClaudeBin: () => ({ path: STUB_CLAUDE, source: 'config' }),
+      ...extra,
+    });
+    const rowFor = (rows, agent) => rows.find(r => r.agent === agent);
+
+    check('mcp-register: the server command is absolute and points at bin/membridge.js mcp', () => {
+      const c = mcpRegister.serverCommand();
+      assert.strictEqual(c.command, process.execPath);
+      assert.deepStrictEqual(c.args, [path.join(__dirname, '..', 'bin', 'membridge.js'), 'mcp']);
+      assert.ok(fs.existsSync(c.args[0]), 'the script we register must actually exist');
+      assert.ok(path.isAbsolute(c.args[0]));
+    });
+
+    check('mcp-register: ELECTRON_RUN_AS_NODE rides in an env field, never as a command prefix', () => {
+      // hookCommand() prefixes a SHELL STRING. An MCP entry is spawned
+      // directly ({command, args}) -- a command of
+      // "ELECTRON_RUN_AS_NODE=1 /path/to/Electron" is a filename no execve
+      // will ever find. Carrying the plan's wording across would register a
+      // server that can never start.
+      //
+      // The suite runs under plain node, so asserting against the ambient
+      // process.versions.electron would exercise the EMPTY branch and pass
+      // whatever the Electron branch does. Drive the branch explicitly.
+      const c = mcpRegister.serverCommand({ electron: true });
+      assert.ok(!/ELECTRON_RUN_AS_NODE/.test(c.command), 'the command must be a bare executable path');
+      assert.ok(!c.args.some(a => /ELECTRON_RUN_AS_NODE/.test(a)), 'nor an argument');
+      assert.strictEqual(c.command, process.execPath);
+      assert.strictEqual(c.env.ELECTRON_RUN_AS_NODE, '1', 'it must ride in an env field');
+      const plain = mcpRegister.serverCommand({ electron: false });
+      assert.deepStrictEqual(plain.env, {}, 'and must be absent off Electron, so a re-run compares equal');
+    });
+
+    check('mcp-register: codex gains our block and every other byte is unchanged', () => {
+      const home = mkHome(['.codex']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CODEX_REAL);
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered');
+      const after = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      assert.ok(after.startsWith(CODEX_REAL), 'the original file must be a byte-identical prefix');
+      assert.ok(after.includes('[plugins."github@openai-curated"]'), 'the @ key must be untouched');
+      assert.ok(after.includes('[projects."/Users/marco/Documents/AI Shit/CopyNigga"]'), 'the spaced path key must be untouched');
+      assert.ok(after.includes('[mcp_servers.membridge]'));
+      assert.ok(after.includes('args = ["/stub/membridge/bin/membridge.js", "mcp"]'));
+    });
+
+    check('mcp-register: a windows path is TOML-escaped, not written raw', () => {
+      // C:\Users\... in a TOML basic string is a run of escape sequences
+      // (\U, \m) -- writing it raw makes the file we registered into
+      // unparseable, on the one platform we cannot test end to end here.
+      const home = mkHome(['.codex']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '');
+      mcpRegister.registerAll(base(home, {
+        command: { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\Users\\me\\membridge\\bin\\membridge.js', 'mcp'], env: {} },
+      }));
+      const after = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      assert.ok(after.includes('command = "C:\\\\Program Files\\\\nodejs\\\\node.exe"'),
+        `backslashes must be doubled, got: ${after.trim()}`);
+      assert.ok(!/[^\\]\\[Um]/.test(after), 'no bare \\U or \\m escape may reach the file');
+    });
+
+    check('mcp-register: cursor keeps a foreign server and gains ours', () => {
+      const home = mkHome(['.cursor']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      fs.writeFileSync(file, JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['their-server'] } } }, null, 2));
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'registered');
+      const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.deepStrictEqual(after.mcpServers.theirs, { command: 'npx', args: ['their-server'] }, 'their server must survive verbatim');
+      assert.deepStrictEqual(after.mcpServers.membridge, { command: '/stub/node', args: ['/stub/membridge/bin/membridge.js', 'mcp'] });
+    });
+
+    check('mcp-register: claude code is registered through its own CLI, with the argv we intend', () => {
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_ABSENT);
+      const rows = mcpRegister.registerAll(base(home, { spawn }));
+      assert.strictEqual(rowFor(rows, 'claude-code').status, 'registered');
+      const argvs = spawn.calls.map(c => [c.command, ...c.args]);
+      assert.deepStrictEqual(argvs[0], [STUB_CLAUDE, 'mcp', 'get', 'membridge'], 'query first');
+      assert.deepStrictEqual(argvs[1], [STUB_CLAUDE, 'mcp', 'add', '-s', 'user', 'membridge', '--', '/stub/node', '/stub/membridge/bin/membridge.js', 'mcp']);
+      assert.strictEqual(spawn.calls[1].options.timeout, 5000, 'bounded: it must never block a launch');
+      assert.strictEqual(spawn.calls[1].options.windowsHide, true, 'no console window may flash');
+      // Nothing was written: the CLI owns that file, we never do.
+      assert.ok(!fs.existsSync(path.join(home, '.claude.json')), 'we must never write ~/.claude.json ourselves');
+    });
+
+    check('mcp-register: the electron env reaches the claude CLI as -e, not as a prefix', () => {
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_ABSENT);
+      mcpRegister.registerAll(base(home, {
+        spawn,
+        command: { command: '/stub/Electron', args: ['/stub/bin/membridge.js', 'mcp'], env: { ELECTRON_RUN_AS_NODE: '1' } },
+      }));
+      const add = spawn.calls.find(c => c.args[1] === 'add');
+      assert.deepStrictEqual(add.args,
+        ['mcp', 'add', '-s', 'user', 'membridge', '-e', 'ELECTRON_RUN_AS_NODE=1', '--', '/stub/Electron', '/stub/bin/membridge.js', 'mcp']);
+    });
+
+    check('mcp-register: an already-correct claude registration is unchanged, never re-added', () => {
+      // `claude mcp add` EXITS 1 on an existing name (verified against the
+      // shipped CLI) -- so skipping the query would turn every reconcile into
+      // a reported failure.
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut(CMD.command, CMD.args, {})));
+      const rows = mcpRegister.registerAll(base(home, { spawn }));
+      assert.strictEqual(rowFor(rows, 'claude-code').status, 'unchanged');
+      assert.deepStrictEqual(spawn.calls.map(c => c.args[1]), ['get'], 'nothing beyond the query may run');
+    });
+
+    check('mcp-register: a STALE registration of ours is repaired, not left to rot', () => {
+      // The path moves (reinstall, new node, app upgrade) and `claude mcp add`
+      // cannot update in place. "Already registered? stop." leaves a server
+      // that can never start -- the exact silent failure this feature exists
+      // to fix.
+      const home = mkHome(['.claude']);
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut('/old/node', ['/old/membridge/bin/membridge.js', 'mcp'], {})));
+      const rows = mcpRegister.registerAll(base(home, { spawn }));
+      assert.strictEqual(rowFor(rows, 'claude-code').status, 'registered');
+      assert.deepStrictEqual(spawn.calls.map(c => c.args.slice(0, 2).join(' ')), ['mcp get', 'mcp remove', 'mcp add']);
+      assert.deepStrictEqual(spawn.calls[1].args, ['mcp', 'remove', 'membridge', '-s', 'user']);
+    });
+
+    check('mcp-register: a stale codex block is replaced in place, keeping its neighbours', () => {
+      const home = mkHome(['.codex']);
+      const file = path.join(home, '.codex', 'config.toml');
+      fs.writeFileSync(file, `${CODEX_REAL}\n[mcp_servers.membridge]\ncommand = "/old/node"\nargs = ["/old/bin/membridge.js", "mcp"]\n`);
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered');
+      const after = fs.readFileSync(file, 'utf8');
+      assert.strictEqual((after.match(/\[mcp_servers\.membridge\]/g) || []).length, 1, 'exactly one block');
+      assert.ok(!after.includes('/old/node'), 'the stale body must be gone');
+      assert.ok(after.includes('[mcp_servers.node_repl]') && after.includes('FOO = "bar"'), 'neighbours survive');
+    });
+
+    check('mcp-register: an agent that is not installed is reported, and no file is conjured', () => {
+      const home = mkHome(['.codex']); // no .cursor, no .claude
+      const rows = mcpRegister.registerAll(base(home));
+      const cursor = rowFor(rows, 'cursor');
+      assert.ok(cursor, 'an uninstalled agent must still produce a ROW -- a silent skip is indistinguishable from success');
+      assert.strictEqual(cursor.status, 'skipped');
+      assert.ok(/config\.mcp\.cursor\.configPath/.test(cursor.detail), `the detail must name the key that fixes it, got: ${cursor.detail}`);
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor')), false, 'no directory may be conjured');
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor', 'mcp.json')), false, 'the default path must still be ABSENT');
+      assert.strictEqual(fs.existsSync(path.join(home, '.claude.json')), false);
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'the installed one is unaffected');
+    });
+
+    check('mcp-register: a relocated codex config leaves the default path absent', () => {
+      const home = mkHome([]);
+      const moved = path.join(rRoot, `moved-${regHomeSeq}`);
+      fs.mkdirSync(moved, { recursive: true });
+      const rows = mcpRegister.registerAll(base(home, { env: { CODEX_HOME: moved } }));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered');
+      assert.ok(fs.existsSync(path.join(moved, 'config.toml')), 'it must land where the tool says it lives');
+      assert.strictEqual(fs.existsSync(path.join(home, '.codex')), false, 'and nowhere else');
+    });
+
+    check('mcp-register: a missing claude binary is skipped, names its config key, and stops nothing else', () => {
+      const home = mkHome(['.claude', '.codex']);
+      const rows = mcpRegister.registerAll(base(home, { resolveClaudeBin: () => null }));
+      const cc = rowFor(rows, 'claude-code');
+      assert.strictEqual(cc.status, 'skipped');
+      assert.ok(/config\.mcp\.claudeBin/.test(cc.detail), `must name the fix, got: ${cc.detail}`);
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'codex must still be registered');
+    });
+
+    check('mcp-register: invalid cursor JSON fails and leaves the file byte-identical', () => {
+      const home = mkHome(['.cursor', '.codex']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      const GARBAGE = '{ this is not json, and it is the user\'s\n';
+      fs.writeFileSync(file, GARBAGE);
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'failed');
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), GARBAGE, 'refuse rather than clobber');
+      assert.deepStrictEqual(fs.readdirSync(path.join(home, '.cursor')), ['mcp.json'], 'no stray temp file');
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'one bad config must not stop the others');
+    });
+
+    check('mcp-register: a text config that exists but cannot be read is a REFUSAL, not emptiness', () => {
+      // The Task 4 defect, one format over: classifying an unreadable config
+      // as "missing, safe to create" destroys it, because rename needs only
+      // the DIRECTORY writable.
+      //
+      // Asserted on the classifier DIRECTLY. Driven only through registerAll
+      // this is untestable: the same fixture that makes the read fail also
+      // makes the write fail, so a swallow-everything catch still ends at
+      // 'failed' and the check passes for the wrong reason. (Measured: it did.)
+      const home = mkHome(['.codex']);
+      const dirInItsPlace = path.join(home, '.codex', 'config.toml');
+      fs.mkdirSync(dirInItsPlace);
+      assert.strictEqual(mcpRegister.readTextConfig(dirInItsPlace), null,
+        'EISDIR means something IS there that we cannot see');
+      assert.deepStrictEqual(mcpRegister.readTextConfig(path.join(home, '.codex', 'nope.toml')),
+        { text: '', existed: false }, 'only a genuinely absent file is safe to create');
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
+      assert.ok(fs.statSync(dirInItsPlace).isDirectory(), 'whatever was there must still be there');
+    });
+
+    check('mcp-register: a mode-000 codex config is refused, not overwritten', () => {
+      // The consequence, end to end: here the DIRECTORY is writable, so a
+      // read-as-empty would rename straight over the user's servers.
+      const home = mkHome(['.codex']);
+      const file = path.join(home, '.codex', 'config.toml');
+      const THEIRS = '[mcp_servers.node_repl]\ncommand = "node"\n';
+      fs.writeFileSync(file, THEIRS);
+      fs.chmodSync(file, 0o000);
+      let readable = true;
+      try { fs.readFileSync(file, 'utf8'); } catch { readable = false; }
+      if (!readable) { // root, and Windows' chmod, cannot produce this
+        const rows = mcpRegister.registerAll(base(home));
+        assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
+        fs.chmodSync(file, 0o600);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), THEIRS, 'their servers must still be there');
+      } else {
+        fs.chmodSync(file, 0o600);
+      }
+    });
+
+    check('mcp-register: a write that throws costs one agent, never the launch', () => {
+      // The only things that THROW out of these modules are the write
+      // syscalls -- a locked-down config directory, a full disk. Registration
+      // is a convenience; nothing may let one of them escape and take the
+      // daemon launch (or the other agents) with it.
+      const home = mkHome(['.codex', '.cursor']);
+      const locked = path.join(home, '.codex');
+      fs.chmodSync(locked, 0o500);
+      let writable = true;
+      try { fs.writeFileSync(path.join(locked, '.probe'), 'x'); fs.unlinkSync(path.join(locked, '.probe')); }
+      catch { writable = false; }
+      let rows;
+      assert.doesNotThrow(() => { rows = mcpRegister.registerAll(base(home)); },
+        'registerAll must never propagate a write error');
+      // Windows chmod and a root uid cannot lock a directory; there the check
+      // still proves registerAll returns a full report without throwing.
+      if (!writable) assert.strictEqual(rowFor(rows, 'codex').status, 'failed', JSON.stringify(rowFor(rows, 'codex')));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'registered', 'the next agent must still be registered');
+      fs.chmodSync(locked, 0o700);
+    });
+
+    check('mcp-register: autoRegister:false writes nothing for any agent', () => {
+      const home = mkHome(['.codex', '.cursor', '.claude']);
+      const spawn = spawnStub(CLAUDE_ABSENT);
+      const rows = mcpRegister.registerAll(base(home, { spawn, config: { mcp: { autoRegister: false } } }));
+      assert.ok(rows.length >= 3 && rows.every(r => r.status === 'skipped'), JSON.stringify(rows));
+      assert.strictEqual(spawn.calls.length, 0, 'not even the query may run');
+      assert.strictEqual(fs.existsSync(path.join(home, '.codex', 'config.toml')), false);
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor', 'mcp.json')), false);
+    });
+
+    check('mcp-register: only the literal false disables it', () => {
+      const home = mkHome(['.codex']);
+      const rows = mcpRegister.registerAll(base(home, { config: { mcp: { autoRegister: 'false' } } }));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'registered', 'a truthy string must not read as off');
+    });
+
+    check('mcp-register: running twice reports unchanged and rewrites nothing', () => {
+      const home = mkHome(['.codex', '.cursor', '.claude']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CODEX_REAL);
+      const first = mcpRegister.registerAll(base(home));
+      assert.deepStrictEqual(
+        [rowFor(first, 'codex').status, rowFor(first, 'cursor').status],
+        ['registered', 'registered']);
+      const tomlAfter = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      const jsonAfter = fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8');
+      const second = mcpRegister.registerAll(base(home));
+      assert.deepStrictEqual(
+        [rowFor(second, 'codex').status, rowFor(second, 'cursor').status],
+        ['unchanged', 'unchanged']);
+      assert.strictEqual(fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8'), tomlAfter);
+      assert.strictEqual(fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'), jsonAfter);
+    });
+
+    check('mcp-register: a foreign server named membridge is never overwritten', () => {
+      const home = mkHome(['.cursor', '.codex']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      const THEIRS = { command: '/usr/bin/python3', args: ['/Users/x/Membridge/tools/serve.py'] };
+      fs.writeFileSync(file, JSON.stringify({ mcpServers: { membridge: THEIRS } }, null, 2));
+      const tomlFile = path.join(home, '.codex', 'config.toml');
+      fs.writeFileSync(tomlFile, '[mcp_servers.membridge]\ncommand = "python3"\nargs = ["/Users/x/Membridge/serve.py"]\n');
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'cursor').status, 'skipped');
+      assert.strictEqual(rowFor(rows, 'codex').status, 'skipped');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers.membridge, THEIRS);
+      assert.ok(fs.readFileSync(tomlFile, 'utf8').includes('/Users/x/Membridge/serve.py'), 'theirs survives');
+    });
+
+    check('mcp-register: a foreign server named membridge survives unregisterAll', () => {
+      const home = mkHome(['.cursor', '.codex', '.claude']);
+      const file = path.join(home, '.cursor', 'mcp.json');
+      const THEIRS = { command: '/usr/bin/python3', args: ['/Users/x/Membridge/tools/serve.py'] };
+      const before = JSON.stringify({ mcpServers: { membridge: THEIRS } }, null, 2);
+      fs.writeFileSync(file, before);
+      const tomlFile = path.join(home, '.codex', 'config.toml');
+      const tomlBefore = '[mcp_servers.membridge]\ncommand = "python3"\nargs = ["/Users/x/Membridge/serve.py"]\n';
+      fs.writeFileSync(tomlFile, tomlBefore);
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut('/usr/bin/python3', ['/Users/x/Membridge/tools/serve.py'], {})));
+      const rows = mcpRegister.unregisterAll(base(home, { spawn }));
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'their JSON entry is byte-identical');
+      assert.strictEqual(fs.readFileSync(tomlFile, 'utf8'), tomlBefore, 'their TOML block is byte-identical');
+      assert.deepStrictEqual(spawn.calls.map(c => c.args[1]), ['get'], 'claude mcp remove must never run on a foreign server');
+      assert.deepStrictEqual(
+        [rowFor(rows, 'cursor').status, rowFor(rows, 'codex').status, rowFor(rows, 'claude-code').status],
+        ['skipped', 'skipped', 'skipped']);
+    });
+
+    check('mcp-register: unregisterAll strips exactly our own entries', () => {
+      const home = mkHome(['.cursor', '.codex', '.claude']);
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CODEX_REAL);
+      fs.writeFileSync(path.join(home, '.cursor', 'mcp.json'),
+        JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['x'] } } }, null, 2));
+      mcpRegister.registerAll(base(home));
+      const spawn = spawnStub(CLAUDE_PRESENT(claudeGetOut(CMD.command, CMD.args, {})));
+      const rows = mcpRegister.unregisterAll(base(home, { spawn }));
+      assert.deepStrictEqual(
+        [rowFor(rows, 'codex').status, rowFor(rows, 'cursor').status, rowFor(rows, 'claude-code').status],
+        ['removed', 'removed', 'removed']);
+      const toml = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      assert.ok(!toml.includes('mcp_servers.membridge'));
+      assert.ok(toml.includes('[plugins."github@openai-curated"]'), 'removal must not disturb the rest either');
+      const json = JSON.parse(fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'));
+      assert.deepStrictEqual(Object.keys(json.mcpServers), ['theirs']);
+      assert.deepStrictEqual(spawn.calls[1].args, ['mcp', 'remove', 'membridge', '-s', 'user']);
+    });
+
+    check('mcp-register: unregisterAll ignores the autoRegister kill switch', () => {
+      // Turning auto-registration off must not strand an entry we already
+      // wrote, and `membridge remove-hooks` must clean up regardless.
+      const home = mkHome(['.codex']);
+      mcpRegister.registerAll(base(home));
+      const rows = mcpRegister.unregisterAll(base(home, { config: { mcp: { autoRegister: false } } }));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'removed');
+      assert.ok(!fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8').includes('mcp_servers.membridge'));
+    });
+
+    check('mcp-register: a user-declared agent on a tool we have never heard of works', () => {
+      const home = mkHome([]);
+      const theirDir = path.join(rRoot, `zed-${regHomeSeq}`);
+      fs.mkdirSync(theirDir, { recursive: true });
+      const theirFile = path.join(theirDir, 'settings.json');
+      fs.writeFileSync(theirFile, JSON.stringify({ mcpServers: {} }, null, 2));
+      const config = { mcp: { 'some-new-tool': { configPath: theirFile, format: 'json' } } };
+      const rows = mcpRegister.registerAll(base(home, { config }));
+      const r = rowFor(rows, 'some-new-tool');
+      assert.ok(r, 'a declared agent must appear in the report');
+      assert.strictEqual(r.status, 'registered');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(theirFile, 'utf8')).mcpServers.membridge,
+        { command: '/stub/node', args: ['/stub/membridge/bin/membridge.js', 'mcp'] });
+    });
+
+    check('mcp-register: a declared agent with a format we cannot write is reported, not guessed at', () => {
+      const home = mkHome([]);
+      const theirDir = path.join(rRoot, `weird-${regHomeSeq}`);
+      fs.mkdirSync(theirDir, { recursive: true });
+      const theirFile = path.join(theirDir, 'servers.ini');
+      const config = { mcp: { 'weird-tool': { configPath: theirFile } } };
+      const rows = mcpRegister.registerAll(base(home, { config }));
+      const r = rowFor(rows, 'weird-tool');
+      assert.strictEqual(r.status, 'skipped');
+      assert.ok(/config\.mcp\.weird-tool\.format/.test(r.detail), `must name the key, got: ${r.detail}`);
+      assert.strictEqual(fs.existsSync(theirFile), false, 'and must not have written a file it cannot format');
+    });
+
+    check('mcp-register: a test-harness MEMBRIDGE_HOME writes nothing anywhere', () => {
+      // The suite's own guard rail (mcp spec §6): a future check that forgets
+      // to inject `home` must not reach a developer's real ~/.codex.
+      const home = mkHome(['.codex', '.cursor']);
+      const rows = mcpRegister.registerAll(base(home, {
+        env: { MEMBRIDGE_HOME: path.join(os.tmpdir(), 'membridge-test-fake', 'home') },
+      }));
+      assert.ok(rows.length >= 3 && rows.every(r => r.status === 'skipped'), JSON.stringify(rows));
+      assert.strictEqual(fs.existsSync(path.join(home, '.codex', 'config.toml')), false);
+      assert.strictEqual(fs.existsSync(path.join(home, '.cursor', 'mcp.json')), false);
+    });
+
+    check('mcp-register: isOurs is anchored, not a substring match on "membridge"', () => {
+      assert.strictEqual(mcpRegister.isOurs({ command: '/n', args: ['/a/bin/membridge.js', 'mcp'] }), true);
+      assert.strictEqual(mcpRegister.isOurs({ command: '/usr/local/bin/membridge', args: ['mcp'] }), true);
+      // A user's own script that merely lives under a directory named
+      // Membridge -- the exact over-broad match that made setup-hooks
+      // overwrite a user's command and remove-hooks delete it (lib/hooks.js).
+      assert.strictEqual(mcpRegister.isOurs({ command: 'python3', args: ['/Users/x/Membridge/tools/serve.py'] }), false);
+      assert.strictEqual(mcpRegister.isOurs({ command: 'node', args: ['/a/membridge-proxy.js', 'mcp'] }), false);
+      assert.strictEqual(mcpRegister.isOurs({ url: 'https://membridge.app/mcp' }), false);
+      assert.strictEqual(mcpRegister.isOurs(null), false);
+      assert.strictEqual(mcpRegister.isOurs('[mcp_servers.membridge]\ncommand = "node"\nargs = ["/a/bin/membridge.js", "mcp"]'), true);
+    });
+
+    check('mcp-register: nothing in the registrar branches on an agent name', () => {
+      // Task 2 put every per-agent difference in SPECS as DATA and gave every
+      // resolution a `format`. A `switch (agent)` here would quietly undo
+      // that, and a user-declared agent would stop working.
+      //
+      // Comments are stripped first and the match is on the bare WORD: an
+      // earlier version keyed on quotes alone and sailed straight past
+      // `const LEGACY = { codex: 'toml' }` -- an unquoted object key is
+      // exactly the shape this drift takes.
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp-register.js'), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .map(l => l.replace(/(^|[^:])\/\/.*$/, '$1'))
+        .join('\n');
+      assert.ok(/HANDLERS/.test(src), 'the stripper must not have eaten the code itself');
+      for (const name of ['codex', 'cursor', 'claude-code']) {
+        assert.ok(!new RegExp(`\\b${name}\\b`, 'i').test(src),
+          `lib/mcp-register.js must not name the agent ${name} outside a comment`);
+      }
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
