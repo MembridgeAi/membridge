@@ -11226,6 +11226,43 @@ async function main() {
     assert.ok(keychain.remove(acct), 'remove failed');
     assert.strictEqual(keychain.load(acct), null, 'load after remove must be null');
   });
+  // Windows DPAPI backend. lib/keychain.js has a full Windows implementation
+  // (winAvailable/winStore/winLoad/winRemove) that has never been executed by
+  // this suite — every check above is darwin-or-fail-closed, so on a Mac the
+  // Windows path is completely uncovered.
+  //
+  // THIS IS DELIBERATELY A VISIBLE SKIP, NOT A SILENT PASS. An earlier version
+  // of this test opened with `if (process.platform !== 'win32') return;`, which
+  // counted as a passing check on every Mac run — the suite reported Windows
+  // key storage as tested when nothing had run. Real coverage requires the
+  // Windows CI leg (.github/workflows/windows.yml); until that runs, this line
+  // is the honest statement that it has not been verified here.
+  if (process.platform === 'win32') {
+    check('keychain(win): real DPAPI store/load/remove round trip', () => {
+      assert.ok(keychain.available(), 'DPAPI must be available on win32');
+      const acct = 'membridge.test.win.' + Date.now();
+      assert.ok(keychain.store(acct, 'WIN-SECRET'), 'store failed');
+      assert.strictEqual(keychain.load(acct), 'WIN-SECRET', 'load round trip');
+      assert.ok(keychain.store(acct, 'WIN-SECOND'), 're-store (update) failed');
+      assert.strictEqual(keychain.load(acct), 'WIN-SECOND', 'update round trip');
+      assert.ok(keychain.remove(acct), 'remove failed');
+      assert.strictEqual(keychain.load(acct), null, 'load after remove must be null');
+    });
+    check('keychain(win): the secret never travels on argv', () => {
+      // argv is world-readable via Get-CimInstance Win32_Process, exactly as it
+      // is via `ps` on macOS. The DPAPI backend must feed the secret to
+      // powershell on stdin; the -EncodedCommand text carries no secret.
+      const acct = 'membridge.test.win.argv.' + Date.now();
+      const secret = 'U0VDUkVULXZh+bHVl/wow==';
+      try {
+        assert.ok(keychain.store(acct, secret), 'store failed');
+        assert.strictEqual(keychain.load(acct), secret, 'round trip');
+      } finally { keychain.remove(acct); }
+    });
+  } else {
+    console.log('  skip  keychain(win): DPAPI round trip — not win32, needs the Windows CI leg');
+  }
+
   // Identity bootstrap (ensureIdentity, plan Task 4): pure by injection, so
   // every scenario runs offline against fakes — no network, no real keychain.
   // Awaits happen at block level (check() doesn't await), wrapped so a missing
@@ -15971,6 +16008,106 @@ async function main() {
       const { settingsPayload } = require('../lib/server');
       const payload = settingsPayload();
       assert.strictEqual(payload.diagnostics.enabled, true);
+    });
+  }
+
+  // ---- anonymous product-health counters (spec §2) ----
+  // The classification ladder is the whole value of this feature: collapsing
+  // the failure states into one "broken" is what made the original bug take a
+  // day to diagnose, so each state is pinned individually.
+  {
+    const counters = require('../lib/counters');
+
+    check('counters: one real serve outranks every other signal', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 1, hotPaths: 0, storeEntries: 0, noStructure: 9 }), 'serving');
+    });
+
+    check('counters: no hot paths is distinguished from an empty store', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 0, storeEntries: 0, noStructure: 0 }), 'no_hot_paths');
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 3, storeEntries: 0, noStructure: 0 }), 'empty_store');
+    });
+
+    check('counters: skeletonizer rejection is its own state, not empty_store', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 3, storeEntries: 0, noStructure: 2 }), 'all_rejected');
+    });
+
+    check('counters: a warm cache that never served is ready_unserved', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 3, storeEntries: 5, noStructure: 0 }), 'ready_unserved');
+    });
+
+    check('counters: roll-up reports serving when ANY project serves', () => {
+      assert.strictEqual(counters.rollUpRecall(['no_hot_paths', 'serving', 'empty_store']), 'serving');
+    });
+
+    check('counters: roll-up otherwise reports the most common failure, deterministically', () => {
+      assert.strictEqual(counters.rollUpRecall(['no_hot_paths', 'empty_store', 'no_hot_paths']), 'no_hot_paths');
+      assert.strictEqual(counters.rollUpRecall([]), null);
+    });
+
+    check('counters: checkout shape is single / worktree / mixed / none', () => {
+      assert.strictEqual(counters.environmentShape([false, false]), 'single');
+      assert.strictEqual(counters.environmentShape([true, true]), 'worktree');
+      assert.strictEqual(counters.environmentShape([true, false]), 'mixed');
+      assert.strictEqual(counters.environmentShape([]), 'none');
+    });
+
+    check('counters: a linked worktree is detected by .git being a file', () => {
+      const wt = path.join(ROOT, 'counters-wt');
+      const plain = path.join(ROOT, 'counters-plain');
+      fs.mkdirSync(wt, { recursive: true });
+      fs.mkdirSync(path.join(plain, '.git'), { recursive: true });
+      fs.writeFileSync(path.join(wt, '.git'), 'gitdir: /somewhere/.git/worktrees/x\n');
+      assert.strictEqual(counters.isWorktreeCheckout(wt), true);
+      assert.strictEqual(counters.isWorktreeCheckout(plain), false);
+      assert.strictEqual(counters.isWorktreeCheckout(path.join(ROOT, 'counters-absent')), false);
+    });
+
+    // Cadence is a safety property, not a nicety: without it a broken install
+    // POSTs on every 60s sync pass forever, which turns a diagnostic into a
+    // beacon and makes an endpoint outage self-amplifying.
+    check('counters: the signature ignores the heartbeat so cadence tracks real state', () => {
+      const built = counters.buildCounters({ recallState: 'serving', shape: 'mixed', registration: 'current' });
+      assert.deepStrictEqual(built.map(c => c.name), ['heartbeat', 'recall_state', 'environment', 'hook_registration']);
+      assert.ok(!counters.signatureOf(built).includes('heartbeat'));
+    });
+
+    check('counters: resend on state change, stay silent while unchanged', () => {
+      assert.strictEqual(counters.shouldSend(null, 'x', 1000), true);
+      assert.strictEqual(counters.shouldSend({ sig: 'x', ts: 1000 }, 'x', 2000), false);
+      assert.strictEqual(counters.shouldSend({ sig: 'x', ts: 1000 }, 'y', 2000), true);
+      assert.strictEqual(counters.shouldSend({ sig: 'x', ts: 0 }, 'x', counters.HEARTBEAT_INTERVAL_MS), true);
+    });
+
+    await check('counters: an unset endpoint never sends (self-hosted builds)', async () => {
+      let called = false;
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: '' }, {
+        fetchImpl: () => { called = true; return Promise.resolve({}); },
+      });
+      assert.strictEqual(sent, false);
+      assert.strictEqual(called, false);
+    });
+
+    await check('counters: the diagnostics kill switch suppresses these too', async () => {
+      let called = false;
+      const sent = await counters.emitCounters({ projects: {} }, {
+        countersUrl: 'http://127.0.0.1:1/never',
+        diagnostics: { enabled: false },
+      }, { fetchImpl: () => { called = true; return Promise.resolve({}); } });
+      assert.strictEqual(sent, false);
+      assert.strictEqual(called, false);
+    });
+
+    await check('counters: the payload carries no path, project name or account', async () => {
+      let body = null;
+      await counters.emitCounters({ projects: { [ROOT]: {} } }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: (url, opts) => { body = opts.body; return Promise.resolve({}); },
+        now: 1,
+      });
+      assert.ok(body, 'expected a POST body');
+      assert.ok(!body.includes(ROOT), 'project path must never be transmitted');
+      assert.ok(!body.includes('/'), 'no path-like value may appear in the payload');
+      const parsed = JSON.parse(body);
+      assert.deepStrictEqual(Object.keys(parsed).sort(), ['counters', 'install_id', 'version']);
     });
   }
 
