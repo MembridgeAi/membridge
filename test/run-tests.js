@@ -17497,6 +17497,49 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(again.stdout, '', 'the note re-fired inside the same session');
     });
 
+    // ---- recall's OFF switch must not silence teammate notes ----
+    // config.recall.enabled is a preference about SERVING skeletons. Teammate
+    // notes have their own switch and never block a read, so for anyone in a
+    // team a "don't touch this yet" must survive the token-saving feature
+    // having been turned off months earlier. MEMBRIDGE_NO_RECALL=1 is a
+    // different thing -- the panic button, "stop touching my reads" -- and
+    // must still silence everything this hook does, notes included.
+    const rp = path.join(ROOT, 'projects', 'notes-recalloff-proj');
+    fs.mkdirSync(path.join(rp, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(rp, 'lib', 'validate.ts'), 'export const a = 1;\n');
+    spawnSync('git', ['init', '-q', rp], { encoding: 'utf8' });
+    repoRoot.clearCache();
+    trackProject(rp);
+    notesStore.write(rp, notes.buildIndex(
+      [fileNoteRow('lib/validate.ts', 'blocked pending migration 018')], null, liveTs));
+    const recallOffPayload = sid => ({
+      session_id: sid, cwd: rp, tool_name: 'Read',
+      tool_input: { file_path: path.join(rp, 'lib', 'validate.ts'), limit: 100 },
+    });
+    const cfgBeforeRecallOff = util.getConfig();
+    util.saveUserConfig({
+      ...cfgBeforeRecallOff,
+      recall: { ...(cfgBeforeRecallOff.recall || {}), enabled: false },
+    });
+    const outRecallOff = runNotesHook(recallOffPayload('notes-recalloff-1'));
+    const outPanic = runNotesHook(recallOffPayload('notes-recalloff-2'), { MEMBRIDGE_NO_RECALL: '1' });
+    util.saveUserConfig(cfgBeforeRecallOff);
+
+    check('notes-hook: recall.enabled=false stops serving but NOT teammate notes', () => {
+      assert.strictEqual(outRecallOff.status, 0, outRecallOff.stderr);
+      assert.ok(outRecallOff.stdout.trim(),
+        'turning recall off silently lost the teammate note — two independent switches must behave independently');
+      const hso = JSON.parse(outRecallOff.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.permissionDecision, 'allow');
+      assert.ok(hso.additionalContext.includes('migration 018'), 'the note text never reached the agent');
+    });
+
+    check('notes-hook: MEMBRIDGE_NO_RECALL=1 is the panic button and silences notes too', () => {
+      assert.strictEqual(outPanic.status, 0, outPanic.stderr);
+      assert.strictEqual(outPanic.stdout, '',
+        'the panic switch must stop every output from this hook, notes included');
+    });
+
     // A file hot enough to have a cached skeleton is exactly where a teammate
     // note is most likely to land. decide() refusing to serve it must not
     // swallow the note.
