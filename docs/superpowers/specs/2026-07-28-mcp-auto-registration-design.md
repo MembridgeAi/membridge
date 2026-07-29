@@ -126,6 +126,58 @@ claude mcp add -s user membridge -- <execPath> <bin/membridge.js> mcp
 Never parse or write `~/.claude.json`. A non-zero exit is logged and ignored —
 this must never break a daemon launch.
 
+Shelling out is not a new pattern here: MemBridge already spawns `git`
+(`lib/teamsync.js` `repoUrl`, `lib/changes.js`), `security` and `powershell`
+(`lib/keychain.js`). What is different is that `claude` is another AI tool's
+CLI — updated far more often than git, and capable of prompting. Hence the
+three constraints below.
+
+#### 5.1.1 Resolving `claude` — do not trust PATH
+
+**This is the failure mode most likely to ship unnoticed.** On this machine
+`claude` lives at `~/.local/bin/claude`, which is on the *shell* PATH. A macOS
+app launched from Finder inherits roughly `/usr/bin:/bin:/usr/sbin:/sbin` and
+nothing else, so **MemBridge.app would not find `claude` at all** while the CLI
+run from a terminal would find it immediately.
+
+That asymmetry is dangerous precisely because it looks like success: whoever
+tests from a terminal sees registration work, while every user of the packaged
+app silently gets nothing — which is indistinguishable from the bug this spec
+exists to fix.
+
+So resolution probes explicit locations in order, and only then falls back to
+PATH:
+
+```
+~/.local/bin/claude
+/opt/homebrew/bin/claude
+/usr/local/bin/claude
+/usr/bin/claude
+$CLAUDE_BIN (escape hatch)
+PATH lookup
+```
+
+"Not found" is a **first-class, reported outcome**, not a silent skip: it is
+logged and surfaced in `membridge status` alongside hook registration state.
+An unregisterable agent the user could fix in ten seconds must not be invisible.
+
+#### 5.1.2 No window, on any platform
+
+`spawnSync` runs the child headless on macOS and Linux — no terminal window
+appears and the child's output is captured by the parent. On **Windows**, a
+console window can flash briefly unless `windowsHide: true` is set.
+`lib/keychain.js` already sets it for its PowerShell call; the MCP spawn must
+match. A window flashing at every daemon launch would be an unacceptable
+regression in a background app.
+
+#### 5.1.3 Never hang
+
+The child gets a **5s timeout**, closed stdin, and its output captured rather
+than inherited. If `claude mcp add` ever decides to prompt, it must fail on the
+timeout rather than block the launch waiting on input that will never come —
+the same defensive stance as `keychain.js`'s `-NonInteractive` flag on
+PowerShell.
+
 ### 5.2 Codex — block surgery, not a round trip
 
 **A TOML library is explicitly rejected here**, despite dependencies now being
@@ -209,7 +261,8 @@ convenience; nothing depends on it succeeding.
 
 | Failure | Behaviour |
 |---|---|
-| `claude` not on PATH | Skip Claude Code; still try the others |
+| `claude` binary not found anywhere (§5.1.1) | Skip Claude Code, **log and report in `membridge status`**; still try the others |
+| `claude mcp add` hangs | Killed at 5s; logged; launch unaffected |
 | `claude mcp add` non-zero exit | Log, continue |
 | `~/.codex/config.toml` unreadable | Skip Codex, change nothing |
 | Codex TOML shape unrecognised | Skip Codex, change nothing |
@@ -235,16 +288,28 @@ reconciling.
 
 ## 10. Open question for review
 
-`claude mcp add -s user` is the right call for Claude Code, but it means
-MemBridge shells out to another tool's CLI during its own launch. That is a new
-kind of coupling — it inherits that CLI's exit codes, latency and prompting
-behaviour. The alternative is writing `~/.claude.json` directly, which is
-faster and dependency-free but bets on an internal shape that has demonstrably
-already moved once.
+Use `claude mcp add -s user`, or write `~/.claude.json` directly?
 
-Recommendation: take the CLI, bound it with a short timeout, and never let its
-outcome affect the launch. But it is worth someone disagreeing with before it
-ships.
+Shelling out is not itself novel — MemBridge already spawns `git`, `security`
+and `powershell`. The genuine cost is §5.1.1: `claude` will not be on the PATH
+of a Finder-launched app, so the CLI route needs its own binary-resolution
+logic and a visible "couldn't find it" state. That is real work the direct-write
+approach does not need.
+
+Against that, writing the file means guessing a private format that has
+**already moved once** — there is no root `mcpServers` in `~/.claude.json` any
+more. When that guess breaks, it breaks silently, and the symptom is
+indistinguishable from the bug this whole spec exists to fix: an MCP server
+nobody is calling.
+
+Recommendation: **take the CLI.** A failure we can see and log beats a failure
+that looks like nothing happening. Bound it with a timeout, resolve the binary
+explicitly, report when it is missing, and never let its outcome affect the
+launch.
+
+Worth disagreeing with before it ships — the honest counter-argument is that
+the binary-probing list in §5.1.1 is itself a guess about install locations,
+just a different one.
 
 ## 11. Testing
 
