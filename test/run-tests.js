@@ -16108,6 +16108,266 @@ const repoRoot = require('../lib/repo-root');
 }
 
 // --- summary ---
+  // ---- teammate notes: pure index logic (spec §4, §5) ----
+  const notes = require('../lib/teammate-notes');
+
+  {
+    const T0 = '2026-07-28T09:00:00Z';
+    const T1 = '2026-07-28T10:00:00Z';
+    const LATER = '2026-08-10T10:00:00Z'; // 13 days after T0
+
+    const rows = [
+      {
+        author_name: 'Andrew', ts: T0,
+        decisions: 'Renamed the retry cap to maxAttempts.',
+        gotchas: '',
+        files: ['lib/validate.ts'],
+        changes: [{ file: 'lib/validate.ts', note: 'blocked pending migration 018' }],
+      },
+      {
+        author_name: 'Andrew', ts: T1,
+        decisions: '', gotchas: 'The parser silently drops BOMs.',
+        files: [], changes: null,
+      },
+    ];
+
+    check('notes: buildIndex extracts decisions and gotchas as prose', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      assert.strictEqual(ix.prose.length, 2);
+      const kinds = ix.prose.map(p => p.kind).sort();
+      assert.deepStrictEqual(kinds, ['decision', 'gotcha']);
+    });
+
+    check('notes: buildIndex skips empty prose fields', () => {
+      const ix = notes.buildIndex([{ author_name: 'A', ts: T0, decisions: '', gotchas: '' }], null, T1);
+      assert.strictEqual(ix.prose.length, 0);
+    });
+
+    check('notes: buildIndex groups file notes by path', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      assert.ok(ix.byFile['lib/validate.ts']);
+      assert.strictEqual(ix.byFile['lib/validate.ts'][0].note, 'blocked pending migration 018');
+    });
+
+    check('notes: buildIndex ignores changes entries with no note', () => {
+      const ix = notes.buildIndex(
+        [{ author_name: 'A', ts: T0, changes: [{ file: 'a.js', note: '' }, { file: 'b.js', note: null }] }],
+        null, T1);
+      assert.deepStrictEqual(Object.keys(ix.byFile), []);
+    });
+
+    check('notes: buildIndex carries prior seen state forward', () => {
+      const first = notes.buildIndex(rows, null, T1);
+      const id = first.prose[0].id;
+      const marked = notes.markProseSeen(first, [id], T1);
+      const rebuilt = notes.buildIndex(rows, marked, T1);
+      assert.ok(rebuilt.seen.prose[id]);
+    });
+
+    check('notes: ids are stable across rebuilds', () => {
+      const a = notes.buildIndex(rows, null, T1).prose.map(p => p.id).sort();
+      const b = notes.buildIndex(rows, null, LATER).prose.map(p => p.id).sort();
+      assert.deepStrictEqual(a, b);
+    });
+
+    check('notes: selectProse returns unseen items newest first', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      const { items } = notes.selectProse(ix, T1);
+      assert.strictEqual(items.length, 2);
+      assert.ok(items[0].ts >= items[1].ts);
+    });
+
+    check('notes: prose delivers once, globally', () => {
+      let ix = notes.buildIndex(rows, null, T1);
+      const ids = notes.selectProse(ix, T1).items.map(i => i.id);
+      ix = notes.markProseSeen(ix, ids, T1);
+      assert.strictEqual(notes.selectProse(ix, T1).items.length, 0);
+      // still zero in a brand-new session, and still zero much later
+      assert.strictEqual(notes.selectProse(ix, LATER).items.length, 0);
+    });
+
+    check('notes: unseen prose never expires (the vacation case)', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      assert.strictEqual(notes.selectProse(ix, LATER).items.length, 2);
+    });
+
+    check('notes: selectProse caps at PROSE_CAP and reports the overflow', () => {
+      const many = [];
+      for (let i = 0; i < 9; i++) {
+        many.push({ author_name: 'A', ts: `2026-07-2${i}T09:00:00Z`, decisions: `decision ${i}`, gotchas: '' });
+      }
+      const ix = notes.buildIndex(many, null, T1);
+      const { items, overflow } = notes.selectProse(ix, T1);
+      assert.strictEqual(items.length, notes.PROSE_CAP);
+      assert.strictEqual(overflow, 9 - notes.PROSE_CAP);
+    });
+
+    check('notes: file notes deliver once per session per file', () => {
+      let ix = notes.buildIndex(rows, null, T1);
+      const first = notes.selectFileNotes(ix, 'lib/validate.ts', 'sess-A', T1);
+      assert.strictEqual(first.length, 1);
+      ix = notes.markFileSeen(ix, 'sess-A', first.map(n => n.id), T1);
+      assert.strictEqual(notes.selectFileNotes(ix, 'lib/validate.ts', 'sess-A', T1).length, 0);
+    });
+
+    check('notes: file notes re-fire in a new session', () => {
+      let ix = notes.buildIndex(rows, null, T1);
+      const ids = notes.selectFileNotes(ix, 'lib/validate.ts', 'sess-A', T1).map(n => n.id);
+      ix = notes.markFileSeen(ix, 'sess-A', ids, T1);
+      assert.strictEqual(notes.selectFileNotes(ix, 'lib/validate.ts', 'sess-B', T1).length, 1);
+    });
+
+    check('notes: file notes stop re-firing after REFIRE_DAYS', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      assert.strictEqual(notes.selectFileNotes(ix, 'lib/validate.ts', 'sess-C', LATER).length, 0);
+    });
+
+    check('notes: an unknown path yields no file notes', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      assert.deepStrictEqual(notes.selectFileNotes(ix, 'lib/nope.ts', 'sess-A', T1), []);
+    });
+
+    check('notes: buildIndex bounds prose to MAX_PROSE, newest kept', () => {
+    // Timestamps MUST be monotonic in i. The original fixture cycled the
+    // seconds field (i % 60) with a 4-digit fraction Date.parse truncates to
+    // 3, so recency had no relationship to i at all -- the eviction set came
+    // out as four clusters (0-6, 60-65, 120-125, 180-185) rather than the
+    // oldest 25, and the "newest kept" half of this test asserted nothing.
+    // One minute apart makes order and index the same thing.
+    const base = Date.parse('2026-01-01T00:00:00Z');
+    const many = [];
+    for (let i = 0; i < notes.MAX_PROSE + 25; i++) {
+      many.push({ author_name: 'A', ts: new Date(base + i * 60000).toISOString(), decisions: `d${i}`, gotchas: '' });
+    }
+    const ix = notes.buildIndex(many, null, T1);
+    assert.strictEqual(ix.prose.length, notes.MAX_PROSE);
+    const texts = new Set(ix.prose.map(p => p.text));
+    // The 25 OLDEST are the ones that must go -- an implementation that
+    // evicted the newest instead would pass a length-only assertion.
+    for (let i = 0; i < 25; i++) {
+      assert.ok(!texts.has(`d${i}`), `d${i} is among the 25 oldest and must have been evicted`);
+    }
+    assert.ok(texts.has(`d${notes.MAX_PROSE + 24}`), 'the single newest entry must be kept');
+    assert.ok(texts.has(`d25`), 'the oldest SURVIVOR (d25) must be kept');
+  });
+    check('notes: pruneSeen drops session records older than SEEN_PRUNE_DAYS', () => {
+      let ix = notes.buildIndex(rows, null, T1);
+      ix = notes.markFileSeen(ix, 'old-session', ['x'], T0);
+      ix = notes.pruneSeen(ix, LATER);
+      assert.strictEqual(ix.seen.file['old-session'], undefined);
+    });
+
+    check('notes: redaction runs on prose and on file notes', () => {
+      const leaky = [{
+        author_name: 'A', ts: T0,
+        decisions: 'use sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA for now',
+        gotchas: '',
+        changes: [{ file: 'a.js', note: 'key sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' }],
+      }];
+      const ix = notes.buildIndex(leaky, null, T1);
+      assert.ok(!ix.prose[0].text.includes('sk-ant-api03-AAAA'));
+      assert.ok(!ix.byFile['a.js'][0].note.includes('sk-ant-api03-BBBB'));
+    });
+
+    check('notes: formatProse renders authors and an overflow pointer', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      const { items, overflow } = notes.selectProse(ix, T1);
+      const s = notes.formatProse(items, overflow);
+      assert.ok(s.includes('Andrew'));
+      assert.ok(s.includes('maxAttempts'));
+    });
+
+    check('notes: formatProse names the catch-up when there is overflow', () => {
+      const many = [];
+      for (let i = 0; i < 9; i++) {
+        many.push({ author_name: 'A', ts: `2026-07-2${i}T09:00:00Z`, decisions: `decision ${i}`, gotchas: '' });
+      }
+      const ix = notes.buildIndex(many, null, T1);
+      const { items, overflow } = notes.selectProse(ix, T1);
+      assert.ok(notes.formatProse(items, overflow).includes(String(overflow)));
+    });
+
+    check('notes: formatFileNotes names the author and the note', () => {
+      const ix = notes.buildIndex(rows, null, T1);
+      const s = notes.formatFileNotes(notes.selectFileNotes(ix, 'lib/validate.ts', 's', T1));
+      assert.ok(s.includes('Andrew'));
+      assert.ok(s.includes('migration 018'));
+    });
+
+    check('notes: buildIndex survives malformed rows', () => {
+      const ix = notes.buildIndex([null, {}, { changes: 'nope' }, { author_name: 'A' }], null, T1);
+      assert.strictEqual(ix.prose.length, 0);
+      assert.deepStrictEqual(Object.keys(ix.byFile), []);
+    });
+  }
+
+  // ---- teammate notes: store (spec §4) ----
+  const notesStore = require('../lib/teammate-notes-store');
+
+  {
+    const np = path.join(ROOT, 'projects', 'notes-proj');
+    fs.mkdirSync(np, { recursive: true });
+
+    check('notes-store: read of a missing file is null, not a throw', () => {
+      assert.strictEqual(notesStore.read(np), null);
+    });
+
+    check('notes-store: write then read round-trips', () => {
+      const ix = notes.buildIndex(
+        [{ author_name: 'Andrew', ts: '2026-07-28T09:00:00Z', decisions: 'renamed the cap', gotchas: '' }],
+        null, '2026-07-28T09:00:00Z');
+      notesStore.write(np, ix);
+      const back = notesStore.read(np);
+      assert.strictEqual(back.prose.length, 1);
+      assert.strictEqual(back.prose[0].text, 'renamed the cap');
+    });
+
+    check('notes-store: a corrupt file reads as null', () => {
+      fs.writeFileSync(notesStore.notesPath(np), '{not json');
+      assert.strictEqual(notesStore.read(np), null);
+    });
+
+    check('notes-store: update applies the function and persists', () => {
+      notesStore.write(np, notes.emptyIndex());
+      notesStore.update(np, ix => notes.markProseSeen(ix, ['abc'], '2026-07-28T10:00:00Z'));
+      assert.ok(notesStore.read(np).seen.prose.abc);
+    });
+
+    check('notes-store: update on a corrupt file starts from empty, never throws', () => {
+      fs.writeFileSync(notesStore.notesPath(np), 'garbage');
+      const out = notesStore.update(np, ix => notes.markProseSeen(ix, ['zzz'], '2026-07-28T10:00:00Z'));
+      assert.ok(out.seen.prose.zzz);
+    });
+
+    check('notes-store: write leaves no temp files behind', () => {
+      notesStore.write(np, notes.emptyIndex());
+      const strays = fs.readdirSync(path.dirname(notesStore.notesPath(np))).filter(f => f.includes('.tmp'));
+      assert.deepStrictEqual(strays, []);
+    });
+
+    // Beyond the plan (Task 5 review): "leaves no temp files behind" passes
+    // just as happily against a plain, NON-atomic fs.writeFileSync -- verified
+    // against a naive variant -- so on its own it proves tidiness, not
+    // atomicity. Spying on the rename is the part a half-written index could
+    // actually fail: it asserts the bytes land in a temp file first and arrive
+    // at the target only via a rename.
+    check('notes-store: write lands in a temp file and renames into place', () => {
+      const realRename = fs.renameSync;
+      let renamedFrom = null;
+      fs.renameSync = (from, to) => { renamedFrom = from; return realRename(from, to); };
+      try {
+        notesStore.write(np, notes.emptyIndex());
+      } finally {
+        fs.renameSync = realRename;
+      }
+      assert.ok(renamedFrom && renamedFrom.includes('.tmp'),
+        'write must stage into a temp file and rename, never write the target in place');
+      assert.strictEqual(path.dirname(renamedFrom), path.dirname(notesStore.notesPath(np)),
+        'the temp file must sit in the target directory so the rename is atomic');
+    });
+  }
+
+  // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   try {
