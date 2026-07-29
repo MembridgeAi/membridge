@@ -135,6 +135,18 @@ Access check at the edge cannot be sidestepped.
 - Confirm the page is excluded from `sitemap.xml` and `llms.txt`. It already
   carries `noindex`.
 
+> **Do step 5 before 5a.** Access *protects* a hostname; it does not create
+> one. Until the Pages project exists and `ops.membridge.me` is added to it as a
+> custom domain, that hostname has no DNS record and Access has nothing to sit
+> in front of.
+>
+> The failure is genuinely confusing: with no DNS record the browser gets
+> NXDOMAIN, and many consumer gateways (AT&T Internet Air among them) hijack
+> that and serve their own router login page. It looks like a misconfigured
+> redirect rather than a missing hostname. **Test DNS with `dig ops.membridge.me`,
+> not a browser** — an empty answer means the record does not exist, whatever
+> the browser shows you.
+
 ### 5a. How you actually sign in
 
 There is no login form, no password and no session code in the panel. That is
