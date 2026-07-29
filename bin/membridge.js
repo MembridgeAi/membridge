@@ -272,6 +272,7 @@ function cmdStatus() {
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
   console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'} — Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
+  printMcpStatus(config);
   const encOn = ((config.team || {}).encrypt !== false);
   const keyAlerts = Array.isArray(state.keyAlerts) ? state.keyAlerts.length : 0;
   let encLine = encOn ? 'on (E2E, fail-closed)' : 'OFF — plaintext sync (explicit team.encrypt=false hatch)';
@@ -294,6 +295,37 @@ function cmdStatus() {
   }
   if (!captured) printEmptyState(config, running);
   prompts.flushValueMoment(config);
+}
+
+// Which AI tools can actually call MemBridge's MCP server, and — the part that
+// matters — which ones CANNOT and why.
+//
+// An agent MemBridge failed to register is the whole reason this feature
+// exists: a silent skip is indistinguishable from the feature working, so
+// every agent gets a line here, including the ones nothing was written for,
+// carrying the config key that fixes it.
+//
+// Read from the RECORDED rows, never re-run. `status` is a read-only command,
+// and re-registering to report on it would both write from a read and add
+// seconds to it (`claude mcp get` alone costs ~2.1s).
+function printMcpStatus(config) {
+  let rec = null;
+  try { rec = require('../lib/mcp-register').lastRegistration(); } catch {}
+  if ((config.mcp || {}).autoRegister === false && !rec) {
+    console.log('MCP:       auto-registration off (config.mcp.autoRegister is false)');
+    return;
+  }
+  if (!rec || !Array.isArray(rec.rows) || !rec.rows.length) {
+    console.log('MCP:       not registered with any AI tool yet — run `membridge mcp register`');
+    return;
+  }
+  const when = rec.at ? ` (last checked ${rec.at})` : '';
+  if (rec.mode === 'unregister') {
+    console.log(`MCP:       removed from your AI tools${when} — re-register with \`membridge mcp register\``);
+  } else {
+    console.log(`MCP:       server name \`membridge\`${when}`);
+  }
+  for (const r of rec.rows) console.log(mcpRow(r));
 }
 
 // Teammate activity is still something to inject, so a project with no local
@@ -426,8 +458,47 @@ function cmdDashboard() {
 // lib/mcp.js (and its @modelcontextprotocol/sdk + zod dependencies) is
 // required lazily, here only, so every other command stays on the
 // dependency-light main path — `membridge status` etc. never load the SDK.
+// `membridge mcp` with NO subcommand is the server itself — that exact argv is
+// what every registered entry runs, so it must stay the default forever. The
+// verbs hang off it rather than replacing it.
 async function cmdMcp() {
-  await require('../lib/mcp').startMcpServer();
+  const sub = args[1];
+  if (!sub) return require('../lib/mcp').startMcpServer();
+  if (sub === 'register') return cmdMcpRegister();
+  if (sub === 'unregister') return cmdMcpUnregister();
+  // Never fall through to starting the server: a typo would hang the terminal
+  // on a stdio server waiting for a client that will never speak.
+  die(`Unknown mcp subcommand: ${sub}\nUsage: membridge mcp [register|unregister]`);
+}
+
+// One line per agent, for both the `mcp register` output and `membridge
+// status`. `reason` is the stable machine token; `detail` is the sentence, and
+// for anything actionable it already names the config key that fixes it.
+function mcpRow(r) {
+  const head = `  ${String(r.agent).padEnd(14)}${r.status}`;
+  // The reason token is a fallback only where something is wrong and no
+  // sentence was written; on a success it is internal detail ('created',
+  // 'cli') that reads as noise next to the status word.
+  const why = r.detail || ((r.status === 'skipped' || r.status === 'failed') ? r.reason : '');
+  return why ? `${head} — ${why}` : head;
+}
+
+function cmdMcpRegister() {
+  const mcpRegister = require('../lib/mcp-register');
+  const { rows, recordedBin } = mcpRegister.registerNow();
+  console.log('MCP server registration (server name: membridge):');
+  for (const r of rows) console.log(mcpRow(r));
+  if (recordedBin) console.log(`Recorded the \`claude\` binary at ${recordedBin} so later launches need not search for it.`);
+  const failed = rows.filter(r => r.status === 'failed').length;
+  if (failed) console.log(`${failed} agent(s) could not be written; nothing of theirs was changed.`);
+}
+
+function cmdMcpUnregister() {
+  const mcpRegister = require('../lib/mcp-register');
+  const { rows } = mcpRegister.unregisterNow();
+  console.log('MCP server removal (server name: membridge):');
+  for (const r of rows) console.log(mcpRow(r));
+  console.log('Re-register anytime with: membridge mcp register');
 }
 
 // `membridge update` — check GitHub for a newer release and update in place.
@@ -910,9 +981,15 @@ Distillation (agent-written session summaries — see README):
 MCP (expose project memory, read-only, to MCP-capable clients — Claude
 Desktop, Cursor, Cowork, ...; see README):
   mcp                 start a read-only MCP server over stdio
-                      Nothing to install — it ships with MemBridge. Point your
-                      MCP client's config at:
-                        { "command": "membridge", "args": ["mcp"] }
+                      Nothing to install — it ships with MemBridge, and the
+                      installer registers it with every AI tool you have.
+  mcp register        register the server with every installed AI tool
+                      (Claude Code, Codex, Cursor, ...); prints one line per
+                      tool, including the ones it could not write and why.
+                      Turn the automatic pass off with config.mcp.autoRegister
+  mcp unregister      remove MemBridge's entry from those tools' configs
+                      (a foreign server that happens to be named "membridge"
+                      is never touched)
 
 Team sync (share project memory with your team — see README):
   join <link-or-code> [--email <e> --password <p>]   one command from invite to member
@@ -961,7 +1038,22 @@ const commands = {
       util.saveUserConfig(raw);
     }
   },
-  'remove-hooks': () => console.log(hooks.removeHooks()),
+  // `remove-hooks` is the documented "take MemBridge back out of my tools"
+  // command, so it also strips the MCP registration — uninstalling must leave
+  // nothing of ours behind in anyone's config.
+  //
+  // Wired HERE and not inside hooks.removeHooks(), deliberately. That function
+  // is also called by lib/server.js when the dashboard's Settings toggle turns
+  // *distillation* off, and by lib/consent.js when the first-run prompt is
+  // declined. Session summaries and the MCP server are unrelated features:
+  // putting the unregister inside removeHooks() would silently tear the MCP
+  // server out of Codex and Cursor because someone switched off Stop-hook
+  // summaries, and would do it from inside an HTTP handler that would then
+  // block for seconds on `claude mcp remove`.
+  'remove-hooks': () => {
+    console.log(hooks.removeHooks());
+    cmdMcpUnregister();
+  },
   'enable-autostart': () => console.log(autostart.enable()),
   'disable-autostart': () => console.log(autostart.disable()),
   help: cmdHelp,

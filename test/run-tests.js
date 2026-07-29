@@ -19103,6 +19103,291 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- MCP wiring: install, launch, status, removal (plan Task 7) ----
+  //
+  // WHY THE FIXTURE HOME IS NOT UNDER ROOT. lib/mcp-register carries a guard
+  // rail that refuses to touch any agent config when MEMBRIDGE_HOME points
+  // into the system temp directory -- which is exactly where ROOT lives. That
+  // guard is what protects a check that FORGOT to inject a home; here it would
+  // make every check below pass vacuously, proving only that the guard works.
+  // So the fixture lives beside the repo, and isolation is instead guaranteed
+  // the honest way: HOME is injected into every child, so os.homedir() -- and
+  // with it ~/.claude.json, ~/.codex/config.toml and ~/.cursor/mcp.json --
+  // resolves inside the fixture. All three of those exist on real machines,
+  // and the last check in this block proves none of them was touched.
+  {
+    const W_ROOT = fs.mkdtempSync(path.join(__dirname, '..', '.mcp-wiring-'));
+    const mcpRegister = require('../lib/mcp-register');
+    const claudeBinMod = require('../lib/claude-bin');
+
+    const REAL_AGENT_FILES = [
+      path.join(os.homedir(), '.claude.json'),
+      path.join(os.homedir(), '.codex', 'config.toml'),
+      path.join(os.homedir(), '.cursor', 'mcp.json'),
+    ];
+    const snapshotReal = () => REAL_AGENT_FILES.map(f => {
+      try { return fs.readFileSync(f).toString('base64'); } catch (err) { return `absent:${err.code}`; }
+    });
+    const realBefore = snapshotReal();
+
+    // A stub `claude` that records the argv it was called with. Exit 1 on
+    // `mcp get` is the clean-machine answer (nothing registered yet).
+    const stubBinDir = path.join(W_ROOT, 'stubbin');
+    fs.mkdirSync(stubBinDir, { recursive: true });
+    const CLAUDE_LOG = path.join(W_ROOT, 'claude-argv.log');
+    const stubClaude = path.join(stubBinDir, 'claude');
+    fs.writeFileSync(stubClaude, [
+      '#!/bin/sh',
+      `printf '%s\\n' "$*" >> "${CLAUDE_LOG}"`,
+      'if [ "$2" = "get" ]; then exit 1; fi',
+      'exit 0',
+    ].join('\n'));
+    fs.chmodSync(stubClaude, 0o755);
+
+    // A stub login shell. Chatty on purpose: a real one prints nvm/motd noise
+    // around the answer, and that is what claude-bin's line scan exists for.
+    const stubShell = path.join(stubBinDir, 'stub-shell');
+    fs.writeFileSync(stubShell, ['#!/bin/sh', 'echo "Now using node v20.11.0"', `echo "${stubClaude}"`].join('\n'));
+    fs.chmodSync(stubShell, 0o755);
+    const deadShell = path.join(stubBinDir, 'dead-shell');
+    fs.writeFileSync(deadShell, ['#!/bin/sh', 'exit 1'].join('\n'));
+    fs.chmodSync(deadShell, 0o755);
+
+    let wSeq = 0;
+    const mkFixture = (dirs = ['.codex', '.cursor', '.claude']) => {
+      const home = path.join(W_ROOT, `home-${wSeq++}`);
+      fs.mkdirSync(path.join(home, '.membridge'), { recursive: true });
+      for (const d of dirs) fs.mkdirSync(path.join(home, d), { recursive: true });
+      return home;
+    };
+    const fixtureEnv = (home, extra = {}) => ({
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      MEMBRIDGE_HOME: path.join(home, '.membridge'),
+      MEMBRIDGE_CLAUDE_SETTINGS: path.join(home, 'claude-settings.json'),
+      MEMBRIDGE_PORT: String(P(46)),
+      SHELL: stubShell,
+      ...extra,
+    });
+    const runCli = (home, argv, extraEnv = {}) =>
+      spawnSync(process.execPath, [BIN, ...argv], { env: fixtureEnv(home, extraEnv), encoding: 'utf8', timeout: 60000 });
+    // The launch path, in a child so HOME injection is real rather than a
+    // temporarily-patched process.env.
+    const runLaunch = (home, extraEnv = {}) => spawnSync(process.execPath,
+      ['-e', 'require(process.argv[1]).ensureRegistered()', path.join(__dirname, '..', 'lib', 'mcp-register.js')],
+      { env: fixtureEnv(home, extraEnv), encoding: 'utf8', timeout: 60000 });
+    const claudeArgv = () => { try { return read(CLAUDE_LOG).trim().split('\n').filter(Boolean); } catch { return []; } };
+    const OUR_SCRIPT = path.join(__dirname, '..', 'bin', 'membridge.js');
+
+    // No system-wide `claude` on the probe list (CANDIDATES[0] is home-relative
+    // and therefore already inside the fixture). Where one exists, the
+    // "nothing found" checks below cannot be produced and are skipped rather
+    // than being quietly weakened into something that always passes.
+    const probeHit = claudeBinMod.CANDIDATES.slice(1).some(c => { try { return fs.statSync(c).isFile(); } catch { return false; } });
+
+    {
+      const home = mkFixture();
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '[mcp_servers.node_repl]\ncommand = "node"\n');
+      fs.writeFileSync(path.join(home, '.cursor', 'mcp.json'),
+        JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['x'] } } }, null, 2));
+      const out = runCli(home, ['mcp', 'register']);
+
+      check('mcp-wiring: `membridge mcp register` writes every installed agent and reports each one', () => {
+        assert.strictEqual(out.status, 0, out.stderr);
+        const toml = read(path.join(home, '.codex', 'config.toml'));
+        assert.ok(toml.includes('[mcp_servers.membridge]'), `codex was not registered: ${toml}`);
+        assert.ok(toml.includes('[mcp_servers.node_repl]'), 'their block must survive');
+        const json = JSON.parse(read(path.join(home, '.cursor', 'mcp.json')));
+        assert.deepStrictEqual(json.mcpServers.membridge.args, [OUR_SCRIPT, 'mcp']);
+        assert.ok(json.mcpServers.theirs, 'their server must survive');
+        for (const agent of ['claude-code', 'codex', 'cursor']) {
+          assert.ok(new RegExp(`^\\s+${agent}\\b`, 'm').test(out.stdout),
+            `every agent must get a line, ${agent} had none:\n${out.stdout}`);
+        }
+      });
+
+      check('mcp-wiring: install-time registration drives the claude CLI, and records the binary it found', () => {
+        // The whole reason registration happens in install.sh: that shell can
+        // resolve `claude` off the real PATH, and recording it is what keeps
+        // every later launch from paying the login-shell query again.
+        const argv = claudeArgv();
+        assert.deepStrictEqual(argv[0], 'mcp get membridge', `query first, got: ${JSON.stringify(argv)}`);
+        assert.ok(argv[1] && argv[1].startsWith('mcp add -s user membridge -- '), `then add, got: ${argv[1]}`);
+        assert.ok(argv[1].endsWith(`${OUR_SCRIPT} mcp`), `must register our own script: ${argv[1]}`);
+        const cfg = JSON.parse(read(path.join(home, '.membridge', 'config.json')));
+        assert.strictEqual(cfg.mcp.claudeBinRecorded, stubClaude,
+          'the resolved binary must be recorded, or every launch re-runs the login shell');
+        assert.ok(out.stdout.includes(stubClaude), 'and the install must say what it recorded');
+      });
+
+      check('mcp-wiring: `membridge status` reports every agent without re-running the claude CLI', () => {
+        // status is READ-ONLY and must stay instant. Re-registering to report
+        // would both write from a read and add `claude mcp get`'s ~2.1s to it.
+        const before = claudeArgv().length;
+        assert.ok(before > 0, 'fixture produced no CLI calls — the check would be vacuous');
+        const st = runCli(home, ['status']);
+        assert.strictEqual(st.status, 0, st.stderr);
+        assert.strictEqual(claudeArgv().length, before, '`status` must not shell out to the claude CLI');
+        assert.ok(/^MCP:/m.test(st.stdout), `status must carry an MCP section:\n${st.stdout}`);
+        for (const agent of ['claude-code', 'codex', 'cursor']) {
+          assert.ok(new RegExp(`^\\s+${agent}\\b`, 'm').test(st.stdout), `${agent} missing from status:\n${st.stdout}`);
+        }
+      });
+
+      check('mcp-wiring: a second launch reconcile is gated — nothing is re-read, nothing is re-spawned', () => {
+        // A reconcile is ~2s on a miss and ~6s on a repair, almost all of it
+        // `claude mcp get`. Paying that on every daemon launch to repair
+        // something that is almost never broken is the cost this gate exists
+        // to remove.
+        const before = claudeArgv().length;
+        const tomlBefore = read(path.join(home, '.codex', 'config.toml'));
+        const r = runLaunch(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.strictEqual(claudeArgv().length, before, 'the gated launch must spawn nothing');
+        assert.strictEqual(read(path.join(home, '.codex', 'config.toml')), tomlBefore);
+      });
+
+      check('mcp-wiring: installing another agent later re-opens the gate', () => {
+        // The gate must not be "run once, ever": the single likeliest reason a
+        // reconcile is needed is a tool installed after MemBridge was.
+        const newAgentDir = path.join(W_ROOT, `late-${wSeq}`);
+        fs.mkdirSync(newAgentDir, { recursive: true });
+        const cfgFile = path.join(home, '.membridge', 'config.json');
+        const raw = JSON.parse(read(cfgFile));
+        raw.mcp = { ...(raw.mcp || {}), 'late-tool': { configPath: path.join(newAgentDir, 'mcp.json'), format: 'json' } };
+        fs.writeFileSync(cfgFile, JSON.stringify(raw, null, 2));
+        const r = runLaunch(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        const written = JSON.parse(read(path.join(newAgentDir, 'mcp.json')));
+        assert.deepStrictEqual(written.mcpServers.membridge.args, [OUR_SCRIPT, 'mcp'],
+          'a newly-declared agent must be picked up by the next launch');
+      });
+
+      check('mcp-wiring: `remove-hooks` strips the MCP entries too', () => {
+        const rm = runCli(home, ['remove-hooks']);
+        assert.strictEqual(rm.status, 0, rm.stderr);
+        const toml = read(path.join(home, '.codex', 'config.toml'));
+        assert.ok(!toml.includes('mcp_servers.membridge'), `our block must be gone: ${toml}`);
+        assert.ok(toml.includes('[mcp_servers.node_repl]'), 'theirs must not be');
+        const json = JSON.parse(read(path.join(home, '.cursor', 'mcp.json')));
+        assert.deepStrictEqual(Object.keys(json.mcpServers), ['theirs']);
+        assert.ok(rm.stdout.includes('membridge mcp register'), 'and it must say how to get it back');
+      });
+
+      check('mcp-wiring: a launch after `remove-hooks` does not put it back behind the user', () => {
+        const r = runLaunch(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(!read(path.join(home, '.codex', 'config.toml')).includes('mcp_servers.membridge'),
+          'removing MemBridge from your tools must survive the next daemon launch');
+        const st = runCli(home, ['status']);
+        assert.ok(/^MCP:.*removed/m.test(st.stdout), `status must say so:\n${st.stdout}`);
+      });
+
+      check('mcp-wiring: an explicit `mcp register` is the way back in', () => {
+        const back = runCli(home, ['mcp', 'register']);
+        assert.strictEqual(back.status, 0, back.stderr);
+        assert.ok(read(path.join(home, '.codex', 'config.toml')).includes('[mcp_servers.membridge]'));
+      });
+    }
+
+    check('mcp-wiring: turning distillation off must NOT unregister the MCP server', () => {
+      // hooks.removeHooks() is what the dashboard's Settings toggle and the
+      // first-run consent prompt call when session summaries are switched off.
+      // The plan says to put unregisterAll() in the "remove-hooks path"; put
+      // literally inside that function, switching off Stop-hook summaries
+      // would silently tear MemBridge's MCP server out of Codex and Cursor --
+      // two unrelated features -- and would do it from inside an HTTP handler
+      // that then blocks on `claude mcp remove`.
+      const home = mkFixture();
+      const reg = runCli(home, ['mcp', 'register']);
+      assert.strictEqual(reg.status, 0, reg.stderr);
+      const toml = path.join(home, '.codex', 'config.toml');
+      assert.ok(read(toml).includes('[mcp_servers.membridge]'), 'fixture never registered — the check would be vacuous');
+      const r = spawnSync(process.execPath,
+        ['-e', 'require(process.argv[1]).removeHooks()', path.join(__dirname, '..', 'lib', 'hooks.js')],
+        { env: fixtureEnv(home), encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.ok(read(toml).includes('[mcp_servers.membridge]'),
+        'switching off session summaries removed the MCP server registration');
+    });
+
+    check('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it', () => {
+      // The non-negotiable: a silent skip is indistinguishable from the
+      // feature working, which is the exact bug this feature exists to fix.
+      if (probeHit) return; // a real claude on the probe list: cannot produce a miss here
+      const home = mkFixture(['.claude']);
+      const reg = runCli(home, ['mcp', 'register'], { SHELL: deadShell });
+      assert.strictEqual(reg.status, 0, reg.stderr);
+      const st = runCli(home, ['status'], { SHELL: deadShell });
+      const line = st.stdout.split('\n').find(l => /^\s+claude-code\b/.test(l));
+      assert.ok(line, `claude-code must appear in status:\n${st.stdout}`);
+      assert.ok(/skipped/.test(line), `and must say it was skipped, got: ${line}`);
+      assert.ok(/config\.mcp\.claudeBin/.test(line), `and name the fix, got: ${line}`);
+    });
+
+    check('mcp-wiring: only a login-shell resolution is recorded, never a probe guess', () => {
+      // A probe hit is a GUESS from a fixed list that cannot see nvm, volta or
+      // asdf. Caching one pins a stale binary forever -- it exists, so the
+      // stale-record check never discards it -- while the user's real one
+      // moves with their version manager. A wrong cached path is worse than
+      // none: the miss is loud, the wrong hit is silent.
+      const savedHome = process.env.MEMBRIDGE_HOME;
+      // Absent is the expected shape for the two that must NOT be recorded:
+      // nothing else in registerNow writes config.json.
+      const cfgOf = h => { try { return JSON.parse(read(path.join(h, 'config.json'))); } catch { return {}; } };
+      try {
+        for (const [source, expect] of [['probe', undefined], ['config', undefined], ['shell', stubClaude]]) {
+          const mbHome = path.join(W_ROOT, `rec-${source}`);
+          fs.mkdirSync(mbHome, { recursive: true });
+          process.env.MEMBRIDGE_HOME = mbHome;
+          const agentHome = mkFixture(['.claude']);
+          mcpRegister.registerNow({
+            home: agentHome, env: {}, platform: 'darwin', config: {},
+            command: { command: '/stub/node', args: ['/stub/bin/membridge.js', 'mcp'], env: {} },
+            spawn: (c, a) => ({ status: a[1] === 'get' ? 1 : 0, stdout: '', stderr: '' }),
+            resolveClaudeBin: () => ({ path: stubClaude, source }),
+          });
+          assert.strictEqual((cfgOf(mbHome).mcp || {}).claudeBinRecorded, expect,
+            `a '${source}' resolution must ${expect ? '' : 'not '}be recorded`);
+        }
+      } finally {
+        process.env.MEMBRIDGE_HOME = savedHome;
+      }
+    });
+
+    check('mcp-wiring: `membridge mcp` with no subcommand still starts the server, a typo never does', () => {
+      // Every entry we register runs exactly `<node> bin/membridge.js mcp`.
+      // A dispatch that swallowed an unknown verb into the server would hang
+      // a user's terminal on a stdio server no client will ever speak to.
+      assert.deepStrictEqual(mcpRegister.serverCommand().args, [OUR_SCRIPT, 'mcp']);
+      const home = mkFixture([]);
+      const r = runCli(home, ['mcp', 'nonsense']);
+      assert.notStrictEqual(r.status, 0, 'an unknown subcommand must fail, not start a server');
+      assert.ok(/register\|unregister/.test(r.stderr + r.stdout), `it must say what is valid: ${r.stderr}`);
+    });
+
+    check('mcp-wiring: install.sh registers, never aborts on it, and never eats the piped script', () => {
+      // `curl ... | sh` means stdin IS the rest of this script; a child that
+      // reads stdin swallows the remaining install steps.
+      for (const f of ['install.sh.tmpl', 'install.sh']) {
+        const sh = read(path.join(__dirname, '..', 'scripts', 'install', f));
+        assert.ok(/mcp register/.test(sh), `${f} must register the MCP server at install time`);
+        assert.ok(/mcp register\s*<\/dev\/null/.test(sh), `${f} must not let the child read the piped script`);
+        assert.ok(/mcp register[^\n]*\|\|/.test(sh), `${f} must warn, never abort, when registration fails`);
+      }
+    });
+
+    check('mcp-wiring: not one byte of the real agent configs was touched', () => {
+      // Three files that exist on this machine. Everything above injects HOME,
+      // and this is what proves it.
+      assert.deepStrictEqual(snapshotReal(), realBefore,
+        'a check reached the developer\'s own ~/.claude.json, ~/.codex or ~/.cursor');
+    });
+
+    try { fs.rmSync(W_ROOT, { recursive: true, force: true }); } catch {}
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

@@ -89,6 +89,27 @@ MANUAL
   fi
 fi
 
+# 7b. Register the MCP server with every AI tool this user actually has.
+#
+# HERE, and not left to the daemon, because this runs in the user's own shell:
+# `claude` resolves off the real PATH (nvm, volta, asdf, a custom prefix) with
+# no searching, and what it resolves is recorded so later launches never have
+# to search either. A GUI-launched app inherits roughly /usr/bin:/bin and would
+# often find nothing at all.
+#
+# NEVER ABORTS. Registration is a convenience; a MemBridge that installed fine
+# but could not write someone's Cursor config must still be an install that
+# succeeded. `|| true` under `set -e`, and the CLI itself reports per agent.
+#
+# </dev/null matters: this script is routinely run as `curl ... | sh`, so
+# stdin is the REST OF THIS SCRIPT. A child that reads stdin would eat it.
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  [dry-run] %s mcp register\n' "$CLI_DEST"
+elif [ -x "$CLI_DEST" ]; then
+  say "Registering the MemBridge MCP server with your AI tools..."
+  "$CLI_DEST" mcp register </dev/null || say "MCP registration didn't complete — run 'membridge mcp register' later. The install is fine."
+fi
+
 # 8. Launch + report
 run "open '$APP_DEST'"
 say "Done. ${APP_NAME} is installed and opens with no warning."
