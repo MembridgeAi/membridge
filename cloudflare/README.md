@@ -159,6 +159,28 @@ application can use it.
    - **GitHub or Google** — nicer day to day, needs an OAuth app registered with
      Cloudflare once. Worth doing if you use the panel daily.
 
+   **If you pick GitHub**, register the OAuth app at GitHub → *Settings →
+   Developer settings → OAuth Apps → New OAuth app*, under the **MembridgeAi
+   org**, not a personal account — an OAuth app tied to a founder's own GitHub
+   becomes a problem exactly when you can least afford one.
+
+   | Field | Value |
+   |---|---|
+   | Homepage URL | `https://weathered-sky-8f4e.cloudflareaccess.com` |
+   | Authorization callback URL | `https://weathered-sky-8f4e.cloudflareaccess.com/cdn-cgi/access/callback` |
+
+   Three things GitHub rejects silently-ish: the `https://` scheme is required,
+   there is **no `www.`** on a Cloudflare team domain, and the callback must end
+   in `/callback` — `/cdn-cgi/access` alone is not enough.
+
+   Do **not** reuse the OAuth app behind the product's own GitHub sign-in. A
+   GitHub OAuth App has exactly one callback URL and that one points at
+   Supabase, so repointing it would break customer sign-in — and it would couple
+   operator auth to customer auth, which is the separation this whole design
+   rests on.
+
+   The Client Secret is shown once. Copy it straight into Cloudflare.
+
    This is entirely separate from the GitHub sign-in inside the product. That
    one is Supabase auth for customers; this is Cloudflare auth for the operator.
    They share nothing, which is correct — a bug in customer auth must not be

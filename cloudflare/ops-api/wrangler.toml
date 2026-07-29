@@ -14,7 +14,7 @@ workers_dev = false
 
 # Non-secret config.
 [vars]
-ACCESS_TEAM_DOMAIN = "REPLACE.cloudflareaccess.com"
+ACCESS_TEAM_DOMAIN = "weathered-sky-8f4e.cloudflareaccess.com"
 ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD"
 ALLOWED_EMAILS = "marco@melika.com"
 # Team ids to leave out of every business figure — the operator's own
