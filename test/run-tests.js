@@ -16042,6 +16042,69 @@ const repoRoot = require('../lib/repo-root');
     assert.strictEqual(repoRoot.wireKeyFor(f), first);
     assert.strictEqual(repoRoot.wireKeyFor(path.join(mono, 'src', 'root.ts')), 'src/root.ts');
   });
+
+  // ---- teamsync emits wire keys (spec §7) ----
+  // Reuses the `mono` / `wt` fixture above: one repo, a monorepo subdirectory,
+  // and a worktree nested inside it — the three shapes entryToRow has to agree
+  // on. `projectPath` is the TRACKED dir, so entry paths are relative to it.
+  const trackedApi = path.join(mono, 'packages', 'api'); // tracks a monorepo subdir
+  const entry = {
+    ts: '2026-07-28T09:00:00Z', source: 'Claude Code', session: 's1',
+    ask: null, goal: null, decisions: 'Renamed the retry cap to maxAttempts.',
+    gotchas: '', files: ['src/validate.ts'],
+    changes: [{ file: 'src/validate.ts', status: 'edited', add: 3, del: 1, note: 'blocked pending 018', dep: false }],
+    summary: 'did a thing', headline: 'a thing', distilled: true,
+  };
+  const rootEntry = { ...entry, files: ['src/root.ts'], changes: [{ file: 'src/root.ts', note: 'careful here' }] };
+  const wireCreds = { userId: 'u1', displayName: 'Andrew' };
+  const rowFor = (e, projectPath) => teamsync.entryToRow(e, 'p1', wireCreds, false, [], projectPath);
+
+  check('teamsync: push translates files to checkout-relative wire keys', () => {
+    assert.deepStrictEqual(rowFor(entry, trackedApi).files, ['packages/api/src/validate.ts']);
+  });
+
+  check('teamsync: push translates changes[].file to a wire key, note intact', () => {
+    const row = rowFor(entry, trackedApi);
+    assert.strictEqual(row.changes[0].file, 'packages/api/src/validate.ts');
+    assert.strictEqual(row.changes[0].note, 'blocked pending 018');
+    assert.strictEqual(row.changes[0].add, 3);
+  });
+
+  check('teamsync: push without a projectPath is unchanged (back-compat)', () => {
+    const row = teamsync.entryToRow(entry, 'p1', wireCreds, false, []);
+    assert.deepStrictEqual(row.files, ['src/validate.ts']);
+    assert.strictEqual(row.changes[0].file, 'src/validate.ts');
+  });
+
+  check('teamsync: push at the checkout root is identity', () => {
+    assert.deepStrictEqual(rowFor(rootEntry, mono).files, ['src/root.ts']);
+  });
+
+  check('teamsync: a worktree session ships the SAME key as the main checkout', () => {
+    // The regression lib/repo-root.js exists for: keyed against the tracked
+    // project (the main repo) this shipped '.claude/worktrees/feature-x/...'.
+    assert.deepStrictEqual(rowFor(rootEntry, wt).files, rowFor(rootEntry, mono).files);
+    assert.strictEqual(rowFor(rootEntry, wt).changes[0].file, 'src/root.ts');
+  });
+
+  check('teamsync: a path outside any checkout is kept, never dropped', () => {
+    // wireKeyFor returns null here; the row must carry the original path rather
+    // than a null the receiver can neither match nor render.
+    const plain = path.join(ROOT, 'projects', 'not-a-repo');
+    fs.mkdirSync(plain, { recursive: true });
+    assert.strictEqual(repoRoot.wireKeyFor(path.join(plain, 'src', 'validate.ts')), null,
+      'fixture is inside a checkout — this check would pass vacuously');
+    const row = rowFor(entry, plain);
+    assert.deepStrictEqual(row.files, ['src/validate.ts']);
+    assert.strictEqual(row.changes[0].file, 'src/validate.ts');
+  });
+
+  check('teamsync: a row with no files or changes survives translation', () => {
+    const bare = { ts: 't1', source: 'Claude Code', session: 's', summary: 's' };
+    const row = rowFor(bare, trackedApi);
+    assert.strictEqual(row.changes, null);
+    assert.strictEqual(row.files, undefined);
+  });
 }
 
 // --- summary ---
