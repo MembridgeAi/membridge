@@ -28,6 +28,11 @@ Every task's requirements implicitly include this section.
   MISSING `web-tree-sitter` — a real declared dependency the main tree was never
   reinstalled for. They are not a regression. Record your own before/after
   numbers and compare deltas, never absolutes.
+- **A test whose name claims more than its assertions is worse than no test.**
+  The `MAX_PROSE` case asserted only a length while being titled "newest kept",
+  so the half that mattered was unverified. When a test names a property, assert
+  that property; where it is cheap, confirm the test fails against a deliberately
+  broken implementation before trusting it.
 - **A silent no-op is the enemy in this feature.** Several functions here answer
   '' or null for "I can't work this out", which is correct for genuinely
   impossible input but will happily swallow a real bug — exactly what happened
@@ -499,7 +504,13 @@ git commit -m "feat(teamsync): ship file paths repo-root-relative"
 
 ---
 
-## Task 4: The notes index — pure logic
+## Task 4: The notes index — pure logic ✅ DONE (`a4f6c2a` + `0a489c6`, `feat/notes-index`)
+
+**Corrections applied after implementation.** The `MAX_PROSE` bounds test below
+now actually tests what its name claims (see its comment); the original asserted
+only length. Task 4 also originally had no full-suite regression step — Step 5
+below adds it, matching Tasks 2, 3 and 6.
+
 
 All decision-making for the feature, with no fs and no clock. This is the module the repetition rules live in, so it carries the heaviest tests.
 
@@ -647,13 +658,24 @@ const notes = require('../lib/teammate-notes');
   });
 
   check('notes: buildIndex bounds prose to MAX_PROSE, newest kept', () => {
+    // Timestamps MUST be monotonic in i. An earlier draft cycled the seconds
+    // field (i % 60) with a 4-digit fraction Date.parse truncates to 3, so
+    // recency had no relationship to i and the eviction set came out as four
+    // clusters rather than the oldest 25 -- with a length-only assertion, an
+    // implementation that evicted the NEWEST passed identically.
+    const base = Date.parse('2026-01-01T00:00:00Z');
     const many = [];
     for (let i = 0; i < notes.MAX_PROSE + 25; i++) {
-      const d = String(i).padStart(4, '0');
-      many.push({ author_name: 'A', ts: `2026-01-01T00:00:${(i % 60).toString().padStart(2, '0')}.${d}Z`, decisions: `d${i}`, gotchas: '' });
+      many.push({ author_name: 'A', ts: new Date(base + i * 60000).toISOString(), decisions: `d${i}`, gotchas: '' });
     }
     const ix = notes.buildIndex(many, null, T1);
     assert.strictEqual(ix.prose.length, notes.MAX_PROSE);
+    const texts = new Set(ix.prose.map(p => p.text));
+    for (let i = 0; i < 25; i++) {
+      assert.ok(!texts.has(`d${i}`), `d${i} is among the 25 oldest and must have been evicted`);
+    }
+    assert.ok(texts.has(`d${notes.MAX_PROSE + 24}`), 'the single newest entry must be kept');
+    assert.ok(texts.has(`d25`), 'the oldest SURVIVOR (d25) must be kept');
   });
 
   check('notes: pruneSeen drops session records older than SEEN_PRUNE_DAYS', () => {
@@ -906,7 +928,14 @@ Run: `node test/run-tests.js 2>&1 | grep "notes:"`
 
 Expected: 21 `ok notes: ...` lines, no `FAIL`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the whole suite for regressions**
+
+Run: `node test/run-tests.js 2>&1 | tail -5`
+
+Expected: the baseline plus 21, with the same 5 pre-existing dependency
+failures and no others.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add lib/teammate-notes.js test/run-tests.js
