@@ -17224,6 +17224,109 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- teammate notes: rebuild the index on every team pull (plan Task 6) ----
+  {
+    const rp = path.join(ROOT, 'projects', 'rebuild-proj');
+    fs.mkdirSync(rp, { recursive: true });
+
+    // THE SHAPE THE DAEMON ACTUALLY HAS IN HAND. The plan assumed
+    // `memorydb.readEntries(key).filter(e => e.origin === 'team')`; neither
+    // exists. memorydb holds LOCAL entries, and `origin` is invented by
+    // lib/feed.js at render time. Pulled teammate rows live in
+    // state.projects[key].teamEntries, mapped by lib/teamsync.js's pull -- and
+    // that mapping renames author_name to `author`. A fixture written in the
+    // wire shape would pass while the real daemon fed every note through as
+    // "a teammate", so these rows are deliberately the STORED shape.
+    const pulledRows = [{
+      author: 'Andrew', ts: '2026-07-28T09:00:00Z', source: 'Claude Code', session: 's1',
+      decisions: 'Renamed the retry cap to maxAttempts.', gotchas: null,
+      files: ['packages/api/src/validate.ts'],
+      changes: [{ file: 'packages/api/src/validate.ts', note: 'blocked pending migration 018' }],
+    }];
+
+    check('notes-rebuild: writes an index readable by the store', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      const ix = notesStore.read(rp);
+      assert.strictEqual(ix.prose.length, 1);
+      assert.ok(ix.byFile['packages/api/src/validate.ts']);
+      assert.strictEqual(ix.byFile['packages/api/src/validate.ts'][0].note, 'blocked pending migration 018');
+    });
+
+    check('notes-rebuild: keeps the pulled row author, never "a teammate"', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      const ix = notesStore.read(rp);
+      assert.strictEqual(ix.prose[0].author, 'Andrew',
+        'stored rows key the author as `author`; reading only author_name silently anonymises every note');
+      assert.strictEqual(ix.byFile['packages/api/src/validate.ts'][0].author, 'Andrew');
+    });
+
+    check('notes-rebuild: byFile keeps the incoming wire key, untranslated', () => {
+      // rp is not a checkout and has no packages/ directory. The key must
+      // survive verbatim: incoming keys ARE wire keys and the read path
+      // computes the wire key of the file it is about to touch. Any inverse
+      // mapping here would mangle or drop this.
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      assert.deepStrictEqual(Object.keys(notesStore.read(rp).byFile), ['packages/api/src/validate.ts']);
+    });
+
+    check('notes-rebuild: preserves prose AND file seen markers across a rebuild', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      const before = notesStore.read(rp);
+      const proseId = before.prose[0].id;
+      const fileId = before.byFile['packages/api/src/validate.ts'][0].id;
+      notesStore.update(rp, ix => notes.markProseSeen(ix, [proseId], '2026-07-28T09:06:00Z'));
+      notesStore.update(rp, ix => notes.markFileSeen(ix, 'sess-A', [fileId], '2026-07-28T09:06:00Z'));
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:07:00Z');
+      const after = notesStore.read(rp);
+      // Both halves matter and fail independently: carrying `prose` alone would
+      // re-fire every file note at the next pull, which is the noisier bug.
+      assert.ok(after.seen.prose[proseId], 'a delivered decision would be delivered again after the next pull');
+      assert.ok(after.seen.file['sess-A'] && after.seen.file['sess-A'][fileId],
+        'a file note already shown to this session would re-fire after the next pull');
+      // The ids must also be the SAME ids -- a rebuild that changed them would
+      // keep the markers and still re-deliver everything.
+      assert.strictEqual(after.prose[0].id, proseId);
+    });
+
+    check('notes-rebuild: an empty pull empties the index', () => {
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      notesStore.rebuildTeammateNotes(rp, [], '2026-07-28T09:08:00Z');
+      const ix = notesStore.read(rp);
+      assert.deepStrictEqual(ix.prose, []);
+      assert.deepStrictEqual(ix.byFile, {});
+    });
+
+    check('notes-rebuild: never throws on malformed input', () => {
+      assert.doesNotThrow(() => notesStore.rebuildTeammateNotes(rp, null, '2026-07-28T09:05:00Z'));
+      assert.doesNotThrow(() => notesStore.rebuildTeammateNotes(rp, 'nope', '2026-07-28T09:05:00Z'));
+      assert.doesNotThrow(() => notesStore.rebuildTeammateNotes(null, pulledRows, '2026-07-28T09:05:00Z'));
+    });
+
+    check('notes-rebuild: malformed input leaves the previous index serving', () => {
+      // Beyond the plan. `buildIndex(null, ...)` does not throw -- it returns an
+      // EMPTY index -- so a caller that failed to produce entries would quietly
+      // wipe a good index instead of failing open. An empty ARRAY is a real
+      // "the teammate has nothing" and must still empty it (checked above); a
+      // non-array is a broken caller and must change nothing.
+      notesStore.rebuildTeammateNotes(rp, pulledRows, '2026-07-28T09:05:00Z');
+      notesStore.rebuildTeammateNotes(rp, null, '2026-07-28T09:09:00Z');
+      const ix = notesStore.read(rp);
+      assert.strictEqual(ix.prose.length, 1, 'a broken caller wiped the last good index');
+      assert.ok(ix.byFile['packages/api/src/validate.ts']);
+    });
+
+    check('notes-rebuild: an undecryptable row contributes nothing but does not break the pull', () => {
+      // teamsync renders a row it cannot decrypt as all-null content. It must
+      // not crash the rebuild and must not surface an empty note.
+      const opaque = [{ author: 'Andrew', ts: '2026-07-28T09:00:00Z', source: 'Claude Code',
+        ask: null, decisions: null, gotchas: null, summary: null, files: [], changes: null, undecryptable: true }];
+      notesStore.rebuildTeammateNotes(rp, opaque, '2026-07-28T09:10:00Z');
+      const ix = notesStore.read(rp);
+      assert.deepStrictEqual(ix.prose, []);
+      assert.deepStrictEqual(ix.byFile, {});
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
