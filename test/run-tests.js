@@ -3197,7 +3197,7 @@ async function main() {
     const stFresh = await (await fetch(`${base}/api/settings`)).json();
     check('settings: hookInstalled + distill fields are reported', () => {
       assert.strictEqual(stFresh.hookInstalled, true, 'daemon should auto-register the Stop hook at boot');
-      assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 4 });
+      assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 12 });
     });
     const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
     check('settings: enabling summaries installs the Claude Code Stop hook and grants consent', () => {
@@ -9216,7 +9216,16 @@ async function main() {
   // entry on every currently-installed machine.
   check('stop: a real-shape entry (node + membridge-hook.js, no subcommand) is recognized as owned; a stale path is upgraded in place', () => {
     const f = path.join(ROOT, 'claude-settings-stop-realshape.json');
-    const staleCommand = '"/opt/homebrew/Cellar/node/25.7.0/bin/node" "/Users/marco/Documents/Membridge/lib/membridge-hook.js"';
+    // The stale value MUST be derived, never pasted in. This test used to
+    // hardcode one developer's real install path as its example of a stale
+    // one -- which on that developer's machine is character-for-character what
+    // hookCommand() resolves to, so there was nothing to upgrade and the check
+    // failed for them and them alone, on every run, forever. Rewriting only
+    // the script's directory keeps the real install shape (node +
+    // membridge-hook.js, no subcommand) while guaranteeing it differs from the
+    // current command on every machine.
+    const staleCommand = hooks.hookCommand().replace(/"[^"]*membridge-hook\.js"$/, '"/prior-install/lib/membridge-hook.js"');
+    assert.notStrictEqual(staleCommand, hooks.hookCommand(), 'the stale command must actually be stale, or this test proves nothing');
     fs.writeFileSync(f, JSON.stringify({
       hooks: { Stop: [{ hooks: [{ type: 'command', command: staleCommand, timeout: 10 }] }] },
     }, null, 2));
@@ -10924,15 +10933,27 @@ async function main() {
   });
   const ckBlocked = out => out.status === 0 && !!out.stdout.trim() && JSON.parse(out.stdout).decision === 'block';
 
+  // checkpointEvery is pinned explicitly here rather than leaning on the
+  // default, so this stays a test of the n-th-threshold ARITHMETIC and does
+  // not have to be rewritten every time the default is retuned. The default
+  // itself is pinned separately, on fresh config.
   check('checkpoint: re-blocks only when checkpointEvery further edits accrue (minEdits 1, every 4)', () => {
-    writeCkLines(0); setCkEdits(1); // 0 lines, due at minEdits (1)
-    assert.ok(ckBlocked(runCk()), 'first checkpoint did not block at minEdits');
-    writeCkLines(1); setCkEdits(2); // 1 line, next due at 1+1*4=5
-    assert.ok(!ckBlocked(runCk()), 'blocked too early (minEdits+1 with 1 line)');
-    setCkEdits(5); // reaches the 2nd threshold
-    assert.ok(ckBlocked(runCk()), 'did not block at minEdits+4 with 1 line');
-    writeCkLines(2); setCkEdits(9); // 2 lines, next due at 1+2*4=9
-    assert.ok(ckBlocked(runCk()), 'did not block again at minEdits+8 with 2 lines');
+    const rawCfg = util.loadUserConfig();
+    rawCfg.distill = { enabled: true, minEdits: 1, checkpointEvery: 4 };
+    util.saveUserConfig(rawCfg);
+    try {
+      writeCkLines(0); setCkEdits(1); // 0 lines, due at minEdits (1)
+      assert.ok(ckBlocked(runCk()), 'first checkpoint did not block at minEdits');
+      writeCkLines(1); setCkEdits(2); // 1 line, next due at 1+1*4=5
+      assert.ok(!ckBlocked(runCk()), 'blocked too early (minEdits+1 with 1 line)');
+      setCkEdits(5); // reaches the 2nd threshold
+      assert.ok(ckBlocked(runCk()), 'did not block at minEdits+4 with 1 line');
+      writeCkLines(2); setCkEdits(9); // 2 lines, next due at 1+2*4=9
+      assert.ok(ckBlocked(runCk()), 'did not block again at minEdits+8 with 2 lines');
+    } finally {
+      delete rawCfg.distill;
+      util.saveUserConfig(rawCfg);
+    }
   });
   check('checkpoint: loop guard short-circuits even when a checkpoint is due', () => {
     writeCkLines(0); setCkEdits(5);
@@ -10951,6 +10972,20 @@ async function main() {
     assert.ok(!/only the work done since/i.test(later), 'delta scoping must be gone');
     const one = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', 1);
     assert.ok(one.includes('1 earlier line ') && !/1 earlier lines/.test(one), 'n=1 uses singular "earlier line"');
+  });
+  // Claude Code prints every Stop-hook block under a fixed, alarming header
+  // ("Stop hook blocking error from command: ..."), and nothing a synchronous
+  // hook sends can change it. The reason text is the first thing the user
+  // reads after that header, so it must open by naming MemBridge and saying
+  // this is normal -- otherwise a working product looks like it crashed, once
+  // per checkpoint, in front of every user.
+  check('checkpoint: blockReason opens by naming MemBridge and defusing the error framing', () => {
+    for (const n of [0, 3]) {
+      const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'ck1', n);
+      assert.ok(r.startsWith('MemBridge'), `n=${n}: reason must lead with the product name, got: ${r.slice(0, 40)}`);
+      assert.ok(/this is not an error/i.test(r.slice(0, 200)),
+        `n=${n}: the opening must say this is not a failure, got: ${r.slice(0, 120)}`);
+    }
   });
   check('checkpoint: blockReason demands outcome phrasing and the discreet append command', () => {
     const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 'sess-x', 0);
@@ -11061,15 +11096,15 @@ async function main() {
     assert.strictEqual(out.status, 0);
     assert.strictEqual(out.stdout, '');
   });
-  check('checkpoint: checkpointEvery below 1 or non-finite falls back to 4', () => {
+  check('checkpoint: checkpointEvery below 1 or non-finite falls back to the default', () => {
     const rawCfg = util.loadUserConfig();
     rawCfg.distill = { enabled: true, minEdits: 1, checkpointEvery: 0 };
     util.saveUserConfig(rawCfg);
-    writeCkLines(1); setCkEdits(2); // with every=4 → threshold 5 → no block; with a bad every=0 → threshold 1 → block
+    writeCkLines(1); setCkEdits(2); // with the default every → threshold 13 → no block; with a bad every=0 → threshold 1 → block
     const out = runCk();
     delete rawCfg.distill;
     util.saveUserConfig(rawCfg);
-    assert.ok(!ckBlocked(out), 'checkpointEvery 0 was not clamped to the default 4');
+    assert.ok(!ckBlocked(out), 'checkpointEvery 0 was not clamped to the default');
   });
   check('checkpoint: sessionSummaries returns only Distilled when both tiers exist, time-ordered', () => {
     const evs = [
@@ -18758,6 +18793,102 @@ const repoRoot = require('../lib/repo-root');
     }
   }
 
+  // The same clobber lib/mcp-json.js's readConfig exists to prevent, in the
+  // settings file that carries the user's whole Claude Code config. Every other
+  // branch of readSettings refuses rather than write over a file it cannot
+  // understand; the read failure must classify the same way. ONLY ENOENT means
+  // "absent, safe to create" -- EACCES/EISDIR/EIO mean something IS there that
+  // we cannot see, and reporting those as missing hands writeSettings an empty
+  // object to write. Today a plain writeFileSync happens to fail on a mode-000
+  // file, so the damage is latent; the moment writeSettings goes atomic
+  // (tmp + rename, as the MCP auto-registration plan requires) the rename only
+  // needs the DIRECTORY writable and the user's settings.json is replaced
+  // wholesale. Verified empirically against the atomic pattern.
+  check('hooks: readSettings refuses an existing-but-unreadable settings file, never "missing"', () => {
+    const asDir = path.join(ROOT, 'settings-isdir.json');
+    fs.mkdirSync(asDir, { recursive: true });
+    assert.throws(() => hooks.readSettings(asDir), /refusing to touch/i,
+      'a directory in the settings slot is not an absent file');
+
+    const locked = path.join(ROOT, 'settings-locked.json');
+    const body = JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: 'theirs' }] }] } });
+    fs.writeFileSync(locked, body);
+    fs.chmodSync(locked, 0o000);
+    try {
+      // root reads through any mode, so only assert where the OS denied us.
+      let denied = false;
+      try { fs.readFileSync(locked, 'utf8'); } catch { denied = true; }
+      if (process.getuid() !== 0 && denied) {
+        assert.throws(() => hooks.readSettings(locked), /refusing to touch/i,
+          'an unreadable settings file must never read as empty-and-writable');
+      }
+    } finally {
+      fs.chmodSync(locked, 0o600);
+    }
+    assert.strictEqual(read(locked), body, 'the unreadable file must survive byte-for-byte');
+  });
+
+  // A half-written settings.json is a file Claude Code refuses to parse -- the
+  // user loses every hook, permission and model setting they had. Staging into
+  // a temp file and renaming means a crash or a full disk leaves the old good
+  // file in place instead.
+  check('hooks: writeSettings stages into a temp file and renames into place', () => {
+    const f = path.join(ROOT, 'settings-atomic.json');
+    const realRename = fs.renameSync;
+    let renamedFrom = null;
+    fs.renameSync = (from, to) => { renamedFrom = from; return realRename(from, to); };
+    try {
+      hooks.writeSettings(f, { hooks: { Stop: [] } });
+    } finally {
+      fs.renameSync = realRename;
+    }
+    assert.ok(renamedFrom && renamedFrom.includes('.tmp'),
+      'writeSettings must stage into a temp file, never write the target in place');
+    assert.strictEqual(path.dirname(renamedFrom), path.dirname(f),
+      'the temp file must sit in the target directory so the rename is atomic');
+    assert.deepStrictEqual(JSON.parse(read(f)), { hooks: { Stop: [] } });
+    const strays = fs.readdirSync(path.dirname(f)).filter(n => n.includes('.settings-atomic.json.'));
+    assert.deepStrictEqual(strays, [], 'temp files must not be left behind');
+  });
+
+  // Rename REPLACES the target, so the new file carries the temp file's mode,
+  // not the old file's. Without care, rewriting a settings.json the user had
+  // locked down to 0600 silently republishes it at the umask default.
+  check('hooks: writeSettings preserves the existing file mode', () => {
+    const f = path.join(ROOT, 'settings-mode.json');
+    fs.writeFileSync(f, JSON.stringify({ hooks: {} }));
+    fs.chmodSync(f, 0o600);
+    hooks.writeSettings(f, { hooks: { Stop: [] } });
+    assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600,
+      'an atomic rewrite must not widen the permissions the user chose');
+  });
+
+  // The end-to-end pair. Atomic writes are what make this dangerous -- a
+  // rename needs only the DIRECTORY writable, so nothing at the write layer
+  // stops it replacing a file we could never read. readSettings refusing
+  // anything but ENOENT is the only thing standing between an unreadable
+  // settings.json and its destruction. If this check ever goes red, do not
+  // "fix" it by loosening readSettings.
+  check('hooks: an unreadable settings.json survives setup-hooks even with atomic writes', () => {
+    const f = path.join(ROOT, 'settings-locked-e2e.json');
+    const body = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'their-tool' }] }] } }, null, 2);
+    fs.writeFileSync(f, body);
+    fs.chmodSync(f, 0o000);
+    try {
+      let denied = false;
+      try { fs.readFileSync(f, 'utf8'); } catch { denied = true; }
+      if (process.getuid() !== 0 && denied) {
+        const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], {
+          env: { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f }, encoding: 'utf8',
+        });
+        assert.strictEqual(out.status, 1, `expected a refusal exit, got ${out.status}: ${out.stdout}${out.stderr}`);
+        assert.ok(/refusing to touch/i.test(out.stderr), `no refusal message: ${out.stderr}`);
+      }
+    } finally {
+      fs.chmodSync(f, 0o600);
+    }
+    assert.strictEqual(read(f), body, 'the user settings file was destroyed');
+  });
   // ---- teammate notes: SessionStart delivery (spec §3.1, delivery points 4 and 5) ----
   //
   // POSTCOMPACT IS NOT A DELIVERY CHANNEL, and the checks below pin that.
