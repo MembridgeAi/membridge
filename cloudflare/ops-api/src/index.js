@@ -1,45 +1,61 @@
 /**
- * MemBridge ops API — the private dashboard's only data source.
+ * MemBridge ops API — the private panel's only data source, and its only way
+ * to write.
  *
  * Two planes, fetched separately and returned side by side but NEVER joined
  * (spec §7):
- *
  *   counters — anonymous, install-scoped, from Analytics Engine
- *   business — account/team aggregates, from Supabase ops_snapshot()
+ *   business — account/team data, from Supabase ops_* functions
+ * They share no key and there is no code path here that correlates them.
  *
- * They share no key and there is deliberately no code path here that
- * correlates them. Joining them would produce per-team behavioural telemetry
- * tied to real accounts, which is the shape this design exists to avoid. If a
- * future change wants "which team hit that failure", that is a spec change
- * with a stated cost, not a patch to this file.
- *
- * ACCESS CONTROL, two independent layers:
+ * ACCESS CONTROL, three independent layers:
  *   1. wrangler.toml sets workers_dev = false, so the only route is the
- *      Cloudflare Access-protected hostname. Access rejects anonymous callers
- *      at the edge, before this code runs.
+ *      Cloudflare Access-protected hostname.
  *   2. This Worker independently verifies the Access JWT and checks the email
- *      claim against an allowlist. Layer 1 alone would be enough right up
- *      until someone adds a route and forgets, which is exactly the kind of
- *      mistake that should not be able to disclose anything.
+ *      claim against an allowlist. Layer 1 alone holds right up until someone
+ *      adds a route and forgets.
+ *   3. Writes additionally require a same-origin JSON request (below).
  *
- * All credentials are Worker secrets. The dashboard page ships no secret and
- * discloses nothing if its bundle leaks.
+ * WHY LAYER 3 EXISTS — the one that is easy to miss. Access authenticates with
+ * a cookie. A cross-site HTML form POSTing to this origin would carry that
+ * cookie, Access would validate it at the edge and inject a perfectly genuine
+ * JWT, and this Worker would see an authenticated request the operator never
+ * intended to make. Classic CSRF, not fixed by Access. So every write must:
+ *   - be Content-Type: application/json (a form cannot send this cross-origin
+ *     without a CORS preflight, which we never answer), and
+ *   - carry an Origin header matching this host.
+ * Reads are exempt: they are side-effect free.
+ *
+ * All credentials are Worker secrets. The panel ships none.
  */
 
 const COUNTER_WINDOW_DAYS = 30;
 
+// Every action the panel may invoke, and the RPC it maps to. An action not in
+// this table cannot be reached, whatever the request body says. Deliberately
+// contains nothing destructive: no delete-team, no remove-member, no
+// delete-entries. Those exist as product RPCs that run as the affected user,
+// which is the right place for them.
+const ACTIONS = {
+  set_note:      { rpc: 'ops_set_team_note',            args: b => ({ p_team: b.team, p_note: b.note ?? null }) },
+  set_internal:  { rpc: 'ops_set_team_internal',        args: b => ({ p_team: b.team, p_internal: !!b.internal }) },
+  rotate_invite: { rpc: 'ops_rotate_invite',            args: b => ({ p_team: b.team }) },
+  onboard:       { rpc: 'ops_create_onboarding_invite', args: b => ({ p_team_name: b.team_name, p_note: b.note ?? null, p_days: b.days ?? 14 }) },
+};
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const json = (body, status = 200) => new Response(JSON.stringify(body), {
+  status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+});
+
 // --- Cloudflare Access JWT verification -----------------------------------
-// Access signs with RS256 and publishes its keys at the team's certs endpoint.
-// Keys are cached for the isolate's lifetime; a rotation is picked up when the
-// isolate recycles, and a signature that fails simply 401s.
 let cachedKeys = null;
 
 async function accessKeys(teamDomain) {
   if (cachedKeys) return cachedKeys;
   const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
   if (!res.ok) throw new Error('cannot fetch Access certs');
-  const { keys } = await res.json();
-  cachedKeys = keys || [];
+  cachedKeys = (await res.json()).keys || [];
   return cachedKeys;
 }
 
@@ -53,50 +69,64 @@ async function verifyAccessJwt(token, { teamDomain, aud }) {
   const parts = String(token || '').split('.');
   if (parts.length !== 3) return null;
   const [rawHeader, rawPayload, rawSig] = parts;
-
   let header, payload;
   try {
     header = JSON.parse(new TextDecoder().decode(b64urlToBytes(rawHeader)));
     payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(rawPayload)));
-  } catch {
-    return null;
-  }
+  } catch { return null; }
   if (header.alg !== 'RS256') return null; // never accept "none" or a downgrade
 
   const jwk = (await accessKeys(teamDomain)).find(k => k.kid === header.kid);
   if (!jwk) return null;
-
   const key = await crypto.subtle.importKey(
-    'jwk',
-    { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['verify'],
+    'jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
   );
-  const ok = await crypto.subtle.verify(
-    'RSASSA-PKCS1-v1_5',
-    key,
-    b64urlToBytes(rawSig),
-    new TextEncoder().encode(`${rawHeader}.${rawPayload}`),
-  );
+  const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key,
+    b64urlToBytes(rawSig), new TextEncoder().encode(`${rawHeader}.${rawPayload}`));
   if (!ok) return null;
 
   const now = Math.floor(Date.now() / 1000);
   if (payload.exp && payload.exp < now) return null;
   if (payload.nbf && payload.nbf > now) return null;
-  // aud pins the token to THIS application. Without it, a valid token for any
+  // aud pins the token to THIS application; without it a valid token for any
   // other app on the same Access team would open this one.
   const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (aud && !auds.includes(aud)) return null;
-
   return payload;
 }
 
-// --- Data sources ----------------------------------------------------------
+async function authenticate(request, env) {
+  const claims = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion'), {
+    teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD,
+  }).catch(() => null);
+  if (!claims) return null;
+  const allowed = (env.ALLOWED_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const email = String(claims.email || '').toLowerCase();
+  if (!email) return null;
+  if (allowed.length && !allowed.includes(email)) return null;
+  return email;
+}
+
+// --- Supabase --------------------------------------------------------------
+async function rpc(env, fn, args) {
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: {
+      apikey: env.SUPABASE_SERVICE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(args || {}),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`supabase ${res.status}: ${text.slice(0, 200)}`);
+  return text ? JSON.parse(text) : null;
+}
 
 // Analytics Engine counts must be summed over _sample_interval, not counted as
-// rows: above the sampling threshold each stored row represents many events,
-// and count(*) would silently under-report exactly when volume matters most.
+// rows: above the sampling threshold each stored row stands for many events,
+// so count(*) under-reports exactly when volume matters most.
 async function fetchCounters(env) {
   const sql = `
     SELECT blob1 AS name, blob2 AS version, blob3 AS dim_key, blob4 AS dim_value,
@@ -106,68 +136,75 @@ async function fetchCounters(env) {
     GROUP BY name, version, dim_key, dim_value
     ORDER BY total DESC
     FORMAT JSON`;
-
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
-    { method: 'POST', headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` }, body: sql },
-  );
+    { method: 'POST', headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` }, body: sql });
   if (!res.ok) return { error: `analytics engine ${res.status}`, rows: [] };
-  const json = await res.json();
-  return { rows: json.data || [] };
+  return { rows: (await res.json()).data || [] };
 }
 
-async function fetchBusiness(env) {
-  const exclude = env.EXCLUDE_TEAMS ? JSON.parse(env.EXCLUDE_TEAMS) : [];
-  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/ops_snapshot`, {
-    method: 'POST',
-    headers: {
-      apikey: env.SUPABASE_SERVICE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ p_exclude_teams: exclude }),
-  });
-  if (!res.ok) return { error: `supabase ${res.status}` };
-  return await res.json();
+// --- CSRF ------------------------------------------------------------------
+// See this file's header for why Access alone does not cover this.
+function writeRequestIsSafe(request, url) {
+  const ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/json') return false;
+  const origin = request.headers.get('origin');
+  if (!origin) return false;
+  try {
+    return new URL(origin).host === url.host;
+  } catch { return false; }
 }
 
 export default {
   async fetch(request, env) {
-    const email = await (async () => {
-      // Access presents the token as a header on every proxied request.
-      const token = request.headers.get('cf-access-jwt-assertion');
-      const claims = await verifyAccessJwt(token, {
-        teamDomain: env.ACCESS_TEAM_DOMAIN,
-        aud: env.ACCESS_AUD,
-      }).catch(() => null);
-      if (!claims) return null;
-      const allowed = (env.ALLOWED_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-      const claimed = String(claims.email || '').toLowerCase();
-      if (allowed.length && !allowed.includes(claimed)) return null;
-      return claimed;
-    })();
+    const url = new URL(request.url);
+    const email = await authenticate(request, env);
+    if (!email) return json({ error: 'unauthorized' }, 401);
 
-    if (!email) {
-      return new Response(JSON.stringify({ error: 'unauthorized' }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json' },
-      });
+    // --- writes ------------------------------------------------------------
+    if (request.method === 'POST' && url.pathname === '/api/action') {
+      if (!writeRequestIsSafe(request, url)) return json({ error: 'bad request context' }, 403);
+
+      let body;
+      try { body = await request.json(); } catch { return json({ error: 'bad json' }, 400); }
+
+      const spec = ACTIONS[body && body.action];
+      if (!spec) return json({ error: 'unknown action' }, 400);
+      if (body.team !== undefined && !UUID_RE.test(String(body.team))) {
+        return json({ error: 'bad team id' }, 400);
+      }
+
+      try {
+        // p_actor is the VERIFIED Access email, never anything the client sent.
+        // It is a required argument on every write RPC, so the audit trail
+        // cannot be skipped by omitting it.
+        const out = await rpc(env, spec.rpc, { p_actor: email, ...spec.args(body) });
+        return json({ ok: true, result: out });
+      } catch (err) {
+        return json({ error: String(err.message || err) }, 500);
+      }
     }
 
-    // Fetched concurrently, merged into one response object, and that is the
-    // only relationship they ever have. No key is shared, nothing is
-    // correlated — see this file's header.
-    const [counters, business] = await Promise.all([
-      fetchCounters(env).catch(e => ({ error: String(e && e.message || e), rows: [] })),
-      fetchBusiness(env).catch(e => ({ error: String(e && e.message || e) })),
+    if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405);
+
+    // --- single team drill-down -------------------------------------------
+    const detail = url.pathname.match(/^\/api\/team\/([0-9a-f-]{36})$/i);
+    if (detail) {
+      try {
+        return json({ team: await rpc(env, 'ops_team_detail', { p_team: detail[1] }) });
+      } catch (err) {
+        return json({ error: String(err.message || err) }, 500);
+      }
+    }
+
+    // --- overview ----------------------------------------------------------
+    const [counters, business, audit, invites] = await Promise.all([
+      fetchCounters(env).catch(e => ({ error: String(e.message || e), rows: [] })),
+      rpc(env, 'ops_snapshot', { p_exclude_teams: [] }).catch(e => ({ error: String(e.message || e) })),
+      rpc(env, 'ops_audit_recent', { p_limit: 50 }).catch(() => []),
+      rpc(env, 'ops_onboarding_invites', {}).catch(() => []),
     ]);
 
-    return new Response(JSON.stringify({ counters, business, viewer: email }), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-store',
-      },
-    });
+    return json({ counters, business, audit, invites, viewer: email });
   },
 };

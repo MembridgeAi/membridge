@@ -30,10 +30,11 @@ broken by accident later.
 | Path | What it is | Public? |
 |---|---|---|
 | `counters-worker/` | Ingest. Validates against a fixed allowlist, writes to Analytics Engine. | yes, unauthenticated |
-| `ops-api/` | Read side. Verifies the Cloudflare Access JWT, fans out to Analytics Engine + Supabase. | no, Access only |
-| `ops-dashboard/` | Static page. Ships no secret. | no, Access only |
+| `ops-api/` | Read **and write**. Verifies the Cloudflare Access JWT, fans out to Analytics Engine + Supabase, and runs the action allowlist. | no, Access only |
+| `ops-dashboard/` | The panel. Static, ships no secret. | no, Access only |
 | `../lib/counters.js` | Client emission, on the daemon tick. | — |
-| `../supabase/migrations/020_ops_snapshot_v2.sql` | Funnel, weekly series, cohorts and the per-team list. `service_role` only. Supersedes 019. | — |
+| `../supabase/migrations/021_ops_panel.sql` | The write half: audit log, team notes/flags, onboarding invites. | — |
+| `../supabase/migrations/022_ops_snapshot_v3.sql` | Funnel, weekly series, cohorts, per-team list. Supersedes 020. | — |
 
 ---
 
@@ -87,13 +88,16 @@ closed rather than leaking somewhere unexpected.
 
 ### 3. Business metrics
 
-Apply `supabase/migrations/019_ops_snapshot.sql` then `020_ops_snapshot_v2.sql` in the
-Supabase SQL editor. 020 replaces 019's function body — 019 is kept rather than
-rewritten because rewriting an already-committed migration is exactly the habit
-that produced the repo/live drift fixed in 018.
-It creates one security-definer function granted to `service_role` only —
-`anon` is the public internet and `authenticated` is every signed-in customer,
-so neither can read aggregate business data.
+Apply `019`, `020`, `021` then `022` in order, in the Supabase SQL editor. Each
+later snapshot replaces the previous function body; the earlier ones are kept
+rather than rewritten, because editing an already-committed migration is exactly
+the habit that produced the repo/live drift fixed in 018.
+
+Everything is granted to `service_role` only — `anon` is the public internet and
+`authenticated` is every signed-in customer, so neither may read business data or
+invoke an admin action. The single exception is `redeem_onboarding_invite`, which
+is granted to `authenticated` **by design**: it must run as the new user so
+`create_team` records them as owner.
 
 ### 4. Read API
 
@@ -137,14 +141,61 @@ Access check at the edge cannot be sidestepped.
 
 ---
 
+## What the panel can and cannot do
+
+Writes go through a fixed allowlist in `ops-api/src/index.js`, each mapping to one
+narrow RPC. The ops API never gets generic INSERT/UPDATE on `teams`,
+`team_members`, `projects` or `memory_entries`, so the blast radius of a
+compromised Worker is the union of those four functions and nothing else.
+
+**Can:** set an internal note on a team, flag a team as internal (drops it from
+every metric), rotate a team's invite code, issue a named onboarding invite.
+
+**Cannot:** delete a team, remove a member, delete entries, or read any session
+content. The destructive operations exist as product RPCs that run as the
+affected user, which is the correct place for them — an admin panel that can
+irreversibly destroy a customer account is a bad trade for the convenience. Do
+those deliberately in the Supabase console.
+
+**Every write is audited** with the verified Access email. `p_actor` is a required
+argument on each write RPC, so the trail cannot be skipped by omitting it. An
+admin panel without an audit log is indistinguishable from someone holding the
+service key.
+
+### Onboarding, and why the panel cannot just create a team
+
+`teams.created_by` is NOT NULL against a real auth user, so a service-key insert
+would have to invent an owner — a phantom account, or the operator, leaving the
+customer not owning their own team. Instead the panel pre-issues a named invite
+and the team is created when the first real user redeems it, as them. Ownership
+and E2E key material are established exactly as in an organic signup; only the
+name and the fact that we were expecting them are pre-set.
+
+The invite link is `https://membridge.app/join#<token>`. **That route does not
+exist on the marketing site yet** — it needs a page that takes the fragment,
+signs the user in, and calls `redeem_onboarding_invite`. Until it exists, issued
+invites cannot be redeemed.
+
+### CSRF
+
+Access authenticates with a cookie, so a cross-site form POST would carry it, be
+validated at the edge, and arrive here as a genuine authenticated request. Access
+does not cover this. Every write therefore also requires
+`Content-Type: application/json` (a cross-origin form cannot set it without a
+preflight the Worker never answers) and a same-origin `Origin` header. Reads are
+exempt — they are side-effect free.
+
+---
+
 ## The one credential worth watching
 
 `SUPABASE_SERVICE_KEY` is the single high-privilege secret here. It is required
 because `ops_snapshot()` is granted to `service_role` only.
 
 Mitigations: it exists only as a Worker secret, the `ops-api` Worker is its sole
-holder, it is used for exactly one RPC that returns aggregates, and that Worker
-has no route reachable without Access.
+holder, it can only reach the `ops_*` functions the panel actually calls, and that
+Worker has no route reachable without Access. Note this got more valuable to an
+attacker the moment writes were added — it is no longer read-only.
 
 **If `ops-api` is ever compromised, rotate this key first.** A dedicated
 read-only Postgres role would be strictly better and is the natural next
