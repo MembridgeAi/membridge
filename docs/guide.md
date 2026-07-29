@@ -248,9 +248,8 @@ boxes and terminal-first teammates aren't second-class:
 (`list_projects`, `get_project_memory`, `get_recent_activity`,
 `search_memory`) for Claude Desktop, Cursor, and other MCP clients. Nothing
 it exposes can write files or trigger sync, and every field passes through
-the same redaction as the context files. The SDK isn't part of the
-zero-dependency core, so install it once before first use:
-`npm install @modelcontextprotocol/sdk zod`, then point your client at
+the same redaction as the context files. The MCP SDK ships with MemBridge —
+there is nothing extra to install. Point your client at
 `{ "command": "membridge", "args": ["mcp"] }`.
 
 ## Supported tools
@@ -331,19 +330,24 @@ sync runs MemBridge Beta. People who just want to watch can use the web
 workspace from a browser.
 
 **How much overhead does it add?** Near zero. It reads only the bytes
-appended since the last pass, sleeps between syncs (60s default), and the
-core has zero runtime dependencies.
+appended since the last pass, sleeps between syncs (60s default), and its
+runtime dependency list is deliberately short — encryption
+(`libsodium-wrappers`), code parsing (`web-tree-sitter`), and the MCP server
+(`@modelcontextprotocol/sdk`, `zod`).
 
 ## Development
 
 ```bash
-node test/run-tests.js   # zero-dependency offline suite (temp dirs + mock Supabase)
+node test/run-tests.js   # dependency-free offline suite (temp dirs + mock Supabase)
 npm run app              # run the tray app from source (Electron)
 npm run dist:mac         # build the macOS menu-bar app
 ```
 
-The core stays zero-dependency; Electron is a devDependency used only by
-the tray app. CI runs the suite on Linux, Windows, and macOS across Node
+The test suite itself needs no test framework — it is plain Node with
+`assert`, and it never touches the network. The runtime dependencies
+(`libsodium-wrappers`, `web-tree-sitter`, `@modelcontextprotocol/sdk`, `zod`)
+all arrive with a plain `npm install`; Electron is a devDependency used only
+by the tray app. CI runs the suite on Linux, Windows, and macOS across Node
 18/20/22.
 
 The suite is fully offline: it runs in temp dirs and talks to mock backends

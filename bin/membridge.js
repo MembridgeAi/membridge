@@ -866,10 +866,8 @@ Distillation (agent-written session summaries — see README):
 MCP (expose project memory, read-only, to MCP-capable clients — Claude
 Desktop, Cursor, Cowork, ...; see README):
   mcp                 start a read-only MCP server over stdio
-                      One-time setup — MemBridge's core stays dependency-free,
-                      so this needs its own packages installed once:
-                        npm install @modelcontextprotocol/sdk zod
-                      Then point your MCP client's config at:
+                      Nothing to install — it ships with MemBridge. Point your
+                      MCP client's config at:
                         { "command": "membridge", "args": ["mcp"] }
 
 Team sync (share project memory with your team — see README):

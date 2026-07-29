@@ -13114,13 +13114,14 @@ async function main() {
     await client.close();
   }
 
-  // Missing-dependency path: MODULE_NOT_FOUND must produce one clear,
-  // actionable line on stderr and a non-zero exit — never a raw stack trace.
-  // Spawned as a subprocess because loadSdkDeps() calls process.exit(1) on
-  // this path, which must not kill the real test runner. The injectable
-  // requireFn simulates the SDK/zod genuinely being absent without actually
-  // uninstalling them from this test environment (they're needed by every
-  // other mcp test above).
+  // Broken-install path: the SDK and zod are ordinary dependencies now, so a
+  // MODULE_NOT_FOUND here means a genuinely damaged node_modules. It must
+  // surface as an ordinary error — the real module message and a non-zero
+  // exit — and must NOT print install advice for an install that already ran.
+  // Spawned as a subprocess because the error is uncaught, which must not kill
+  // the real test runner. The injectable requireFn simulates the SDK/zod being
+  // absent without actually uninstalling them from this test environment
+  // (they're needed by every other mcp test above).
   {
     const mcpPath = path.join(__dirname, '..', 'lib', 'mcp.js');
     const script = `
@@ -13134,11 +13135,18 @@ async function main() {
       console.log('UNREACHABLE');
     `;
     const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
-    check('mcp: a missing @modelcontextprotocol/sdk or zod produces exactly the friendly message on stderr and a non-zero exit', () => {
+    check('mcp: a broken install surfaces the real module error and a non-zero exit, with no stale opt-in advice', () => {
       assert.notStrictEqual(out.status, 0, `expected non-zero exit, got ${out.status}`);
-      assert.strictEqual(out.stderr.trim(), mcpMod.MISSING_DEPS_MESSAGE.trim(), `stderr was: ${out.stderr}`);
-      assert.ok(out.stderr.includes('npm install @modelcontextprotocol/sdk zod'), 'missing the actionable install command');
-      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past process.exit');
+      assert.ok(
+        out.stderr.includes("Cannot find module '@modelcontextprotocol/sdk/server/mcp.js'"),
+        `the real module error must reach stderr; stderr was: ${out.stderr}`
+      );
+      assert.ok(!/opt-in/i.test(out.stderr), `must not claim the deps are opt-in; stderr was: ${out.stderr}`);
+      assert.ok(
+        !/npm install @modelcontextprotocol\/sdk zod/.test(out.stderr),
+        'must not advise an install that a plain `npm install` already performs'
+      );
+      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past the throw');
     });
   }
 
@@ -15971,6 +15979,32 @@ async function main() {
       const { settingsPayload } = require('../lib/server');
       const payload = settingsPayload();
       assert.strictEqual(payload.diagnostics.enabled, true);
+    });
+  }
+
+  // ---- MCP dependencies ship by default (mcp spec §7) ----
+  {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+
+    check('mcp-deps: the SDK and zod are real dependencies, not opt-in', () => {
+      assert.ok(pkg.dependencies['@modelcontextprotocol/sdk'], '@modelcontextprotocol/sdk must be a dependency');
+      assert.ok(pkg.dependencies.zod, 'zod must be a dependency');
+    });
+
+    check('mcp-deps: prepublishOnly no longer side-installs them', () => {
+      const pre = pkg.scripts.prepublishOnly || '';
+      assert.ok(!/modelcontextprotocol/.test(pre), 'prepublishOnly must not --no-save install the SDK');
+      assert.ok(!/\bzod\b/.test(pre), 'prepublishOnly must not --no-save install zod');
+    });
+
+    check('mcp-deps: they resolve from a plain install', () => {
+      assert.doesNotThrow(() => require.resolve('@modelcontextprotocol/sdk/server/mcp.js'));
+      assert.doesNotThrow(() => require.resolve('zod'));
+    });
+
+    check('mcp-deps: lib/mcp.js no longer calls them opt-in', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(!/opt-in/i.test(src), 'the opt-in message is now false and must be gone');
     });
   }
 
