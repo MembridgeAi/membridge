@@ -19372,6 +19372,52 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // The reporting half of the ownership bug. isHookInstalled's own contract is
+  // "installed means it will actually RUN", but it only checked that the
+  // RUNTIME resolved -- and the runtime is usually plain `node`, which always
+  // resolves. So a registration whose membridge-hook.js had been deleted (the
+  // trial clone removed, the worktree cleaned up) reported "hook installed"
+  // forever, in the app and in `membridge status`, while every stop silently
+  // did nothing. A user had no way to discover it: this check IS the discovery
+  // mechanism, and it was the thing lying.
+  check('hooks: a registration whose script is gone is NOT reported as installed', () => {
+    const f = path.join(ROOT, 'claude-settings-deadscript.json');
+    const gone = path.join(ROOT, 'removed-install', 'lib', 'membridge-hook.js');
+    assert.ok(!fs.existsSync(gone), 'fixture must not exist');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: `"${process.execPath}" "${gone}"` }] }] },
+    }));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isHookInstalled(), false,
+        'a hook whose script is missing must report NOT installed — node resolving is not enough');
+    } finally {
+      if (prev === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+
+  check('hooks: a registration whose script exists is still reported as installed', () => {
+    const f = path.join(ROOT, 'claude-settings-livescript.json');
+    const liveDir = path.join(ROOT, 'live-install', 'lib');
+    fs.mkdirSync(liveDir, { recursive: true });
+    const live = path.join(liveDir, 'membridge-hook.js');
+    fs.writeFileSync(live, '// present\n');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: `"${process.execPath}" "${live}"` }] }] },
+    }));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isHookInstalled(), true,
+        'a working registration must still report installed');
+    } finally {
+      if (prev === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
