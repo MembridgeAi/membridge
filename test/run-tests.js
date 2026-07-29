@@ -7004,6 +7004,42 @@ async function main() {
       assert.strictEqual(JSON.parse(rows[rows.length - 1]).relPath, rotRel, 'the new row is missing after rotation');
     });
 
+    // Fix round 3 (FINDING 3, carried): a naive byte-midpoint rotation can
+    // split a pending row from its confirmation -- if the pending row lands
+    // in the dropped head while its confirmation survives in the kept tail,
+    // the fold is left with a stray confirmation and no pending row to
+    // settle it against (lib/ledger-fold-recall-settle.js's groupServeRows
+    // silently drops it: "nothing to settle or retain"). Places a
+    // pending/confirmation pair straddling the naive midpoint -- pending well
+    // before it, confirmation well after -- and asserts rotation keeps them
+    // together (both survive, since the pending row anchors the kept tail
+    // back to include it) rather than orphaning the confirmation.
+    const pairProj = path.join(ROOT, 'projects', 'recall-rotate-pairing-proj');
+    fs.mkdirSync(hooksRecall.recallDir(pairProj), { recursive: true });
+    const pairFillerLine = JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', sessionId: 'old', relPath: 'src/old.js', tier: 'B', callTokens: 401, skeletonTokens: 1, holdout: false });
+    const pairFillerRow = pairFillerLine + '\n';
+    const pairTotalRows = Math.ceil((2 * 1024 * 1024 * 1.3) / pairFillerRow.length);
+    const pairPendingRow = JSON.stringify({
+      ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-pair', relPath: 'src/paired.js',
+      tier: 'B', callTokens: 999, skeletonTokens: 99, holdout: false, committed: false,
+    }) + '\n';
+    const pairConfirmRow = JSON.stringify({ ts: '2026-07-20T00:00:00.000Z', sessionId: 'sess-pair', relPath: 'src/paired.js', committed: true }) + '\n';
+    const pairHeadCount = Math.floor(pairTotalRows * 0.45);   // pending lands well before the naive ~50% cut
+    const pairGapCount = Math.floor(pairTotalRows * 0.15);    // confirmation lands well after it
+    const pairTailCount = pairTotalRows - pairHeadCount - pairGapCount;
+    const pairFile = hooksRecall.eventsPath(pairProj);
+    fs.writeFileSync(pairFile,
+      pairFillerRow.repeat(pairHeadCount) + pairPendingRow + pairFillerRow.repeat(pairGapCount) + pairConfirmRow + pairFillerRow.repeat(pairTailCount));
+    check('recall hook: rotateEvents never orphans a confirmation row by splitting it from its pending row', () => {
+      assert.ok(fs.statSync(pairFile).size > 2 * 1024 * 1024, 'test setup must actually exceed the rotation threshold');
+      hooksRecall.rotateEvents(pairFile);
+      const rows = fs.readFileSync(pairFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+      const hasPending = rows.some(r => r.relPath === 'src/paired.js' && r.committed === false);
+      const hasConfirm = rows.some(r => r.relPath === 'src/paired.js' && r.committed === true);
+      assert.strictEqual(hasConfirm, true, 'the confirmation (placed well past the midpoint) should always survive naively');
+      assert.strictEqual(hasPending, true, 'the pending row must rotate together WITH its confirmation, not be dropped and orphan it');
+    });
+
     // L7: saveSessionState used to commit BEFORE the event write, so an
     // events.jsonl failure marked the path served and burned an interception
     // for a serve the agent never received -- locking that path out for the
@@ -7398,6 +7434,191 @@ async function main() {
       });
     }
 
+    // Fix round 3 (carried FINDING 1): the correction pass used to order a
+    // read against its serve with a raw string compare
+    // (`String(e.ts) > String(current.ts)`), which misorders mixed-precision
+    // ISO stamps -- '.' (0x2E) sorts before 'Z' (0x5A), so a millisecond-
+    // bearing stamp can sort BEFORE the whole second it is actually later
+    // than. serve.ts is always millisecond-precision (new
+    // Date().toISOString() in lib/hooks-recall.js); read ts can arrive
+    // second-precision from an adapter transcript. PIN: a read stamped
+    // '2026-07-28T10:00:05Z' (no millis) is chronologically BEFORE a serve
+    // stamped '2026-07-28T10:00:05.500Z' (500ms later) and must NOT be
+    // treated as a follow-up, even though it string-sorts after it; a read
+    // stamped '2026-07-28T10:00:06Z' (genuinely a half-second later) must.
+    {
+      const projByTs = seedT6Project('t6-byts-ordering');
+      const relByTs = 'src/byts.js';
+      const tsByTsServe = '2026-07-28T10:00:05.500Z';
+      const tByTsServe = Date.parse(tsByTsServe);
+      writeServeRows(projByTs, tsByTsServe, 'sess-byts', relByTs, 'B', 4210, 380);
+      const ledByTs1 = ledgerStoreT6.updateLedger(projByTs, [], util.getConfig(), () => tByTsServe + 10);
+      check('ledger-fold-recall-open-serves (FINDING 1): settles full before any follow-up is in evidence', () => {
+        assert.strictEqual(ledByTs1.avoided.tokens, 3830);
+      });
+
+      // Chronologically EARLIER than the serve (05.000 < 05.500) but sorts
+      // AFTER it as a raw string ("...:05Z" > "...:05.500Z" lexically) --
+      // must be rejected as a follow-up, not applied.
+      const earlierButStringGreater = readEvent('sess-byts', relByTs, '2026-07-28T10:00:05Z', projByTs, { toolUseId: 'fu-byts-early', limit: 50 });
+      const ledByTs2 = ledgerStoreT6.updateLedger(projByTs, [earlierButStringGreater], util.getConfig(), () => tByTsServe + 20);
+      check('ledger-fold-recall-open-serves (FINDING 1): a read that STRING-sorts later but is chronologically earlier must not correct', () => {
+        assert.strictEqual(ledByTs2.avoided.tokens, 3830, 'the pre-serve read must be ignored, not applied as a follow-up');
+        assert.strictEqual(ledByTs2.openServes[0].correctedBy.length, 0);
+      });
+
+      // Genuinely later (06.000 > 05.500) -- must apply.
+      const genuinelyLater = readEvent('sess-byts', relByTs, '2026-07-28T10:00:06.000Z', projByTs, { toolUseId: 'fu-byts-late', limit: 50 });
+      const ledByTs3 = ledgerStoreT6.updateLedger(projByTs, [genuinelyLater], util.getConfig(), () => tByTsServe + 30);
+      check('ledger-fold-recall-open-serves (FINDING 1): a genuinely later read (correct byTs ordering) does correct', () => {
+        assert.strictEqual(ledByTs3.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledByTs3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // Fix round 3 (carried FINDING 4): a corrupt/skewed serve ts far in the
+    // future used to make an open-serve record BOTH immortal ((now - ts) is
+    // negative, never crossing OPEN_SERVE_TTL_MS) and uncorrectable (no real
+    // read's ts could ever exceed it). buildOpenServe now clamps a
+    // future-of-`now` pending ts down to `now` at the moment the record is
+    // created, anchoring it to a real clock reading. PIN: the stored ts is
+    // the clamp, not the corrupt value; a real follow-up shortly after can
+    // still correct it; and it properly ages out once OPEN_SERVE_TTL_MS of
+    // REAL time has passed the clamped anchor.
+    {
+      const projFuture = seedT6Project('t6-future-ts-clamp');
+      const relFuture = 'src/future.js';
+      const corruptFutureTs = '2030-01-01T00:00:00.000Z'; // implausibly far in the future
+      const realNow = Date.parse('2026-07-28T10:00:00.000Z');
+      writeServeRows(projFuture, corruptFutureTs, 'sess-future', relFuture, 'B', 4210, 380);
+      const ledFuture1 = ledgerStoreT6.updateLedger(projFuture, [], util.getConfig(), () => realNow);
+      check('ledger-fold-recall-open-serves (FINDING 4): a future-of-now serve ts is clamped to `now` on the stored receipt', () => {
+        assert.strictEqual(ledFuture1.avoided.tokens, 3830, 'settlement itself is unaffected by the clamp');
+        assert.strictEqual(ledFuture1.openServes[0].ts, new Date(realNow).toISOString(),
+          'the receipt must record the REAL clock reading, not the corrupt future stamp');
+      });
+
+      // A real follow-up shortly after `realNow` must still be able to
+      // correct it -- proving the clamp fixed uncorrectability too, not just
+      // the age computation.
+      const followUpFuture = readEvent('sess-future', relFuture, new Date(realNow + 5000).toISOString(), projFuture, { toolUseId: 'fu-future', limit: 50 });
+      const ledFuture2 = ledgerStoreT6.updateLedger(projFuture, [followUpFuture], util.getConfig(), () => realNow + 10000);
+      check('ledger-fold-recall-open-serves (FINDING 4): a real follow-up shortly after `now` still corrects a clamped receipt', () => {
+        assert.strictEqual(ledFuture2.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12) -- proves the clamped ts is usable as an ordering anchor');
+      });
+
+      // Once OPEN_SERVE_TTL_MS of REAL wall-clock time has elapsed past the
+      // clamped anchor, the receipt must finally age out -- proving it is no
+      // longer immortal.
+      const ledFuture3 = ledgerStoreT6.updateLedger(projFuture, [], util.getConfig(), () => realNow + openServesT6.OPEN_SERVE_TTL_MS + 10000);
+      check('ledger-fold-recall-open-serves (FINDING 4): the clamped receipt properly ages out after a real TTL window, not immortally', () => {
+        assert.strictEqual(ledFuture3.openServes.length, 0, 'a future-stamped receipt must not survive forever');
+      });
+    }
+
+    // Fix round 3: at-most-one-rejection-bump-per-LOGICAL-serve must hold
+    // even when a failed queue rewrite causes a retry to re-settle an
+    // already-settled serve into a SECOND open-serve record sharing the same
+    // serveId (the accepted over-count residual pinned just above). Without
+    // the bumpedServeIds guard in applyCorrections, a single follow-up read
+    // that pushes both duplicate records negative in the SAME pass would
+    // call recallStore.bumpRejection twice for what is really one physical
+    // serve -- a durable, hard-to-undo double-penalty. This pins that it
+    // does not: the rejection counter moves exactly once, even though both
+    // duplicate records correctly transition to 'negative'.
+    {
+      const projIdem = seedT6Project('t6-idempotent-rejection-bump');
+      const relIdem = 'src/idem.js';
+      recallStoreT6.put(projIdem, relIdem, { contentHash: 'hidem', skeleton: 'SKELIDEM', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      const tsIdem = '2026-07-28T10:00:00.000Z';
+      const now0Idem = Date.parse(tsIdem) + 10;
+      writeServeRows(projIdem, tsIdem, 'sess-idem', relIdem, 'B', 4210, 380);
+      // A companion pending row with no confirmation yet, young enough to be
+      // RETAINED regardless of outcome -- gives commit() real content to
+      // write back (not the empty-queue rmSync branch, which the mock below
+      // does not intercept -- see the identical trick in the FINDING 3 test
+      // above).
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(projIdem), jsonl([
+        { ts: new Date(now0Idem - 1000).toISOString(), sessionId: 'sess-idem-companion', relPath: 'src/idem-companion.js', tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSyncIdem = fs.writeFileSync;
+      const recallDirTagIdem = path.join(memorydb.DIR_NAME, 'recall');
+      fs.writeFileSync = function (p, ...rest) {
+        if (typeof p === 'string' && p.includes(recallDirTagIdem)) {
+          throw new Error('simulated queue rewrite failure');
+        }
+        return realWriteFileSyncIdem.call(fs, p, ...rest);
+      };
+      let ledIdem1;
+      try {
+        ledIdem1 = ledgerStoreT6.updateLedger(projIdem, [], util.getConfig(), () => now0Idem);
+      } finally {
+        fs.writeFileSync = realWriteFileSyncIdem;
+      }
+      check('ledger-fold-recall (idempotent rejection setup): first pass settles full, queue rewrite fails, row stays queued', () => {
+        assert.strictEqual(ledIdem1.avoided.tokens, 3830);
+        assert.strictEqual(ledIdem1.openServes.length, 1);
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(projIdem), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 3, 'the confirmed pair AND the young companion pending row must still be queued after the failed rewrite');
+      });
+
+      // File big enough that a full re-read (no limit -> size/4 tokens) alone
+      // pushes net negative in ONE shot: 20000/4=5000 > 3830.
+      fs.writeFileSync(path.join(projIdem, relIdem), 'x'.repeat(20000));
+      const followUpIdem = readEvent('sess-idem', relIdem, '2026-07-28T10:05:00.000Z', projIdem, { toolUseId: 'fu-idem' });
+      // This pass BOTH re-settles the still-queued row (real fs restored,
+      // queue untouched) into a second open-serve record AND applies the
+      // negative-crossing follow-up in the same pass -- the exact compound
+      // scenario the bumpedServeIds guard exists for.
+      const ledIdem2 = ledgerStoreT6.updateLedger(projIdem, [followUpIdem], util.getConfig(), () => now0Idem + 100);
+      check('ledger-fold-recall-open-serves: a queue-rewrite-failure retry never double-bumps rejection for one logical serve', () => {
+        assert.strictEqual(ledIdem2.openServes.length, 2, 'both duplicate receipts remain on record (the accepted over-count residual)');
+        assert.ok(ledIdem2.openServes.every(s => s.classified === 'negative'), 'both duplicates are correctly corrected to negative');
+        assert.strictEqual(recallStoreT6.get(projIdem, relIdem).rejections, 1,
+          'exactly ONE bump for one physical follow-up read, despite two open-serve records sharing the same serve');
+        assert.strictEqual(ledIdem2.avoided.tokens, -2340, 'documented over-count math: 3830(prev) + 3830(re-settle) - 5000 - 5000 (both duplicates corrected)');
+      });
+    }
+
+    // Fix round 3 (documented residual, FINDING 2): a correction, once
+    // applied, is permanent regardless of what later happens to proj.events
+    // -- the avoidedDelta is already folded into st.avoided and the read's
+    // key is already in correctedBy, both durably written into ledger.json.
+    // Neither is re-derived from proj.events on a later pass, so a read that
+    // subsequently falls out of the sliding window (evicted by
+    // lib/digest.js's mergeEvents plumbing cap) can neither un-correct
+    // (nothing re-examines proj.events to undo it) nor re-correct (even if
+    // it somehow reappears, correctedBy already remembers its key).
+    {
+      const projEvict = seedT6Project('t6-correction-survives-eviction');
+      const relEvict = 'src/evict.js';
+      const tsEvict = '2026-07-28T10:00:00.000Z';
+      const tEvict = Date.parse(tsEvict);
+      writeServeRows(projEvict, tsEvict, 'sess-evict', relEvict, 'B', 4210, 380);
+      ledgerStoreT6.updateLedger(projEvict, [], util.getConfig(), () => tEvict + 10);
+      const followUpEvict = readEvent('sess-evict', relEvict, '2026-07-28T10:05:00.000Z', projEvict, { toolUseId: 'fu-evict', limit: 50 });
+      const ledEvict1 = ledgerStoreT6.updateLedger(projEvict, [followUpEvict], util.getConfig(), () => tEvict + 20);
+      check('ledger-fold-recall-open-serves (residual setup): the follow-up corrects to a partial win', () => {
+        assert.strictEqual(ledEvict1.avoided.tokens, 3230);
+        assert.strictEqual(ledEvict1.openServes[0].correctedBy.length, 1);
+      });
+      // Pass with the follow-up ABSENT from readEvents -- simulating eviction
+      // from proj.events' capped window.
+      const ledEvict2 = ledgerStoreT6.updateLedger(projEvict, [], util.getConfig(), () => tEvict + 30);
+      check('ledger-fold-recall-open-serves (FINDING 2): a correction is not undone once its read is evicted from later passes', () => {
+        assert.strictEqual(ledEvict2.avoided.tokens, 3230, 'the correction must stand -- no un-correct');
+        assert.strictEqual(ledEvict2.openServes[0].correctedBy.length, 1, 'correctedBy must not lose the entry either');
+      });
+      // Pass with the SAME follow-up reappearing (e.g. a re-scan quirk) --
+      // correctedBy must still prevent a second application.
+      const ledEvict3 = ledgerStoreT6.updateLedger(projEvict, [followUpEvict], util.getConfig(), () => tEvict + 40);
+      check('ledger-fold-recall-open-serves (FINDING 2): a re-presented already-applied read does not re-correct', () => {
+        assert.strictEqual(ledEvict3.avoided.tokens, 3230, 'no double-application');
+        assert.strictEqual(ledEvict3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
     // Holdout rows (spec §7.2) must accumulate ONLY into `holdout`, and must
     // never touch `avoided` -- the two are strictly separate arms.
     const proj4T6 = seedT6Project('t6-holdout-isolated');
@@ -7513,6 +7734,42 @@ async function main() {
       assert.strictEqual(remaining.length, extraRows, 'rows past the bound stay queued, never dropped');
       const ledBound2 = ledgerStoreT6.updateLedger(projBound, [], util.getConfig());
       assert.strictEqual(ledBound2.holdout.skips, ledgerFoldRecall.MAX_FOLD_LINES + extraRows, 'a second pass finishes off the remainder');
+    });
+
+    // Fix round 3 (carried FINDING 5): overflow rows must keep their relative
+    // order, and a remainder row must settle on the NEXT pass, not be
+    // skipped, dropped, or reordered. MAX_FOLD_LINES itself is a hard
+    // constant (10,000 confirmed serves is too heavy for a unit test) -- so
+    // this exercises the SAME injectable-bound mechanism updateLedger/
+    // settleRecallQueue/readQueue already expose (mirroring the nowFn
+    // pattern) with a small override instead.
+    check('ledger-fold-recall: overflow rows keep relative order across passes when MAX_FOLD_LINES is overridden small', () => {
+      const projOverflow = seedT6Project('t6-fold-lines-override');
+      const nowOverflow = Date.parse('2026-07-28T11:00:00.000Z');
+      // Three confirmed serves (2 lines each = 6 lines), written in order.
+      writeServeRows(projOverflow, '2026-07-28T10:00:00.000Z', 'sess-o1', 'src/o1.js', 'B', 1000, 100); // net 900
+      writeServeRows(projOverflow, '2026-07-28T10:00:01.000Z', 'sess-o2', 'src/o2.js', 'B', 2000, 200); // net 1800
+      writeServeRows(projOverflow, '2026-07-28T10:00:02.000Z', 'sess-o3', 'src/o3.js', 'B', 3000, 300); // net 2700
+
+      // maxLines=4 covers exactly serve1+serve2's two pairs; serve3's pair
+      // must stay queued as the remainder.
+      const ledOverflow1 = ledgerStoreT6.updateLedger(projOverflow, [], util.getConfig(), () => nowOverflow, 4);
+      assert.strictEqual(ledOverflow1.avoided.tokens, 900 + 1800, 'only the first two (in-order) serves settle this pass');
+      assert.strictEqual(ledOverflow1.avoided.serves, 2);
+      assert.deepStrictEqual(ledOverflow1.openServes.map(s => s.relPath).sort(), ['src/o1.js', 'src/o2.js']);
+      const remainingOverflow = fs.readFileSync(ledgerFoldRecall.eventsPath(projOverflow), 'utf8').trim().split('\n').filter(Boolean);
+      assert.strictEqual(remainingOverflow.length, 2, 'serve3\'s pending+confirmation pair stays queued as the remainder, never dropped');
+      assert.strictEqual(JSON.parse(remainingOverflow[0]).relPath, 'src/o3.js', 'the remainder is the correct, un-reordered row');
+
+      // Next pass finishes off the remainder -- serve3 settles, and the
+      // already-settled serve1/serve2 receipts are untouched (not
+      // re-settled, not reordered, not lost).
+      const ledOverflow2 = ledgerStoreT6.updateLedger(projOverflow, [], util.getConfig(), () => nowOverflow + 1000, 4);
+      assert.strictEqual(ledOverflow2.avoided.tokens, 900 + 1800 + 2700, 'serve3 settles on the very next pass, nothing lost or duplicated');
+      assert.strictEqual(ledOverflow2.avoided.serves, 3);
+      assert.deepStrictEqual(ledOverflow2.openServes.map(s => s.relPath).sort(), ['src/o1.js', 'src/o2.js', 'src/o3.js']);
+      assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(projOverflow)) || fs.readFileSync(ledgerFoldRecall.eventsPath(projOverflow), 'utf8') === '',
+        'the queue is fully drained once the remainder settles');
     });
   }
 
