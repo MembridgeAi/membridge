@@ -8770,13 +8770,22 @@ async function main() {
         'avoided must carry tokens only -- no dollar/cost field');
       assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
         'holdout must carry tokens only -- no dollar/cost field');
+      // Teammate-note injection cost (notes spec §9): a FLAT sibling of
+      // `avoided`, never a member of it, so nothing doing net arithmetic can
+      // reach it. This fixture's ledger predates the field entirely, which is
+      // also the check that an absent block defaults to zero rather than
+      // undefined -- the dashboard reads this straight off totals.
+      assert.strictEqual(payload.projects[0].notesInjectedTokens, 0);
+      assert.strictEqual(payload.totals.notesInjectedTokens, 0);
+      assert.ok(!('notesInjectedTokens' in payload.projects[0].avoided));
       // Whitelist: the payload is an explicit projection, so accumulation
-      // bookkeeping (dedupe keys, per-path reader sets) can never leak onto
-      // the wire just because it was added to ledger.json.
+      // bookkeeping (dedupe keys, per-path reader sets, notes.seenKeys) can
+      // never leak onto the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['avoided', 'holdout', 'hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
-      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['avoided', 'holdout', 'reads', 'requests', 'volume'],
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(),
+        ['avoided', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
@@ -19233,10 +19242,13 @@ const repoRoot = require('../lib/repo-root');
         sessionId: 's1', now: NOWT, config: {},
       });
       assert.ok(out.text.includes('maxAttempts'));
+      // Unwrapping the append is what this catches: the append genuinely
+      // fails here, so without its own try/catch the throw escapes commit()
+      // into the hook body. There it would be swallowed by runRecall()'s outer
+      // catch -- silently, with the note already on stdout and its marker
+      // never written, so the same note re-fires on every read forever.
       assert.doesNotThrow(() => out.commit(), 'accounting must never throw out to the caller');
-      // The half that actually matters: the note was still marked delivered,
-      // so it is not re-shown forever. Ordering it the other way round --
-      // accounting first, marking second -- would fail here.
+      // The half that actually matters: the note was still marked delivered.
       assert.strictEqual(hooksRecallLib.buildNotesOutput({
         projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
         sessionId: 's2', now: NOWT, config: {},
@@ -19275,12 +19287,19 @@ const repoRoot = require('../lib/repo-root');
       const st = util.loadState();
       util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
       seedNotes(tp);
+      // The ROLL-UP before anything is injected. A defect that nets the two
+      // only in `totals` -- leaving every per-project field honest -- is
+      // invisible to the per-project assertions below, and `totals` is the
+      // number the headline line is built from.
+      const avoidedBefore = JSON.parse(JSON.stringify(savingsPayload().totals.avoided));
       hooksRecallLib.buildNotesOutput({
         projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
         sessionId: 's1', now: NOWT, config: {},
       }).commit();
       const led = ledgerStoreTok.updateLedger(tp, [], {});
       assert.ok(led.notes.tokens > 0);
+      assert.deepStrictEqual(savingsPayload().totals.avoided, avoidedBefore,
+        'injecting notes must not move the avoidance roll-up in either direction');
       // Spec §9: an injected note is input SPENT. Netting it against avoidance
       // would need a fabricated avoided figure, so every avoided field stays
       // exactly zero here even though tokens were demonstrably injected.
@@ -19304,13 +19323,21 @@ const repoRoot = require('../lib/repo-root');
         require('../lib/dashboard/client')('', ''),
       ];
       for (const src of srcs) {
-        for (const line of src.split('\n')) {
-          if (!/notesInjectedTokens/.test(line)) continue;
-          // `totals.notesInjectedTokens += ...` is the figure accumulating
-          // into ITSELF, which is the only arithmetic it may take part in.
-          if (/totals\.notesInjectedTokens \+=/.test(line)) continue;
-          assert.ok(!/notesInjectedTokens\s*[-+*/]|[-+*/]\s*[A-Za-z0-9_.]*notesInjectedTokens/.test(line),
-            `notesInjectedTokens must not enter any arithmetic: ${line.trim()}`);
+        for (const raw of src.split('\n')) {
+          const line = raw.trim();
+          if (!/notesInjectedTokens/.test(line) || line.startsWith('//')) continue;
+          // It may never so much as SHARE A LINE with the avoidance figures.
+          // Broader than "no operator", and deliberately so: the shapes that
+          // would net the two (`totals.avoided.tokens -= notesInjectedTokens`,
+          // `pxSavingsPct(tokens - notesInjectedTokens, volume)`) all read the
+          // two names together, whatever operator sits between them.
+          assert.ok(!/avoided|volume|SavingsPct/.test(line),
+            `notesInjectedTokens must never meet the avoidance figures: ${line}`);
+          // Accumulating into ITSELF is the only compound assignment allowed.
+          if (/[-+*/]=/.test(line)) {
+            assert.ok(/^totals\.notesInjectedTokens \+=/.test(line),
+              `the only compound assignment allowed is into its own total: ${line}`);
+          }
         }
       }
     });
