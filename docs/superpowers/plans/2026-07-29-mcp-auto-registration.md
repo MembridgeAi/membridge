@@ -1237,12 +1237,67 @@ git commit -m "feat(mcp): register the MemBridge server with every installed age
 
 ---
 
-## Task 7: Wiring
+## Task 7: Wiring ✅ DONE
 
-**Do not start until Task 6 is merged.**
+**Five defects in the text below, each fixed in the shipped commit and each
+pinned by a check that fails without the fix:**
+
+1. **Step 3's premise is wrong, and it is the load-bearing one.** "It must not
+   measurably slow startup — the cached binary path is what makes that true."
+   The cached path saves the login-shell query (**178 ms** measured here). It
+   saves nothing on `claude mcp get`, which is **2164 ms** measured against the
+   shipped CLI and is paid on *every* reconcile no matter what is cached — 92%
+   of the cost. Caching alone therefore cannot make a launch-time reconcile
+   free. `ensureRegistered()` gates the whole pass on a cheap fingerprint
+   (version, the command we would write, the recorded/override binary, the kill
+   switch, and each agent's resolved file + existence), the same
+   marker-in-state shape `ensurePostCommitForVersion` already uses. Measured:
+   **16–17 ms** on an already-registered launch, ~15 ms of which is requiring
+   the module, versus ~2.34 s ungated.
+2. **Step 5 put inside `hooks.removeHooks()` breaks an unrelated feature.**
+   That function is also called by `lib/server.js` when the dashboard's
+   Settings toggle switches *distillation* off, and by `lib/consent.js` when
+   the first-run prompt is declined. Wiring `unregisterAll()` into it means
+   turning off Stop-hook session summaries silently tears MemBridge's MCP
+   server out of Codex and Cursor, from inside an HTTP handler that then blocks
+   on `claude mcp remove`. It is wired into the `remove-hooks` **CLI verb**
+   instead — the documented uninstall path — and `lib/server.js` needs no edit
+   at all, despite being on the file list.
+3. **Step 4 as written makes `status` write, and slow.** "Report in `membridge
+   status`: one line per agent" implies running a registration to report on it,
+   from a read-only command, at 2.1 s a go. The rows are persisted to state by
+   whoever last ran one, and `status` prints those. That is also what makes the
+   "never silently skip" rule real: a report only reports if it outlives the
+   process that produced it.
+4. **The file list is wrong twice.** `install.sh` is **generated** from
+   `scripts/install/install.sh.tmpl` by `gen-install.js`; editing only the
+   generated copy is reverted by the next release stamp, so both move together.
+   And the list omits `lib/mcp-register.js`, which is where the gate, the
+   persistence and the read-only report have to live.
+5. **`curl … | sh` means stdin is the rest of the script.** The install step
+   runs a child that would otherwise inherit it and eat the remaining steps.
+   `</dev/null`, and `|| say …` so a failed registration warns instead of
+   aborting an otherwise-good install under `set -e`.
+
+**Two calls made under "best long-term for a diverse userbase":**
+
+- **Only a `'shell'` resolution is recorded** as `config.mcp.claudeBinRecorded`.
+  `'probe'` is a guess from a fixed list that cannot see nvm/volta/asdf; caching
+  one pins a stale binary *forever* (it exists, so the stale-record check never
+  discards it) while the user's real one moves with their version manager. A
+  wrong cached path is worse than none — the miss is loud, the wrong hit is
+  silent. `'config'` and `'recorded'` teach us nothing new.
+- **An explicit `mcp unregister` is remembered as an opt-out**, so a user who
+  ran `membridge remove-hooks` does not find MemBridge back in their tools after
+  the next daemon launch. `membridge mcp register` (which `install.sh` runs) is
+  the way back in, and `remove-hooks` says so.
+
+**Not changed, deliberately:** the kill switch still refuses an *explicit*
+`membridge mcp register` (reporting `config.mcp.autoRegister is false` on every
+row). One switch, one meaning, and the row names the key that undoes it.
 
 **Files:**
-- Modify: `install.sh`, `bin/membridge.js`, `lib/server.js`, `lib/hooks.js` (removal path)
+- Modify: `scripts/install/install.sh.tmpl` + `scripts/install/install.sh`, `bin/membridge.js`, `lib/hooks.js` (launch path), `lib/mcp-register.js` (gate, persistence, report)
 - Test: `test/run-tests.js`
 
 - [ ] **Step 1: Register during install**
