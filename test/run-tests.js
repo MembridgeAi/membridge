@@ -16367,6 +16367,150 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+// ---- teammate notes: kill switch + hook registration (plan Task 7) ----
+  {
+    check('notes: enabled by default', () => {
+      assert.strictEqual(notes.isNotesEnabled({}), true);
+    });
+
+    check('notes: kill switch disables the feature', () => {
+      assert.strictEqual(notes.isNotesEnabled({ teammateNotes: { enabled: false } }), false);
+    });
+
+    check('notes: an unrelated config key does not disable it', () => {
+      assert.strictEqual(notes.isNotesEnabled({ teammateNotes: {} }), true);
+    });
+
+    // Every registration check drives its OWN settings file. reconcileNotesHooks
+    // writes wherever MEMBRIDGE_CLAUDE_SETTINGS points, and the suite sets that
+    // globally much earlier (the API block), so sharing it would let these
+    // checks scribble over another block's fixture.
+    const withNotesSettings = (basename, seed, fn) => {
+      const f = path.join(ROOT, basename);
+      fs.writeFileSync(f, JSON.stringify(seed, null, 2));
+      const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+      try {
+        return fn(f);
+      } finally {
+        process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+      }
+    };
+    const cmdsOf = arr => (arr || []).flatMap(e => (e.hooks || []).map(h => h.command));
+    const countSub = (arr, re) => cmdsOf(arr).filter(c => re.test(c)).length;
+
+    check('hooks: reconcileNotesHooks registers SessionStart and PostCompact', () => {
+      withNotesSettings('claude-settings-notes-fresh.json', { model: 'opus' }, () => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, true, 'the first reconcile must write');
+        const settings = JSON.parse(read(r.file));
+        assert.ok(cmdsOf(settings.hooks.SessionStart).some(c => /notes-session-start/.test(c)));
+        assert.ok(cmdsOf(settings.hooks.PostCompact).some(c => /notes-post-compact/.test(c)));
+        assert.strictEqual(settings.model, 'opus', 'an unrelated settings key was lost');
+        // FileChanged is deliberately NOT registered: the Task 1 spike proved it
+        // suppresses systemMessage and that its matcher rejects any filename
+        // containing '.' or '-'. Registering it would be a silent no-op surface.
+        assert.strictEqual(settings.hooks.FileChanged, undefined, 'FileChanged must never be registered');
+      });
+    });
+
+    check('hooks: reconcileNotesHooks is idempotent', () => {
+      withNotesSettings('claude-settings-notes-idempotent.json', {}, f => {
+        hooks.reconcileNotesHooks();
+        const after1 = read(f);
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, false, 'a converged second reconcile must not rewrite the file');
+        assert.strictEqual(read(f), after1, 'the second reconcile changed the file');
+        const settings = JSON.parse(read(r.file));
+        assert.strictEqual(countSub(settings.hooks.SessionStart, /notes-session-start/), 1);
+        assert.strictEqual(countSub(settings.hooks.PostCompact, /notes-post-compact/), 1);
+      });
+    });
+
+    // The fixture seeds a STALE command of ours next to the user's entries, so
+    // the reconcile pass under test is one that actually REWRITES the file.
+    // Prepending to an already-converged install (the obvious way to write this)
+    // proves nothing: that second reconcile is a no-op that writes nothing at
+    // all, so the user's entry survives on disk however badly the reconciler
+    // mangles it in memory — a mutant that deletes every foreign hook passes.
+    check('hooks: reconcileNotesHooks leaves a foreign SessionStart entry alone', () => {
+      const mineStart = { hooks: [{ type: 'command', command: 'echo mine' }] };
+      const minePost = { matcher: 'manual', hooks: [{ type: 'command', command: 'echo mine-compact' }] };
+      const stale = sub => ({ hooks: [{ type: 'command', command: `"/old/node" "/old/lib/membridge-hook.js" ${sub}`, timeout: 5 }] });
+      const seed = {
+        hooks: {
+          SessionStart: [mineStart, stale('notes-session-start')],
+          PostCompact: [minePost, stale('notes-post-compact')],
+        },
+      };
+      withNotesSettings('claude-settings-notes-foreign.json', seed, f => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, true, 'the fixture must force a real write, or this check proves nothing');
+        assert.strictEqual(r.upgraded, 2, 'both stale notes commands should have been recognized and upgraded');
+        const s1 = JSON.parse(read(f));
+        // Not merely "still present somewhere": still FIRST, byte-identical and
+        // not duplicated. A reconcile that rebuilt the array around its own
+        // entry, or reordered foreign entries behind it, sails through a bare
+        // includes() check.
+        assert.deepStrictEqual(s1.hooks.SessionStart[0], mineStart, "the user's SessionStart entry was moved, rewritten or dropped");
+        assert.deepStrictEqual(s1.hooks.PostCompact[0], minePost, "the user's PostCompact entry was moved, rewritten or dropped");
+        assert.strictEqual(countSub(s1.hooks.SessionStart, /^echo mine$/), 1, "the user's entry was duplicated");
+        assert.strictEqual(countSub(s1.hooks.SessionStart, /notes-session-start/), 1, 'our entry was duplicated');
+        assert.strictEqual(s1.hooks.SessionStart.length, 2);
+        assert.strictEqual(s1.hooks.PostCompact.length, 2);
+        // And the converged pass after it is a true no-op: nothing rewritten,
+        // nothing appended alongside what it just upgraded.
+        const before = read(f);
+        assert.strictEqual(hooks.reconcileNotesHooks().wrote, false, 'the pass after an upgrade must be a no-op');
+        assert.strictEqual(read(f), before);
+      });
+    });
+
+    // The destructive case a per-ENTRY ownership test cannot see: a user hook
+    // sharing one entry object with ours. Claiming the whole entry as ours
+    // deletes the user's hook along with it.
+    check('hooks: reconcileNotesHooks upgrades a stale command without touching a user hook in the same entry', () => {
+      const userHook = { type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mystart.js' };
+      const seed = {
+        hooks: {
+          SessionStart: [{
+            hooks: [userHook, { type: 'command', command: '"/old/node" "/old/lib/membridge-hook.js" notes-session-start', timeout: 5 }],
+          }],
+        },
+      };
+      withNotesSettings('claude-settings-notes-mixed.json', seed, f => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.upgraded, 1, 'the stale notes command was not recognized as ours');
+        const s = JSON.parse(read(f));
+        assert.strictEqual(s.hooks.SessionStart.length, 1, 'the mixed entry was split, dropped or duplicated');
+        const inner = s.hooks.SessionStart[0].hooks;
+        assert.strictEqual(inner.length, 2, 'the stale hook was appended alongside instead of upgraded in place');
+        assert.deepStrictEqual(inner[0], userHook, "the user's hook inside our entry was rewritten or dropped");
+        assert.strictEqual(inner[1].command, `${hooks.hookCommand()} notes-session-start`, 'the stale install path was not upgraded');
+        assert.strictEqual(inner[1].timeout, 5, 'sibling fields lost in the upgrade');
+      });
+    });
+
+    check('hooks: remove-hooks strips the notes entries and leaves foreign ones alone', () => {
+      const mineStart = { hooks: [{ type: 'command', command: 'echo my-session-start' }] };
+      const minePost = { hooks: [{ type: 'command', command: 'echo my-post-compact' }] };
+      const seed = { hooks: { SessionStart: [mineStart], PostCompact: [minePost] } };
+      const f = path.join(ROOT, 'claude-settings-notes-remove.json');
+      fs.writeFileSync(f, JSON.stringify(seed, null, 2));
+      const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const before = JSON.parse(read(f));
+      assert.strictEqual(countSub(before.hooks.SessionStart, /notes-session-start/), 1, 'setup-hooks did not register the notes SessionStart hook');
+      assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 1, 'setup-hooks did not register the notes PostCompact hook');
+      const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(rm.status, 0, rm.stderr);
+      const after = JSON.parse(read(f));
+      assert.deepStrictEqual(after.hooks.SessionStart, [mineStart], "remove-hooks left our SessionStart entry behind, or ate the user's");
+      assert.deepStrictEqual(after.hooks.PostCompact, [minePost], "remove-hooks left our PostCompact entry behind, or ate the user's");
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
