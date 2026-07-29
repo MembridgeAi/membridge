@@ -17,15 +17,21 @@ workers_dev = false
 ACCESS_TEAM_DOMAIN = "weathered-sky-8f4e.cloudflareaccess.com"
 ACCESS_AUD = "ce8ae1ef05b71f3245bd11441a382d6f2c9bbbd0b7a23840e96b34dfc3a66646"
 ALLOWED_EMAILS = "marco@melika.com"
+# Not secrets, so they live here rather than as `wrangler secret put` prompts.
+# The account id appears in every dashboard URL; the Supabase project URL already
+# ships publicly in lib/backend.json. Treating non-secrets as secrets just adds
+# steps and makes the two that ARE sensitive easier to lose track of.
+CF_ACCOUNT_ID = "a699188326d9ffcbf6499e943228a8f2"
+SUPABASE_URL = "https://mefgbiecvoszjorwzkfz.supabase.co"
 # Team ids to leave out of every business figure — the operator's own
 # dogfooding teams. JSON array of uuids, or [] for everything.
 EXCLUDE_TEAMS = "[]"
 
-# Secrets — NEVER put these in this file. Set with `wrangler secret put <NAME>`:
-#   CF_ACCOUNT_ID         Cloudflare account id
+# Secrets — exactly TWO, and NEVER in this file. Set with
+# `wrangler secret put <NAME>` (it prompts; the value never touches your shell
+# history or argv):
 #   CF_API_TOKEN          scoped to Account Analytics: Read, nothing else
-#   SUPABASE_URL          https://<project>.supabase.co
-#   SUPABASE_SERVICE_KEY  service role key
+#   SUPABASE_SERVICE_KEY  Supabase service role key
 #
 # On SUPABASE_SERVICE_KEY, stated plainly rather than hidden: this is the one
 # high-privilege credential in the design. It is required because ops_snapshot()
