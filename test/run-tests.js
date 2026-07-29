@@ -8810,13 +8810,22 @@ async function main() {
         'avoided must carry tokens only -- no dollar/cost field');
       assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
         'holdout must carry tokens only -- no dollar/cost field');
+      // Teammate-note injection cost (notes spec §9): a FLAT sibling of
+      // `avoided`, never a member of it, so nothing doing net arithmetic can
+      // reach it. This fixture's ledger predates the field entirely, which is
+      // also the check that an absent block defaults to zero rather than
+      // undefined -- the dashboard reads this straight off totals.
+      assert.strictEqual(payload.projects[0].notesInjectedTokens, 0);
+      assert.strictEqual(payload.totals.notesInjectedTokens, 0);
+      assert.ok(!('notesInjectedTokens' in payload.projects[0].avoided));
       // Whitelist: the payload is an explicit projection, so accumulation
-      // bookkeeping (dedupe keys, per-path reader sets) can never leak onto
-      // the wire just because it was added to ledger.json.
+      // bookkeeping (dedupe keys, per-path reader sets, notes.seenKeys) can
+      // never leak onto the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['avoided', 'holdout', 'hotPaths', 'name', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
-      assert.deepStrictEqual(Object.keys(payload.totals).sort(), ['avoided', 'holdout', 'reads', 'requests', 'volume'],
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(),
+        ['avoided', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
@@ -19277,6 +19286,266 @@ const repoRoot = require('../lib/repo-root');
       const bad = runNotesEntry('notes-session-start', { session_id: 'has spaces', cwd: hookProj });
       assert.strictEqual(bad.status, 0, bad.stderr);
       assert.strictEqual(bad.stdout.trim(), '');
+    });
+  }
+
+  // ---- teammate notes: token accounting (spec §9) ----
+  // The property this whole block exists to defend is NOT "a number appears".
+  // It is that an injected note is counted as INPUT COST, on its own line,
+  // and never enters the avoided/net arithmetic -- and that the count survives
+  // the fold at all. The queue these rows land in is REWRITTEN by
+  // lib/ledger-fold-recall.js's commit() down to remainder+retained, and a
+  // notes_injected row is neither, so anything that reads events.jsonl after a
+  // fold pass finds nothing. "the fold's accumulator" was therefore never a
+  // free-standing reader; the tally has to happen in the same pass that
+  // consumes the rows. The 'a later reader finds nothing' check below pins
+  // exactly that, so the mistake cannot be reintroduced quietly.
+  {
+    const notesLib = require('../lib/teammate-notes');
+    const notesStoreLib = require('../lib/teammate-notes-store');
+    const hooksRecallLib = require('../lib/hooks-recall');
+    const hooksNotesLib = require('../lib/hooks-notes');
+    const ledgerStoreTok = require('../lib/ledger-store');
+    const { estimateTokens: estimateTokensLib } = require('../lib/token-estimate');
+    const NOWT = '2026-07-28T10:00:00Z';
+    const rowsOf = p => fs.readFileSync(hooksRecallLib.eventsPath(p), 'utf8')
+      .trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const injectedRows = p => (fs.existsSync(hooksRecallLib.eventsPath(p)) ? rowsOf(p) : [])
+      .filter(r => r.kind === 'notes_injected');
+    const seedNotes = (p, when) => notesStoreLib.write(p, notesLib.buildIndex(
+      [{ author_name: 'Andrew', ts: '2026-07-28T09:00:00Z',
+        decisions: 'renamed the retry cap to maxAttempts', gotchas: '' }],
+      null, when || NOWT));
+    const mkProj = name => {
+      const p = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(p, { recursive: true });
+      return p;
+    };
+
+    check('notes-tokens: an injection records its own token cost', () => {
+      const tp = mkProj('token-notes-proj');
+      seedNotes(tp);
+      const out = hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      });
+      out.commit();
+      const injected = injectedRows(tp);
+      assert.strictEqual(injected.length, 1);
+      // Not merely `> 0`: the row must price THIS injection, so the count has
+      // to track the text actually written. A hardcoded constant, or a tally
+      // of the wrong string, passes a bare positivity check.
+      assert.strictEqual(injected[0].tokens, estimateTokensLib(out.text));
+      assert.strictEqual(injected[0].relPath, 'lib/x.js');
+      assert.strictEqual(injected[0].sessionId, 's1');
+    });
+
+    check('notes-tokens: the fold reduces those rows onto the ledger and /api/savings reports them', () => {
+      const tp = mkProj('token-notes-fold');
+      seedNotes(tp);
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      const cost = injectedRows(tp)[0].tokens;
+      assert.ok(cost > 0);
+
+      const led = ledgerStoreTok.updateLedger(tp, [], {});
+      assert.strictEqual(led.notes.tokens, cost);
+      assert.strictEqual(led.notes.injections, 1);
+
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
+      const pay = savingsPayload();
+      const proj = pay.projects.find(x => x.path === tp);
+      assert.ok(proj, 'the project must appear in /api/savings');
+      assert.strictEqual(proj.notesInjectedTokens, cost);
+      assert.ok(pay.totals.notesInjectedTokens >= cost);
+      // A plain number on the wire: the dedupe evidence behind it is
+      // bookkeeping and stays off, exactly like holdout.seenKeys already does.
+      assert.strictEqual(typeof proj.notesInjectedTokens, 'number');
+      assert.ok(!JSON.stringify(pay).includes('seenKeys'), 'dedupe evidence must not reach the wire');
+    });
+
+    check('notes-tokens: a reader that waits until after the fold finds nothing — the tally must happen in the consuming pass', () => {
+      const tp = mkProj('token-notes-consumed');
+      seedNotes(tp);
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      assert.strictEqual(injectedRows(tp).length, 1, 'precondition: the row is queued');
+      ledgerStoreTok.updateLedger(tp, [], {});
+      // THIS is the broken implementation, made explicit: a separate pass over
+      // events.jsonl, run after the fold, is what the plan's Step 6 reads as
+      // describing. It sees zero rows, so it would report zero tokens forever
+      // while every test that only looked at the hook stayed green.
+      assert.strictEqual(injectedRows(tp).length, 0,
+        'commit() rewrites the queue to remainder+retained; a notes_injected row is neither');
+      assert.ok(ledgerStoreTok.readLedger(tp).notes.tokens > 0,
+        'so the tally has to have happened inside the pass that consumed it');
+    });
+
+    check('notes-tokens: a re-read of the same queued row never inflates the figure', () => {
+      const tp = mkProj('token-notes-dedupe');
+      seedNotes(tp);
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      const queued = fs.readFileSync(hooksRecallLib.eventsPath(tp), 'utf8');
+      const cost = ledgerStoreTok.updateLedger(tp, [], {}).notes.tokens;
+      assert.ok(cost > 0);
+      // Exactly the failure lib/ledger-fold-recall.js's commit() header
+      // documents for serves and holdout rows: the ledger write landed, the
+      // queue rewrite did not, so the identical row is read again next pass.
+      // An input-cost figure that climbs on its own is worse than none.
+      fs.writeFileSync(hooksRecallLib.eventsPath(tp), queued);
+      const again = ledgerStoreTok.updateLedger(tp, [], {});
+      assert.strictEqual(again.notes.tokens, cost);
+      assert.strictEqual(again.notes.injections, 1);
+    });
+
+    check('notes-tokens: a failed measurement row never costs the user the note', () => {
+      const tp = mkProj('token-notes-besteffort');
+      seedNotes(tp);
+      // appendEvent mkdirSync's this path; a FILE there makes every write fail
+      // (ENOTDIR/EEXIST), which is the closest deterministic stand-in for a
+      // full disk there is.
+      fs.mkdirSync(path.join(tp, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(tp, '.membridge', 'recall'), 'not a directory');
+      const out = hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      });
+      assert.ok(out.text.includes('maxAttempts'));
+      // Unwrapping the append is what this catches: the append genuinely
+      // fails here, so without its own try/catch the throw escapes commit()
+      // into the hook body. There it would be swallowed by runRecall()'s outer
+      // catch -- silently, with the note already on stdout and its marker
+      // never written, so the same note re-fires on every read forever.
+      assert.doesNotThrow(() => out.commit(), 'accounting must never throw out to the caller');
+      // The half that actually matters: the note was still marked delivered.
+      assert.strictEqual(hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's2', now: NOWT, config: {},
+      }), null, 'the seen-marking must have survived the failed measurement');
+    });
+
+    check('notes-tokens: a restated-only injection after a compaction is still counted', () => {
+      const tp = mkProj('token-notes-refire');
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
+      seedNotes(tp);
+      // Deliver once, so the decision is marked seen and has nothing new left
+      // to say -- the state a compacted session is in.
+      hooksNotesLib.buildSessionOutput({
+        projectPath: tp, sessionId: 's1', source: 'startup', now: NOWT, config: {},
+      }).commit();
+      const beforeRows = injectedRows(tp).length;
+      const restated = hooksNotesLib.buildSessionOutput({
+        projectPath: tp, sessionId: 's1', source: 'compact', now: NOWT, config: {},
+      });
+      assert.ok(restated && /still in force/.test(restated.text), 'precondition: this is a restatement');
+      restated.commit();
+      // buildSessionOutput's commit() returns early when there are no new ids
+      // to mark. Those tokens were still spent -- delivery point 4 is a
+      // RE-injection, its whole cost is input -- so the accounting row must be
+      // written BEFORE that return, not after it.
+      const after = injectedRows(tp);
+      assert.strictEqual(after.length, beforeRows + 1,
+        'a re-injection costs input tokens and must not be invisible to the ledger');
+      assert.strictEqual(after[after.length - 1].tokens, estimateTokensLib(restated.text));
+      assert.strictEqual(after[after.length - 1].relPath, null);
+    });
+
+    check('notes-tokens: the figure sits OUTSIDE the net — avoidance is untouched by an injection', () => {
+      const tp = mkProj('token-notes-outside');
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [tp]: { events: [] } } });
+      seedNotes(tp);
+      // The ROLL-UP before anything is injected. A defect that nets the two
+      // only in `totals` -- leaving every per-project field honest -- is
+      // invisible to the per-project assertions below, and `totals` is the
+      // number the headline line is built from.
+      const avoidedBefore = JSON.parse(JSON.stringify(savingsPayload().totals.avoided));
+      hooksRecallLib.buildNotesOutput({
+        projectPath: tp, absPath: path.join(tp, 'lib/x.js'), relPath: 'lib/x.js',
+        sessionId: 's1', now: NOWT, config: {},
+      }).commit();
+      const led = ledgerStoreTok.updateLedger(tp, [], {});
+      assert.ok(led.notes.tokens > 0);
+      assert.deepStrictEqual(savingsPayload().totals.avoided, avoidedBefore,
+        'injecting notes must not move the avoidance roll-up in either direction');
+      // Spec §9: an injected note is input SPENT. Netting it against avoidance
+      // would need a fabricated avoided figure, so every avoided field stays
+      // exactly zero here even though tokens were demonstrably injected.
+      assert.deepStrictEqual(led.avoided,
+        { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      const proj = savingsPayload().projects.find(x => x.path === tp);
+      assert.strictEqual(proj.avoided.tokens, 0);
+      assert.ok(proj.notesInjectedTokens > 0);
+      // A sibling of `avoided`, never a member of it: nesting it is the one
+      // shape that would put it within reach of the net arithmetic.
+      assert.ok(!('notesInjectedTokens' in proj.avoided));
+    });
+
+    check('notes-tokens: no net-savings expression references the injected-notes figure', () => {
+      // The plan asks for this to be confirmed by reading. Reading does not
+      // survive the next edit; this does. Every arithmetic operator applied to
+      // the figure anywhere in the two modules that own the savings surface is
+      // a spec §9 violation, so the check is on the source, not on a value.
+      const srcs = [
+        fs.readFileSync(path.join(__dirname, '..', 'lib', 'server.js'), 'utf8'),
+        require('../lib/dashboard/client')('', ''),
+      ];
+      for (const src of srcs) {
+        for (const raw of src.split('\n')) {
+          const line = raw.trim();
+          if (!/notesInjectedTokens/.test(line) || line.startsWith('//')) continue;
+          // It may never so much as SHARE A LINE with the avoidance figures.
+          // Broader than "no operator", and deliberately so: the shapes that
+          // would net the two (`totals.avoided.tokens -= notesInjectedTokens`,
+          // `pxSavingsPct(tokens - notesInjectedTokens, volume)`) all read the
+          // two names together, whatever operator sits between them.
+          assert.ok(!/avoided|volume|SavingsPct/.test(line),
+            `notesInjectedTokens must never meet the avoidance figures: ${line}`);
+          // Accumulating into ITSELF is the only compound assignment allowed.
+          if (/[-+*/]=/.test(line)) {
+            assert.ok(/^totals\.notesInjectedTokens \+=/.test(line),
+              `the only compound assignment allowed is into its own total: ${line}`);
+          }
+        }
+      }
+    });
+
+    check('notes-tokens: the dashboard line reports tokens outside the figure — never dollars, never "saved"', () => {
+      const src = require('../lib/dashboard/client')('', '');
+      const grab = (s, name) => {
+        const start = s.indexOf('function ' + name + '(');
+        if (start === -1) return null;
+        let i = s.indexOf('{', start), depth = 0, end = i;
+        for (; end < s.length; end++) {
+          if (s[end] === '{') depth++;
+          else if (s[end] === '}') { depth--; if (depth === 0) { end++; break; } }
+        }
+        return s.slice(start, end);
+      };
+      const fmtBody = grab(src, 'pxFmtTokens');
+      const lineBody = grab(src, 'pxNotesInjectedLine');
+      assert.ok(lineBody, 'pxNotesInjectedLine is missing from the client bundle');
+      const fn = new Function('var pxFmtTokens = ' + fmtBody + ';\nreturn (' + lineBody + ')')();
+      assert.strictEqual(fn({ notesInjectedTokens: 0 }), '', 'nothing injected: no line at all');
+      assert.strictEqual(fn(null), '', 'a missing totals block must not throw');
+      const line = fn({ notesInjectedTokens: 4120 });
+      assert.ok(line.indexOf('Tokens injected as teammate notes: 4k') === 0, line);
+      // The three wording constraints, each asserted rather than assumed.
+      assert.ok(!/saved/i.test(line), 'must never say "saved"');
+      assert.ok(!/[$£€]|dollar|cost you|\bspend\b/i.test(line), 'must never price it in money');
+      // And the sentence that says why it sits outside -- without it the figure
+      // reads as an unexplained charge against the number above it.
+      assert.ok(/kept out of the figure above/.test(line), line);
+      assert.ok(/cannot measure/.test(line), line);
     });
   }
 
