@@ -29,7 +29,60 @@ no project names, no account; two kill switches.
 
 ---
 
-## 2. Why the ingest endpoint is deferred
+## 2. REVISED — counters on Cloudflare, not Supabase
+
+Draft 2 deferred the ingest endpoint because it was dangerous. Re-examined: the
+danger was never the payload, it was the **address**. A one-line counter POSTed to
+Supabase is still an unauthenticated write path into the database holding every
+customer's data. Shrinking the payload makes a smaller hole in the same wall.
+
+**Decision: counters go to a Cloudflare Worker, not Supabase.** This changes the
+risk profile enough to move them into Phase 0.
+
+- **Blast radius goes to zero.** A Worker on the marketing account has no
+  credentials for, and no route to, the Supabase project. The worst case for a
+  compromised counter endpoint is wrong numbers on an internal page — not
+  customer data.
+- **Rate limiting and DDoS protection are inherited**, not hand-rolled.
+- **No database to secure**, no RLS to get wrong, no migration.
+- **The two-plane rule (§7) becomes structural.** Anonymous counters and
+  account data now live in systems that cannot query each other. That is a
+  stronger guarantee than a policy nobody can enforce at 2am.
+
+`membridge.app` is already on Cloudflare and already fronts the dashboard
+(§8), so this adds no new vendor.
+
+### 2.1 What to count
+
+Counters with a small number of dimensions — enough to ask a follow-up
+question, not enough to identify anyone:
+
+| Counter | Dimensions | Answers |
+|---|---|---|
+| `heartbeat` | version | how many installs are alive, on what |
+| `recall_state` | version, state (`serving` / `no_hot_paths` / `empty_store` / `all_rejected` / `never_fired`) | is the headline feature working, and how is it failing |
+| `hook_registration` | version, result (`wrote` / `current` / `failed`) | did a release break registration |
+| `environment` | shape (`single` / `worktree` / `mixed`) | how many installs the worktree keying defect strands |
+
+No paths, no repo names, no branch names, no account, no content. The existing
+random `install_id` rides along — it is not tied to any account, and without it
+these count *events* rather than *installs*, which is a much weaker number
+("1,200 broken heartbeats" vs "40 broken installs").
+
+### 2.2 Honest limits
+
+- **Forgery stays possible.** The client ships as readable JS, so anyone can
+  invent counters. For pure counters this only inflates numbers — sanity-check
+  against GitHub release download counts before trusting a spike.
+- **Counters cannot be re-asked.** A dimension not captured today is gone
+  forever for past data. Hence keeping `version` and `reason` rather than
+  reducing to a single number per counter.
+- **Self-reporting bias is unchanged.** An install broken enough not to run the
+  daemon reports nothing, so this can never measure total install base.
+
+---
+
+## 2b. Historical note — why the Supabase version was deferred
 
 `lib/diagnostics.js`'s own header states the justification for pooling: *"a single install never
 sees enough held-out reads to prove causation on its own."* That argument requires a population.
@@ -40,8 +93,12 @@ Against that, the cost is not theoretical (§6). So:
 
 | Phase | Trigger to start | What ships |
 |---|---|---|
-| **0 — now** | immediately | Business metrics (§4), migration reconciliation (§3), `membridge doctor` (§5) |
-| **1 — later** | install base large enough that pooling means something (order hundreds) | Public ingest endpoint (§6), Plane A payload additions |
+| **0 — now** | immediately | Cloudflare counters (§2), business metrics (§4), migration reconciliation (§3), `membridge doctor` (§5) |
+| **1 — later** | only if counters prove insufficient AND the install base justifies it | The richer Supabase payload described in §6 |
+
+**Superseded by §2.** The reasoning below explains why the *Supabase-hosted*
+endpoint was deferred; it is kept because the argument still applies to the
+richer payload, which would still need a database.
 
 Phase 0 delivers the questions actually being asked today — how many teams, what size, who is
 active, is recall working — with no new attack surface.
