@@ -16094,15 +16094,28 @@ async function main() {
     });
 
     check('notes: buildIndex bounds prose to MAX_PROSE, newest kept', () => {
-      const many = [];
-      for (let i = 0; i < notes.MAX_PROSE + 25; i++) {
-        const d = String(i).padStart(4, '0');
-        many.push({ author_name: 'A', ts: `2026-01-01T00:00:${(i % 60).toString().padStart(2, '0')}.${d}Z`, decisions: `d${i}`, gotchas: '' });
-      }
-      const ix = notes.buildIndex(many, null, T1);
-      assert.strictEqual(ix.prose.length, notes.MAX_PROSE);
-    });
-
+    // Timestamps MUST be monotonic in i. The original fixture cycled the
+    // seconds field (i % 60) with a 4-digit fraction Date.parse truncates to
+    // 3, so recency had no relationship to i at all -- the eviction set came
+    // out as four clusters (0-6, 60-65, 120-125, 180-185) rather than the
+    // oldest 25, and the "newest kept" half of this test asserted nothing.
+    // One minute apart makes order and index the same thing.
+    const base = Date.parse('2026-01-01T00:00:00Z');
+    const many = [];
+    for (let i = 0; i < notes.MAX_PROSE + 25; i++) {
+      many.push({ author_name: 'A', ts: new Date(base + i * 60000).toISOString(), decisions: `d${i}`, gotchas: '' });
+    }
+    const ix = notes.buildIndex(many, null, T1);
+    assert.strictEqual(ix.prose.length, notes.MAX_PROSE);
+    const texts = new Set(ix.prose.map(p => p.text));
+    // The 25 OLDEST are the ones that must go -- an implementation that
+    // evicted the newest instead would pass a length-only assertion.
+    for (let i = 0; i < 25; i++) {
+      assert.ok(!texts.has(`d${i}`), `d${i} is among the 25 oldest and must have been evicted`);
+    }
+    assert.ok(texts.has(`d${notes.MAX_PROSE + 24}`), 'the single newest entry must be kept');
+    assert.ok(texts.has(`d25`), 'the oldest SURVIVOR (d25) must be kept');
+  });
     check('notes: pruneSeen drops session records older than SEEN_PRUNE_DAYS', () => {
       let ix = notes.buildIndex(rows, null, T1);
       ix = notes.markFileSeen(ix, 'old-session', ['x'], T0);
