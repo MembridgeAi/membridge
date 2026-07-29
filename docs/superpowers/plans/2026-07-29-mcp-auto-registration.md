@@ -200,7 +200,56 @@ git commit -m "feat(mcp): ship the MCP dependencies instead of calling them opt-
 
 ---
 
-## Task 2: Agent config discovery
+## Task 2: Agent config discovery ✅ DONE (`5222b9c`, merged)
+
+**The implementation sketched below would have made the entire feature silently
+inert in production, and no test in this plan could have caught it.** Read
+`lib/agent-config.js`, not the sketch.
+
+**Defect 1 — `util.homeDir()` is not the user's home.** It returns
+`~/.membridge`, MemBridge's own config directory. So `resolveAgentConfig('codex')`
+resolved `~/.membridge/.codex/config.toml` — a path Codex will never read. Every
+agent would report `exists: false`, `installedAgents()` would return empty, and
+**nothing would ever register**: precisely the bug this feature exists to fix,
+reintroduced by the fix. Verified:
+
+```
+util.homeDir()  = /Users/marco/.membridge     (does not contain .codex)
+os.homedir()    = /Users/marco                (does)
+```
+
+Every test in this plan injects `home`, so **not one of them could ever have
+failed on it**. That is the lesson: a fixture that supplies the value under test
+cannot test how it is obtained. Fixed to `os.homedir()`, with a regression test
+that deliberately omits `home`.
+
+**Defect 2 — Claude Code's config path was wrong twice over.** The real file is
+`~/.claude.json`, a *sibling* of `~/.claude/`, not `~/.claude/claude.json`. `dir`
+(install detection) and `file` now diverge via a `defaultFile` field.
+
+**Defect 3 — `xdg: 'codex'` was fabricated.** Verified behaviourally: with
+`XDG_CONFIG_HOME` set, `codex doctor` still reports `~/.codex`. Left in, we would
+write a file Codex never reads on every Linux machine. Set to `null`.
+
+**Defect 4 — the XDG branch silently dropped Linux Cursor users.** It returned
+the XDG path unconditionally when `XDG_CONFIG_HOME` was set; a user with the
+variable set (most Linux users) but Cursor at `~/.cursor` got an empty XDG dir,
+`exists: false`, and silent exclusion. Now the XDG directory must actually exist
+before it wins.
+
+**All three env vars turned out to be REAL** — I had doubted two. `CODEX_HOME`,
+`CLAUDE_CONFIG_DIR` and `CURSOR_CONFIG_DIR` were each verified behaviourally.
+One caveat recorded in the code: `CURSOR_CONFIG_DIR` governs the cursor-agent
+CLI, while the Cursor **IDE** hardcodes `~/.cursor/mcp.json` with no env var and
+no XDG. The two surfaces genuinely disagree.
+
+**Built under the long-term-first rule:** `envVar` accepts a string, an array or
+`null` (a renamed variable with a legacy alias is a one-line data edit); a
+user-declared agent escape hatch, `config.mcp.<name> = { configPath, format }`,
+so someone on a tool MemBridge has never heard of is not stuck; and a `format`
+field (`'claude-cli' | 'toml' | 'json'`) so **Task 6 never needs to branch on an
+agent name** — every per-agent difference is a `SPECS` field.
+
 
 Resolves **where** each agent keeps its MCP config, by asking authorities rather than hardcoding one machine's layout. Spec §4.1.
 
