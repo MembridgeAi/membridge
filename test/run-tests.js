@@ -17238,7 +17238,13 @@ const repoRoot = require('../lib/repo-root');
         config: {}, recorded: null, env: { SHELL: slow }, candidates: [],
       });
       assert.strictEqual(r, null, 'a shell that never answers must resolve to null');
-      assert.ok(Date.now() - t0 < 20000, 'the shell query must be bounded by its timeout');
+      // The bound must sit BETWEEN the 5s timeout and the stub's 30s sleep: under
+      // 30s proves the timeout actually fired rather than the sleep completing.
+      // 20s looked like a comfortable 4x margin and still flaked under parallel
+      // suites -- spawn plus node startup stretch a long way on a loaded box.
+      // 25s keeps the discrimination (a missing timeout takes 30s+) without
+      // failing for load.
+      assert.ok(Date.now() - t0 < 25000, 'the shell query must be bounded by its timeout');
     });
 
     // A GUI-launched .app is the case this module exists for, and launchd does
