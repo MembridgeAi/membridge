@@ -38,6 +38,9 @@ Every task's requirements implicitly include this section.
   impossible input but will happily swallow a real bug — exactly what happened
   with `trackedOffset` in Task 2 (symlinked paths). When a fallback fires in a
   case you did not expect, treat it as a defect, not as the design working.
+- **Tests go INSIDE `main()`, immediately before the `// --- summary ---` block** — never at the end of the file. The suite lives inside `async function main()`, whose summary block prints the count, `fs.rmSync(ROOT)`s the fixtures and may `process.exit(1)`. Appending after it puts your checks out of scope, after the fixtures are gone. "Append to `test/run-tests.js`" always means this insertion point.
+- **A test that cannot fail is worse than no test.** Task 5's "leaves no temp files behind" check passed against a plain `writeFileSync` — a non-atomic write never creates a temp file, so the assertion was vacuously true. Where a test claims a property, build the broken implementation and confirm the test catches it.
+- **Verify `node_modules` before trusting a baseline.** `test/run-tests.js` requires the MCP SDK at top level; a worktree missing it dies instantly with a friendly message and NO baseline. Check first. If it fails, give the worktree its own `node_modules` rather than running `npm install` in the shared main tree — those packages are `--no-save` there and a plain install PRUNES them, including the demo pipeline's `playwright-core`. That has already happened once.
 - **No test may touch the network or a live backend.** Everything runs under a throwaway `MEMBRIDGE_HOME`, matching `test/run-tests.js`.
 - **Atomic writes only:** tmp file + rename, matching `lib/util.js` `saveState`, `lib/ledger-store.js` `writeLedger`, `lib/recall-store.js` `put`.
 - **No `Date.now()` inside pure functions.** Every selection and expiry function takes an injected `now` (an ISO string or ms number), so tests are deterministic.
@@ -154,7 +157,20 @@ a worktree, which is nearly every session on this machine. Both now key as
 
 ---
 
-## Task 3: Emit wire keys from teamsync
+## Task 3: Emit wire keys from teamsync ✅ DONE (`a255cb1`, merged)
+
+**A failure mode this task's text never considered, found during implementation
+and now fixed in the shipped code.** The superseded `toWirePath` was string
+concatenation and could not fail. `wireKeyFor` returns **`null`** for a file
+outside any checkout — so without an explicit fallback, `files` ships as
+`[null]`: a row no teammate can match or render. The shipped implementation
+falls back to the original path (`wireKeyFor(...) || p`), with a test that first
+asserts the fixture really is outside a checkout so the case cannot pass
+vacuously, mutation-verified by deleting the fallback.
+
+Anywhere else a `wireKeyFor` result is used, the null case must be handled
+explicitly. It is not a theoretical branch.
+
 
 Task 2 shipped `wireKeyFor(absPath)`. This task makes the wire actually carry
 those keys instead of tracked-relative paths.
@@ -777,7 +793,21 @@ git commit -m "feat(notes): pure teammate-notes index, selection and repetition 
 
 ---
 
-## Task 5: The notes store — fs layer
+## Task 5: The notes store — fs layer ✅ DONE (`c9ff90e`, merged)
+
+**The plan's atomicity test was hollow and has been replaced.** "Leaves no temp
+files behind" passes against a plain `fs.writeFileSync` — a non-atomic write
+never creates a temp file, so the assertion is trivially true. It proved
+tidiness, not atomicity. The shipped suite adds a discriminating check that
+spies on `fs.renameSync` and asserts the bytes were staged in a `.tmp` in the
+target directory and arrived only via a rename; it fails against the naive
+implementation and passes against the shipped one.
+
+**One caveat for Task 6 onward:** `read()` returns whatever parses, without
+validating shape. That is safe today only because every selector in
+`lib/teammate-notes.js` defaults its fields (`ix.prose || []`, `ix.byFile || {}`).
+Do not assume `read()` hands back a well-formed index.
+
 
 **Files:**
 - Create: `lib/teammate-notes-store.js`
