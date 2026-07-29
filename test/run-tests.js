@@ -8965,7 +8965,16 @@ async function main() {
   // entry on every currently-installed machine.
   check('stop: a real-shape entry (node + membridge-hook.js, no subcommand) is recognized as owned; a stale path is upgraded in place', () => {
     const f = path.join(ROOT, 'claude-settings-stop-realshape.json');
-    const staleCommand = '"/opt/homebrew/Cellar/node/25.7.0/bin/node" "/Users/marco/Documents/Membridge/lib/membridge-hook.js"';
+    // The stale value MUST be derived, never pasted in. This test used to
+    // hardcode one developer's real install path as its example of a stale
+    // one -- which on that developer's machine is character-for-character what
+    // hookCommand() resolves to, so there was nothing to upgrade and the check
+    // failed for them and them alone, on every run, forever. Rewriting only
+    // the script's directory keeps the real install shape (node +
+    // membridge-hook.js, no subcommand) while guaranteeing it differs from the
+    // current command on every machine.
+    const staleCommand = hooks.hookCommand().replace(/"[^"]*membridge-hook\.js"$/, '"/prior-install/lib/membridge-hook.js"');
+    assert.notStrictEqual(staleCommand, hooks.hookCommand(), 'the stale command must actually be stale, or this test proves nothing');
     fs.writeFileSync(f, JSON.stringify({
       hooks: { Stop: [{ hooks: [{ type: 'command', command: staleCommand, timeout: 10 }] }] },
     }, null, 2));
@@ -16400,6 +16409,68 @@ const repoRoot = require('../lib/repo-root');
       fs.chmodSync(locked, 0o600);
     }
     assert.strictEqual(read(locked), body, 'the unreadable file must survive byte-for-byte');
+  });
+
+  // A half-written settings.json is a file Claude Code refuses to parse -- the
+  // user loses every hook, permission and model setting they had. Staging into
+  // a temp file and renaming means a crash or a full disk leaves the old good
+  // file in place instead.
+  check('hooks: writeSettings stages into a temp file and renames into place', () => {
+    const f = path.join(ROOT, 'settings-atomic.json');
+    const realRename = fs.renameSync;
+    let renamedFrom = null;
+    fs.renameSync = (from, to) => { renamedFrom = from; return realRename(from, to); };
+    try {
+      hooks.writeSettings(f, { hooks: { Stop: [] } });
+    } finally {
+      fs.renameSync = realRename;
+    }
+    assert.ok(renamedFrom && renamedFrom.includes('.tmp'),
+      'writeSettings must stage into a temp file, never write the target in place');
+    assert.strictEqual(path.dirname(renamedFrom), path.dirname(f),
+      'the temp file must sit in the target directory so the rename is atomic');
+    assert.deepStrictEqual(JSON.parse(read(f)), { hooks: { Stop: [] } });
+    const strays = fs.readdirSync(path.dirname(f)).filter(n => n.includes('.settings-atomic.json.'));
+    assert.deepStrictEqual(strays, [], 'temp files must not be left behind');
+  });
+
+  // Rename REPLACES the target, so the new file carries the temp file's mode,
+  // not the old file's. Without care, rewriting a settings.json the user had
+  // locked down to 0600 silently republishes it at the umask default.
+  check('hooks: writeSettings preserves the existing file mode', () => {
+    const f = path.join(ROOT, 'settings-mode.json');
+    fs.writeFileSync(f, JSON.stringify({ hooks: {} }));
+    fs.chmodSync(f, 0o600);
+    hooks.writeSettings(f, { hooks: { Stop: [] } });
+    assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600,
+      'an atomic rewrite must not widen the permissions the user chose');
+  });
+
+  // The end-to-end pair. Atomic writes are what make this dangerous -- a
+  // rename needs only the DIRECTORY writable, so nothing at the write layer
+  // stops it replacing a file we could never read. readSettings refusing
+  // anything but ENOENT is the only thing standing between an unreadable
+  // settings.json and its destruction. If this check ever goes red, do not
+  // "fix" it by loosening readSettings.
+  check('hooks: an unreadable settings.json survives setup-hooks even with atomic writes', () => {
+    const f = path.join(ROOT, 'settings-locked-e2e.json');
+    const body = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'their-tool' }] }] } }, null, 2);
+    fs.writeFileSync(f, body);
+    fs.chmodSync(f, 0o000);
+    try {
+      let denied = false;
+      try { fs.readFileSync(f, 'utf8'); } catch { denied = true; }
+      if (process.getuid() !== 0 && denied) {
+        const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], {
+          env: { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f }, encoding: 'utf8',
+        });
+        assert.strictEqual(out.status, 1, `expected a refusal exit, got ${out.status}: ${out.stdout}${out.stderr}`);
+        assert.ok(/refusing to touch/i.test(out.stderr), `no refusal message: ${out.stderr}`);
+      }
+    } finally {
+      fs.chmodSync(f, 0o600);
+    }
+    assert.strictEqual(read(f), body, 'the user settings file was destroyed');
   });
 
   // --- summary ---
