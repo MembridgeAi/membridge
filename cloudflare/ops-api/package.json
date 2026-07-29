@@ -1,0 +1,5 @@
+{
+  "name": "membridge-ops-api",
+  "private": true,
+  "type": "module"
+}

@@ -11,6 +11,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # windows-latest is load-bearing, not decoration: it is the ONLY place
+        # lib/keychain.js's DPAPI backend is ever executed. The keychain(win)
+        # checks in test/run-tests.js print a visible skip everywhere else, so
+        # dropping this leg silently removes all coverage of Windows private-key
+        # storage while the suite still reports green.
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: [18, 20, 22]
     runs-on: ${{ matrix.os }}

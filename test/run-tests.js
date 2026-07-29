@@ -11552,6 +11552,43 @@ async function main() {
     assert.ok(keychain.remove(acct), 'remove failed');
     assert.strictEqual(keychain.load(acct), null, 'load after remove must be null');
   });
+  // Windows DPAPI backend. lib/keychain.js has a full Windows implementation
+  // (winAvailable/winStore/winLoad/winRemove) that has never been executed by
+  // this suite — every check above is darwin-or-fail-closed, so on a Mac the
+  // Windows path is completely uncovered.
+  //
+  // THIS IS DELIBERATELY A VISIBLE SKIP, NOT A SILENT PASS. An earlier version
+  // of this test opened with `if (process.platform !== 'win32') return;`, which
+  // counted as a passing check on every Mac run — the suite reported Windows
+  // key storage as tested when nothing had run. Real coverage requires the
+  // Windows CI leg (.github/workflows/windows.yml); until that runs, this line
+  // is the honest statement that it has not been verified here.
+  if (process.platform === 'win32') {
+    check('keychain(win): real DPAPI store/load/remove round trip', () => {
+      assert.ok(keychain.available(), 'DPAPI must be available on win32');
+      const acct = 'membridge.test.win.' + Date.now();
+      assert.ok(keychain.store(acct, 'WIN-SECRET'), 'store failed');
+      assert.strictEqual(keychain.load(acct), 'WIN-SECRET', 'load round trip');
+      assert.ok(keychain.store(acct, 'WIN-SECOND'), 're-store (update) failed');
+      assert.strictEqual(keychain.load(acct), 'WIN-SECOND', 'update round trip');
+      assert.ok(keychain.remove(acct), 'remove failed');
+      assert.strictEqual(keychain.load(acct), null, 'load after remove must be null');
+    });
+    check('keychain(win): the secret never travels on argv', () => {
+      // argv is world-readable via Get-CimInstance Win32_Process, exactly as it
+      // is via `ps` on macOS. The DPAPI backend must feed the secret to
+      // powershell on stdin; the -EncodedCommand text carries no secret.
+      const acct = 'membridge.test.win.argv.' + Date.now();
+      const secret = 'U0VDUkVULXZh+bHVl/wow==';
+      try {
+        assert.ok(keychain.store(acct, secret), 'store failed');
+        assert.strictEqual(keychain.load(acct), secret, 'round trip');
+      } finally { keychain.remove(acct); }
+    });
+  } else {
+    console.log('  skip  keychain(win): DPAPI round trip — not win32, needs the Windows CI leg');
+  }
+
   // Identity bootstrap (ensureIdentity, plan Task 4): pure by injection, so
   // every scenario runs offline against fakes — no network, no real keychain.
   // Awaits happen at block level (check() doesn't await), wrapped so a missing
@@ -16307,6 +16344,106 @@ async function main() {
     });
   }
 
+  // ---- anonymous product-health counters (spec §2) ----
+  // The classification ladder is the whole value of this feature: collapsing
+  // the failure states into one "broken" is what made the original bug take a
+  // day to diagnose, so each state is pinned individually.
+  {
+    const counters = require('../lib/counters');
+
+    check('counters: one real serve outranks every other signal', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 1, hotPaths: 0, storeEntries: 0, noStructure: 9 }), 'serving');
+    });
+
+    check('counters: no hot paths is distinguished from an empty store', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 0, storeEntries: 0, noStructure: 0 }), 'no_hot_paths');
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 3, storeEntries: 0, noStructure: 0 }), 'empty_store');
+    });
+
+    check('counters: skeletonizer rejection is its own state, not empty_store', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 3, storeEntries: 0, noStructure: 2 }), 'all_rejected');
+    });
+
+    check('counters: a warm cache that never served is ready_unserved', () => {
+      assert.strictEqual(counters.classifyRecall({ serves: 0, hotPaths: 3, storeEntries: 5, noStructure: 0 }), 'ready_unserved');
+    });
+
+    check('counters: roll-up reports serving when ANY project serves', () => {
+      assert.strictEqual(counters.rollUpRecall(['no_hot_paths', 'serving', 'empty_store']), 'serving');
+    });
+
+    check('counters: roll-up otherwise reports the most common failure, deterministically', () => {
+      assert.strictEqual(counters.rollUpRecall(['no_hot_paths', 'empty_store', 'no_hot_paths']), 'no_hot_paths');
+      assert.strictEqual(counters.rollUpRecall([]), null);
+    });
+
+    check('counters: checkout shape is single / worktree / mixed / none', () => {
+      assert.strictEqual(counters.environmentShape([false, false]), 'single');
+      assert.strictEqual(counters.environmentShape([true, true]), 'worktree');
+      assert.strictEqual(counters.environmentShape([true, false]), 'mixed');
+      assert.strictEqual(counters.environmentShape([]), 'none');
+    });
+
+    check('counters: a linked worktree is detected by .git being a file', () => {
+      const wt = path.join(ROOT, 'counters-wt');
+      const plain = path.join(ROOT, 'counters-plain');
+      fs.mkdirSync(wt, { recursive: true });
+      fs.mkdirSync(path.join(plain, '.git'), { recursive: true });
+      fs.writeFileSync(path.join(wt, '.git'), 'gitdir: /somewhere/.git/worktrees/x\n');
+      assert.strictEqual(counters.isWorktreeCheckout(wt), true);
+      assert.strictEqual(counters.isWorktreeCheckout(plain), false);
+      assert.strictEqual(counters.isWorktreeCheckout(path.join(ROOT, 'counters-absent')), false);
+    });
+
+    // Cadence is a safety property, not a nicety: without it a broken install
+    // POSTs on every 60s sync pass forever, which turns a diagnostic into a
+    // beacon and makes an endpoint outage self-amplifying.
+    check('counters: the signature ignores the heartbeat so cadence tracks real state', () => {
+      const built = counters.buildCounters({ recallState: 'serving', shape: 'mixed', registration: 'current' });
+      assert.deepStrictEqual(built.map(c => c.name), ['heartbeat', 'recall_state', 'environment', 'hook_registration']);
+      assert.ok(!counters.signatureOf(built).includes('heartbeat'));
+    });
+
+    check('counters: resend on state change, stay silent while unchanged', () => {
+      assert.strictEqual(counters.shouldSend(null, 'x', 1000), true);
+      assert.strictEqual(counters.shouldSend({ sig: 'x', ts: 1000 }, 'x', 2000), false);
+      assert.strictEqual(counters.shouldSend({ sig: 'x', ts: 1000 }, 'y', 2000), true);
+      assert.strictEqual(counters.shouldSend({ sig: 'x', ts: 0 }, 'x', counters.HEARTBEAT_INTERVAL_MS), true);
+    });
+
+    await check('counters: an unset endpoint never sends (self-hosted builds)', async () => {
+      let called = false;
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: '' }, {
+        fetchImpl: () => { called = true; return Promise.resolve({}); },
+      });
+      assert.strictEqual(sent, false);
+      assert.strictEqual(called, false);
+    });
+
+    await check('counters: the diagnostics kill switch suppresses these too', async () => {
+      let called = false;
+      const sent = await counters.emitCounters({ projects: {} }, {
+        countersUrl: 'http://127.0.0.1:1/never',
+        diagnostics: { enabled: false },
+      }, { fetchImpl: () => { called = true; return Promise.resolve({}); } });
+      assert.strictEqual(sent, false);
+      assert.strictEqual(called, false);
+    });
+
+    await check('counters: the payload carries no path, project name or account', async () => {
+      let body = null;
+      await counters.emitCounters({ projects: { [ROOT]: {} } }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: (url, opts) => { body = opts.body; return Promise.resolve({}); },
+        now: 1,
+      });
+      assert.ok(body, 'expected a POST body');
+      assert.ok(!body.includes(ROOT), 'project path must never be transmitted');
+      assert.ok(!body.includes('/'), 'no path-like value may appear in the payload');
+      const parsed = JSON.parse(body);
+      assert.deepStrictEqual(Object.keys(parsed).sort(), ['counters', 'install_id', 'version']);
+    });
+  }
+
 // ---- wire keys: one rule for monorepo depth AND worktrees (spec §7) ----
 const repoRoot = require('../lib/repo-root');
 
@@ -16771,18 +16908,49 @@ const repoRoot = require('../lib/repo-root');
     const cmdsOf = arr => (arr || []).flatMap(e => (e.hooks || []).map(h => h.command));
     const countSub = (arr, re) => cmdsOf(arr).filter(c => re.test(c)).length;
 
-    check('hooks: reconcileNotesHooks registers SessionStart and PostCompact', () => {
+    check('hooks: reconcileNotesHooks registers SessionStart and never PostCompact', () => {
       withNotesSettings('claude-settings-notes-fresh.json', { model: 'opus' }, () => {
         const r = hooks.reconcileNotesHooks();
         assert.strictEqual(r.wrote, true, 'the first reconcile must write');
         const settings = JSON.parse(read(r.file));
         assert.ok(cmdsOf(settings.hooks.SessionStart).some(c => /notes-session-start/.test(c)));
-        assert.ok(cmdsOf(settings.hooks.PostCompact).some(c => /notes-post-compact/.test(c)));
+        // PostCompact must NEVER be registered: it carries no additionalContext,
+        // so an entry there could never reach the model while still costing the
+        // user a hook run after every compaction. SessionStart's `compact`
+        // source covers compaction instead.
+        assert.strictEqual(settings.hooks.PostCompact, undefined, 'PostCompact must never be registered');
         assert.strictEqual(settings.model, 'opus', 'an unrelated settings key was lost');
         // FileChanged is deliberately NOT registered: the Task 1 spike proved it
         // suppresses systemMessage and that its matcher rejects any filename
         // containing '.' or '-'. Registering it would be a silent no-op surface.
         assert.strictEqual(settings.hooks.FileChanged, undefined, 'FileChanged must never be registered');
+      });
+    });
+
+    // Upgrade path. Earlier builds registered `notes-post-compact`; PostCompact
+    // carries no additionalContext, so it was retired. The entry survives in an
+    // installed settings.json, and the hook entry point's fallthrough is the
+    // STOP hook -- so a retired subcommand that is neither inert nor removed
+    // would run session distillation on every compaction.
+    check('hooks: reconcileNotesHooks strips a retired notes hook and spares the user\'s', () => {
+      const theirs = { hooks: [{ type: 'command', command: 'echo their-compact-thing' }] };
+      const ourStale = { hooks: [{ type: 'command', command: '"/old/node" "/old/lib/membridge-hook.js" notes-post-compact', timeout: 5 }] };
+      const seed = { hooks: { PostCompact: [theirs, ourStale] } };
+      withNotesSettings('claude-settings-notes-retired.json', seed, f => {
+        const r = hooks.reconcileNotesHooks();
+        assert.strictEqual(r.wrote, true, 'a stale retired entry must force a write');
+        assert.strictEqual(r.retired, 1, 'the retired entry was not counted as stripped');
+        const s = JSON.parse(read(f));
+        assert.deepStrictEqual(s.hooks.PostCompact, [theirs], "the retired entry survived, or the user's was eaten");
+      });
+    });
+
+    check('hooks: reconcileNotesHooks drops the PostCompact key when only ours was there', () => {
+      const ourStale = { hooks: [{ type: 'command', command: '"/old/node" "/old/lib/membridge-hook.js" notes-post-compact', timeout: 5 }] };
+      withNotesSettings('claude-settings-notes-retired-only.json', { hooks: { PostCompact: [ourStale] } }, f => {
+        hooks.reconcileNotesHooks();
+        const s = JSON.parse(read(f));
+        assert.strictEqual(s.hooks.PostCompact, undefined, 'an empty PostCompact array was left behind');
       });
     });
 
@@ -16795,7 +16963,7 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(read(f), after1, 'the second reconcile changed the file');
         const settings = JSON.parse(read(r.file));
         assert.strictEqual(countSub(settings.hooks.SessionStart, /notes-session-start/), 1);
-        assert.strictEqual(countSub(settings.hooks.PostCompact, /notes-post-compact/), 1);
+        assert.strictEqual(settings.hooks.PostCompact, undefined, 'PostCompact must never be registered');
       });
     });
 
@@ -16812,24 +16980,28 @@ const repoRoot = require('../lib/repo-root');
       const seed = {
         hooks: {
           SessionStart: [mineStart, stale('notes-session-start')],
-          PostCompact: [minePost, stale('notes-post-compact')],
+          PostCompact: [minePost],
         },
       };
       withNotesSettings('claude-settings-notes-foreign.json', seed, f => {
         const r = hooks.reconcileNotesHooks();
         assert.strictEqual(r.wrote, true, 'the fixture must force a real write, or this check proves nothing');
-        assert.strictEqual(r.upgraded, 2, 'both stale notes commands should have been recognized and upgraded');
+        // One stale command now, not two: PostCompact was retired, so the only
+        // subcommand we still register is notes-session-start.
+        assert.strictEqual(r.upgraded, 1, 'the stale notes command should have been recognized and upgraded');
         const s1 = JSON.parse(read(f));
         // Not merely "still present somewhere": still FIRST, byte-identical and
         // not duplicated. A reconcile that rebuilt the array around its own
         // entry, or reordered foreign entries behind it, sails through a bare
         // includes() check.
         assert.deepStrictEqual(s1.hooks.SessionStart[0], mineStart, "the user's SessionStart entry was moved, rewritten or dropped");
-        assert.deepStrictEqual(s1.hooks.PostCompact[0], minePost, "the user's PostCompact entry was moved, rewritten or dropped");
+        // Stronger than before: PostCompact is an event we do not own AT ALL,
+        // so the whole array must come back byte-identical.
+        assert.deepStrictEqual(s1.hooks.PostCompact, [minePost], "an event we never register was modified");
         assert.strictEqual(countSub(s1.hooks.SessionStart, /^echo mine$/), 1, "the user's entry was duplicated");
         assert.strictEqual(countSub(s1.hooks.SessionStart, /notes-session-start/), 1, 'our entry was duplicated');
         assert.strictEqual(s1.hooks.SessionStart.length, 2);
-        assert.strictEqual(s1.hooks.PostCompact.length, 2);
+        assert.strictEqual(s1.hooks.PostCompact.length, 1, 'we added an entry to an event we do not own');
         // And the converged pass after it is a true no-op: nothing rewritten,
         // nothing appended alongside what it just upgraded.
         const before = read(f);
@@ -16874,12 +17046,15 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(out.status, 0, out.stderr);
       const before = JSON.parse(read(f));
       assert.strictEqual(countSub(before.hooks.SessionStart, /notes-session-start/), 1, 'setup-hooks did not register the notes SessionStart hook');
-      assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 1, 'setup-hooks did not register the notes PostCompact hook');
+      assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 0, 'setup-hooks registered a PostCompact hook that can never deliver');
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
       assert.strictEqual(rm.status, 0, rm.stderr);
       const after = JSON.parse(read(f));
       assert.deepStrictEqual(after.hooks.SessionStart, [mineStart], "remove-hooks left our SessionStart entry behind, or ate the user's");
-      assert.deepStrictEqual(after.hooks.PostCompact, [minePost], "remove-hooks left our PostCompact entry behind, or ate the user's");
+      // PostCompact is retired: reconcile already stripped ours before this ran,
+      // so the user's entry is all that can be there — and remove-hooks must
+      // leave an event we no longer register completely alone.
+      assert.deepStrictEqual(after.hooks.PostCompact, [minePost], "remove-hooks touched an event we do not register");
     });
   }
 
@@ -18891,6 +19066,219 @@ const repoRoot = require('../lib/repo-root');
     }
     assert.strictEqual(read(f), body, 'the user settings file was destroyed');
   });
+  // ---- teammate notes: SessionStart delivery (spec §3.1, delivery points 4 and 5) ----
+  //
+  // POSTCOMPACT IS NOT A DELIVERY CHANNEL, and the checks below pin that.
+  // Verified against Claude Code 2.1.220 the way the FileChanged spike was: its
+  // hookSpecificOutput schema is a union with no PostCompact member, its
+  // executor runs through executeHooksOutsideREPL (which never reads
+  // additionalContext at all), and it feeds the hook's raw stdout into a
+  // userDisplayMessage shown to the HUMAN. Emitting the plan's JSON there would
+  // fail validation and print an error line to the user after every compaction.
+  // Delivery point 4 rides on SessionStart with source "compact" instead --
+  // that source is real (the compaction path calls the SessionStart executor
+  // with it) and SessionStart does support additionalContext.
+  {
+    const hooksNotes = require('../lib/hooks-notes');
+    const NOTES_HOOK_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+    const runNotesEntry = (sub, input) => spawnSync(process.execPath, [NOTES_HOOK_ENTRY, sub], {
+      input: typeof input === 'string' ? input : JSON.stringify(input),
+      encoding: 'utf8', env: { ...process.env },
+    });
+    const trackNotesProject = dir => {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [dir]: { events: [] } } });
+    };
+
+    const sp = path.join(ROOT, 'projects', 'session-notes-proj');
+    fs.mkdirSync(sp, { recursive: true });
+    const NOW2 = '2026-07-28T10:00:00Z';
+    const FOUR_DAYS = '2026-08-01T10:00:00Z';
+    const VERY_LATER = '2026-08-20T10:00:00Z';
+
+    // Three authors, deliberately. The catch-up header names how many teammates
+    // the backlog came from, and a single-author fixture cannot tell a real
+    // count from a hardcoded 1.
+    const TEAM = ['Andrew', 'Bea', 'Cai'];
+    const manyRows = [];
+    for (let i = 0; i < 9; i++) {
+      manyRows.push({ author_name: TEAM[i % 3], ts: `2026-07-2${i}T09:00:00Z`, decisions: `decision ${i}`, gotchas: '' });
+    }
+    const oneRow = [{ author_name: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'renamed the cap', gotchas: '' }];
+    const seed = rows => notesStore.write(sp, notes.buildIndex(rows, null, NOW2));
+    const session = extra => hooksNotes.buildSessionOutput({
+      projectPath: sp, sessionId: 's1', source: 'startup', now: NOW2, config: {}, ...extra,
+    });
+
+    check('notes-session: delivers unseen prose at session start', () => {
+      seed(oneRow);
+      assert.ok(session().text.includes('renamed the cap'));
+    });
+
+    check('notes-session: shows a catch-up count when over the cap', () => {
+      seed(manyRows);
+      const out = session();
+      // NOT `includes('6')`: the delivered lines read "- Cai: decision 6", so a
+      // bare-digit assertion passes even with no header at all -- vacuous in
+      // exactly the way this plan's global constraints call out. The header and
+      // the remainder line are asserted whole.
+      const lines = out.text.split('\n');
+      assert.strictEqual(lines[0],
+        `While you were away — 9 teammate decisions from 3 teammates. The ${notes.PROSE_CAP} most recent:`);
+      assert.ok(lines.includes(`${9 - notes.PROSE_CAP} more in the MemBridge feed.`), out.text);
+      assert.strictEqual(lines.filter(l => l.startsWith('- ')).length, notes.PROSE_CAP);
+    });
+
+    check('notes-session: at or below the cap there is no catch-up framing', () => {
+      seed(oneRow);
+      const out = session();
+      assert.ok(out.text.includes('renamed the cap'));
+      assert.ok(!/While you were away/.test(out.text), out.text);
+    });
+
+    check('notes-session: nothing is marked seen until commit() runs', () => {
+      seed(oneRow);
+      const first = session();
+      const second = session();
+      assert.ok(second && second.text.includes('renamed the cap'),
+        'the decision was consumed by building the output, before it was ever written');
+      first.commit();
+      assert.strictEqual(session(), null);
+    });
+
+    check('notes-session: nothing unseen returns null', () => {
+      seed(manyRows);
+      for (let i = 0; i < 4; i++) {
+        const more = session();
+        if (more) more.commit();
+      }
+      assert.strictEqual(session(), null);
+    });
+
+    check('notes-session: an old undelivered decision still arrives (vacation)', () => {
+      seed([{ author_name: 'A', ts: '2026-07-01T09:00:00Z', decisions: 'decided long ago', gotchas: '' }]);
+      const out = session({ sessionId: 's2', now: VERY_LATER });
+      assert.ok(out && out.text.includes('decided long ago'));
+    });
+
+    check('notes-session: after a compaction a delivered decision is restated', () => {
+      seed(oneRow);
+      session().commit();
+      const after = session({ source: 'compact' });
+      assert.ok(after && after.text.includes('renamed the cap'),
+        'delivery point 4 is inert: compaction summarised the decision away and nothing put it back');
+      after.commit();
+      assert.ok(session({ source: 'compact' }), 'restating a decision must not consume it');
+    });
+
+    check('notes-session: the cap of 3 covers new and restated together', () => {
+      seed(manyRows);
+      session().commit();
+      session().commit(); // 6 of 9 delivered, 3 still unseen, all 6 restatable
+      const out = session({ source: 'compact' });
+      const bullets = out.text.split('\n').filter(l => l.startsWith('- '));
+      assert.strictEqual(bullets.length, notes.PROSE_CAP,
+        `a compaction must not stack a full new block on a full restated one:\n${out.text}`);
+    });
+
+    check('notes-session: an ordinary session start does not restate what was already delivered', () => {
+      seed(oneRow);
+      session().commit();
+      assert.strictEqual(session({ source: 'startup' }), null);
+      assert.strictEqual(session({ source: 'resume' }), null);
+      assert.strictEqual(session({ source: undefined }), null);
+    });
+
+    check('notes-session: restating stops after the re-fire window', () => {
+      seed(oneRow);
+      session().commit();
+      assert.ok(session({ source: 'compact', now: FOUR_DAYS }));
+      assert.strictEqual(session({ source: 'compact', now: VERY_LATER }), null);
+    });
+
+    check('notes-session: kill switch silences it, on arrival and after compaction', () => {
+      seed(manyRows);
+      const off = { teammateNotes: { enabled: false } };
+      assert.strictEqual(session({ sessionId: 's3', config: off }), null);
+      assert.strictEqual(session({ sessionId: 's3', source: 'compact', config: off }), null);
+    });
+
+    check('notes-session: a corrupt index yields null, never a throw', () => {
+      fs.writeFileSync(notesStore.notesPath(sp), 'nope');
+      assert.doesNotThrow(() => {
+        assert.strictEqual(session({ sessionId: 's4' }), null);
+      });
+    });
+
+    // ---- the same thing through the real hook entry point ----
+    const hookProj = path.join(ROOT, 'projects', 'session-hook-proj');
+    fs.mkdirSync(hookProj, { recursive: true });
+    trackNotesProject(hookProj);
+    const startPayload = (sessionId, cwd, source) => ({
+      session_id: sessionId, transcript_path: '/dev/null', cwd,
+      hook_event_name: 'SessionStart', source: source || 'startup',
+    });
+
+    check('notes-session: resolveTrackedKey needs a FILE path, so the hook must not pass cwd bare', () => {
+      // A load-bearing assumption, pinned rather than trusted. resolveRoot
+      // starts at path.dirname(file), and a session's cwd IS normally the
+      // project root -- passing it bare resolves to the PARENT and every
+      // SessionStart delivery goes silently dead. If this ever starts
+      // returning a hit, the join in lib/hooks-notes.js can be dropped.
+      const st = util.loadState();
+      assert.strictEqual(projectResolve.resolveTrackedKey(st, hookProj), null);
+      const hit = projectResolve.resolveTrackedKey(st, path.join(hookProj, 'x'));
+      assert.ok(hit && hit.key === hookProj);
+    });
+
+    check('notes-session: the SessionStart hook writes additionalContext, and only then marks seen', () => {
+      notesStore.write(hookProj, notes.buildIndex(oneRow, null, NOW2));
+      const r = runNotesEntry('notes-session-start', startPayload('sess-live-1', hookProj));
+      assert.strictEqual(r.status, 0, r.stderr);
+      const hso = JSON.parse(r.stdout).hookSpecificOutput;
+      assert.strictEqual(hso.hookEventName, 'SessionStart');
+      assert.ok(hso.additionalContext.includes('renamed the cap'));
+      // Never a permission decision: SessionStart has none, and this feature
+      // never blocks anything anywhere.
+      assert.ok(!('permissionDecision' in hso), r.stdout);
+      // The marking is proved by what follows it, not by inspecting the file
+      // shape: a second session gets nothing.
+      assert.strictEqual(runNotesEntry('notes-session-start', startPayload('sess-live-2', hookProj)).stdout.trim(), '');
+    });
+
+    check('notes-session: PostCompact stays silent — the event cannot carry additionalContext', () => {
+      notesStore.write(hookProj, notes.buildIndex(oneRow, null, NOW2));
+      const before = fs.readFileSync(notesStore.notesPath(hookProj), 'utf8');
+      const r = runNotesEntry('notes-post-compact', {
+        session_id: 'sess-pc-1', cwd: hookProj, hook_event_name: 'PostCompact',
+        trigger: 'auto', compact_summary: 'a summary',
+      });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout.trim(), '',
+        'PostCompact stdout is echoed to the HUMAN and its hookSpecificOutput fails Claude Code\'s schema');
+      assert.strictEqual(fs.readFileSync(notesStore.notesPath(hookProj), 'utf8'), before,
+        'a hook that delivers nothing must not consume a decision');
+    });
+
+    check('notes-session: an untracked cwd delivers nothing and consumes nothing', () => {
+      const stray = path.join(ROOT, 'projects', 'session-untracked');
+      fs.mkdirSync(stray, { recursive: true });
+      notesStore.write(stray, notes.buildIndex(oneRow, null, NOW2));
+      const r = runNotesEntry('notes-session-start', startPayload('sess-stray', stray));
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout.trim(), '');
+      assert.deepStrictEqual(notesStore.read(stray).seen.prose, {});
+    });
+
+    check('notes-session: a malformed payload is a silent no-op, never a crash', () => {
+      const r = runNotesEntry('notes-session-start', 'not json at all');
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout.trim(), '');
+      const bad = runNotesEntry('notes-session-start', { session_id: 'has spaces', cwd: hookProj });
+      assert.strictEqual(bad.status, 0, bad.stderr);
+      assert.strictEqual(bad.stdout.trim(), '');
+    });
+  }
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);
