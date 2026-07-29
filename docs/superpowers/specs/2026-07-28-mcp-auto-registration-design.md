@@ -79,30 +79,65 @@ both a space and slashes.
 
 ### 3.3 Cursor — plain JSON, absent here
 
-`~/.cursor/mcp.json`, a flat `{ "mcpServers": { ... } }`. Does not exist on
-this machine, which is the point: Cursor is not installed, so nothing should be
-written for it.
+`~/.cursor/mcp.json` by default, a flat `{ "mcpServers": { ... } }`. Does not
+exist on this machine, which is the point: Cursor is not installed, so nothing
+should be written for it.
 
-## 4. Which agents get registered
+**Treat every path in §3 as a default, not a fact** — see §4.1. These are what
+one machine had on one day; users relocate configs and other platforms differ.
 
-**Rule: register with every agent that is actually installed, detected by the
-presence of its config directory. No opt-in flag.**
+## 4. Which agents get registered, and how they are found
 
-| Agent | Detection | Method |
-|---|---|---|
-| Claude Code | `claude` resolvable on PATH | `claude mcp add -s user` |
-| Codex | `~/.codex/` exists | targeted TOML block surgery (§5.2) |
-| Cursor | `~/.cursor/` exists | JSON merge (§5.3) |
+**Rule: register with every agent that is actually installed. No opt-in flag.**
 
 Rejected: gating on `config.extraTargets`. That flag governs whether MemBridge
 injects a **context file** into a repo — a different question the user answered
 for a different reason. Someone can use Cursor daily and never have wanted a
-`.cursor/rules/membridge.mdc` written into their repos. Presence of the tool's
-own config directory is direct evidence they use it; `extraTargets` is not.
+`.cursor/rules/membridge.mdc` written into their repos.
 
 Detection re-runs on every daemon launch, like the existing hook reconcilers.
-Install Cursor next month and the next tick registers it — no reinstall, no
-command to remember.
+Install Cursor next month and the next tick registers it.
+
+### 4.1 Discovery: ask an authority, never hardcode a path
+
+**`~/.codex/config.toml` and `~/.cursor/mcp.json` are defaults, not facts.**
+Users relocate them, tools ship env vars precisely so they can, Linux has XDG,
+and Windows is a different tree entirely. A location that happened to be right
+on one machine is not a design.
+
+MemBridge already has the correct pattern for exactly this problem — session
+log discovery layers `MEMBRIDGE_CODEX_DIR` / `MEMBRIDGE_CLAUDE_DIR` over
+`config.adapters.<agent>.dir` over a default (`lib/util.js`). **MCP config
+discovery uses the same layering**, so a user who has already relocated one has
+one concept to learn, not two.
+
+Resolution order for every agent, first hit wins:
+
+1. **MemBridge config override** — `config.mcp.<agent>.configPath`. Always wins.
+   The escape hatch for anyone whose layout we did not anticipate.
+2. **The tool's own documented environment variable** — e.g. `CODEX_HOME` for
+   Codex. This is the tool telling us where it lives; prefer it over anything
+   we could infer.
+3. **Platform-standard location** — XDG (`$XDG_CONFIG_HOME`) on Linux,
+   `%APPDATA%` / `%USERPROFILE%` on Windows, `~` on macOS. Not a macOS-shaped
+   guess applied to three platforms.
+4. **The documented default** — `~/.codex/`, `~/.cursor/`.
+
+### 4.2 Never conjure a config file
+
+If no location resolves, **write nothing**. Creating `~/.codex/config.toml`
+because it was absent is actively harmful: the user relocated it, so the tool
+will not read what we wrote, and we have littered their home directory with a
+file that looks authoritative and does nothing.
+
+An unresolved agent is a **reported outcome** — logged, and shown in
+`membridge status` next to hook registration state, with the config key that
+would fix it. A user who moved their config can point us at it in one step. A
+silent skip teaches them nothing and looks identical to the feature working.
+
+The one exception: an agent whose directory exists but has no MCP config file
+yet. There, creating the file is correct — the tool is installed, it simply has
+no servers registered.
 
 ## 5. Registration mechanics
 
@@ -132,34 +167,43 @@ Shelling out is not a new pattern here: MemBridge already spawns `git`
 CLI — updated far more often than git, and capable of prompting. Hence the
 three constraints below.
 
-#### 5.1.1 Resolving `claude` — do not trust PATH
+#### 5.1.1 Registration happens at install time; the daemon only repairs
 
-**This is the failure mode most likely to ship unnoticed.** On this machine
-`claude` lives at `~/.local/bin/claude`, which is on the *shell* PATH. A macOS
-app launched from Finder inherits roughly `/usr/bin:/bin:/usr/sbin:/sbin` and
-nothing else, so **MemBridge.app would not find `claude` at all** while the CLI
-run from a terminal would find it immediately.
+**This is the failure mode most likely to ship unnoticed.** A macOS app
+launched from Finder inherits roughly `/usr/bin:/bin:/usr/sbin:/sbin`. The
+`claude` binary is installed per-user — on the author's machine
+`~/.local/bin/claude`, elsewhere under nvm, volta, asdf, homebrew, or a custom
+prefix. **MemBridge.app would frequently fail to find it** while the same code
+run from a terminal finds it instantly.
 
 That asymmetry is dangerous precisely because it looks like success: whoever
-tests from a terminal sees registration work, while every user of the packaged
-app silently gets nothing — which is indistinguishable from the bug this spec
-exists to fix.
+tests from a terminal sees registration work, while packaged-app users silently
+get nothing — indistinguishable from the bug this spec exists to fix.
 
-So resolution probes explicit locations in order, and only then falls back to
-PATH:
+**The fix is to stop doing it in the wrong place.** `install.sh` runs in the
+user's own shell, with the user's own PATH, where `claude` resolves without any
+searching at all. Primary registration belongs there. The daemon's job shrinks
+from "find and register" to "verify and repair", which it can usually do from a
+cached answer.
 
-```
-~/.local/bin/claude
-/opt/homebrew/bin/claude
-/usr/local/bin/claude
-/usr/bin/claude
-$CLAUDE_BIN (escape hatch)
-PATH lookup
-```
+**Resolution order when the daemon genuinely must resolve it**, first hit wins:
 
-"Not found" is a **first-class, reported outcome**, not a silent skip: it is
-logged and surfaced in `membridge status` alongside hook registration state.
-An unregisterable agent the user could fix in ten seconds must not be invisible.
+1. `config.mcp.claudeBin` — explicit override, always wins.
+2. **The path recorded at install time**, if it still exists on disk.
+3. **Ask the user's login shell** — `$SHELL -lic 'command -v claude'`. A login
+   + interactive shell reads the user's profile and rc files, so it returns the
+   real PATH including every version manager's shims. This is asking the
+   authority rather than guessing, and it is the standard remedy for
+   GUI-launched apps on macOS. Bound it with a timeout: an rc file that is
+   chatty or expects a terminal can hang.
+4. A short probe list (`~/.local/bin`, homebrew, `/usr/local/bin`) — **last
+   resort only**, explicitly acknowledged as incomplete.
+
+Whatever resolves is **cached into config**, so later launches are instant and
+re-resolution happens only when the cached path stops existing.
+
+"Not found" is a **first-class, reported outcome** (§4.2): logged and shown in
+`membridge status`, naming the config key that fixes it.
 
 #### 5.1.2 No window, on any platform
 
@@ -262,6 +306,8 @@ convenience; nothing depends on it succeeding.
 | Failure | Behaviour |
 |---|---|
 | `claude` binary not found anywhere (§5.1.1) | Skip Claude Code, **log and report in `membridge status`**; still try the others |
+| An agent's config relocated, default absent (§4.2) | Write **nothing**; report the miss and the config key that fixes it |
+| Login-shell PATH query hangs | Killed by timeout; fall through to the probe list |
 | `claude mcp add` hangs | Killed at 5s; logged; launch unaffected |
 | `claude mcp add` non-zero exit | Log, continue |
 | `~/.codex/config.toml` unreadable | Skip Codex, change nothing |
@@ -314,7 +360,15 @@ just a different one.
 ## 11. Testing
 
 - **Detection** — table-driven over fixture home directories: each agent
-  present/absent, in every combination.
+  present/absent, in every combination; plus a relocated config reachable only
+  via `config.mcp.<agent>.configPath`, and one reachable only via the tool's own
+  env var, on each of macOS, Linux (XDG) and Windows path shapes.
+- **Never conjure** — an agent whose config is relocated and whose default
+  location is absent must leave the default location **still absent** and report
+  the miss. This is the assertion that stops us littering a user's home.
+- **Binary resolution** — the install-time record wins over the login-shell
+  query; a stale recorded path (deleted binary) triggers re-resolution; a
+  hanging login shell is killed by the timeout and does not block launch.
 - **Codex surgery** — the byte-identical assertion from §5.2; plus insert into
   a file with no `mcp_servers` at all; plus replace an existing
   `[mcp_servers.membridge]` followed by another table; plus refuse on garbage.
