@@ -83,7 +83,7 @@ Two teammates on the same remote tracking different depths (one at `repo`, one a
 
 - `additionalContext` is supported on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`, `PostCompact` and others. It reaches the model only, wrapped in a system reminder; it does not appear as a chat message.
 - `systemMessage` is a top-level output field shown to the **human** in the terminal, not to the model.
-- `FileChanged` fires when a watched file changes on disk, with `matcher` naming literal filenames. It has **no decision control** — side effects only.
+- `FileChanged` fires when a watched file changes on disk, with `matcher` naming literal filenames. It has **no decision control** — side effects only. Testing (§11) showed this also suppresses `systemMessage`, and that its matcher rejects any name containing `.` or `-`. Unusable for this feature.
 - `SessionStart` matchers: `startup`, `resume`, `clear`, `compact`, `fork`.
 
 ---
@@ -109,7 +109,7 @@ Rejected alternatives:
 
 | # | Trigger | Hook | Audience | Payload |
 |---|---|---|---|---|
-| 1 | Daemon pulls a new decision | `FileChanged` | Human | `systemMessage`, one line |
+| 1 | Daemon pulls a new decision | *(none — dashboard poll)* | Human | One line in the dashboard, no hook (§6, §11) |
 | 2 | Next tool call after arrival | `PreToolUse` | Agent | Prose decisions, `additionalContext` |
 | 3 | Agent reads/edits an affected file | `PreToolUse` | Agent | That file's note, `additionalContext` |
 | 4 | After compaction | `PostCompact` | Agent | Still-live decisions, re-injected |
@@ -200,11 +200,26 @@ The rules that decide whether this stays switched on.
 
 ## 6. The human surface
 
-Delivery point 1 is the only new human-facing surface. The daemon's write of `teammate-notes.json` triggers a `FileChanged` hook, which emits a `systemMessage`:
+**The in-terminal line is cut.** It was to be a `FileChanged` hook emitting a
+`systemMessage` when the daemon wrote `teammate-notes.json`. The spike
+(`docs/superpowers/spikes/2026-07-28-filechanged-findings.md`, Claude Code
+2.1.220) proved that impossible on two independent counts: `FileChanged`
+suppresses `systemMessage` — its documented "no decision control" extends to
+user-visible output, verified against a `SessionStart` control whose
+`systemMessage` did surface in the same stream — and its matcher accepts only
+letters, digits, `_` and `|`, so `teammate-notes.json` cannot be watched under
+any spelling.
 
-> MemBridge · Andrew just decided: don't touch validate.ts until migration 018 lands.
+**The dashboard is the human surface.** It already polls every 5 seconds, so a
+teammate decision is visible there within seconds of the pull with no new
+mechanism. The human still learns about a decision without waiting for their
+agent to act on it, which was the requirement; it just arrives in the browser
+rather than the terminal.
 
-This never reaches the model, so it costs no context.
+Not adopted here, but noted for later: MemBridge ships as an Electron app, so
+the daemon could raise a **native desktop notification** with no hook involved
+and no context cost. That is a different mechanism from anything specced here
+and needs its own design.
 
 **The existing human surfaces are unchanged.** The Activity feed and the injected CLAUDE.md narrative block keep their current content and behaviour. This feature must not become a backdoor shrink or bloat of the CLAUDE.md block (decided 2026-07-28, token-reduction spec §5.5).
 
@@ -267,7 +282,7 @@ The governing rule from the recall layer holds unchanged: **every failure degrad
 |---|---|
 | `teammate-notes.json` missing or corrupt | Treated as no notes; hooks step aside |
 | Index write fails | Previous index stays valid; retried next pull |
-| `FileChanged` unavailable or unsupported | Human line falls back to the dashboard (already polls every 5s) |
+| Dashboard not open when a decision lands | No human notice until it is opened; the agent surfaces are unaffected |
 | Sync paused / auth expired | No new notes; existing index still serves |
 | Path translation fails | Tracked-relative fallback (§7); on total failure, no note |
 | Hook exceeds its budget | Existing 5s settings timeout applies; read proceeds |
@@ -278,14 +293,26 @@ A kill switch mirrors `MEMBRIDGE_NO_RECALL`: `config.teammateNotes.enabled === f
 
 ---
 
-## 11. Unverified assumptions — spike before planning
+## 11. Resolved assumptions
 
-Two load-bearing claims come from documentation rather than a live test. Both must be verified first; the plan's shape depends on the answers.
+Both previously open questions were settled by a live test against Claude Code
+2.1.220 — see `docs/superpowers/spikes/2026-07-28-filechanged-findings.md`.
 
-1. **Does `FileChanged` accept `systemMessage`?** It has no decision control, and it is not established that "side effects only" permits user-visible output. If not, delivery point 1 falls back to the dashboard and the terminal line is dropped.
-2. **Can `FileChanged`'s matcher watch a MemBridge path?** The matcher takes literal filenames with a narrower character set than other events (letters, digits, `_`, `|`). `teammate-notes.json` contains a `.` and a `-`, which may force it onto the regular-expression path or fail to match. If the watcher cannot be pointed at the file, delivery point 1 is dashboard-only.
+1. **Does `FileChanged` accept `systemMessage`?** **No.** Suppressed. Verified
+   against a `SessionStart` control whose `systemMessage` did surface in the
+   same stream, same session, so this is specific to `FileChanged` rather than
+   an artefact of headless mode.
+2. **Can `FileChanged`'s matcher watch `teammate-notes.json`?** **No.** The
+   matcher accepts letters, digits, `_` and `|` only. Both the literal filename
+   and an underscore variant failed while a plain `notes` matched, so a name
+   containing `.` or `-` cannot be watched at all.
 
-Neither affects delivery points 2–5, which use documented, widely-used fields.
+Consequence: delivery point 1 is dashboard-only (§6), and `FileChanged` is
+dropped from the hooks this feature registers. Delivery points 2–5 are
+unaffected — they use documented, widely-used fields.
+
+Residual risk: the test was headless. If the terminal line is ever revisited,
+retest interactively before trusting the verdict.
 
 ---
 

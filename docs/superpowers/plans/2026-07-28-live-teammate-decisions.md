@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver a teammate's distilled decisions into a running agent session — project-wide prose on arrival, file-keyed notes at the moment the agent touches the file — plus a live human-facing terminal line.
+**Goal:** Deliver a teammate's distilled decisions into a running agent session — project-wide prose on arrival, file-keyed notes at the moment the agent touches the file.
 
-**Architecture:** The daemon already pulls teammate `decisions`, `gotchas` and per-file `changes[].note` every tick. On each pull it folds them into one small per-project index, `.membridge/teammate-notes.json`. Five hook entry points read that index and inject via `additionalContext` (model) or `systemMessage` (human). Nothing new crosses the wire; the only wire change is making file paths repo-root-relative so monorepo teammates agree on file identity.
+**Architecture:** The daemon already pulls teammate `decisions`, `gotchas` and per-file `changes[].note` every tick. On each pull it folds them into one small per-project index, `.membridge/teammate-notes.json`. Three hook entry points read that index and inject via `additionalContext`; the human surface is the existing dashboard poll. Nothing new crosses the wire; the only wire change is making file paths repo-root-relative so monorepo teammates agree on file identity.
 
-**Tech Stack:** Node.js (CommonJS, zero runtime dependencies), Claude Code hooks (`PreToolUse`, `SessionStart`, `PostCompact`, `FileChanged`), the repo's own zero-dependency test runner (`node test/run-tests.js`).
+**Tech Stack:** Node.js (CommonJS), Claude Code hooks (`PreToolUse`, `SessionStart`, `PostCompact`), the repo's own offline test runner (`node test/run-tests.js`).
+
+**Spike outcome (Task 1, done):** `FileChanged` cannot reach the human — it suppresses `systemMessage`, and its matcher rejects any filename containing `.` or `-`. Delivery point 1 is dashboard-only and `FileChanged` is dropped everywhere in this plan. See `docs/superpowers/spikes/2026-07-28-filechanged-findings.md`.
 
 **Spec:** `docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md`
 
@@ -45,7 +47,7 @@ Expected: all three files exist. If they do not, stop and merge the recall branc
 | `lib/repo-root.js` | Repo-root discovery and the tracked-dir↔repo-root path offset. Nothing else. |
 | `lib/teammate-notes.js` | Pure logic: build the index from pulled entries, select what to deliver, mark seen, prune, format. No fs, no clock. |
 | `lib/teammate-notes-store.js` | The fs layer for `.membridge/teammate-notes.json`: atomic read/write/update. |
-| `lib/hooks-notes.js` | The `SessionStart`, `PostCompact` and `FileChanged` hook bodies. |
+| `lib/hooks-notes.js` | The `SessionStart` and `PostCompact` hook bodies. |
 | `test/teammate-notes-e2e.js` | Opt-in end-to-end proof, mirroring `test/recall-e2e.js`. |
 
 **Modified:**
@@ -62,108 +64,24 @@ Expected: all three files exist. If they do not, stop and merge the recall branc
 
 ---
 
-## Task 1: Spike — can `FileChanged` reach the human?
+## Task 1: Spike — can `FileChanged` reach the human? ✅ DONE
 
-Spec §11 names two unverified claims. Both gate delivery point 1 only; Tasks 2–11 do not depend on the outcome. Do this first so the answer is known before Task 10.
+**Outcome: NO-GO.** Run 2026-07-28 against Claude Code 2.1.220. Findings in
+`docs/superpowers/spikes/2026-07-28-filechanged-findings.md`, committed.
 
-**Files:**
-- Create: `docs/superpowers/spikes/2026-07-28-filechanged-findings.md`
-- Create (throwaway, deleted in step 5): `/tmp/fc-spike/hook.js`
+- `FileChanged` **fires** and carries a usable payload (`file_path`, `event`).
+- Its `systemMessage` is **suppressed** — verified against a `SessionStart`
+  control whose `systemMessage` did surface in the same stream.
+- Its matcher accepts letters, digits, `_` and `|` only, so
+  `teammate-notes.json` **cannot be watched** under any spelling.
 
-**Interfaces:**
-- Consumes: nothing.
-- Produces: a written go/no-go for Task 10. No code.
+**Consequences, already applied to this plan and to spec §6/§11:**
+`FileChanged` is dropped everywhere. Delivery point 1 becomes the existing
+dashboard poll (5s), so Task 10 is now a dashboard task with no hook. Task 7's
+`NOTES_HOOKS` registers `SessionStart` and `PostCompact` only, and
+`lib/hooks-notes.js` needs no `runFileChanged`.
 
-- [ ] **Step 1: Create a throwaway project with a FileChanged hook**
-
-```bash
-mkdir -p /tmp/fc-spike/.claude
-cat > /tmp/fc-spike/hook.js <<'EOF'
-'use strict';
-const fs = require('fs');
-let payload = {};
-try { payload = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
-fs.appendFileSync('/tmp/fc-spike/fired.log', JSON.stringify(payload) + '\n');
-process.stdout.write(JSON.stringify({
-  systemMessage: 'MemBridge spike: FileChanged fired and carried systemMessage',
-}) + '\n');
-EOF
-cat > /tmp/fc-spike/.claude/settings.json <<'EOF'
-{
-  "hooks": {
-    "FileChanged": [
-      { "matcher": "teammate_notes|teammate-notes.json",
-        "hooks": [{ "type": "command", "command": "node /tmp/fc-spike/hook.js", "timeout": 5 }] }
-    ]
-  }
-}
-EOF
-```
-
-Note the matcher deliberately carries both a safe-charset alternative (`teammate_notes`) and the real filename, because the docs say `FileChanged` uses a narrower exact-match set — letters, digits, `_` and `|` — and that a `.` or `-` keeps it on the regular-expression path.
-
-- [ ] **Step 2: Start a Claude Code session in that directory and touch the file**
-
-In one terminal:
-
-```bash
-cd /tmp/fc-spike && claude
-```
-
-In a second terminal, while the session is open:
-
-```bash
-echo '{"version":1}' > /tmp/fc-spike/teammate-notes.json
-```
-
-- [ ] **Step 3: Record what happened**
-
-Check both channels:
-
-```bash
-cat /tmp/fc-spike/fired.log
-```
-
-Answer three questions in the findings doc:
-
-1. Did the hook fire at all? (log file exists and is non-empty)
-2. Did the `systemMessage` string appear in the Claude Code terminal?
-3. Did it fire on the `.`/`-` filename, or only when the file was renamed to `teammate_notes` (retry with `mv` if question 1 failed)?
-
-- [ ] **Step 4: Write the findings doc**
-
-```markdown
-# Spike: FileChanged as a human notification channel
-
-**Date:** 2026-07-28
-**Question:** Can a `FileChanged` hook watching `.membridge/teammate-notes.json`
-emit a `systemMessage` to the human, given the event has no decision control?
-
-## Result
-
-- Hook fired: YES / NO
-- `systemMessage` displayed: YES / NO
-- Matched the literal `teammate-notes.json`: YES / NO
-- If NO: matched as `<name that worked>`
-
-## Verdict for Task 10
-
-GO — implement delivery point 1 as specced.
-NO-GO — drop the terminal line; the dashboard (already polling every 5s)
-is the human surface. Update spec §6 and §11 to record this.
-
-## Raw payload
-
-<paste one line from fired.log>
-```
-
-- [ ] **Step 5: Clean up and commit**
-
-```bash
-rm -rf /tmp/fc-spike
-git add docs/superpowers/spikes/2026-07-28-filechanged-findings.md
-git commit -m "docs(spike): FileChanged systemMessage viability for teammate notes"
-```
+Nothing here blocks Tasks 2–9, 11 or 12.
 
 ---
 
@@ -1235,9 +1153,9 @@ Registering the three new hook entries before the bodies exist keeps Tasks 8–1
 **Interfaces:**
 - Consumes: the existing `reconcileRecallHook` pattern in `lib/hooks.js`.
 - Produces:
-  - `reconcileNotesHooks()` in `lib/hooks.js` — registers `SessionStart`, `PostCompact` and (if Task 1 said GO) `FileChanged`.
+  - `reconcileNotesHooks()` in `lib/hooks.js` — registers `SessionStart` and `PostCompact`.
   - `isNotesEnabled(config) -> boolean` in `lib/teammate-notes.js`.
-  - CLI routes: `membridge hook notes-session-start`, `notes-post-compact`, `notes-file-changed`.
+  - CLI routes: `membridge hook notes-session-start`, `notes-post-compact`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1324,9 +1242,9 @@ In `lib/hooks.js`, read `reconcileRecallHook` first — it is the exact pattern 
 // touched), same absolute-command shape with a subcommand that
 // lib/membridge-hook.js routes on.
 //
-// FileChanged is registered ONLY if the Task 1 spike said GO -- see
-// docs/superpowers/spikes/2026-07-28-filechanged-findings.md. It is listed
-// here so the flip is a one-line change rather than a new reconciler.
+// FileChanged is deliberately absent: the Task 1 spike proved it suppresses
+// systemMessage and that its matcher rejects any filename containing '.' or
+// '-'. See docs/superpowers/spikes/2026-07-28-filechanged-findings.md.
 const NOTES_HOOKS = [
   { event: 'SessionStart', sub: 'notes-session-start', timeout: 5, matcher: null },
   { event: 'PostCompact', sub: 'notes-post-compact', timeout: 5, matcher: null },
@@ -1372,19 +1290,18 @@ Add `reconcileNotesHooks` to the module exports, and call it from the same launc
 
 - [ ] **Step 5: Route the subcommands**
 
-In `lib/membridge-hook.js`, find the existing routing that sends `recall` to `runRecall()` and add three cases mapping `notes-session-start`, `notes-post-compact` and `notes-file-changed` to `hooksNotes.runSessionStart()`, `runPostCompact()` and `runFileChanged()`. Those functions arrive in Tasks 8–10; add stubs now so registration is testable:
+In `lib/membridge-hook.js`, find the existing routing that sends `recall` to `runRecall()` and add two cases mapping `notes-session-start` and `notes-post-compact` to `hooksNotes.runSessionStart()` and `runPostCompact()`. Those functions arrive in Task 9; add stubs now so registration is testable:
 
 Create `lib/hooks-notes.js` with placeholders that will be filled in:
 
 ```js
 'use strict';
-// SessionStart / PostCompact / FileChanged hook bodies for teammate notes.
+// SessionStart / PostCompact hook bodies for teammate notes.
 // Every entry point follows lib/hooks-recall.js's fail-open contract: the
 // whole body is wrapped so any exception degrades to ordinary behaviour.
 function runSessionStart() {}
 function runPostCompact() {}
-function runFileChanged() {}
-module.exports = { runSessionStart, runPostCompact, runFileChanged };
+module.exports = { runSessionStart, runPostCompact };
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -1774,8 +1691,9 @@ Replace the whole of `lib/hooks-notes.js`:
 
 ```js
 'use strict';
-// SessionStart / PostCompact / FileChanged hook bodies for teammate notes
-// (spec §3.1, delivery points 1, 4 and 5).
+// SessionStart / PostCompact hook bodies for teammate notes
+// (spec §3.1, delivery points 4 and 5). There is no human-facing hook: the
+// Task 1 spike ruled FileChanged out, so the dashboard carries that (Task 10).
 //
 // GOVERNING RULE, identical to lib/hooks-recall.js: every failure degrades to
 // ordinary agent behaviour. Each run* entry point wraps its whole body, so a
@@ -1864,10 +1782,7 @@ function runPostCompact() {
   }
 }
 
-// Delivery point 1 (the human line) lands in Task 10.
-function runFileChanged() {}
-
-module.exports = { runSessionStart, runPostCompact, runFileChanged, buildSessionOutput };
+module.exports = { runSessionStart, runPostCompact, buildSessionOutput };
 ```
 
 - [ ] **Step 4: Verify `resolveTrackedKey`'s calling convention**
@@ -1906,175 +1821,111 @@ git commit -m "feat(notes): SessionStart and PostCompact delivery of unseen deci
 
 ---
 
-## Task 10: Delivery point 1 — the human line
+## Task 10: Delivery point 1 — the human surface
 
-**Gated on Task 1.** If the spike returned NO-GO, do only Step 5 of this task (record the fallback) and skip the rest.
+Task 1 proved the in-terminal line impossible. This task is now: make a newly
+arrived teammate decision visible in the dashboard, which already polls every
+5 seconds. No hook, no `systemMessage`, no new mechanism.
 
 **Files:**
-- Modify: `lib/hooks-notes.js` (`runFileChanged`)
-- Modify: `lib/hooks.js` (add the `FileChanged` entry to `NOTES_HOOKS`)
+- Modify: `lib/server.js` (expose unseen teammate decisions on an existing payload)
+- Modify: `lib/dashboard/client.js` (render them)
 - Test: `test/run-tests.js`
 
 **Interfaces:**
-- Consumes: `notesStore.read`.
-- Produces: `buildHumanLine({ projectPath, since, now, config }) -> string|null` in `lib/hooks-notes.js`.
+- Consumes: `notesStore.read` from Task 5.
+- Produces: `teammateNotes: { fresh: [{author, ts, text}], total }` on the
+  payload the dashboard already polls.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
 Append to `test/run-tests.js`:
 
 ```js
-// ---- teammate notes: human line (spec §6) ----
+// ---- teammate notes: dashboard surface (spec §6) ----
 {
-  const fp = path.join(ROOT, 'projects', 'human-line-proj');
-  fs.mkdirSync(fp, { recursive: true });
+  const dp = path.join(ROOT, 'projects', 'dash-notes-proj');
+  fs.mkdirSync(dp, { recursive: true });
   const NOW3 = '2026-07-28T10:00:00Z';
 
-  check('notes-human: names the author and the newest decision', () => {
-    notesStore.write(fp, notes.buildIndex(
+  check('notes-dash: unseen decisions appear on the polled payload', () => {
+    notesStore.write(dp, notes.buildIndex(
       [{ author_name: 'Andrew', ts: '2026-07-28T09:55:00Z', decisions: 'do not touch validate.ts yet', gotchas: '' }],
       null, NOW3));
-    const line = hooksNotes.buildHumanLine({ projectPath: fp, since: '2026-07-28T09:00:00Z', now: NOW3, config: {} });
-    assert.ok(line.includes('Andrew'));
-    assert.ok(line.includes('validate.ts'));
-    assert.ok(line.startsWith('MemBridge'));
+    const out = notes.dashboardPayload(notesStore.read(dp), NOW3);
+    assert.strictEqual(out.total, 1);
+    assert.strictEqual(out.fresh[0].author, 'Andrew');
+    assert.ok(out.fresh[0].text.includes('validate.ts'));
   });
 
-  check('notes-human: nothing newer than `since` returns null', () => {
-    const line = hooksNotes.buildHumanLine({ projectPath: fp, since: '2026-07-28T09:59:00Z', now: NOW3, config: {} });
-    assert.strictEqual(line, null);
+  check('notes-dash: an empty index yields an empty payload, not null', () => {
+    notesStore.write(dp, notes.emptyIndex());
+    const out = notes.dashboardPayload(notesStore.read(dp), NOW3);
+    assert.deepStrictEqual(out, { fresh: [], total: 0 });
   });
 
-  check('notes-human: an empty index returns null', () => {
-    notesStore.write(fp, notes.emptyIndex());
-    assert.strictEqual(hooksNotes.buildHumanLine({
-      projectPath: fp, since: '2026-01-01T00:00:00Z', now: NOW3, config: {},
-    }), null);
-  });
-
-  check('notes-human: kill switch silences it', () => {
-    notesStore.write(fp, notes.buildIndex(
-      [{ author_name: 'A', ts: '2026-07-28T09:55:00Z', decisions: 'x', gotchas: '' }], null, NOW3));
-    assert.strictEqual(hooksNotes.buildHumanLine({
-      projectPath: fp, since: '2026-01-01T00:00:00Z', now: NOW3, config: { teammateNotes: { enabled: false } },
-    }), null);
+  check('notes-dash: a missing index yields an empty payload', () => {
+    assert.deepStrictEqual(notes.dashboardPayload(null, NOW3), { fresh: [], total: 0 });
   });
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `node test/run-tests.js 2>&1 | grep "notes-human:"`
+Run: `node test/run-tests.js 2>&1 | grep "notes-dash:"`
 
-Expected: all `FAIL` with `hooksNotes.buildHumanLine is not a function`.
+Expected: all `FAIL` with `notes.dashboardPayload is not a function`.
 
-- [ ] **Step 3: Implement the human line**
+- [ ] **Step 3: Add the payload builder**
 
-In `lib/hooks-notes.js`, replace `function runFileChanged() {}` with:
+Append to `lib/teammate-notes.js`, before `module.exports`, and add
+`dashboardPayload` to the exports:
 
 ```js
-// Delivery point 1 (spec §6): the human line. This is the ONLY output in the
-// feature that never reaches the model -- `systemMessage` goes to the terminal
-// only -- so it costs no context and needs no seen-marking.
-//
-// `since` is the last time this hook reported, persisted next to the index. It
-// exists so a FileChanged firing for an unrelated reason cannot re-announce a
-// decision the user already read on screen.
-function humanStatePath(projectPath) {
-  return path.join(path.dirname(notesStore.notesPath(projectPath)), 'teammate-notes-seen-human.json');
-}
-
-function readHumanSince(projectPath) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(humanStatePath(projectPath), 'utf8'));
-    return typeof raw.since === 'string' ? raw.since : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeHumanSince(projectPath, since) {
-  try {
-    fs.mkdirSync(path.dirname(humanStatePath(projectPath)), { recursive: true });
-    fs.writeFileSync(humanStatePath(projectPath), JSON.stringify({ since }));
-  } catch { /* best-effort; a lost marker costs at most one repeat line */ }
-}
-
-function buildHumanLine({ projectPath, since, now, config }) {
-  try {
-    if (!notes.isNotesEnabled(config)) return null;
-    const index = notesStore.read(projectPath);
-    if (!index) return null;
-    const cutoff = since ? Date.parse(since) : 0;
-    const fresh = (index.prose || []).filter(p => Date.parse(p.ts) > (Number.isFinite(cutoff) ? cutoff : 0));
-    if (!fresh.length) return null;
-    const newest = fresh[0]; // buildIndex sorts newest-first
-    const more = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
-    return `MemBridge · ${newest.author} just decided: ${newest.text}${more}`;
-  } catch {
-    return null;
-  }
-}
-
-function runFileChanged() {
-  try {
-    let payload = {};
-    try { payload = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { return; }
-    const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : null;
-    if (!cwd) return;
-    const state = util.loadState();
-    const hit = projectResolve.resolveTrackedKey(state, path.join(cwd, 'x'));
-    if (!hit) return;
-    const projectPath = hit.key;
-    const now = new Date().toISOString();
-    const line = buildHumanLine({
-      projectPath, since: readHumanSince(projectPath), now, config: util.getConfig(),
-    });
-    if (!line) return;
-    process.stdout.write(JSON.stringify({ systemMessage: line }) + '\n');
-    writeHumanSince(projectPath, now);
-  } catch (err) {
-    try { util.log(`hook notes file-changed error: ${err && err.stack ? err.stack : err}`); } catch {}
-  }
+// Spec §6: the human surface. Deliberately independent of the `seen` markers
+// the agent surfaces use -- being shown a decision in the dashboard is not the
+// same event as an agent having consumed it, and conflating the two would let
+// a browser visit silently suppress an agent-side delivery.
+function dashboardPayload(index, now) {
+  const ix = index || emptyIndex();
+  const all = ix.prose || [];
+  return { fresh: all.slice(0, PROSE_CAP), total: all.length };
 }
 ```
 
-Add `buildHumanLine` to the module exports.
+- [ ] **Step 4: Run the tests to verify they pass**
 
-- [ ] **Step 4: Register the FileChanged hook**
+Run: `node test/run-tests.js 2>&1 | grep "notes-dash:"`
 
-In `lib/hooks.js`, add to `NOTES_HOOKS`, using the matcher form the Task 1 spike proved works:
+Expected: three `ok` lines.
 
-```js
-  { event: 'FileChanged', sub: 'notes-file-changed', timeout: 5, matcher: 'teammate-notes.json' },
+- [ ] **Step 5: Surface it in the dashboard**
+
+Add `teammateNotes: notes.dashboardPayload(notesStore.read(projectPath), new Date().toISOString())`
+to the payload `lib/dashboard/client.js` already polls, and render each entry as
+`<author> · <text>`. Follow the existing card markup; add no new poll and no new
+endpoint.
+
+**Hazard from project memory:** `lib/dashboard/client.js` is one large template
+literal. A backtick in any added comment or code breaks `require` — this has
+bitten twice. Smoke-check before committing:
+
+```bash
+node -e "require('./lib/dashboard/client.js'); console.log('client.js loads OK')"
 ```
-
-The `matcher` field is currently ignored by `reconcileNotesHooks`. Add it to the entry object it builds:
-
-```js
-      const entry = spec.matcher
-        ? { matcher: spec.matcher, hooks: [{ type: 'command', command, timeout: spec.timeout }] }
-        : { hooks: [{ type: 'command', command, timeout: spec.timeout }] };
-```
-
-- [ ] **Step 5: Record the outcome in the spec**
-
-Whatever the spike returned, update spec §11 to replace the open question with the answer, and §6 if the terminal line was dropped in favour of the dashboard. An unresolved "unverified" section in a shipped spec is a defect.
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `node test/run-tests.js 2>&1 | tail -5`
 
-Expected: previous count plus 4, zero failures.
+Expected: previous count plus 3, zero failures.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lib/hooks-notes.js lib/hooks.js docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md test/run-tests.js
-git commit -m "feat(notes): live human notification on new teammate decisions"
+git add lib/teammate-notes.js lib/server.js lib/dashboard/client.js test/run-tests.js
+git commit -m "feat(notes): surface newly arrived teammate decisions in the dashboard"
 ```
-
----
 
 ## Task 11: Token accounting
 
@@ -2397,7 +2248,7 @@ Expected: `lib/teammate-notes.js`, `lib/teammate-notes-store.js`, `lib/repo-root
 node bin/membridge.js setup-hooks && grep -c "notes-" ~/.claude/settings.json
 ```
 
-Expected: at least 2 (3 if Task 1 said GO for `FileChanged`).
+Expected: 2 — one `notes-session-start`, one `notes-post-compact`.
 
 - [ ] **Step 4: Watch it work**
 
@@ -2430,7 +2281,7 @@ Commit only genuine source changes. Build artefacts stay untracked.
 | §8 redaction; team-membership boundary | 4 (`clean`), 12 |
 | §9 token accounting outside the balance | 11 |
 | §10 failure modes, kill switch | 5, 7, 8, 9, 12 |
-| §11 unverified assumptions | 1, 10 (step 5) |
+| §11 assumptions (now resolved) | 1 — done, NO-GO; consequences applied to Tasks 7, 9, 10 |
 | §14 testing | every task, plus 12 |
 
 **Naming consistency check.** `buildNotesOutput` (file/read-scoped, Task 8) and `buildSessionOutput` (session-scoped, Task 9) are distinct on purpose; both return `{ text, commit }`. `notesStore` is the store module everywhere; `notes` is the pure module everywhere. `rebuildTeammateNotes` lives on the store, not the pure module, because it does fs work.
