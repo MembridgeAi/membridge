@@ -2412,7 +2412,33 @@ git commit -m "test(notes): end-to-end proof of live teammate decision delivery"
 
 ---
 
-## Task 13: Rebuild and dogfood
+## Task 13: Rebuild and dogfood ✅ DONE (run by hand, 2026-07-29)
+
+**Two defects found live that no test had caught — both now fixed and tested:**
+
+1. **First-install gap.** The index was only rebuilt for projects whose pull
+   brought NEW rows, so decisions already in state when the feature arrives
+   stayed invisible until a teammate pushed again. Live: 65 team entries, 7
+   with decisions, no index. Fixed with `backfillProjects`.
+2. **The tray app never ran the post-pull step at all.** The product has two
+   sync loops — the CLI daemon and app/main.js's in-process tick — and the
+   rebuild lived as bin/ glue the app never executed. App users (the normal
+   install) would have had every surface silent, with all tests green. The
+   logic now lives in the store as `afterTeamPull`, both loops call it, and a
+   source-shape test pins both call sites.
+
+**Verified live on the real install:** hooks reconciled to exactly Stop +
+recall + one SessionStart entry (PostCompact stripped from a real settings
+file); MCP registered with Claude Code (`✔ Connected`), Codex (block surgery,
+neighbours intact) and Cursor (file created); the backfill indexed 13 of a
+real teammate's decisions within a minute of launch; the SessionStart hook
+produced the catch-up brief verbatim and the PreToolUse hook delivered notes
+alongside an ALLOWED read. The dogfood session's index was restored afterwards
+so the user's own next session still receives its brief.
+
+Also retired during dogfood: an orphaned daemon running from a finished
+subagent's worktree (adopted by launchd), replaced by the installed app's own.
+
 
 Project memory: rebuild and reinstall MemBridge.app after every large change.
 
