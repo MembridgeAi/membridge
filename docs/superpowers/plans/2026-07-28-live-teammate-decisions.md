@@ -2168,7 +2168,67 @@ git commit -m "feat(notes): report injected note tokens outside the savings bala
 
 ---
 
-## Task 12: End-to-end proof
+## Task 12: End-to-end proof ✅ DONE (`feat/notes12`)
+
+**The proof found a shipped defect: the kill switch did not silence the
+dashboard.** `lib/server.js`'s `projectDetail` read the index unconditionally,
+so `config.teammateNotes.enabled = false` silenced every agent surface while
+delivery point 1 kept serving teammate decisions on the project page — for as
+long as the index sat on disk, which is forever: `rebuildNotesForChanged` stops
+*writing* it and nothing ever deletes it. Turning a feature off after using it
+is the normal case, so the index is essentially always already there. Spec §10
+is explicit ("disables all five delivery points") and Task 1 made delivery
+point 1 the dashboard, so this was a violation, not an open question. Fixed in
+`lib/server.js` with a paired regression check in `test/run-tests.js` — the
+opt-in e2e alone would not have held it, since `npm test` never runs it.
+
+**The check that found it passed vacuously first.** Written against a project
+whose index carried only a file note, `{fresh: [], total: 0}` was true either
+way. Every kill-switch check in the shipped suite is now PAIRED with the same
+call under the switch ON — same project, same file, same session id — so
+"silenced" cannot be confused with "already delivered" or "nothing there".
+
+**Six ways this task's sketch was wrong**, all corrected in the shipped file:
+
+1. **Every `buildNotesOutput` call omitted `absPath`.** The wire-key lookup
+   reads `absPath` (Task 8); with only `relPath` no file note can ever be found,
+   so four of the eleven checks would have failed and two of the remaining ones
+   would have proved nothing.
+2. **`byFile` is not translated on receive.** The sketch asserted
+   `ix.byFile['src/validate.ts']`; keys stay in wire form
+   (`packages/api/src/validate.ts`) — Task 6's DONE section.
+3. **`author_name` is the WIRE shape, not the stored one.** Every fixture in
+   this plan is a hand-written wire row, which is the one shape the daemon never
+   holds. Only a real pull exercises the `author` rename, so the proof does a
+   real pull.
+4. **`PostCompact` is retired**; `hooksNotes.runPostCompact` no longer exists.
+5. **`buildSessionOutput` takes `source`**, and the restatement path keys off it.
+6. **`MEMBRIDGE_HOME` alone is not isolation.** `HOME`, the agent session dirs
+   and `MEMBRIDGE_CLAUDE_SETTINGS` must be injected too, into this process AND
+   every child, or a child resolves `os.homedir()` to the developer's own.
+
+**Two things the sketch could not have known:**
+
+- **`spawnSync` on the CLI deadlocks the proof.** The mock backend lives in the
+  test process, so a synchronous child blocks the very event loop that has to
+  answer its REST calls. It looks exactly like a hung `membridge sync`. The CLI
+  is spawned asynchronously; the hooks (no network) stay synchronous.
+- **A byte-for-byte snapshot of `~/.membridge/state.json` and `~/.claude.json`
+  flakes on any live machine** — the user's own daemon and Claude Code rewrite
+  them mid-run. Those two are held to "no fixture path leaked in" instead; the
+  files this feature could actually write are still compared byte for byte.
+
+**Beyond the sketch:** the proof drives the whole chain rather than the index
+alone — a teammate's real session events → `buildEntries` → `entryToRow`'s wire
+translation → a real HTTP round trip → `pullProject`'s rename → the real
+`membridge sync` (which is what calls `rebuildNotesForChanged`) → the real
+PreToolUse and SessionStart hooks as subprocesses, asserted on actual stdout.
+Both identity problems use genuinely mismatched checkouts (the teammate tracks
+the monorepo root, this machine tracks `packages/api`; one session runs from a
+nested `git worktree add`) and each asserts the naive key **differs** from the
+wire key, so neither can pass tautologically. Mutation-verified against four
+deliberate breakages: dropping the stored-`author` fallback, looking `byFile` up
+by `relPath`, turning the `allow` into a `deny`, and expiring unseen prose.
 
 **Files:**
 - Create: `test/teammate-notes-e2e.js`
