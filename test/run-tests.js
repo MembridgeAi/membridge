@@ -3296,6 +3296,124 @@ async function main() {
     assert.ok(/not running/.test(statusOut2.stdout), `status said: ${statusOut2.stdout}`);
   });
 
+  // --- 6b. `membridge status` empty states ---
+  // Two users installed MemBridge, ran `start`, saw a status page identical to
+  // a healthy one and concluded the product was broken — it was working, with
+  // nothing yet to inject. Each empty state must name itself and say what to do.
+  {
+    // Each state gets its own throwaway home so nothing leaks between them (and
+    // nothing touches the suite's shared home). `running` writes a pid file for
+    // this very process: process.kill(pid, 0) then reports the daemon as up
+    // without spawning one.
+    const statusEnv = (name, over = {}) => {
+      const home = path.join(ROOT, 'status-states', name);
+      fs.mkdirSync(home, { recursive: true });
+      if (over.running) fs.writeFileSync(path.join(home, 'membridge.pid'), String(process.pid));
+      const env = { ...process.env, MEMBRIDGE_HOME: home, MEMBRIDGE_PORT: '17944' };
+      if (over.state) fs.writeFileSync(path.join(home, 'state.json'), JSON.stringify(over.state));
+      if (over.claudeDir !== undefined) env.MEMBRIDGE_CLAUDE_DIR = over.claudeDir;
+      if (over.codexDir !== undefined) env.MEMBRIDGE_CODEX_DIR = over.codexDir;
+      return env;
+    };
+    const runStatus = env => spawnSync(process.execPath, [BIN, 'status'], { env, encoding: 'utf8' });
+    const gone = path.join(ROOT, 'status-states', 'nowhere');
+    const emptyClaude = path.join(ROOT, 'status-states', 'empty-claude');
+    const emptyCodex = path.join(ROOT, 'status-states', 'empty-codex');
+    fs.mkdirSync(emptyClaude, { recursive: true });
+    fs.mkdirSync(emptyCodex, { recursive: true });
+
+    // State A: a supported tool is installed, nothing captured yet.
+    const noSessions = runStatus(statusEnv('no-sessions', {
+      running: true,
+      claudeDir: emptyClaude,
+      codexDir: emptyCodex,
+    }));
+    check('status: nothing captured yet says so, and says what to do', () => {
+      assert.strictEqual(noSessions.status, 0, noSessions.stderr);
+      const out = noSessions.stdout;
+      assert.ok(/running \(pid \d+\)/.test(out), `daemon state lost: ${out}`);
+      assert.ok(/No agent sessions captured yet/.test(out), `silent empty state: ${out}`);
+      assert.ok(/Claude Code and Codex/.test(out), `does not name the tools it reads: ${out}`);
+      assert.ok(/check back after a sync \(every \d+s\)/.test(out), `no next step: ${out}`);
+      assert.ok(!/No supported AI tool found/.test(out), `wrong empty state — the tools are installed: ${out}`);
+    });
+
+    // Same state with the daemon down: nothing is being captured at all, so the
+    // advice must be to start it rather than to wait for a sync.
+    const noSessionsStopped = runStatus(statusEnv('no-sessions-stopped', {
+      claudeDir: emptyClaude,
+      codexDir: emptyCodex,
+    }));
+    check('status: nothing captured and daemon down points at `membridge start`', () => {
+      const out = noSessionsStopped.stdout;
+      assert.ok(/No agent sessions captured yet/.test(out), `silent empty state: ${out}`);
+      assert.ok(/membridge start/.test(out), `tells a stopped daemon to wait for a sync: ${out}`);
+      assert.ok(!/check back after a sync/.test(out), `promises a sync that cannot happen: ${out}`);
+    });
+
+    // State B: no supported tool on the machine at all — a different failure
+    // from "no sessions yet", so it gets different text.
+    const noTools = runStatus(statusEnv('no-tools', {
+      running: true,
+      claudeDir: path.join(gone, 'claude'),
+      codexDir: path.join(gone, 'codex'),
+    }));
+    check('status: no supported tool installed reads differently from no sessions', () => {
+      const out = noTools.stdout;
+      assert.ok(/No supported AI tool found/.test(out), `silent about a missing tool: ${out}`);
+      assert.ok(out.includes(path.join(gone, 'claude')) && out.includes(path.join(gone, 'codex')),
+        `does not show where it looked: ${out}`);
+      assert.ok(/Claude Code/.test(out) && /Codex/.test(out), `roots not labelled by tool: ${out}`);
+      assert.ok(!/No agent sessions captured yet/.test(out), `conflates the two empty states: ${out}`);
+    });
+
+    // Every adapter switched off: nothing can be captured at all, and blaming a
+    // missing tool would send the user looking in the wrong place.
+    const offHome = path.join(ROOT, 'status-states', 'adapters-off');
+    fs.mkdirSync(offHome, { recursive: true });
+    fs.writeFileSync(path.join(offHome, 'config.json'), JSON.stringify({
+      adapters: { 'claude-code': { enabled: false }, codex: { enabled: false }, custom: [] },
+    }));
+    const noAdapters = runStatus({ ...process.env, MEMBRIDGE_HOME: offHome, MEMBRIDGE_PORT: '17944' });
+    check('status: every adapter disabled is reported as such, not as a missing tool', () => {
+      const out = noAdapters.stdout;
+      assert.ok(/No session adapters are enabled/.test(out), `silent about a disabled adapter set: ${out}`);
+      assert.ok(!/No supported AI tool found/.test(out), `blames the machine for a config choice: ${out}`);
+    });
+
+    // State C: sessions exist, but one watched project has none of its own
+    // (added from the dashboard, or nothing run in it yet).
+    const mixed = runStatus(statusEnv('mixed', {
+      running: true,
+      claudeDir: emptyClaude,
+      codexDir: emptyCodex,
+      state: {
+        version: util.STATE_VERSION,
+        files: {},
+        projects: {
+          [proj1]: {
+            events: [{ ts: '2026-07-09T10:00:00.000Z', session: 's1', project: proj1, source: 'Claude Code', kind: 'prompt', text: 'hi' }],
+            lastSync: '2026-07-09T10:01:00.000Z',
+          },
+          [proj2]: { events: [] },
+          [proj3]: { events: [], teamEntries: [{ ts: '2026-07-09T09:00:00.000Z' }] },
+        },
+      },
+    }));
+    check('status: a project with no sessions is marked, not rendered as active', () => {
+      const out = mixed.stdout;
+      const active = out.split('\n').find(l => l.includes(proj1)) || '';
+      const empty = out.split('\n').find(l => l.includes(proj2)) || '';
+      const teamOnly = out.split('\n').find(l => l.includes(proj3)) || '';
+      assert.ok(/1 event\(s\), last sync 2026-07-09/.test(active), `active project line changed: ${active}`);
+      assert.ok(/no sessions captured yet/.test(empty), `empty project reads as active: ${empty}`);
+      // Teammate activity is real content, so it is not "nothing to inject".
+      assert.ok(/no local sessions yet — 1 teammate entry synced/.test(teamOnly),
+        `team-only project misreported: ${teamOnly}`);
+      assert.ok(!/No agent sessions captured yet/.test(out), `whole-install empty state fired with sessions present: ${out}`);
+    });
+  }
+
   // --- 7. dashboard port retry (EADDRINUSE) ---
   // A fast stop→start can find the port still held by the dying daemon: the
   // server must retry the bind instead of leaving a daemon with no dashboard.

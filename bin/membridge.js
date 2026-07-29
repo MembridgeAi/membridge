@@ -231,11 +231,76 @@ function cmdStatus() {
   console.log(`Encrypt:   ${encLine}`);
   const projects = Object.entries(state.projects || {});
   console.log(`Projects:  ${projects.length}`);
+  let captured = 0;
   for (const [key, proj] of projects) {
     const paused = util.isProjectOff(key, config) ? ' [paused]' : '';
-    console.log(`  ${key}${paused} — ${proj.events.length} event(s), last sync ${proj.lastSync || 'never'}`);
+    const events = (proj.events || []).length;
+    captured += events;
+    // A project MemBridge has nothing for must not read like an active one:
+    // that sameness is what makes a working install look broken.
+    const detail = events
+      ? `${events} event(s), last sync ${proj.lastSync || 'never'}`
+      : emptyProjectDetail(proj);
+    console.log(`  ${key}${paused} — ${detail}`);
   }
+  if (!captured) printEmptyState(config, running);
   prompts.flushValueMoment(config);
+}
+
+// Teammate activity is still something to inject, so a project with no local
+// sessions of its own says which of the two it is rather than reading as dead.
+function emptyProjectDetail(proj) {
+  const n = (proj.teamEntries || []).length;
+  if (!n) return 'no sessions captured yet, nothing to inject';
+  return `no local sessions yet — ${n} teammate entr${n === 1 ? 'y' : 'ies'} synced`;
+}
+
+// Where each enabled adapter looks for sessions, and whether that root is
+// actually there. Best-effort: an adapter that throws is reported as not found
+// rather than taking `status` down with it.
+function sessionRootsOf(config) {
+  const roots = [];
+  for (const adapter of getAdapters(config)) {
+    try {
+      for (const root of adapter.sessionRoots(config)) {
+        let found = false;
+        try {
+          found = fs.existsSync(root);
+        } catch {}
+        roots.push({ name: adapter.displayName, root, found });
+      }
+    } catch {}
+  }
+  return roots;
+}
+
+const joinNames = names =>
+  names.length < 2 ? (names[0] || '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+
+// Nothing captured anywhere. Two users read that state — printed identically to
+// a healthy one — as proof MemBridge was broken, when it was working and simply
+// had nothing to inject yet. Two different causes, two different next steps.
+function printEmptyState(config, running) {
+  const roots = sessionRootsOf(config);
+  const tools = joinNames([...new Set(roots.map(r => r.name))]);
+  console.log('');
+  if (!roots.length) {
+    console.log('No session adapters are enabled, so nothing can be captured — every tool is');
+    console.log(`switched off in the \`adapters\` section of ${util.configPath()}.`);
+    return;
+  }
+  if (!roots.some(r => r.found)) {
+    console.log(`No supported AI tool found. MemBridge reads ${tools} session logs,`);
+    console.log('and none of those directories exist on this machine:');
+    for (const r of roots) console.log(`  ${r.name.padEnd(14)} ${r.root} (not found)`);
+    console.log('Run one of those tools once, or point MemBridge at another tool via the');
+    console.log(`\`adapters\` section of ${util.configPath()}.`);
+    return;
+  }
+  console.log(`No agent sessions captured yet. MemBridge reads ${tools} session logs;`);
+  console.log(running
+    ? `open a project in one of those tools and check back after a sync (every ${config.intervalSec}s).`
+    : 'open a project in one of those tools. Nothing is captured while the daemon is\nstopped — start it with `membridge start`.');
 }
 
 function cmdRemove() {
