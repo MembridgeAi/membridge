@@ -13134,11 +13134,18 @@ async function main() {
       console.log('UNREACHABLE');
     `;
     const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
-    check('mcp: a missing @modelcontextprotocol/sdk or zod produces exactly the friendly message on stderr and a non-zero exit', () => {
+    check('mcp: a broken install surfaces the real module error and a non-zero exit, with no stale opt-in advice', () => {
       assert.notStrictEqual(out.status, 0, `expected non-zero exit, got ${out.status}`);
-      assert.strictEqual(out.stderr.trim(), mcpMod.MISSING_DEPS_MESSAGE.trim(), `stderr was: ${out.stderr}`);
-      assert.ok(out.stderr.includes('npm install @modelcontextprotocol/sdk zod'), 'missing the actionable install command');
-      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past process.exit');
+      assert.ok(
+        out.stderr.includes("Cannot find module '@modelcontextprotocol/sdk/server/mcp.js'"),
+        `the real module error must reach stderr; stderr was: ${out.stderr}`
+      );
+      assert.ok(!/opt-in/i.test(out.stderr), `must not claim the deps are opt-in; stderr was: ${out.stderr}`);
+      assert.ok(
+        !/npm install @modelcontextprotocol\/sdk zod/.test(out.stderr),
+        'must not advise an install that a plain `npm install` already performs'
+      );
+      assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past the throw');
     });
   }
 
