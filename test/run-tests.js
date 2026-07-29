@@ -12691,6 +12691,43 @@ async function main() {
     assert.ok(b.includes('[redacted:anthropic-key]'), 'anthropic marker missing from Result line');
     assert.ok(b.includes('[redacted:credentials]'), 'connection marker missing from Result line');
   });
+  // Cloudflare credentials. Added from a live incident: a cfut_ token pasted
+  // into an agent session went through every layer untouched — no prefix rule
+  // matched it, and the entropy backstop skipped it. Anyone deploying Workers
+  // or Pages from an agent will paste one eventually.
+  //
+  // The mid-sentence case is the one that matters: real pastes are prose ("here
+  // is the cloudflare: cfut_..."), not bare tokens on their own line, and a
+  // \b-anchored rule that only fires at a line start would pass this test while
+  // failing every real leak.
+  check('redact: a Cloudflare API token is redacted, alone and mid-sentence', () => {
+    const CFUT = 'cfut_' + 'a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXyZ012345';
+    const compiled = digest.compileRedactions({});
+    assert.ok(!digest.redactText(CFUT, compiled).includes(CFUT), 'bare token survived');
+    const prose = `here is the cloudflare token: ${CFUT} — use it for the deploy`;
+    const out = digest.redactText(prose, compiled);
+    assert.ok(!out.includes(CFUT), 'token survived inside a sentence');
+    assert.ok(out.includes('[redacted:cloudflare-token]'), 'expected a named marker');
+    assert.ok(out.includes('use it for the deploy'), 'redaction ate surrounding prose');
+  });
+  check('redact: a Cloudflare Origin CA key is redacted', () => {
+    const CAKEY = 'v1.0-' + 'aaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const compiled = digest.compileRedactions({});
+    const out = digest.redactText(`origin ca key ${CAKEY} rotated`, compiled);
+    assert.ok(!out.includes(CAKEY), 'origin CA key survived');
+    assert.ok(out.includes('[redacted:cloudflare-origin-ca]'), 'expected a named marker');
+  });
+  // Regression guard for the claim that started this: the Supabase service_role
+  // key WAS already covered by the jwt rule. Pinned so a future narrowing of
+  // that pattern cannot silently expose the single most dangerous credential in
+  // the stack — service_role bypasses row-level security entirely.
+  check('redact: a Supabase service_role JWT is redacted', () => {
+    const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.c2lnbmF0dXJlLXBsYWNlaG9sZGVy';
+    const out = digest.redactText(`service role: ${JWT}`, digest.compileRedactions({}));
+    assert.ok(!out.includes(JWT), 'service_role JWT survived');
+    assert.ok(out.includes('[redacted:jwt]'), 'expected the jwt marker');
+  });
+
   check('redact: memory.md and memory.json redact prompt, checkpoint, and todo item', () => {
     const mem = read(path.join(projRed, '.membridge', 'memory.md'));
     const db = read(path.join(projRed, '.membridge', 'memory.json'));
