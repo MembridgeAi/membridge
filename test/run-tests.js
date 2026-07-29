@@ -16828,6 +16828,32 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- MCP dependencies ship by default (mcp spec §7) ----
+  {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+
+    check('mcp-deps: the SDK and zod are real dependencies, not opt-in', () => {
+      assert.ok(pkg.dependencies['@modelcontextprotocol/sdk'], '@modelcontextprotocol/sdk must be a dependency');
+      assert.ok(pkg.dependencies.zod, 'zod must be a dependency');
+    });
+
+    check('mcp-deps: prepublishOnly no longer side-installs them', () => {
+      const pre = pkg.scripts.prepublishOnly || '';
+      assert.ok(!/modelcontextprotocol/.test(pre), 'prepublishOnly must not --no-save install the SDK');
+      assert.ok(!/\bzod\b/.test(pre), 'prepublishOnly must not --no-save install zod');
+    });
+
+    check('mcp-deps: they resolve from a plain install', () => {
+      assert.doesNotThrow(() => require.resolve('@modelcontextprotocol/sdk/server/mcp.js'));
+      assert.doesNotThrow(() => require.resolve('zod'));
+    });
+
+    check('mcp-deps: lib/mcp.js no longer calls them opt-in', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(!/opt-in/i.test(src), 'the opt-in message is now false and must be gone');
+    });
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
