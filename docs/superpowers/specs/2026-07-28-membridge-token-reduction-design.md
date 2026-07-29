@@ -190,6 +190,8 @@ Its job is narrow: catch cases where direct avoidance and total session cost dis
 
 It is deliberately **not** the quoted number. At a median of 9 interceptions per session, a 10% holdout yields roughly one held-out read per session — against per-developer spend that varies 4.7× between quartiles, no single project accumulates enough signal to produce a usable causal estimate in any reasonable window. **A holdout is the right instrument for a population, the wrong one for an individual.**
 
+*(Note, final whole-branch review, MINOR 5: the diagnostics payload field for this was originally named `holdout_divergence`, implying it directly performs this check. It doesn't — both its terms live on the direct-avoidance side (avoided tokens per served read vs. call size per held-out read), never touching total session cost/volume, so it can't see the second-order effects described above. Renamed to `compression_realization`. The real divergence check this section describes needs per-session total volume and remains future work.)*
+
 ### 7.3 Rejection learning
 
 A follow-up read only counts against us when **`net < 0`**. A smaller, targeted follow-up is a success and must never trip the rejection counter — otherwise we stop serving precisely the files where skeletons work best. Three net-negative outcomes on a path stop interception for it.

@@ -25,6 +25,7 @@
   "files": [
     "bin",
     "lib",
+    "vendor",
     "README.md",
     "LICENSE"
   ],

@@ -482,6 +482,30 @@ async function main() {
     assert.strictEqual(pkg.build.mac.artifactName, 'MemBridge-${version}-${arch}.${ext}',
       'artifactName must be deterministic so install.sh can build the release URL');
   });
+  check('C1: the npm tarball ships vendor/grammars, not just the packaged Electron app', () => {
+    // CRITICAL (final whole-branch review, C1): package.json's "files"
+    // whitelist excluded vendor/, so a plain `npm install
+    // @membridgeai/membridge` -- the PRIMARY install channel -- shipped
+    // web-tree-sitter (a real, installed dependency) with ZERO grammars to
+    // load. lib/skeleton.js resolves vendor/grammars relative to
+    // __dirname/../; with nothing there, the engine caches null on first
+    // failure and every project silently falls back to the stripper
+    // forever, with no warning ever surfaced. The "prepare-app bundles the
+    // runtime dependency closure" check above catches this same class of
+    // omission for the packaged Electron app (app/vendor/grammars); this is
+    // its npm-channel counterpart -- the libsodium incident, replayed on
+    // the channel most installs actually use.
+    // --dry-run --json only computes the file list; it writes no tarball
+    // and touches no network.
+    const out = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+      cwd: path.join(__dirname, '..'), encoding: 'utf8',
+    });
+    assert.strictEqual(out.status, 0, `npm pack --dry-run failed: ${out.stderr}`);
+    const [{ files }] = JSON.parse(out.stdout);
+    const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
+    assert.ok(vendoredWasm.length >= 4,
+      `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
+  });
 
   // --- 1. fresh sync ---
   const r1 = syncOnce();
@@ -6447,6 +6471,15 @@ async function main() {
     // is never created (readIndex() fails open to {} but nothing triggers a
     // write), which is itself proof no stub entry was left behind.
     assert.ok(!fs.existsSync(store.indexPath(proj)), 'no index.json is written when every candidate is refused');
+    // MINOR 4 (final whole-branch review): a refusal is no longer silent --
+    // it bumps a persisted per-project counter (separate from index.json)
+    // so lib/diagnostics.js's reject_reasons.no_structure can report a real
+    // figure instead of a hardcoded 0.
+    assert.strictEqual(store.readCounters(proj).noStructure, 1, 'a refused file must bump the no_structure counter');
+    const minified2 = 'y'.repeat(3000);
+    fs.writeFileSync(path.join(proj, 'bundle2.min.js'), minified2);
+    await store.warm(proj, [{ file: 'bundle2.min.js' }], util.getConfig());
+    assert.strictEqual(store.readCounters(proj).noStructure, 2, 'the counter accumulates across separate refused files');
   });
 
   await check('recall-store: warm() keeps processing the rest of the hot set when one path\'s write fails', async () => {
@@ -6663,6 +6696,73 @@ async function main() {
     }));
     assert.strictEqual(tierCLit.serve, true);
     assert.strictEqual(tierCLit.tier, 'C');
+
+    // 11. C3 (final whole-branch review): a Grep/Glob interception must
+    // never be answered -- decide() accepted a `toolName` in its input
+    // contract but never read it, so a Grep on a hot file was priced by
+    // estimateCallTokens(null, {size}) as though the WHOLE FILE had been
+    // read, though a grep call would only ever return a few matching lines.
+    // Refused here regardless of tier/floor eligibility: this exact
+    // storeEntry/ledger shape is the same one tierB above proves WOULD
+    // serve for toolName 'Read'.
+    const grepRefused = recall.decide(base({
+      toolName: 'Grep',
+      sessionId: 'session-y',
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(grepRefused.serve, false);
+    assert.strictEqual(grepRefused.reason, 'non-read-tool');
+    const globRefused = recall.decide(base({ toolName: 'Glob', limit: 100 }));
+    assert.strictEqual(globRefused.serve, false);
+    assert.strictEqual(globRefused.reason, 'non-read-tool');
+    // A Read call, same shape otherwise, still serves -- the narrowing must
+    // not have collaterally broken the tool it exists to keep serving.
+    const readStillServes = recall.decide(base({
+      toolName: 'Read',
+      sessionId: 'session-y',
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
+      fileStat: { size: 8000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(readStillServes.serve, true);
+  });
+
+  check('recall: MINOR 1 -- estimateCallTokens and everything downstream of it are whole numbers, never fractional', () => {
+    // A no-limit (full-file) call prices callTokens as fileStat.size / 4
+    // (bytes/4 -- see estimateCallTokens's own header for why bytes, not
+    // chars). Any size not a clean multiple of 4 used to leave a fractional
+    // remainder that survived all the way to the terminal string
+    // ('672.75 tokens'), avoided.tokens, and net_tokens. Math.round at the
+    // estimator boundary is enough: skeletonTokens is already
+    // Math.ceil'd by lib/token-estimate.js's estimateTokens, so once
+    // callTokens is also an integer, every value derived from the two
+    // (avoidedTokensOptimistic = callTokens - skeletonTokens, pct) is too.
+    const recall = require('../lib/recall');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), 673, '2691 / 4 = 672.75, rounds to 673');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2690 }), 673, '2690 / 4 = 672.5, rounds to 673');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2689 }), 672, '2689 / 4 = 672.25, rounds to 672');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 0 }), 0);
+    assert.strictEqual(recall.estimateCallTokens(50, { size: 2691 }), 600, 'a limit-priced call (50*12) is untouched -- always already whole');
+
+    const fractional = recall.decide({
+      projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
+      sessionId: 'session-y', toolName: 'Read', offset: null,
+      limit: null, // no-limit call -- exercises the fractional size/4 branch
+      sessionState: { served: {}, interceptions: 0 },
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
+      storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 673, rejections: 0 },
+      fileStat: { size: 2691, hash: 'HASH1' }, // 2691 / 4 = 672.75
+      config: {},
+      tracked: true,
+    });
+    assert.strictEqual(fractional.serve, true);
+    assert.strictEqual(fractional.callTokens, 673, 'callTokens must be rounded, not fractional');
+    assert.strictEqual(Number.isInteger(fractional.avoidedTokensOptimistic), true, 'avoidedTokensOptimistic must be a whole number');
+    assert.strictEqual(fractional.avoidedTokensOptimistic, 623);
   });
 
   check('recall: decide() refuses unless tracked is the explicit literal true (fail-closed, never intercepts untracked/paused)', () => {
@@ -6820,6 +6920,21 @@ async function main() {
       assert.deepStrictEqual(Object.keys(confirmed).sort(), ['committed', 'relPath', 'sessionId', 'ts']);
       assert.strictEqual(confirmed.committed, true, 'the second row confirms the session-state commit actually succeeded');
       assert.strictEqual(confirmed.ts, pending.ts, 'the confirmation correlates back to the same attempt');
+    });
+
+    // C3 (final whole-branch review): a Grep interception, driven through
+    // the REAL hook entry point, must step aside silently -- decide()'s new
+    // toolName gate refuses it -- even though this is the exact same
+    // path/ledger/store shape that just served for toolName 'Read' above. A
+    // fresh session id is used so 'already-served' can never be the reason
+    // this steps aside instead.
+    const sessGrep = nonHoldoutSession(relB, 'sess-tierb-grep');
+    const outGrep = runRecallHook({ session_id: sessGrep, cwd: recallProj, tool_name: 'Grep', tool_input: { file_path: fileB, limit: 100 } });
+    check('recall hook: C3 -- a Grep call steps aside silently (decide() refuses non-Read tools), even when the ledger/store would otherwise serve', () => {
+      assert.strictEqual(outGrep.status, 0, outGrep.stderr);
+      assert.strictEqual(outGrep.stdout, '', 'a Grep call must never be answered with a skeleton');
+      const lines = fs.readFileSync(hooksRecall.eventsPath(recallProj), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+      assert.ok(!lines.some(l => l.sessionId === sessGrep), 'a refused Grep call must never write an events.jsonl row');
     });
 
     // A second, different path served in the SAME session, past the first
@@ -7835,6 +7950,63 @@ async function main() {
       });
     }
 
+    // MINOR 3 (final whole-branch review): holdout rows had no idempotency
+    // guard -- unlike serve rows (deduped on serveId via
+    // prevLedger.openServes, see settleRows' own header), a re-read of the
+    // SAME still-queued holdout row after a failed queue rewrite re-tallied
+    // holdout.skips/callTokens on every retried pass. Fixed the same way
+    // serves already are: deduped on the row's own identity
+    // (ts|sessionId|relPath), persisted as ledger.holdout.seenKeys, bounded
+    // like the openServes/seenKeys precedent. Mirrors the FINDINGS 1+2
+    // failed-queue-rewrite tests above, but for the holdout arm.
+    {
+      const projHoldoutIdem = seedT6Project('t6-holdout-idempotent-on-failed-rewrite');
+      const relHoldoutIdem = 'src/holdout-idem.js';
+      const tsHoldoutIdem = '2026-07-28T10:00:00.000Z';
+      const nowHoldoutIdem = Date.parse(tsHoldoutIdem) + 10;
+      const holdoutIdemKey = `${tsHoldoutIdem}|sess-holdout-idem|${relHoldoutIdem}`;
+      fs.mkdirSync(path.dirname(ledgerFoldRecall.eventsPath(projHoldoutIdem)), { recursive: true });
+      fs.appendFileSync(ledgerFoldRecall.eventsPath(projHoldoutIdem), jsonl([
+        { ts: tsHoldoutIdem, sessionId: 'sess-holdout-idem', relPath: relHoldoutIdem, holdout: true, wouldServe: 'B', callTokens: 1200 },
+        // A companion pending row, young enough to be RETAINED regardless of
+        // outcome -- gives commit() real content to (fail to) write back on
+        // the first pass (not the empty-queue rmSync branch, which the mock
+        // below does not intercept -- same trick as the FINDING 3 /
+        // idempotent-rejection tests above).
+        { ts: new Date(nowHoldoutIdem - 1000).toISOString(), sessionId: 'sess-holdout-companion', relPath: 'src/holdout-companion.js', tier: 'B', callTokens: 4210, skeletonTokens: 380, holdout: false, committed: false },
+      ]));
+
+      const realWriteFileSyncHoldout = fs.writeFileSync;
+      const recallDirTagHoldout = path.join(memorydb.DIR_NAME, 'recall');
+      fs.writeFileSync = function (p, ...rest) {
+        if (typeof p === 'string' && p.includes(recallDirTagHoldout)) {
+          throw new Error('simulated queue rewrite failure');
+        }
+        return realWriteFileSyncHoldout.call(fs, p, ...rest);
+      };
+      let ledHoldoutIdem1;
+      try {
+        ledHoldoutIdem1 = ledgerStoreT6.updateLedger(projHoldoutIdem, [], util.getConfig(), () => nowHoldoutIdem);
+      } finally {
+        fs.writeFileSync = realWriteFileSyncHoldout;
+      }
+      check('ledger-fold-recall (MINOR 3 setup): a holdout row tallies on the very first pass even though the queue rewrite fails', () => {
+        assert.deepStrictEqual(ledHoldoutIdem1.holdout, { skips: 1, callTokens: 1200, seenKeys: [holdoutIdemKey] });
+        const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(projHoldoutIdem), 'utf8').trim().split('\n').filter(Boolean);
+        assert.strictEqual(remaining.length, 2, 'the holdout row AND the young companion pending row must still be queued after the failed rewrite');
+      });
+
+      // Real fs restored: the SAME holdout row is still on the queue (the
+      // rewrite that would have dropped it failed) and gets re-read on this
+      // pass. Without the seenKeys dedupe this would tally a second time
+      // (skips:2, callTokens:2400) -- exactly the bug this fix closes.
+      const ledHoldoutIdem2 = ledgerStoreT6.updateLedger(projHoldoutIdem, [], util.getConfig(), () => nowHoldoutIdem + 61000);
+      check('ledger-fold-recall (MINOR 3): a subsequent pass re-reading the still-queued holdout row does not re-tally it', () => {
+        assert.deepStrictEqual(ledHoldoutIdem2.holdout, { skips: 1, callTokens: 1200, seenKeys: [holdoutIdemKey] },
+          'holdout.skips/callTokens/seenKeys must be unchanged by the retry -- idempotent on the row\'s own identity');
+      });
+    }
+
     // FINDING 3 (fix round 4): a malformed openServes record used to freeze
     // the project's ledger forever -- normalizeOpenServes only checked
     // object-ness, so a receipt missing `correctedBy` made applyCorrections'
@@ -7973,7 +8145,10 @@ async function main() {
     ]));
     const led4Holdout = ledgerStoreT6.updateLedger(proj4T6, [], util.getConfig());
     check('ledger-fold-recall: a holdout row accumulates only into `holdout`, never `avoided`', () => {
-      assert.deepStrictEqual(led4Holdout.holdout, { skips: 1, callTokens: 1200 });
+      // seenKeys (MINOR 3, final whole-branch review) is this row's own
+      // idempotency evidence -- see the dedicated MINOR 3 test block below
+      // for the failed-rewrite scenario it exists to fix.
+      assert.deepStrictEqual(led4Holdout.holdout, { skips: 1, callTokens: 1200, seenKeys: ['2026-07-28T10:00:00.000Z|sess-4|src/d.js'] });
       assert.deepStrictEqual(led4Holdout.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
     });
 
@@ -8489,7 +8664,7 @@ async function main() {
     // the recall hook is appended as its own entry alongside it (Task 5).
     assert.strictEqual(afterSetup.hooks.PreToolUse.length, 2, 'recall entry not appended');
     assert.deepStrictEqual(afterSetup.hooks.PreToolUse[0], seedSettings.hooks.PreToolUse[0], 'unrelated PreToolUse hook changed');
-    assert.strictEqual(afterSetup.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'recall hook matcher missing/wrong');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[1].matcher, 'Read', 'recall hook matcher missing/wrong');
     assert.strictEqual(afterSetup.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'recall command missing or not the resolved absolute form');
     assert.strictEqual(afterSetup.model, 'opus');
     assert.deepStrictEqual(afterSetup.feedbackSurveyState, seedSettings.feedbackSurveyState, 'unknown keys lost');
@@ -8531,7 +8706,7 @@ async function main() {
       // way, on the same every-launch path, from a settings file that starts
       // with no PreToolUse key at all.
       assert.strictEqual(after1.hooks.PreToolUse.length, 1, 'recall hook not auto-registered');
-      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read|Grep|Glob', 'recall hook matcher missing/wrong');
+      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read', 'recall hook matcher missing/wrong');
       assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand(), 'auto-registered recall command is not the resolved form');
       assert.strictEqual(after1.model, 'opus', 'unrelated settings key lost');
       hooks.ensureInstalled();
@@ -8695,7 +8870,7 @@ async function main() {
     assert.ok(/already installed/.test(out2.stdout), `second run after convergence was not a no-op: ${out2.stdout}`);
     assert.strictEqual(read(f), before2, 'second setup-hooks run rewrote the file after convergence');
   });
-  check('recall: reconcileRecallHook installs on Read|Grep|Glob into a settings file with no PreToolUse key at all', () => {
+  check('recall: reconcileRecallHook installs on Read into a settings file with no PreToolUse key at all', () => {
     const f = path.join(ROOT, 'claude-settings-recall-fresh.json');
     fs.writeFileSync(f, JSON.stringify({ model: 'opus' }, null, 2));
     const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
@@ -8705,7 +8880,7 @@ async function main() {
       assert.strictEqual(r1.wrote, true, 'first reconcile should write');
       const after1 = JSON.parse(read(f));
       assert.strictEqual(after1.hooks.PreToolUse.length, 1);
-      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read|Grep|Glob');
+      assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read');
       assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand());
       assert.strictEqual(after1.model, 'opus', 'unrelated key lost');
       const r2 = hooks.reconcileRecallHook();
@@ -8734,6 +8909,9 @@ async function main() {
       assert.deepStrictEqual(after.hooks.PreToolUse[0], { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, 'unrelated matcher touched');
       assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'stale recall command not upgraded');
       assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost in upgrade');
+      // The fixture's matcher also carries the pre-C3 value -- a command
+      // upgrade and a matcher rematch can land in the same reconcile pass.
+      assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the pre-narrowing matcher was not reconciled alongside the stale command');
       const r2 = hooks.reconcileRecallHook();
       assert.strictEqual(r2.wrote, false, 'upgrade not idempotent');
     } finally {
@@ -8759,7 +8937,7 @@ async function main() {
     const after = JSON.parse(read(f));
     assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own hook");
     assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the user entry');
-    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'the recall hook must register on reads, not inherit a foreign matcher');
+    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit a foreign matcher');
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(rm.status, 0, rm.stderr);
@@ -8782,7 +8960,7 @@ async function main() {
     const after = JSON.parse(read(f));
     assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own false-positive recall-shaped hook");
     assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the false-positive user entry');
-    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'the recall hook must register on reads, not inherit the false-positive matcher');
+    assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit the false-positive matcher');
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(rm.status, 0, rm.stderr);
@@ -8807,25 +8985,33 @@ async function main() {
     }
   });
   // M4. The upgrade path rewrote h.command but never entry.matcher, so an
-  // entry narrowed to "Read" left Grep/Glob unregistered forever and any
-  // future RECALL_MATCHER change could never propagate.
-  check('recall: M4 -- an owned entry narrowed to another matcher is reconciled back to Read|Grep|Glob', () => {
+  // entry narrowed to a matcher other than the current RECALL_MATCHER left
+  // it permanently mismatched -- any future RECALL_MATCHER change could
+  // never propagate to an already-installed entry.
+  //
+  // C3 (final whole-branch review) is exactly that future change: Grep/Glob
+  // interceptions were priced as a full-file read (estimateCallTokens(null,
+  // {size}) has no notion of what a grep call actually returns), so
+  // RECALL_MATCHER narrowed from 'Read|Grep|Glob' to 'Read'. This test now
+  // pins the real migration: an entry installed under the OLD, broader
+  // matcher must be reconciled down to the new one.
+  check('recall: M4/C3 -- an owned entry carrying the pre-narrowing matcher (Read|Grep|Glob) is reconciled down to Read', () => {
     const f = path.join(ROOT, 'claude-settings-recall-matcher.json');
     fs.writeFileSync(f, JSON.stringify({
       hooks: { PreToolUse: [
         { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] },
-        { matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] },
+        { matcher: 'Read|Grep|Glob', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] },
       ] },
     }, null, 2));
     const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
     process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
     try {
       const r = hooks.reconcileRecallHook();
-      assert.strictEqual(r.wrote, true, 'a narrowed matcher must be reconciled');
+      assert.strictEqual(r.wrote, true, 'an entry carrying the old, broader matcher must be reconciled');
       const after = JSON.parse(read(f));
       assert.strictEqual(after.hooks.PreToolUse.length, 2, 'reconciling the matcher must not add or drop entries');
       assert.deepStrictEqual(after.hooks.PreToolUse[0], { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, 'unrelated matcher touched');
-      assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read|Grep|Glob', 'the owned entry kept its narrowed matcher');
+      assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the owned entry must be narrowed from Read|Grep|Glob to Read');
       assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].timeout, 5, 'sibling fields lost while reconciling the matcher');
       assert.strictEqual(hooks.reconcileRecallHook().wrote, false, 'matcher reconcile is not idempotent');
     } finally {
@@ -12253,6 +12439,66 @@ async function main() {
       assert.ok(recallHit.callTokens > 0 && recallHit.skeletonTokens > 0, 'callTokens/skeletonTokens missing');
     });
 
+    // C2 (CRITICAL, final whole-branch review): the PreToolUse hook honours
+    // THREE kill switches (lib/hooks-recall.js:151,178,204) -- the
+    // MEMBRIDGE_NO_RECALL env var, config.recall.enabled === false, and
+    // config.recall.pausedProjects (the Task 9 net-negative auto-pause) --
+    // but the MCP recall tool used to gate on isProjectOff alone, so a user
+    // who globally disabled recall, or whose project had just been
+    // auto-paused for going net-negative, still got every read served
+    // through the MCP surface. Each case below is driven against the exact
+    // same warmed, fresh big.js the "serves the tier-B body" case just
+    // above proved WOULD serve, absent the switch under test -- so a
+    // regression that silently drops the check surfaces as `available:
+    // true`, not just a wrong reason string.
+    {
+      const prevNoRecall = process.env.MEMBRIDGE_NO_RECALL;
+      process.env.MEMBRIDGE_NO_RECALL = '1';
+      let killEnvData;
+      try {
+        ({ data: killEnvData } = await callJson('recall', { project: projMcp, path: 'big.js' }));
+      } finally {
+        if (prevNoRecall === undefined) delete process.env.MEMBRIDGE_NO_RECALL;
+        else process.env.MEMBRIDGE_NO_RECALL = prevNoRecall;
+      }
+      check('mcp: C2 -- MEMBRIDGE_NO_RECALL=1 kill switch is honoured by the recall tool', () => {
+        assert.strictEqual(killEnvData.available, false);
+        assert.strictEqual(killEnvData.reason, 'recall-disabled');
+      });
+    }
+
+    {
+      const rcBeforeDisable = util.loadUserConfig();
+      util.saveUserConfig({ ...rcBeforeDisable, recall: { ...(rcBeforeDisable.recall || {}), enabled: false } });
+      let killCfgData;
+      try {
+        ({ data: killCfgData } = await callJson('recall', { project: projMcp, path: 'big.js' }));
+      } finally {
+        util.saveUserConfig(rcBeforeDisable);
+      }
+      check('mcp: C2 -- config.recall.enabled === false kill switch is honoured by the recall tool', () => {
+        assert.strictEqual(killCfgData.available, false);
+        assert.strictEqual(killCfgData.reason, 'recall-disabled');
+      });
+    }
+
+    {
+      const stateForPause = util.loadState();
+      const mcpKeyForPause = Object.keys(stateForPause.projects).find(k => path.resolve(k) === path.resolve(projMcp));
+      const rcBeforePause = util.loadUserConfig();
+      util.saveUserConfig({ ...rcBeforePause, recall: { ...(rcBeforePause.recall || {}), pausedProjects: [mcpKeyForPause] } });
+      let killPauseData;
+      try {
+        ({ data: killPauseData } = await callJson('recall', { project: projMcp, path: 'big.js' }));
+      } finally {
+        util.saveUserConfig(rcBeforePause);
+      }
+      check('mcp: C2 -- config.recall.pausedProjects (net-negative auto-pause) kill switch is honoured by the recall tool', () => {
+        assert.strictEqual(killPauseData.available, false);
+        assert.strictEqual(killPauseData.reason, 'recall-paused');
+      });
+    }
+
     // Below floors (the fixture that recall-store's own tests already proved
     // warms successfully): tiny call size never clears MIN_CALL_TOKENS.
     fs.writeFileSync(path.join(projMcp, 'tiny.js'), [
@@ -15032,12 +15278,13 @@ async function main() {
       recallStoreLib.put(diagProjA, 'db/schema.sql', { contentHash: 'h2', skeleton: 'y', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
       const payload = diagnosticsLib.buildPayload(diagProjA, negLedger, util.getConfig());
       assert.deepStrictEqual(Object.keys(payload).sort(), [
-        'acceptance', 'direct_avoided', 'holdout_divergence', 'install_id',
+        'acceptance', 'compression_realization', 'direct_avoided', 'install_id',
         'languages', 'net_tokens', 'reads_answered', 'reject_reasons', 'version',
       ]);
       assert.strictEqual(payload.net_tokens, -500);
       assert.strictEqual(payload.reads_answered, 25);
       assert.strictEqual(payload.reject_reasons.read_after_serve, 7);
+      assert.strictEqual(payload.reject_reasons.no_structure, 0, 'diagProjA has had no warm() refusals yet');
       assert.strictEqual(payload.languages.ts, 1);
       assert.strictEqual(payload.languages.sql, 1);
       assert.strictEqual(payload.direct_avoided.tokens, -500);
@@ -15057,6 +15304,21 @@ async function main() {
       walk(payload);
     });
 
+    // MINOR 4 (final whole-branch review): reject_reasons.no_structure used
+    // to be a hardcoded 0, teaching the pooled dataset that a warm() refusal
+    // never happens. It is now wired to lib/recall-store.js's real,
+    // per-project counter (bumped in warm()'s `if (!skeletonized.ok)`
+    // branch -- see that module's own test for the counter itself).
+    await check('diagnostics: reject_reasons.no_structure reflects real warm() refusals, not a hardcoded 0', async () => {
+      const diagProjD = path.join(ROOT, 'projects', 'diag-unit-proj-no-structure');
+      fs.mkdirSync(path.join(diagProjD, '.membridge'), { recursive: true });
+      const minifiedD = 'z'.repeat(3000); // trips looksLikeDegenerate -> ok:false, same fixture as the recall-store test
+      fs.writeFileSync(path.join(diagProjD, 'bundle.min.js'), minifiedD);
+      await recallStoreLib.warm(diagProjD, [{ file: 'bundle.min.js' }], util.getConfig());
+      const payloadD = diagnosticsLib.buildPayload(diagProjD, negLedger, util.getConfig());
+      assert.strictEqual(payloadD.reject_reasons.no_structure, 1, 'a real warm() refusal must be reflected, not zeroed');
+    });
+
     check('diagnostics: install_id is generated once and stays stable across calls', () => {
       const first = diagnosticsLib.getOrCreateInstallId();
       const second = diagnosticsLib.getOrCreateInstallId();
@@ -15064,11 +15326,11 @@ async function main() {
       assert.strictEqual(util.loadUserConfig().installId, first, 'install_id must persist to config.json');
     });
 
-    check('diagnostics: holdout_divergence is null below MIN_HOLDOUT_SKIPS and a number once there is enough signal', () => {
+    check('diagnostics: compression_realization is null below MIN_HOLDOUT_SKIPS and a number once there is enough signal', () => {
       const thin = diagnosticsLib.buildPayload(diagProjA, { avoided: negLedger.avoided, holdout: { skips: 1, callTokens: 50 } }, util.getConfig());
-      assert.strictEqual(thin.holdout_divergence, null);
+      assert.strictEqual(thin.compression_realization, null);
       const enough = diagnosticsLib.buildPayload(diagProjA, negLedger, util.getConfig());
-      assert.strictEqual(typeof enough.holdout_divergence, 'number');
+      assert.strictEqual(typeof enough.compression_realization, 'number');
     });
 
     // Task 9's "config flag write" pause must actually stop the PreToolUse
@@ -15157,7 +15419,7 @@ async function main() {
         assert.ok(util.getConfig().recall.pausedProjects.includes(scanProj), 'syncOnce must pause a net-negative project');
         assert.ok(received, 'the diagnostics mock server never received a POST from syncOnce');
         assert.deepStrictEqual(Object.keys(received).sort(), [
-          'acceptance', 'direct_avoided', 'holdout_divergence', 'install_id',
+          'acceptance', 'compression_realization', 'direct_avoided', 'install_id',
           'languages', 'net_tokens', 'reads_answered', 'reject_reasons', 'version',
         ]);
         assert.strictEqual(received.net_tokens, -500);
