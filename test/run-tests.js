@@ -18916,6 +18916,34 @@ const repoRoot = require('../lib/repo-root');
       assert.deepStrictEqual(projectDetail(bare).teammateNotes, { fresh: [], total: 0 });
     });
 
+    // The kill switch (spec §10) disables ALL FIVE delivery points, and Task 1
+    // made delivery point 1 this payload. Found by the Task 12 end-to-end
+    // proof: projectDetail read the index unconditionally, so a user who
+    // switched the feature off kept seeing teammate decisions on the project
+    // page for as long as the index sat on disk — which is forever, since the
+    // rebuild only stops writing and never deletes. Every agent surface had
+    // gone quiet; the browser had not.
+    //
+    // The control is what makes this discriminating: the SAME project, the
+    // SAME index, switch on -> the notes are there. So the empty payload below
+    // is the switch working, not an empty fixture.
+    check('notes-dash: the kill switch silences the project payload too', () => {
+      const saved = util.loadUserConfig();
+      try {
+        trackDashProject(dashDir);
+        notesStore.write(dashDir, notes.buildIndex(
+          [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'do not touch validate.ts yet')], null, NOW3));
+        util.saveUserConfig({ ...saved, teammateNotes: { enabled: true } });
+        assert.strictEqual(projectDetail(dashDir).teammateNotes.total, 1,
+          'control failed: nothing to silence, so this check would pass against no gate at all');
+        util.saveUserConfig({ ...saved, teammateNotes: { enabled: false } });
+        assert.deepStrictEqual(projectDetail(dashDir).teammateNotes, { fresh: [], total: 0 },
+          'the dashboard kept serving teammate decisions after the kill switch');
+      } finally {
+        util.saveUserConfig(saved);
+      }
+    });
+
     // The index's own redaction (lib/teammate-notes.js's clean) is
     // DEFAULTS-ONLY. Everything else on this payload — teamEntries' ask,
     // summary, decisions, gotchas — is re-run through the user's configured
@@ -20008,6 +20036,80 @@ const repoRoot = require('../lib/repo-root');
       else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
   });
+
+  // ---- teammate notes: first-install backfill (Task 13 dogfood finding) ----
+  // The daemon only rebuilt the index for projects whose pull brought NEW rows,
+  // so teammate decisions already sitting in state when this feature arrives
+  // stayed invisible until a teammate happened to push again. Measured live:
+  // 65 team entries, 7 with decisions, no index. backfillProjects closes it.
+  {
+    const bfRoot = path.join(ROOT, 'projects', 'backfill-proj');
+    fs.mkdirSync(bfRoot, { recursive: true });
+    const storedRow = { author: 'Andrew', ts: '2026-07-28T09:00:00Z', decisions: 'upgraded users must still see this', gotchas: '', changes: [{ file: 'lib/x.js', note: 'careful here' }] };
+    const bfState = { projects: {
+      [bfRoot]: { teamEntries: [storedRow] },
+      [path.join(ROOT, 'projects', 'no-team')]: { events: [] },
+      [path.join(ROOT, 'projects', 'empty-team')]: { teamEntries: [] },
+    } };
+
+    check('notes-backfill: builds an index for existing entries with no index file', () => {
+      const rebuilt = notesStore.backfillProjects(bfState, '2026-07-28T10:00:00Z');
+      assert.deepStrictEqual(rebuilt, [bfRoot], 'exactly the project with team entries and no index');
+      const ix = notesStore.read(bfRoot);
+      assert.strictEqual(ix.prose[0].author, 'Andrew', 'the stored-shape author must survive');
+      assert.ok(ix.byFile['lib/x.js'], 'file notes must ride along');
+    });
+
+    check('notes-backfill: an existing index is never rewritten by the backfill', () => {
+      const before = fs.statSync(notesStore.notesPath(bfRoot)).mtimeMs;
+      const again = notesStore.backfillProjects(bfState, '2026-07-28T11:00:00Z');
+      assert.deepStrictEqual(again, [], 'a project with an index must be left alone');
+      assert.strictEqual(fs.statSync(notesStore.notesPath(bfRoot)).mtimeMs, before, 'the index file was rewritten');
+    });
+
+    check('notes-backfill: no teamEntries means no file conjured', () => {
+      assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'no-team'))));
+      assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'empty-team'))));
+    });
+
+    // afterTeamPull is the shared post-pull entry point BOTH sync loops call
+    // (bin daemon + tray app). Guard the two properties the loops rely on:
+    // the kill switch is inside it, and app/main.js actually invokes it.
+    check('notes-backfill: afterTeamPull honours the kill switch', () => {
+      const kp = path.join(ROOT, 'projects', 'backfill-killed');
+      fs.mkdirSync(kp, { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [kp]: { teamEntries: [{ author: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'x', gotchas: '' }] } } });
+      const cfg = util.getConfig();
+      util.saveUserConfig({ ...cfg, teammateNotes: { enabled: false } });
+      try {
+        notesStore.afterTeamPull([]);
+        assert.ok(!fs.existsSync(notesStore.notesPath(kp)), 'the kill switch must stop the backfill too');
+      } finally {
+        util.saveUserConfig(cfg);
+      }
+      notesStore.afterTeamPull([]);
+      assert.ok(fs.existsSync(notesStore.notesPath(kp)), 'with the switch back on, the backfill must run');
+    });
+
+    check('notes-backfill: the tray app loop calls afterTeamPull (both loops share it)', () => {
+      // Source-shape check with teeth: the app has its OWN sync loop, and the
+      // first version of this feature lived only in bin/ glue — app users
+      // never got an index while everything was green. Pin the call site.
+      const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'main.js'), 'utf8');
+      const i = appSrc.indexOf('async function runSync');
+      assert.ok(i !== -1, 'app/main.js runSync not found');
+      const body = appSrc.slice(i, appSrc.indexOf('\nfunction tick', i));
+      assert.ok(/afterTeamPull\s*\(/.test(body), "the tray app's runSync no longer calls afterTeamPull");
+      const binSrc = fs.readFileSync(path.join(__dirname, '..', 'bin', 'membridge.js'), 'utf8');
+      assert.ok(/afterTeamPull\s*\(/.test(binSrc), 'the CLI loop no longer calls afterTeamPull');
+    });
+
+    check('notes-backfill: malformed state yields [] and never throws', () => {
+      assert.deepStrictEqual(notesStore.backfillProjects(null, 'x'), []);
+      assert.deepStrictEqual(notesStore.backfillProjects({ projects: 'nope' }, 'x'), []);
+    });
+  }
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);

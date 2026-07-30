@@ -73,44 +73,12 @@ function cmdSync() {
   }
 }
 
-// Rebuild the teammate-notes index for every project whose teammate entries
-// just changed, so the hooks have it before the agent's next tool call (spec
-// §3.1). Shared by BOTH pull paths -- the daemon tick and a manual/cron
-// `membridge sync` -- because a user who runs the CLI instead of the daemon
-// must not silently get a stale index.
-//
-// The rows are state.projects[key].teamEntries, written by teamsync's pull.
-// That is the only place pulled teammate rows live: memorydb holds LOCAL
-// entries, and `origin` is a field lib/feed.js invents at render time, so
-// neither can answer "what did my teammates just say". The pull already
-// excludes self-authored rows (author_id=neq), so no further filtering.
-//
-// Fail-open throughout: a project that throws keeps its previous index and the
-// loop continues.
+// Post-pull teammate-notes work (rebuild for changed projects + first-install
+// backfill) lives in lib/teammate-notes-store.js's afterTeamPull, because the
+// tray app (app/main.js) runs its own sync loop and must run the same logic --
+// the first version lived here as glue and the app never executed it.
 function rebuildNotesForChanged(changed) {
-  if (!changed || !changed.length) return;
-  const config = util.getConfig();
-  if (!notes.isNotesEnabled(config)) return; // kill switch: write nothing at all
-  const nowIso = new Date().toISOString();
-  let state;
-  try {
-    state = util.loadState();
-  } catch (err) {
-    util.log(`teammate notes: cannot read state (${err.message})`);
-    return;
-  }
-  for (const key of changed) {
-    try {
-      const proj = (state.projects || {})[key];
-      // No project, or a project with no teamEntries array, is a broken read --
-      // NOT "the teammates said nothing". Passing a non-array through would
-      // hand rebuildTeammateNotes an empty pull; it refuses those on purpose.
-      if (!proj) continue;
-      notesStore.rebuildTeammateNotes(key, proj.teamEntries || [], nowIso);
-    } catch (err) {
-      util.log(`teammate notes: ${key}: ${err.message}`);
-    }
-  }
+  notesStore.afterTeamPull(changed);
 }
 
 // One team push/pull pass; pulled teammate entries re-render those projects'
