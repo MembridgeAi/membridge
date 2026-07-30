@@ -17763,6 +17763,16 @@ async function main() {
       assert.strictEqual(called, false);
     });
 
+    check('counters: an absent endpoint key falls back to the baked default (normal installs still report)', () => {
+      const backend = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'lib', 'counters-backend.json'), 'utf8'));
+      assert.strictEqual(counters.countersUrl({}), backend.url);
+      assert.strictEqual(counters.countersUrl(undefined), backend.url);
+    });
+
+    check('counters: a custom endpoint is used verbatim (self-hosted installs pointing at their own collector)', () => {
+      assert.strictEqual(counters.countersUrl({ countersUrl: 'https://example.com/collector' }), 'https://example.com/collector');
+    });
+
     await check('counters: the diagnostics kill switch suppresses these too', async () => {
       let called = false;
       const sent = await counters.emitCounters({ projects: {} }, {
