@@ -84,9 +84,16 @@ export class FakeDataClient implements DataClient {
       ],
     })
   }
+  // 'andrew' rounds this out to the 3 members getSettings().team.memberCount
+  // already claims, and to the 3 memberIds the shared 'membridge' project
+  // fixture lists above -- he was previously referenced by getLiveSessions(),
+  // getProjectAccess(), and getAccessMatrix() but absent here, so anything
+  // joining those against getMembers() (Task 9's AccessPanel) silently
+  // dropped him.
   getMembers() {
     return this.guard<Member[]>([
       { id: 'me', name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
+      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false },
       { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
     ])
   }

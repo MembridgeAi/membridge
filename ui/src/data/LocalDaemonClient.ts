@@ -126,12 +126,18 @@ export class LocalDaemonClient implements DataClient {
     return r.text || ''
   }
 
-  getProjectAccess(_projectPath: string): Promise<{ memberId: string; canSee: boolean }[]> {
-    return Promise.reject(missingEndpoint('getProjectAccess', 'GET /api/project/access'))
+  // The real endpoint (lib/api-access.js readAccess, wired in Task 8) also
+  // returns each member's name -- dropped here because DataClient's shape
+  // predates that response and Task 9's UI already resolves names/roles via
+  // getMembers(), joined by memberId.
+  async getProjectAccess(projectPath: string): Promise<{ memberId: string; canSee: boolean }[]> {
+    const r = await get<{ members: { memberId: string; name: string; canSee: boolean }[] }>(
+      `/api/project/access?path=${encodeURIComponent(projectPath)}`)
+    return r.members.map(m => ({ memberId: m.memberId, canSee: m.canSee }))
   }
 
-  setProjectAccess(_projectPath: string, _memberId: string, _canSee: boolean): Promise<void> {
-    return Promise.reject(missingEndpoint('setProjectAccess', 'POST /api/project/access'))
+  async setProjectAccess(projectPath: string, memberId: string, canSee: boolean): Promise<void> {
+    await post<{ ok: boolean }>('/api/project/access', { path: projectPath, memberId, canSee })
   }
 
   getAccessMatrix(): Promise<AccessMatrix> {

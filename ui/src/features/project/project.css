@@ -1,0 +1,264 @@
+/* Project page — imported once from ProjectPage.tsx (per-feature CSS, same
+ * precedent as today.css). One --r radius everywhere except avatars
+ * (circles), no shadows, no gradients, hover changes background/border only. */
+
+.project-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.project-back {
+  color: var(--text3);
+  text-decoration: none;
+  font-size: 13px;
+}
+.project-title {
+  margin: 0;
+  font-size: 14px;
+}
+.project-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.project-btn {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.project-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.project-btn-primary:hover {
+  background: var(--accent2);
+  border-color: var(--accent2);
+}
+.project-btn-ghost:hover {
+  background: var(--panel2);
+}
+.project-btn:disabled {
+  opacity: 0.6;
+}
+
+/* Duplicated from today.css's .tag rules -- each feature CSS file owns its
+ * small utility classes rather than importing another feature's stylesheet. */
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  background: var(--panel2);
+  color: var(--text2);
+}
+.tag-team {
+  background: var(--accent-dim);
+  color: var(--accent2);
+}
+.tag-private {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.project-error {
+  margin: 12px 16px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
+.project-empty-note {
+  margin: 0;
+  padding: 8px 16px 14px;
+  color: var(--text3);
+}
+
+/* Two columns: flex stream + fixed 300px side, stacking below 1000px. */
+.project-cols {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.project-stream {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.project-side {
+  width: 300px;
+  flex-shrink: 0;
+}
+@media (max-width: 1000px) {
+  .project-cols {
+    flex-direction: column;
+  }
+  .project-stream {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .project-side {
+    width: auto;
+  }
+}
+
+.project-day {
+  color: var(--text3);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 600;
+  padding: 10px 16px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Stream entry — a 3-column grid (avatar / who+tool / meta), outcome+intent+
+ * files sharing the name's left edge (grid-column: 2), same shape as Today's
+ * .live-entry. */
+.stream-entry {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 10px;
+  padding: 9px 16px;
+  align-items: start;
+  border-bottom: 1px solid var(--line);
+}
+.stream-entry-who-cell {
+  min-width: 0;
+}
+.stream-entry-who {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.stream-entry-tool {
+  margin-left: 6px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.stream-entry-meta {
+  padding-top: 2px;
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.stream-entry-meta .live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 3px;
+  border-radius: var(--r);
+  background: var(--green);
+}
+.stream-entry-outcome {
+  grid-column: 2;
+  margin-top: 2px;
+  color: var(--text);
+}
+.stream-entry-intent {
+  grid-column: 2;
+  margin-top: 2px;
+  color: var(--text3);
+  font-size: 11px;
+}
+.stream-entry-intent-label {
+  margin-right: 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.stream-entry-files {
+  grid-column: 2;
+  margin-top: 3px;
+  color: var(--text3);
+  font-size: 10px;
+}
+
+/* Side panels — ruled sections, no cards. */
+.panel {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.panel-last {
+  border-bottom: none;
+}
+.section-label {
+  color: var(--text3);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 12px 16px 6px;
+  font-weight: 600;
+}
+
+.access-row {
+  gap: 8px;
+  padding: 5px 16px;
+}
+.access-name {
+  font-weight: 600;
+}
+.access-role {
+  color: var(--text3);
+  font-size: 10px;
+  text-transform: capitalize;
+  letter-spacing: 0.05em;
+  margin-left: -2px;
+}
+.access-row .toggle {
+  margin-left: auto;
+}
+.access-note {
+  margin: 2px 0;
+  padding: 2px 16px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.access-default {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 5px 16px;
+  color: var(--text2);
+}
+.access-default-label {
+  color: var(--text2);
+}
+.access-default-value {
+  margin-left: auto;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+
+.kv {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  color: var(--text2);
+}
+.kv-key {
+  width: 86px;
+  flex-shrink: 0;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.kv-value {
+  font-size: 10.5px;
+}

@@ -1,5 +1,6 @@
 import { Route, Switch } from 'wouter'
 import { Placeholder } from '../components/Placeholder'
+import { ProjectPage } from '../features/project/ProjectPage'
 import { TodayPage } from '../features/today/TodayPage'
 import { Shell } from './Shell'
 import { ROUTES } from './routes'
@@ -15,7 +16,7 @@ export function App() {
         <Route path={ROUTES.feed}><Placeholder title="Feed" /></Route>
         <Route path={ROUTES.projects}><Placeholder title="Projects" /></Route>
         <Route path={ROUTES.project}>
-          {(params) => <Placeholder title={`Project · ${params.name}`} />}
+          {(params) => <ProjectPage name={params.name} />}
         </Route>
         <Route path={ROUTES.members}><Placeholder title="Members" /></Route>
         <Route path={ROUTES.insights}><Placeholder title="Insights" /></Route>
