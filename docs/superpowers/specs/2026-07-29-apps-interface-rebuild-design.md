@@ -297,10 +297,12 @@ rather than disabling it. Exactly one Owner; transfer is explicit.
 - `project_access` — `team_id, project_key, member_id, can_see, updated_at,
   updated_by`. Absence of a row means "team default applies."
 
-Migrations are numbered from **018** onward. Prior numbers are contested:
-015 is squatted (`015_feedback` on master vs. the manually applied join-seal
-SQL) and two competing 016s exist. Verify the live schema before numbering, and
-never reuse a number.
+Migrations are numbered from **023** onward — `supabase/migrations/` already
+runs through `022_ops_snapshot_v3.sql`. (An earlier draft of this spec said 018;
+that was wrong.) Some earlier numbers are also contested — 015 was squatted
+(`015_feedback` on master vs. a manually applied join-seal SQL) — so always list
+the directory and check the live schema before choosing a number, and never
+reuse one.
 
 ## 7. Performance
 
