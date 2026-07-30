@@ -102,9 +102,22 @@ export class LocalDaemonClient implements DataClient {
     return this.requestCache.get('status', () => get<Status>('/api/status'))
   }
 
+  // getStatus() here is for intervalSec, which sizes the "behind" grace period
+  // (mappers.ts syncStateOf). It routes through the same 'status' requestCache
+  // key as useStatus(), which every screen already mounts -- so this is a cache
+  // hit, not a third request per poll.
+  //
+  // Its failure is swallowed on purpose: intervalSec only tunes one badge's
+  // tolerance, and syncStateOf falls back to the shipped 60s default without
+  // it. Letting a status hiccup reject here would blank the entire projects
+  // list over a cosmetic detail.
   async getProjects(): Promise<Project[]> {
-    const [rows, f] = await Promise.all([get<RawProjectRow[]>('/api/projects'), this.feed()])
-    return rows.map(row => mapProjectRow(row, f.entries))
+    const [rows, f, status] = await Promise.all([
+      get<RawProjectRow[]>('/api/projects'),
+      this.feed(),
+      this.getStatus().catch(() => null),
+    ])
+    return rows.map(row => mapProjectRow(row, f.entries, status?.intervalSec))
   }
 
   async getLiveSessions(): Promise<LiveSession[]> {

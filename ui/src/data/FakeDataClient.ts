@@ -54,7 +54,7 @@ export class FakeDataClient implements DataClient {
   getStatus() {
     return this.guard<Status>({
       running: true, version: '0.1.7', solo: !!this.opts.solo, setupDone: true,
-      projectCount: this.opts.empty ? 0 : 3, lastSync: '2026-07-29T21:00:00Z',
+      projectCount: this.opts.empty ? 0 : 3, intervalSec: 60, lastSync: '2026-07-29T21:00:00Z',
       teamLastSync: this.opts.solo ? null : (this.opts.teamLastSync !== undefined ? this.opts.teamLastSync : '2026-07-29T21:00:00Z'),
       tools: ['Claude Code', 'Codex'],
       encryption: { enabled: true, plaintextOff: true, paused: null, keyAlerts: 0 },

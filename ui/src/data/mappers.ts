@@ -64,14 +64,41 @@ export interface RawTeamFeedEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Sync state (spec rule, verbatim): paused wins outright; otherwise activity
-// after the last sync is "behind"; anything else is up to date.
+// Sync state: paused wins outright; otherwise activity after the last sync is
+// "behind"; anything else is up to date.
+//
+// The comparison needs a grace period, because the daemon syncs on a timer
+// (config.intervalSec) rather than on every write. Work done at any point
+// during a tick is legitimately newer than the last sync until that tick
+// fires, so a bare `lastActivity > lastSync` flags every actively-used project
+// as a problem for most of every interval -- observed live flipping
+// behind/up-to-date every poll on a lag of half a second. "Behind" has to mean
+// the daemon missed a cycle, not that it simply has not come around yet.
+//
+// Two intervals, not one: a project synced at the very start of a tick has a
+// full interval to accumulate activity before the next one, and the sync
+// itself is not instant. One interval would still flag the ordinary case.
 // ---------------------------------------------------------------------------
-export function syncStateOf(p: { paused: boolean; lastSync: string | null; lastActivity: string | null }): SyncState {
+export const SYNC_GRACE_INTERVALS = 2
+const DEFAULT_SYNC_INTERVAL_SEC = 60
+
+export function syncStateOf(
+  p: { paused: boolean; lastSync: string | null; lastActivity: string | null },
+  intervalSec: number = DEFAULT_SYNC_INTERVAL_SEC,
+): SyncState {
   if (p.paused) return { state: 'paused' }
-  if (p.lastActivity && (!p.lastSync || p.lastActivity > p.lastSync)) {
-    return { state: 'behind', lastSyncedAt: p.lastSync }
+  if (!p.lastActivity) return { state: 'up-to-date' }
+  // No sync ever recorded is genuinely behind -- there is no tick to be
+  // waiting on, so the grace period below does not apply.
+  if (!p.lastSync) return { state: 'behind', lastSyncedAt: null }
+  const graceMs = Math.max(0, intervalSec) * SYNC_GRACE_INTERVALS * 1000
+  const lagMs = Date.parse(p.lastActivity) - Date.parse(p.lastSync)
+  // Unparseable timestamps yield NaN, which fails every comparison -- fall
+  // back to the raw string ordering the daemon's ISO stamps already satisfy.
+  if (Number.isNaN(lagMs)) {
+    return p.lastActivity > p.lastSync ? { state: 'behind', lastSyncedAt: p.lastSync } : { state: 'up-to-date' }
   }
+  if (lagMs > graceMs) return { state: 'behind', lastSyncedAt: p.lastSync }
   return { state: 'up-to-date' }
 }
 
@@ -295,7 +322,7 @@ export function memberIdsFor(entries: RawFeedEntry[]): string[] {
   return [...ids]
 }
 
-export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[]): Project {
+export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[], intervalSec?: number): Project {
   const entries = entriesForProject(row, feedEntries)
   return {
     path: row.path,
@@ -311,7 +338,7 @@ export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[]): 
     sessionsThisWeek: row.sessionsThisWeek,
     dailyCounts: row.dailyCounts,
     latestSummary: latestSummaryFor(entries),
-    sync: syncStateOf(row),
+    sync: syncStateOf(row, intervalSec),
   }
 }
 

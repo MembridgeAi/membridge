@@ -7,6 +7,9 @@ export interface Status {
   solo: boolean
   setupDone: boolean
   projectCount: number
+  /** Daemon sync period (/api/status, server.js:303). Drives the grace period
+   *  in syncStateOf -- a project is only "behind" once a tick has been missed. */
+  intervalSec: number
   lastSync: string | null
   teamLastSync: string | null
   tools: string[]

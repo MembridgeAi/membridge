@@ -1312,6 +1312,74 @@ async function main() {
   // (which shares this same MEMBRIDGE_HOME config) behaves exactly as before.
   { const rc = util.loadUserConfig(); rc.extraTargets = { gemini: false, cursor: false, windsurf: false, copilot: false }; util.saveUserConfig(rc); }
 
+  // ===== Regression: a clean project's lastSync must keep moving =====
+  // Reported live: a project sat on the "behind · <date>" badge with a Sync
+  // now button for minutes on end while the daemon ticked past it twice. Every
+  // consumer (the app's sync badge, `membridge status`, MCP project metadata)
+  // decides "is this work captured?" by comparing lastActivity against
+  // lastSync. The sync loop skips a project with nothing pending, which used
+  // to mean its lastSync froze at whatever it was -- so any activity that
+  // landed after the last write made the comparison true forever, and only a
+  // manual sync could clear it. Nothing pending means synced; say so.
+  {
+    const syncProj = path.join(ROOT, 'projects', 'lastsync-refresh');
+    fs.mkdirSync(syncProj, { recursive: true });
+    const keyOf = st => Object.keys(st.projects || {}).find(k => k === syncProj);
+
+    check('lastSync: a project with nothing pending still gets its stamp refreshed', () => {
+      const st0 = util.loadState();
+      st0.projects[syncProj] = { events: [], lastSync: '2026-07-30T19:51:48.006Z' };
+      util.saveState(st0);
+
+      syncOnce({});
+
+      const proj = util.loadState().projects[keyOf(util.loadState())];
+      assert.ok(proj, 'project vanished from state');
+      assert.notStrictEqual(proj.lastSync, '2026-07-30T19:51:48.006Z', 'lastSync froze — the "behind" badge would latch on forever');
+      assert.ok(Date.parse(proj.lastSync) > Date.parse('2026-07-30T19:51:48.006Z'), 'lastSync moved backwards');
+    });
+
+    check('lastSync: the refreshed stamp clears a stale lastActivity comparison', () => {
+      // The exact live shape: activity 12s newer than the last sync, nothing
+      // pending. Before the fix this stayed "behind" across every tick.
+      const st = util.loadState();
+      st.projects[syncProj] = { events: [], lastSync: '2026-07-30T19:51:48.006Z' };
+      util.saveState(st);
+      const lastActivity = '2026-07-30T19:52:00.000Z';
+
+      syncOnce({});
+
+      const proj = util.loadState().projects[syncProj];
+      assert.ok(Date.parse(proj.lastSync) > Date.parse(lastActivity),
+        `lastSync (${proj.lastSync}) must overtake lastActivity (${lastActivity}) once the project is confirmed clean`);
+    });
+
+    check('lastSync: a paused/excluded project does NOT claim it synced', () => {
+      const rc = util.loadUserConfig();
+      const before = rc.exclude;
+      rc.exclude = [...(before || []), syncProj];
+      util.saveUserConfig(rc);
+      try {
+        const st = util.loadState();
+        st.projects[syncProj] = { events: [], lastSync: '2026-07-30T19:51:48.006Z' };
+        util.saveState(st);
+
+        syncOnce({});
+
+        const proj = util.loadState().projects[syncProj];
+        assert.strictEqual(proj.lastSync, '2026-07-30T19:51:48.006Z',
+          'an excluded project was deliberately not synced — stamping it would be a false success flag');
+      } finally {
+        const rc2 = util.loadUserConfig();
+        rc2.exclude = before;
+        util.saveUserConfig(rc2);
+      }
+    });
+
+    // Leave no trace for the rest of the suite, which shares this state file.
+    { const st = util.loadState(); delete st.projects[syncProj]; util.saveState(st); }
+  }
+
   // --- 5. daemon + dashboard ---
   // Mock Anthropic API so key tests and roadmap generation stay offline
   // (advisor honors MEMBRIDGE_API_BASE).
