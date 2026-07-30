@@ -20740,6 +20740,116 @@ const repoRoot = require('../lib/repo-root');
     spawnSync(process.execPath, [BIN, 'stop'], { env, encoding: 'utf8' });
   }
 
+  // Task 15: serve the rebuilt UI at /app, alongside the untouched legacy
+  // dashboard at /. Exercises the real static-serving code path in
+  // lib/server.js (not just dashboardPage()), including the path-traversal
+  // guard: a raw '../' is resolved away from /app entirely by the URL
+  // parser's own dot-segment normalization before the request ever reaches
+  // our routing, but an encoded '..%2f' or an encoded backslash survives
+  // that normalization intact and must be caught by resolveAppAsset's own
+  // decode-then-check guard.
+  {
+    const APP_PORT = P(91);
+    const srvApp = startServer(APP_PORT, { retries: 0 });
+    try {
+      const base = 'http://127.0.0.1:' + APP_PORT;
+      await waitForHttp(base + '/api/status');
+      const raw = p => fetch(base + p);
+
+      const shellRes = await raw('/app/');
+      const shellText = await shellRes.text();
+      await check('GET /app serves the new UI shell', () => {
+        assert.strictEqual(shellRes.status, 200);
+        assert.ok(/<div id="root">/.test(shellText), 'SPA root element present');
+      });
+
+      await check('the shell response is never cached', () => {
+        assert.match(String(shellRes.headers.get('cache-control') || ''), /no-store/);
+      });
+
+      await check('an unknown /app path falls back to the SPA shell', async () => {
+        const res = await raw('/app/team/members');
+        const text = await res.text();
+        assert.strictEqual(res.status, 200);
+        assert.ok(/<div id="root">/.test(text));
+      });
+
+      await check('a missing /app asset is a 404, not the shell', async () => {
+        const res = await raw('/app/assets/nope-does-not-exist.js');
+        assert.strictEqual(res.status, 404);
+      });
+
+      await check('the legacy dashboard still serves at /, unchanged', async () => {
+        const res = await raw('/');
+        const text = await res.text();
+        assert.strictEqual(res.status, 200);
+        assert.ok(text.length > 0);
+        assert.ok(!/id="root"/.test(text), 'the legacy dashboard must not have started serving the new shell');
+      });
+
+      await check('a real hashed asset is served with a long, immutable cache lifetime', async () => {
+        const distAssets = path.join(__dirname, '..', 'ui', 'dist', 'assets');
+        const jsFile = fs.readdirSync(distAssets).find(f => f.endsWith('.js'));
+        assert.ok(jsFile, 'ui/dist/assets must contain a built JS bundle for this test to check against');
+        const res = await raw(`/app/assets/${jsFile}`);
+        assert.strictEqual(res.status, 200);
+        assert.match(String(res.headers.get('cache-control') || ''), /max-age=\d+/);
+      });
+
+      // ---- path-traversal rejection: the three cases the plan calls out ----
+
+      await check('path traversal via a raw ../ cannot escape /app (never a 200)', async () => {
+        const res = await raw('/app/../../../etc/passwd');
+        assert.notStrictEqual(res.status, 200);
+      });
+
+      await check('path traversal via an encoded ..%2f is rejected (404, not the file)', async () => {
+        const res = await raw('/app/..%2f..%2f..%2fetc%2fpasswd');
+        assert.strictEqual(res.status, 404);
+      });
+
+      await check('path traversal via an encoded backslash (%5c) separator is rejected', async () => {
+        const res = await raw('/app/assets%5c..%5c..%5csecret.json');
+        assert.strictEqual(res.status, 404);
+      });
+    } finally {
+      await new Promise(r => srvApp.close(r));
+    }
+  }
+
+  // A fresh checkout whose ui/ has never been built (no `npm run build` in
+  // ui/ yet) must degrade to a plain, one-line 503 at /app — never throw,
+  // never crash the daemon. MEMBRIDGE_UI_DIST_ROOT points lib/server.js at a
+  // directory that does not exist, so this never touches the real ui/dist —
+  // load-bearing here, since another process in this checkout may be
+  // building it at the same time.
+  {
+    const NOBUILD_PORT = P(92);
+    const HOME_NOBUILD = path.join(ROOT, 'home-app-nobuild');
+    fs.mkdirSync(HOME_NOBUILD, { recursive: true });
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const ORIGINAL_UI_DIST_ROOT = process.env.MEMBRIDGE_UI_DIST_ROOT;
+    process.env.MEMBRIDGE_HOME = HOME_NOBUILD;
+    process.env.MEMBRIDGE_UI_DIST_ROOT = path.join(ROOT, 'ui-dist-that-does-not-exist');
+    const srvNoBuild = startServer(NOBUILD_PORT, { retries: 0 });
+    try {
+      const base = 'http://127.0.0.1:' + NOBUILD_PORT;
+      await waitForHttp(base + '/api/status');
+      const res = await fetch(base + '/app/');
+      const text = await res.text();
+      await check('GET /app degrades to a plain 503 when ui/dist is absent, never throws', () => {
+        assert.strictEqual(res.status, 503);
+        assert.ok(text.length > 0 && text.length < 200, 'expected a short one-line message, not a stack trace');
+        assert.ok(!/<html/i.test(text), 'expected plain text, not an HTML error page');
+      });
+    } finally {
+      await new Promise(r => srvNoBuild.close(r));
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+      if (ORIGINAL_UI_DIST_ROOT === undefined) delete process.env.MEMBRIDGE_UI_DIST_ROOT;
+      else process.env.MEMBRIDGE_UI_DIST_ROOT = ORIGINAL_UI_DIST_ROOT;
+    }
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

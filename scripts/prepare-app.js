@@ -61,6 +61,24 @@ if (fs.existsSync(vendorSrc)) {
   console.warn('vendor/grammars missing — packaged app will fall back to lib/skeleton-strip.js for every file');
 }
 
+// Copies the built React UI (ui/dist, a Vite build) into app/ui/dist so
+// lib/server.js's UI_DIST_ROOT — path.join(__dirname, '..', 'ui', 'dist'),
+// resolved from wherever lib/ itself ends up — finds it inside the packaged
+// asar too, at the mirrored app/ui/dist. Same tolerance as vendor/grammars
+// above: a missing build warns rather than failing the whole packaging step,
+// because `npm run build` in ui/ is a separate step that may not have run
+// yet; the packaged app then serves lib/server.js's own 503 at /app instead
+// of crashing.
+const uiDistSrc = path.join(root, 'ui', 'dist');
+const uiDistDest = path.join(root, 'app', 'ui', 'dist');
+fs.rmSync(path.join(root, 'app', 'ui'), { recursive: true, force: true });
+if (fs.existsSync(uiDistSrc)) {
+  fs.cpSync(uiDistSrc, uiDistDest, { recursive: true });
+  console.log('app/ui/dist refreshed from ui/dist/');
+} else {
+  console.warn('ui/dist missing — packaged app will serve a 503 at /app until `cd ui && npm run build` runs');
+}
+
 const appPkgPath = path.join(root, 'app', 'package.json');
 const appPkg = JSON.parse(fs.readFileSync(appPkgPath, 'utf8'));
 if (appPkg.version !== rootPkg.version) {
