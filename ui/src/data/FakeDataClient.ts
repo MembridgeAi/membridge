@@ -12,11 +12,8 @@ export interface FakeOptions {
 export class FakeDataClient implements DataClient {
   readonly capabilities: Capabilities
   constructor(private opts: FakeOptions = {}) {
-    this.capabilities = {
-      daemonControl: true,
-      localPaths: true,
-      teamAdmin: !opts.solo && opts.role !== 'member',
-    }
+    // Transport support only — the viewer's role decides authorization.
+    this.capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
   }
   private guard<T>(value: T): Promise<T> {
     if (this.opts.failWith) return Promise.reject(new Error(this.opts.failWith))

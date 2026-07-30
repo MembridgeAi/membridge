@@ -108,6 +108,7 @@
 .status-dot {
   width: 7px;
   height: 7px;
+  border-radius: var(--r);
   background: var(--green);
   flex-shrink: 0;
 }
@@ -116,4 +117,13 @@
   flex: 1;
   overflow-y: auto;
   scrollbar-gutter: stable;
+}
+
+.shell-error {
+  margin: 12px 12px 0;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
 }

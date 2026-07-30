@@ -69,6 +69,15 @@ describe('LocalDaemonClient feed coalescing', () => {
   })
 })
 
+describe('LocalDaemonClient capabilities', () => {
+  // teamAdminSupported says the daemon transport CAN carry admin calls -- it
+  // is not, and must never be read as, permission for the current viewer to
+  // make them. Authorization is Settings.team.role, gated in Shell.tsx.
+  it('reports teamAdminSupported as transport support only', () => {
+    expect(new LocalDaemonClient().capabilities.teamAdminSupported).toBe(true)
+  })
+})
+
 describe('syncStateOf', () => {
   it('is paused when the project is paused, regardless of timestamps', () => {
     expect(syncStateOf({ paused: true, lastSync: null, lastActivity: '2026-07-29T00:00:00Z' })).toEqual({ state: 'paused' })

@@ -2,11 +2,14 @@ import type {
   AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, Status, StreamEntry,
 } from './types'
 
-/** What the active transport can do. Screens hide what is unsupported. */
+/** What the active TRANSPORT supports — never what the current USER is allowed
+ *  to do. Conflating the two let a member see admin screens: a transport that
+ *  *can* carry admin calls is not permission to make them. Authorization is the
+ *  viewer's role, read from `Settings.team.role`, and is checked separately. */
 export interface Capabilities {
   daemonControl: boolean   // restart, start-at-login, interval
   localPaths: boolean      // show filesystem paths, open files
-  teamAdmin: boolean       // roles, invites, audit, access matrix
+  teamAdminSupported: boolean  // the transport exposes admin endpoints at all
 }
 
 export interface DataClient {

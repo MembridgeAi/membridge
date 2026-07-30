@@ -46,7 +46,7 @@ const missingEndpoint = (method: string, endpoint: string): Error =>
   new Error(`${method} has no daemon endpoint yet -- ${endpoint} does not exist until Task 10 lands.`)
 
 export class LocalDaemonClient implements DataClient {
-  readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdmin: true }
+  readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
 
   // The Today screen mounts useProjects() and useLiveSessions() together, and
   // useLiveSessions() polls every 10s on top -- both hit the SAME /api/feed

@@ -25,20 +25,37 @@ interface ShellProps {
   children: ReactNode
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error'
+}
+
 /** Fixed-width left rail + main content region. Team surfaces (switcher,
- *  Members, Insights) render only when the machine is actually on a team AND
- *  this transport/role can administer it — solo or a member role never sees
- *  them, absent rather than disabled (spec §3.7). */
+ *  Members, Insights) render only when the machine is actually on a team.
+ *  Members/Insights additionally require the VIEWER's role — owner or admin,
+ *  read from `Settings.team.role` — since `capabilities.teamAdminSupported`
+ *  only says the transport *can* carry admin calls, never that this user may
+ *  make them (spec §3.7). Until status and settings both resolve, neither the
+ *  Team group nor the solo "Create a team" CTA renders — defaulting either
+ *  way would flash a control the user may not be entitled to. */
 export function Shell({ children }: ShellProps) {
-  const { data: status } = useStatus()
-  const { data: settings } = useSettings()
+  const statusQuery = useStatus()
+  const settingsQuery = useSettings()
   const client = useDataClient()
   const [, navigate] = useLocation()
 
-  // Unknown (still loading) defaults to solo — a control never flashes on
-  // before its data confirms the machine is actually on a team.
+  const status = statusQuery.data
+  const settings = settingsQuery.data
+  const ready = status !== undefined && settings !== undefined
+  const hasError = statusQuery.isError || settingsQuery.isError
+
+  // Unknown (still loading, or failed) defaults to solo/no-role — a control
+  // never flashes on before its data confirms the machine is actually on a
+  // team and the viewer actually holds an admin role.
   const solo = status?.solo ?? true
-  const showTeamNav = !solo && client.capabilities.teamAdmin
+  const role = settings?.team?.role ?? null
+  const isTeamAdmin = role === 'owner' || role === 'admin'
+  const showTeamNav = ready && !solo && client.capabilities.teamAdminSupported && isTeamAdmin
+  const showCreateTeam = ready && solo
 
   return (
     <div className="shell">
@@ -67,7 +84,7 @@ export function Shell({ children }: ShellProps) {
             </>
           )}
 
-          {solo && (
+          {showCreateTeam && (
             <button type="button" className="create-team" onClick={() => navigate(ROUTES.settings)}>
               + Create a team
             </button>
@@ -85,7 +102,14 @@ export function Shell({ children }: ShellProps) {
         </div>
       </nav>
 
-      <main className="shell-main">{children}</main>
+      <main className="shell-main">
+        {hasError && (
+          <p className="shell-error" role="alert">
+            Couldn't load your account status. {errorMessage(statusQuery.error ?? settingsQuery.error)}
+          </p>
+        )}
+        {children}
+      </main>
     </div>
   )
 }

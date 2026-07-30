@@ -2,21 +2,25 @@ import { describe, it, expect } from 'vitest'
 import { FakeDataClient } from './FakeDataClient'
 
 describe('FakeDataClient', () => {
-  it('reports no team admin capability in solo mode', async () => {
+  // Capabilities describe transport support only, never the viewer's
+  // authorization — they must stay true regardless of solo/role.
+  it('reports teamAdminSupported unconditionally, independent of solo or role', () => {
+    expect(new FakeDataClient({ solo: true }).capabilities.teamAdminSupported).toBe(true)
+    expect(new FakeDataClient({ role: 'member' }).capabilities.teamAdminSupported).toBe(true)
+    expect(new FakeDataClient().capabilities.teamAdminSupported).toBe(true)
+    expect(new FakeDataClient({ role: 'admin' }).capabilities.teamAdminSupported).toBe(true)
+  })
+
+  it('has no team in solo mode', async () => {
     const c = new FakeDataClient({ solo: true })
-    expect(c.capabilities.teamAdmin).toBe(false)
     expect((await c.getSettings()).team).toBeNull()
   })
 
-  it('reports no team admin capability for a member role', () => {
-    expect(new FakeDataClient({ role: 'member' }).capabilities.teamAdmin).toBe(false)
-  })
-
-  it('reports team admin capability by default and for an admin role', async () => {
+  it('drives the viewer role in getSettings().team.role from opts.role', async () => {
     const byDefault = new FakeDataClient()
-    expect(byDefault.capabilities.teamAdmin).toBe(true)
-    expect(new FakeDataClient({ role: 'admin' }).capabilities.teamAdmin).toBe(true)
     expect((await byDefault.getSettings()).team).toEqual({ name: 'MemBridge HQ', role: 'owner', memberCount: 3 })
+    expect((await new FakeDataClient({ role: 'admin' }).getSettings()).team?.role).toBe('admin')
+    expect((await new FakeDataClient({ role: 'member' }).getSettings()).team?.role).toBe('member')
   })
 
   it('gives the self member a role matching the constructed role', async () => {
