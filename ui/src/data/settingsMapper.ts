@@ -1,7 +1,29 @@
 // Settings-specific mapping, split out of mappers.ts (Task 18) to keep that
 // file focused on feed/project/member mapping -- Settings' raw shape and
 // fold logic is a large, self-contained unit of its own.
-import type { Role, Settings, Status } from './types'
+import type { DeliveryChannel, Role, Settings, Status } from './types'
+
+// One row per AI tool mcp-register.js attempted -- see lib/mcp-register.js's
+// `row()` for the full shape; only the fields this page actually renders are
+// declared here.
+export interface RawMcpRow {
+  agent: string
+  status: 'registered' | 'removed' | 'unchanged' | 'skipped' | 'failed'
+  detail: string | null
+}
+
+// Mirrors lib/server.js's mcpStatusPayload, which mirrors bin/membridge.js's
+// printMcpStatus -- same four states, structured instead of printed.
+export interface RawMcpStatus {
+  autoRegister: boolean
+  state: 'disabled' | 'never' | 'removed' | 'registered'
+  at: string | null
+  rows: RawMcpRow[]
+}
+
+export interface RawRecallStatus {
+  installed: boolean
+}
 
 export interface RawSettingsPayload {
   intervalSec: number
@@ -16,6 +38,85 @@ export interface RawSettingsPayload {
   targets: string[]
   extraTargets: Record<string, boolean>
   extraTargetFiles: Record<string, string>
+  // Optional, not missing-on-purpose: an older daemon's /api/settings
+  // predates these two fields entirely. mcpChannel/recallChannel below treat
+  // that absence as unknown, never as false -- see DeliveryChannel.installed.
+  mcp?: RawMcpStatus
+  recall?: RawRecallStatus
+}
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+// Same bucket idiom as MemberRow.tsx/StreamEntry.tsx's own relativeTime --
+// no shared util exists yet for it, so this follows the established pattern
+// rather than introducing a fourth one.
+function relativeTime(iso: string, now: number = Date.now()): string {
+  const ms = now - new Date(iso).getTime()
+  if (ms < MINUTE) return 'just now'
+  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`
+  if (ms < DAY) return `${Math.floor(ms / HOUR)}h ago`
+  return `${Math.floor(ms / DAY)}d ago`
+}
+
+const KNOWN_AGENT_LABELS: Record<string, string> = {
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+}
+
+// lib/mcp-register.js supports a user-declared agent on a tool it has never
+// heard of (mcp spec §6) -- so this falls back to a title-cased version of
+// the raw id instead of assuming the three built-in agents are the only ones
+// that can ever appear in a row.
+function agentLabel(agent: string): string {
+  return KNOWN_AGENT_LABELS[agent] ?? agent.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+const MCP_LABEL = 'MCP server'
+const MCP_DESCRIPTION = 'Lets any MCP-capable tool query team memory directly.'
+
+// The MCP channel used to be hardcoded installed:false with no daemon field
+// behind it at all (the bug this mapping fixes) -- every branch below is a
+// real, distinct state mcpStatusPayload can report, mirrored from
+// bin/membridge.js's printMcpStatus so the dashboard and the CLI never
+// disagree about what "registered" means.
+function mcpChannel(mcp: RawMcpStatus | undefined): DeliveryChannel {
+  const base = { id: 'mcp' as const, label: MCP_LABEL, description: MCP_DESCRIPTION }
+  if (!mcp) return { ...base, installed: null, enabled: null, detail: 'Not reported by this daemon yet.' }
+  if (mcp.state === 'disabled') {
+    return { ...base, installed: false, enabled: null, detail: 'Auto-registration is turned off in your config.' }
+  }
+  if (mcp.state === 'never') {
+    // No detail beyond the chip: "not registered" already says everything
+    // there is to say here, and a detail string echoing it back (see the
+    // 'disabled'/'removed'/no-active-rows branches for cases that DO add
+    // real information) would just be noise next to it.
+    return { ...base, installed: false, enabled: null, detail: '' }
+  }
+  const checked = mcp.at ? ` · checked ${relativeTime(mcp.at)}` : ''
+  if (mcp.state === 'removed') {
+    return { ...base, installed: false, enabled: null, detail: `Removed from your AI tools${checked}.` }
+  }
+  // state === 'registered'
+  const active = mcp.rows.filter(r => r.status === 'registered' || r.status === 'unchanged')
+  if (!active.length) {
+    return { ...base, installed: false, enabled: null, detail: 'Registration ran, but no AI tool on this machine picked it up.' }
+  }
+  return { ...base, installed: true, enabled: null, detail: `registered with ${active.map(r => agentLabel(r.agent)).join(', ')}${checked}` }
+}
+
+function recallChannel(recall: RawRecallStatus | undefined): DeliveryChannel {
+  const base = {
+    id: 'recall' as const, label: 'Recall',
+    description: 'Surfaces a relevant past note the moment a matching file is opened.',
+  }
+  if (!recall) return { ...base, installed: null, enabled: null, detail: 'Not reported by this daemon yet.' }
+  return {
+    ...base, installed: recall.installed, enabled: null,
+    detail: recall.installed ? 'Installed as a Claude Code hook.' : 'Not installed.',
+  }
 }
 
 export interface RawTeamRow {
@@ -47,23 +148,15 @@ export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTe
       {
         id: 'context-block', label: 'Context block',
         description: 'A small skeleton written into CLAUDE.md, AGENTS.md and other context files your AI tools read at startup.',
-        installed: true, enabled: null,
+        installed: true, enabled: null, detail: '',
       },
       {
         id: 'summaries', label: 'Session summaries',
         description: 'A Claude Code Stop-hook that distills each session into a summary as it ends.',
-        installed: raw.hookInstalled, enabled: raw.distill.enabled,
+        installed: raw.hookInstalled, enabled: raw.distill.enabled, detail: '',
       },
-      {
-        id: 'recall', label: 'Recall',
-        description: 'Surfaces a relevant past note the moment a matching file is opened.',
-        installed: false, enabled: null,
-      },
-      {
-        id: 'mcp', label: 'MCP server',
-        description: 'Lets any MCP-capable tool query team memory directly.',
-        installed: false, enabled: null,
-      },
+      recallChannel(raw.recall),
+      mcpChannel(raw.mcp),
     ],
     privacy: {
       endToEnd: status.encryption.enabled,

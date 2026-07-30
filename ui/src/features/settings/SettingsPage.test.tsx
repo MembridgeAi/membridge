@@ -17,11 +17,54 @@ describe('SettingsPage', () => {
     expect(screen.queryByText(/anthropic/i)).toBeNull()
   })
 
+  // The "not installed" render state -- amber chip + its real fix (Register).
   it('marks an uninstalled delivery channel amber with its fix', async () => {
     renderApp({}, <SettingsPage />)
     const row = await screen.findByTestId('setting-mcp')
     expect(within(row).getByText(/not registered/i)).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: /register/i })).toBeInTheDocument()
+  })
+
+  // Settings honesty fix: the bug was mcp.installed defaulting to false (and
+  // rendering "not registered") on a machine where the MCP server was
+  // actually working. This is the "installed" render state -- it must read
+  // as installed, carry its real detail, and never show the amber "not
+  // registered" wording the false-failure bug produced.
+  it('shows the MCP channel as installed, with its real detail, when the daemon reports a real registration', async () => {
+    const client = new FakeDataClient()
+    const base = await client.getSettings()
+    vi.spyOn(client, 'getSettings').mockResolvedValue({
+      ...base,
+      delivery: base.delivery.map(c => c.id === 'mcp'
+        ? { ...c, installed: true, detail: 'registered with Claude Code, Codex · checked 2h ago' }
+        : c),
+    })
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+    expect(within(row).getByText(/installed/i)).toBeInTheDocument()
+    expect(within(row).getByText(/registered with claude code, codex/i)).toBeInTheDocument()
+    expect(within(row).queryByText(/not registered/i)).toBeNull()
+    expect(within(row).queryByRole('button', { name: /register/i })).toBeNull()
+  })
+
+  // The "unknown" render state (installed:null -- an older daemon that has
+  // not reported a real check for this channel yet). Must say so in words,
+  // and must never fall back to "not registered": that would tell the user
+  // something is broken when the truth is simply "never checked".
+  it('shows the MCP channel as not checked yet -- never "not registered" -- when the daemon reports no real check', async () => {
+    const client = new FakeDataClient()
+    const base = await client.getSettings()
+    vi.spyOn(client, 'getSettings').mockResolvedValue({
+      ...base,
+      delivery: base.delivery.map(c => c.id === 'mcp'
+        ? { ...c, installed: null, detail: 'Not reported by this daemon yet.' }
+        : c),
+    })
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+    expect(within(row).getByText(/not checked yet/i)).toBeInTheDocument()
+    expect(within(row).queryByText(/not registered/i)).toBeNull()
+    expect(within(row).queryByRole('button', { name: /register/i })).toBeNull()
   })
 
   it('omits the Team group entirely in solo mode', async () => {
@@ -121,7 +164,7 @@ describe('SettingsPage', () => {
       ...base,
       delivery: [
         ...base.delivery,
-        { id: 'summaries', label: 'Session summaries', description: 'Distills each session.', installed: true, enabled: false },
+        { id: 'summaries', label: 'Session summaries', description: 'Distills each session.', installed: true, enabled: false, detail: '' },
       ],
     })
     const setSpy = vi.spyOn(client, 'setSetting')

@@ -145,8 +145,16 @@ export interface DeliveryChannel {
   id: 'context-block' | 'recall' | 'summaries' | 'mcp'
   label: string
   description: string
-  installed: boolean
+  // null = unknown -- the daemon has not reported a real check for this
+  // channel yet (e.g. an older daemon whose /api/settings predates this
+  // field). Must never collapse to false: false reads as "broken", and an
+  // unchecked channel is not known to be broken.
+  installed: boolean | null
   enabled: boolean | null
+  // Dynamic specifics beyond the static `description` -- which tools, when
+  // last checked (e.g. "registered with Claude Code, Codex · checked 2h
+  // ago"). '' when there is nothing dynamic to add yet.
+  detail: string
 }
 
 export interface Settings {

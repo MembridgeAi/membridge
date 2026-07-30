@@ -58,4 +58,86 @@ describe('mapSettings', () => {
     const s = mapSettings(raw, status, null)
     expect(s.contextFiles).toEqual({ targets: ['CLAUDE.md', 'AGENTS.md'], extraTargets: { gemini: false }, extraTargetFiles: { gemini: 'GEMINI.md' } })
   })
+
+  // Settings honesty fix: /api/settings used to carry no mcp/recall field at
+  // all, so the UI defaulted to installed:false -- a state that reads as
+  // broken even when the channel is actually working. These pin the mapper
+  // reading the REAL daemon shape (RawMcpStatus/RawRecallStatus), never a
+  // hardcoded true/false standing in for it.
+  describe('mcp channel', () => {
+    it('is unknown, never false, when an older daemon reports no mcp field at all', () => {
+      const s = mapSettings(raw, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp?.installed).toBeNull()
+    })
+    it('is not installed, with no redundant detail, when nothing was ever registered', () => {
+      const s = mapSettings({ ...raw, mcp: { autoRegister: true, state: 'never', at: null, rows: [] } }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp).toMatchObject({ installed: false, detail: '' })
+    })
+    it('is not installed and says so when auto-registration is turned off', () => {
+      const s = mapSettings({ ...raw, mcp: { autoRegister: false, state: 'disabled', at: null, rows: [] } }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp).toMatchObject({ installed: false })
+      expect(mcp?.detail).toMatch(/auto-registration/i)
+    })
+    it('is installed, naming the real registered tools, when the daemon reports a live registration', () => {
+      const s = mapSettings({
+        ...raw,
+        mcp: {
+          autoRegister: true, state: 'registered', at: null,
+          rows: [
+            { agent: 'claude-code', status: 'registered', detail: null },
+            { agent: 'codex', status: 'unchanged', detail: null },
+            { agent: 'cursor', status: 'skipped', detail: '~/.cursor does not exist' },
+          ],
+        },
+      }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp?.installed).toBe(true)
+      expect(mcp?.detail).toContain('Claude Code')
+      expect(mcp?.detail).toContain('Codex')
+      expect(mcp?.detail).not.toContain('Cursor')
+    })
+    it('reports the real checked time, never a fabricated one', () => {
+      const at = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+      const s = mapSettings({
+        ...raw,
+        mcp: { autoRegister: true, state: 'registered', at, rows: [{ agent: 'codex', status: 'registered', detail: null }] },
+      }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp?.detail).toMatch(/checked 2h ago/)
+    })
+    it('is not installed when a registration ran but every row failed or was skipped', () => {
+      const s = mapSettings({
+        ...raw,
+        mcp: { autoRegister: true, state: 'registered', at: null, rows: [{ agent: 'cursor', status: 'skipped', detail: 'not installed' }] },
+      }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp?.installed).toBe(false)
+    })
+    it('is not installed after a real unregister', () => {
+      const s = mapSettings({ ...raw, mcp: { autoRegister: true, state: 'removed', at: null, rows: [{ agent: 'codex', status: 'removed', detail: null }] } }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp?.installed).toBe(false)
+    })
+  })
+
+  describe('recall channel', () => {
+    it('is unknown, never false, when an older daemon reports no recall field at all', () => {
+      const s = mapSettings(raw, status, null)
+      const recall = s.delivery.find(d => d.id === 'recall')
+      expect(recall?.installed).toBeNull()
+    })
+    it('is installed when the daemon confirms a live, resolvable recall hook', () => {
+      const s = mapSettings({ ...raw, recall: { installed: true } }, status, null)
+      const recall = s.delivery.find(d => d.id === 'recall')
+      expect(recall?.installed).toBe(true)
+    })
+    it('is not installed when the daemon reports the hook missing', () => {
+      const s = mapSettings({ ...raw, recall: { installed: false } }, status, null)
+      const recall = s.delivery.find(d => d.id === 'recall')
+      expect(recall?.installed).toBe(false)
+    })
+  })
 })

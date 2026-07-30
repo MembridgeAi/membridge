@@ -9743,6 +9743,70 @@ async function main() {
       process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
   });
+  // Settings' recall channel (lib/server.js settingsPayload's `recall`
+  // field) used to report nothing at all, so the dashboard defaulted to a
+  // state that reads as broken even on a machine with a real, working
+  // recall hook. isRecallHookInstalled is isHookInstalled's twin, pointed at
+  // the PreToolUse array instead of Stop -- same liveness contract: an
+  // entry only counts as installed if the script it names still exists.
+  check('recall: isRecallHookInstalled is false with no PreToolUse hooks at all', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-none.json');
+    fs.writeFileSync(f, JSON.stringify({ hooks: {} }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isRecallHookInstalled(), false);
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('recall: isRecallHookInstalled is true for a real, resolvable recall entry', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-live.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] }] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isRecallHookInstalled(), true, 'a live, resolvable recall command must report installed');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  // The exact bug this repo has shipped once already for the Stop hook
+  // (commandIsLive's comment): a settings.json entry alone is not proof the
+  // hook runs. Here the recall entry is present and well-formed, but the
+  // script it points at is gone -- must report NOT installed, never
+  // "installed" off the entry's mere presence.
+  check('recall: isRecallHookInstalled is false when the settings entry exists but its script does not', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-dead-script.json');
+    const deadCommand = hooks.recallCommand().replace(hooks.hookScriptPath(), path.join(ROOT, 'no-such-dir', 'membridge-hook.js'));
+    assert.ok(deadCommand.includes('no-such-dir'), 'fixture did not actually rewrite the script path');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: deadCommand, timeout: 5 }] }] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isRecallHookInstalled(), false, 'a recall entry pointing at a missing script must not read as installed');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('recall: isRecallHookInstalled ignores a Stop-only distill hook -- the two channels are independent', () => {
+    const f = path.join(ROOT, 'claude-settings-recall-stop-only.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] }] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      assert.strictEqual(hooks.isHookInstalled(), true, 'fixture sanity: the Stop hook is installed');
+      assert.strictEqual(hooks.isRecallHookInstalled(), false, 'a Stop-only settings.json must not report the recall channel installed');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
   check('distill: status reports the Distill line with hook install state', () => {
     const out = spawnSync(process.execPath, [BIN, 'status'], { env: envHook, encoding: 'utf8' });
     assert.ok(/Distill:\s+enabled — Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
@@ -20229,6 +20293,81 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // ---- Settings honesty: GET /api/settings's mcp field (settingsPayload's
+  // mcpStatusPayload in lib/server.js) driven through the REAL
+  // mcpRegister.lastRegistration() path -- no hardcoded literal stands in
+  // for the registration state anywhere below. Each case is produced by
+  // actually calling mcpRegister.registerNow/unregisterNow against a
+  // fixture home + stubbed spawn (same fixture shape as the "MCP registrar"
+  // suite above), then reading settingsPayload() the same way the endpoint
+  // does. Isolated in its own MEMBRIDGE_HOME/block (not the live T17 daemon
+  // above) so these cases can't be reordered against each other.
+  {
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const HOME_SETTINGS_MCP = path.join(ROOT, 'home-settings-mcp');
+    process.env.MEMBRIDGE_HOME = HOME_SETTINGS_MCP;
+    util.ensureConfig();
+    const { settingsPayload } = require('../lib/server');
+    const mcpRegisterLib = require('../lib/mcp-register');
+
+    const fixtureHome = path.join(ROOT, 'home-settings-mcp-agents');
+    fs.mkdirSync(path.join(fixtureHome, '.codex'), { recursive: true });
+    const stubClaude = path.join(ROOT, 'home-settings-mcp-stub-claude');
+    fs.writeFileSync(stubClaude, '#!/bin/sh\n');
+    const regOpts = {
+      home: fixtureHome,
+      env: {},
+      platform: 'darwin',
+      config: {},
+      command: { command: '/stub/node', args: ['/stub/membridge/bin/membridge.js', 'mcp'], env: {} },
+      spawn: () => ({ status: 1, stdout: '', stderr: 'No MCP server named "membridge".' }),
+      resolveClaudeBin: () => ({ path: stubClaude, source: 'config' }),
+    };
+
+    try {
+      check('settingsPayload: mcp.state is "never" before any registration has run', () => {
+        const payload = settingsPayload();
+        assert.strictEqual(payload.mcp.state, 'never');
+        assert.deepStrictEqual(payload.mcp.rows, []);
+      });
+
+      check('settingsPayload: mcp.state is "registered" with real per-tool rows after a real registerNow', () => {
+        const { rows } = mcpRegisterLib.registerNow(regOpts);
+        assert.ok(rows.some(r => r.agent === 'codex' && (r.status === 'registered' || r.status === 'unchanged')),
+          `fixture did not actually register codex: ${JSON.stringify(rows)}`);
+        const payload = settingsPayload();
+        assert.strictEqual(payload.mcp.state, 'registered');
+        assert.ok(payload.mcp.at, 'a registered state must report when it was last checked');
+        assert.deepStrictEqual(payload.mcp.rows, mcpRegisterLib.lastRegistration().rows,
+          'settingsPayload must read the SAME rows lastRegistration() returns, never a re-derived or hardcoded copy');
+      });
+
+      check('settingsPayload: mcp.state is "removed" (not registered) after a real unregisterNow', () => {
+        mcpRegisterLib.unregisterNow(regOpts);
+        const payload = settingsPayload();
+        assert.strictEqual(payload.mcp.state, 'removed');
+      });
+
+      check('settingsPayload: mcp.state is "disabled" when config.mcp.autoRegister is false and nothing was ever recorded', () => {
+        const prevHome = process.env.MEMBRIDGE_HOME;
+        process.env.MEMBRIDGE_HOME = path.join(ROOT, 'home-settings-mcp-disabled');
+        util.ensureConfig();
+        try {
+          const raw = util.loadUserConfig();
+          util.saveUserConfig({ ...raw, mcp: { autoRegister: false } });
+          const payload = settingsPayload();
+          assert.strictEqual(payload.mcp.state, 'disabled');
+          assert.strictEqual(payload.mcp.autoRegister, false);
+          assert.deepStrictEqual(payload.mcp.rows, []);
+        } finally {
+          process.env.MEMBRIDGE_HOME = prevHome;
+        }
+      });
+    } finally {
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+    }
+  }
+
   // ---- teammate notes: the human surface (spec §6) ----
   // Task 1 proved the in-terminal line impossible, so the dashboard IS the
   // human surface. That makes the wiring the whole point: dashboardPayload
@@ -21996,6 +22135,34 @@ const repoRoot = require('../lib/repo-root');
           assert.ok(sawForce, 'on-demand check must force past the 6h cache TTL');
         } finally {
           updateCheckLib.check = origCheck;
+        }
+      });
+
+      // GET /api/settings's recall field (Settings honesty fix): it used to
+      // be entirely absent from the payload, so the dashboard fell back to a
+      // default that reads as "broken" even on a machine with a real,
+      // working recall hook. One end-to-end HTTP check here confirms the
+      // wiring (settingsPayload -> hooks.isRecallHookInstalled -> the live
+      // response); the state-machine cases for both mcp and recall are
+      // pinned in isolation below (no shared daemon/home, so ordering can't
+      // leak between them).
+      await check('GET /api/settings recall.installed reflects a real, resolvable recall hook', async () => {
+        const claudeSettingsFile = path.join(HOME_T17, 'claude-settings-recall.json');
+        fs.mkdirSync(path.dirname(claudeSettingsFile), { recursive: true });
+        const prevClaudeSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+        process.env.MEMBRIDGE_CLAUDE_SETTINGS = claudeSettingsFile;
+        try {
+          fs.writeFileSync(claudeSettingsFile, JSON.stringify({ hooks: {} }, null, 2));
+          const off = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(off.recall.installed, false);
+
+          fs.writeFileSync(claudeSettingsFile, JSON.stringify({
+            hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] }] },
+          }, null, 2));
+          const on = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(on.recall.installed, true, 'a live recall hook must report installed:true');
+        } finally {
+          process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevClaudeSettings;
         }
       });
 

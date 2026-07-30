@@ -26,18 +26,47 @@ interface DeliveryControlProps {
   onChooseFiles: () => void
 }
 
+// A channel's dynamic specifics (which tools, when last checked) -- '' when
+// the mapper had nothing to add beyond the chip itself.
+function ChannelDetail({ detail }: { detail: string }) {
+  return detail ? <span className="settings-metric">{detail}</span> : null
+}
+
 // One control per known DeliveryChannel.id (types.ts's closed union). Only
 // 'summaries' (the distill Stop-hook), 'mcp' (registration) and
 // 'context-block' (choose files, Task 18) have a real daemon-side action
 // behind them today -- lib/server.js's saveSettings has no handler for
 // 'recall', so it gets status only, never a button that would silently do
 // nothing.
+//
+// installed:null (Settings honesty fix) is handled once, for every channel,
+// before any per-id branch: a channel the daemon has not actually checked
+// yet must say so in words -- never fall through to a channel's own
+// installed:false wording (e.g. "not registered"), which reads as a real
+// failure rather than "not checked".
 function DeliveryControl({ channel, onSetSetting, onChooseFiles }: DeliveryControlProps) {
+  if (channel.installed === null) {
+    return (
+      <>
+        <StateChip tone="muted" glyph="•">not checked yet</StateChip>
+        <ChannelDetail detail={channel.detail} />
+      </>
+    )
+  }
+
   if (channel.id === 'mcp') {
-    if (channel.installed) return <StateChip tone="ok" glyph="✓">installed</StateChip>
+    if (channel.installed) {
+      return (
+        <>
+          <StateChip tone="ok" glyph="✓">installed</StateChip>
+          <ChannelDetail detail={channel.detail} />
+        </>
+      )
+    }
     return (
       <>
         <StateChip tone="warn" glyph="⚠">not registered</StateChip>
+        <ChannelDetail detail={channel.detail} />
         <button type="button" className="settings-btn" onClick={() => onSetSetting('mcpRegistered', true)}>
           Register
         </button>
@@ -75,9 +104,14 @@ function DeliveryControl({ channel, onSetSetting, onChooseFiles }: DeliveryContr
 
   // recall: status only. No daemon endpoint exists to "fix" it beyond what
   // the summaries toggle above already covers.
-  return channel.installed
-    ? <StateChip tone="ok" glyph="✓">installed</StateChip>
-    : <StateChip tone="warn" glyph="⚠">not installed</StateChip>
+  return (
+    <>
+      {channel.installed
+        ? <StateChip tone="ok" glyph="✓">installed</StateChip>
+        : <StateChip tone="warn" glyph="⚠">not installed</StateChip>}
+      <ChannelDetail detail={channel.detail} />
+    </>
+  )
 }
 
 type ActiveDialog = 'contextFiles' | 'redaction' | 'exclude' | null
