@@ -234,6 +234,7 @@ describe('LocalDaemonClient.getInsights', () => {
     membersSyncing: { ok: 2, total: 3 },
     entriesShared: { count: 187, delta: 31 },
     skeleton: { available: true, repeatOpens: 1204, answeredFirst: 818 },
+    assists: { available: true, total: 876, byKind: { recallServed: 818, teammateNotes: 46, mcpQueries: 12 } },
     perPerson: [{ id: 'me', name: 'Marco', sessions: 214, shared: 205 }],
     topProjects: [{ name: 'membridge', sessions: 184, people: 3 }],
     problems: [

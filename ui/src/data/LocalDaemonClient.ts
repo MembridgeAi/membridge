@@ -252,7 +252,9 @@ export class LocalDaemonClient implements DataClient {
   // field name matches Insights verbatim, right down to `skeleton`, which
   // the daemon folds with its own copy of this same rule (lib/api-insights.js
   // skeletonStatsFrom mirrors ./skeletonStats.ts) -- so, like getAccessMatrix
-  // above, there is nothing here to map or drop.
+  // above, there is nothing here to map or drop. `assists` is the same
+  // pattern: computed entirely server-side by api-insights.js's assistsFrom,
+  // no client-side counterpart the way skeleton has one for Today.
   getInsights(window: 7 | 30 | 90): Promise<Insights> {
     return get<Insights>(`/api/team/insights?window=${window}`)
   }

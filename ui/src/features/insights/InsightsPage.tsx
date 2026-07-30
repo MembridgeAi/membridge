@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { useDataClient } from '../../data/DataClientProvider'
 import { useInsights, useSettings, useStatus } from '../../data/queries'
-import type { Insights, SkeletonStats } from '../../data/types'
+import type { AssistsStats, Insights, SkeletonStats } from '../../data/types'
+import { AssistsBreakdown } from './AssistsBreakdown'
 import { PersonBars } from './PersonBars'
 import { ProblemGroup } from './ProblemList'
 import './insights.css'
@@ -26,6 +27,14 @@ function headlinePercentLabel(skeleton: SkeletonStats): string {
   if (!skeleton.available) return 'pending'
   if (skeleton.repeatOpens <= 0) return '0%'
   return `${Math.round((skeleton.answeredFirst / skeleton.repeatOpens) * 100)}%`
+}
+
+// The headline stat (spec: "answered by our memory first should be a
+// better stat -- it should be any instance where the memory helped").
+// `total` already sums every channel AssistsBreakdown lists below it, by
+// construction (lib/api-insights.js assistsFrom) -- this only formats it.
+function assistsHeadlineValue(assists: AssistsStats): string {
+  return assists.available ? formatCount(assists.total) : 'pending'
 }
 
 function trendNote(deltaPct: number | null, windowDays: number): string | undefined {
@@ -59,6 +68,10 @@ function buildCsv(insights: Insights): string {
     toCsvRow(['entries_shared', insights.entriesShared.count]),
     toCsvRow(['repeat_file_opens', insights.skeleton.available ? insights.skeleton.repeatOpens : 'pending']),
     toCsvRow(['answered_by_memory_first', insights.skeleton.available ? insights.skeleton.answeredFirst : 'pending']),
+    toCsvRow(['memory_assists_total', insights.assists.available ? insights.assists.total : 'pending']),
+    toCsvRow(['assists_recall_served', insights.assists.available ? insights.assists.byKind.recallServed : 'pending']),
+    toCsvRow(['assists_teammate_notes', insights.assists.available ? insights.assists.byKind.teammateNotes : 'pending']),
+    toCsvRow(['assists_mcp_queries', insights.assists.available ? insights.assists.byKind.mcpQueries : 'pending']),
     '',
     toCsvRow(['person', 'sessions', 'shared']),
     ...insights.perPerson.map(p => toCsvRow([p.name, p.sessions, p.shared])),
@@ -128,7 +141,7 @@ function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentP
 
   const stats: StatItem[] = [
     { value: formatCount(insights.sessions.count), label: 'sessions', note: trendNote(insights.sessions.deltaPct, window) },
-    { value: headlinePercentLabel(insights.skeleton), label: 'repeat opens answered by memory' },
+    { value: assistsHeadlineValue(insights.assists), label: 'times memory helped' },
     {
       value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
       label: 'members syncing',
@@ -190,6 +203,11 @@ function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentP
               </span>
             </div>
           </div>
+
+          <div className="insights-sect">
+            Where memory helped <span className="insights-hint">behind the headline above</span>
+          </div>
+          <AssistsBreakdown assists={insights.assists} />
 
           <div className="insights-sect">Most active projects</div>
           {insights.topProjects.map(p => (

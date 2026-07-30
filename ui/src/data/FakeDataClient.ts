@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
-  AccessMatrix, AuditEvent, FeedEntry, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
-  Settings, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AssistsStats, AuditEvent, FeedEntry, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project,
+  Role, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 export interface FakeOptions {
@@ -172,6 +172,16 @@ export class FakeDataClient implements DataClient {
       ? { available: false }
       : { available: true, repeatOpens: 1204, answeredFirst: 818 }
   }
+  // Same skeletonAvailable flag drives both -- in the real daemon, `assists`
+  // and `skeleton` come off the same /api/savings totals, so a fixture that
+  // could make one available and the other not would model a state the real
+  // server never produces. recallServed matches skeleton's answeredFirst
+  // (818) on purpose: both read the identical avoided.serves number.
+  private assistsStats(): AssistsStats {
+    return this.opts.skeletonAvailable === false
+      ? { available: false }
+      : { available: true, total: 876, byKind: { recallServed: 818, teammateNotes: 46, mcpQueries: 12 } }
+  }
   getSkeletonStats() {
     return this.guard<SkeletonStats>(this.skeletonStats())
   }
@@ -182,6 +192,7 @@ export class FakeDataClient implements DataClient {
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },
       skeleton: this.skeletonStats(),
+      assists: this.assistsStats(),
       perPerson: [{ id: this.viewerId, name: 'Marco', sessions: 214, shared: 205 }],
       topProjects: [{ name: 'membridge', sessions: 184, people: 3 }],
       problems: [

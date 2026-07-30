@@ -241,6 +241,10 @@
   padding-bottom: 4px;
 }
 
+.assists-breakdown {
+  padding-bottom: 4px;
+}
+
 /* Broken / minor problems. */
 .problem-row {
   display: flex;
