@@ -13582,6 +13582,35 @@ async function main() {
       assert.deepStrictEqual(searchNone.results, []);
     });
 
+    const { data: sDecide } = await callJson('search_memory', { query: 'vault rotation' });
+    check('mcp: search_memory matches team decisions, not just ask/summary', () => {
+      assert.ok(sDecide.results.some(r => r.author === 'Priya'),
+        'a decisions-only match was missed (query terms only appear in the decisions field)');
+      assert.ok(!JSON.stringify(sDecide).includes('sk-tamper-mcp'), 'secret leaked');
+    });
+
+    check('mcp: search results are ranked (score desc) and carry matched fields', () => {
+      assert.ok(sDecide.results.every(r => typeof r.score === 'number' && Array.isArray(r.matched)));
+      const scores = sDecide.results.map(r => r.score);
+      assert.deepStrictEqual(scores, [...scores].sort((a, b) => b - a), 'results not score-ordered');
+    });
+
+    const { data: sFile } = await callJson('search_memory', { query: 'vault', file: 'vault.tf' });
+    check('mcp: search_memory file filter narrows to entries touching the file', () => {
+      assert.ok(sFile.results.length >= 1, 'file-filtered search found nothing');
+      assert.ok(sFile.results.every(r => (r.files || []).some(f => f.includes('vault.tf'))));
+    });
+
+    const { data: sAuthor } = await callJson('search_memory', { query: 'vault', author: 'priya' });
+    check('mcp: search_memory author filter is a case-insensitive substring', () => {
+      assert.ok(sAuthor.results.length >= 1 && sAuthor.results.every(r => r.author === 'Priya'));
+    });
+
+    const { data: sTool } = await callJson('search_memory', { query: 'vault', tool: 'Codex' });
+    check('mcp: search_memory tool filter matches the source exactly', () => {
+      assert.ok(sTool.results.length >= 1 && sTool.results.every(r => r.source === 'Codex'));
+    });
+
     // recall: the same Tier B "header + skeleton" body decide() would serve,
     // but with NO session gating (an MCP caller manages its own context) --
     // just freshness + a cached skeleton + the same floors. Never writes
