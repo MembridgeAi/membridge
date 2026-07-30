@@ -16,6 +16,34 @@ process.env.MEMBRIDGE_CODEX_DIR = path.join(ROOT, 'codex-sessions');
 process.env.MEMBRIDGE_INTERVAL = '3600'; // daemon ticks once at boot, then stays quiet
 delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not leak into settings tests
 
+// Safety net for the incident below: ROOT's own fixtures include a real
+// `.membridge/` marker directory (setupFixtures' proj1), which is exactly
+// what lets the daemon treat a directory as a tracked project on sight. If
+// this suite dies before reaching its own end-of-main() cleanup -- an
+// assertion or a bare `await` outside check() throwing, or the process being
+// killed/interrupted mid-run, both of which a 22k-line suite with real git
+// subprocesses and real HTTP servers will hit sooner or later -- ROOT is left
+// stranded on disk under the OS temp dir. A later GENUINE coding-agent
+// session whose shell cwd happens to land inside that leftover directory
+// (e.g. someone poking at a stale fixture while debugging) is then exactly
+// the kind of real session the REAL, non-isolated daemon picks up as
+// legitimate project activity -- which is how a fixture path ends up tracked
+// in the owner's actual ~/.membridge/state.json. 'exit' fires on every way
+// out of the process except a hard kill (SIGKILL), so this is strictly more
+// robust than relying on main() reaching its own rmSync at the bottom of this
+// file; SIGINT/SIGTERM get an explicit handler because registering ANY
+// listener for them suppresses Node's default immediate-exit behavior.
+let rootCleaned = false;
+function cleanupRoot() {
+  if (rootCleaned) return;
+  rootCleaned = true;
+  try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {}
+}
+process.on('exit', cleanupRoot);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { cleanupRoot(); process.exit(1); });
+}
+
 // Regression guard for a real incident: a prior run of this suite left a
 // fixture path (.../membridge-test-XXXXXX/projects/excluded-app -- exactly
 // this ROOT's own naming) sitting in the OWNER's REAL ~/.membridge/
@@ -35,6 +63,36 @@ function snapshotRealConfig() {
   try { return fs.readFileSync(REAL_CONFIG_PATH, 'utf8'); } catch { return null; }
 }
 const realConfigBeforeSuite = snapshotRealConfig();
+
+// SECOND, INDEPENDENT data point on the same incident: the owner's REAL
+// ~/.membridge/state.json separately turned up tracking a project at
+// .../membridge-test-XXXXXX/projects/shop-app -- proj1's own fixture path,
+// in a DIFFERENT file than the config.json exclude entry above, from what
+// was one suite run. A repeat investigation still found no live write-path
+// bug (see cleanupRoot above for the mechanism that best explains it: this
+// suite's ROOT fixtures carry a real `.membridge/` marker, so if a run ever
+// dies before reaching its own cleanup, a later genuine coding-agent session
+// whose cwd lands inside the stranded directory reads as legitimate activity
+// to the real, non-isolated daemon). cleanupRoot narrows that window.
+//
+// NOT a byte-identical guard like REAL_CONFIG_PATH above: this machine runs
+// the REAL MemBridge daemon continuously (it dogfoods this repo), and it
+// rewrites state.json on every sync tick regardless of whether this suite is
+// running -- confirmed live: the real state.json's mtime moves in lockstep
+// with an independent, already-running MemBridge.app process, not with this
+// suite. A before/after byte comparison over a multi-minute run is therefore
+// a guaranteed false positive from ordinary background activity on the
+// owner's REAL projects, not evidence of a leak. The invariant that actually
+// matches the incident, and stays true no matter how much legitimate churn
+// happens elsewhere in the file: no project key in the real state can ever
+// be shaped like one of THIS suite's own OS-temp fixture roots.
+const REAL_STATE_PATH = path.join(os.homedir(), '.membridge', 'state.json');
+function realStateLeakedFixtureKeys() {
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(REAL_STATE_PATH, 'utf8')); } catch { return []; }
+  const keys = Object.keys((parsed && parsed.projects) || {});
+  return keys.filter(k => /membridge-test-/.test(k));
+}
 
 const util = require('../lib/util');
 const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('../lib/scan');
@@ -9079,6 +9137,12 @@ async function main() {
       assert.strictEqual(payload.projects[0].notesInjectedTokens, 0);
       assert.strictEqual(payload.totals.notesInjectedTokens, 0);
       assert.ok(!('notesInjectedTokens' in payload.projects[0].avoided));
+      // Injection COUNT (assists breakdown, distinct from the token cost
+      // above): same flat-sibling-of-avoided treatment, same zero default on
+      // a ledger that predates the field.
+      assert.strictEqual(payload.projects[0].notesInjections, 0);
+      assert.strictEqual(payload.totals.notesInjections, 0);
+      assert.ok(!('notesInjections' in payload.projects[0].avoided));
       // Ride-along billed accrual (spec §7.5): a FLAT sibling of avoided,
       // tokens only, defaulted to zero on a ledger that predates the field --
       // and never a member of `avoided`, so §7.1 arithmetic can't reach it.
@@ -9089,10 +9153,10 @@ async function main() {
       // bookkeeping (dedupe keys, per-path reader sets, notes.seenKeys) can
       // never leak onto the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['avoided', 'billed', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'billed', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'notesInjections', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
       assert.deepStrictEqual(Object.keys(payload.totals).sort(),
-        ['avoided', 'billed', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
+        ['avoided', 'billed', 'holdout', 'notesInjectedTokens', 'notesInjections', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
@@ -17155,6 +17219,93 @@ async function main() {
       const folded = scan.foldWorktreeProjects(state, util.getConfig());
       assert.ok(Array.isArray(folded), 'fold returned without hanging');
     });
+
+    // --- prevention: a worktree session must never mint a fragment at all ---
+    // THE REAL INCIDENT this guards against: foldWorktreeProjects (above) ran
+    // 2,164 times on a live machine, once or twice a minute, because a
+    // worktree session's PROMPT/SUMMARY/TODOS events (no file attached) have
+    // no edit for rehomeEvents' dominant-root logic to redirect -- so they
+    // reached mergeEvents still carrying the raw worktree cwd as `project`,
+    // re-minting the fragment every single pass for the fold to keep
+    // repairing. scanAll now collapses a LIVE worktree's raw cwd to its main
+    // repo before ev.project is ever looked at (normalizeWorktreeProject),
+    // so the fragment can no longer be minted in the first place -- this
+    // fixture reproduces the exact prompt-only shape that used to slip past.
+    check('worktree: a prompt-only session in a live worktree never mints a fragment project', () => {
+      const savedHome = process.env.MEMBRIDGE_HOME;
+      const wtHome = path.join(ROOT, 'home-wt-prevent');
+      const wtMain = path.join(ROOT, 'projects', 'wt-prevent-main');
+      const wtLive = path.join(wtMain, '.claude', 'worktrees', 'prevent-feature');
+      try {
+        fs.mkdirSync(wtMain, { recursive: true });
+        spawnSync('git', ['init', '-q', wtMain], { encoding: 'utf8' });
+        fs.writeFileSync(path.join(wtMain, 'root.txt'), 'main\n');
+        for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+          spawnSync('git', ['-C', wtMain, ...args], { encoding: 'utf8' });
+        }
+        spawnSync('git', ['-C', wtMain, 'worktree', 'add', '-q', '-b', 'prevent-feature', wtLive], { encoding: 'utf8' });
+        assert.ok(fs.existsSync(path.join(wtLive, '.git')), 'worktree fixture missing — git worktree add failed');
+        // Tracked by the ingestion gate's OWN definition (a .membridge/ dir),
+        // exactly like proj1 in setupFixtures — not by pre-seeding state, so
+        // this proves prevention works on a project's very FIRST sync too.
+        fs.mkdirSync(path.join(wtMain, '.membridge'), { recursive: true });
+        // git canonicalizes the path it writes into the linked worktree's
+        // `.git` pointer, so on macOS (/var -> /private/var) worktreeMain's
+        // return value comes back realpath'd even though ROOT itself never
+        // was. Compare against the realpath'd form, exactly like
+        // project-resolve.js's own resolveTrackedKey treats both spellings
+        // of a path as the same key.
+        const wtMainReal = fs.realpathSync(wtMain);
+
+        const cDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-wt-prevent');
+        fs.mkdirSync(cDir, { recursive: true });
+        // Filename doubles as the session id (scanAll), and rehomeEvents'
+        // dominant-root logic is keyed PURELY by that id -- a real session id
+        // is a UUID and can never collide, but this suite reuses the literal
+        // name 'sess1.jsonl' across many unrelated fixtures sharing one
+        // MEMBRIDGE_CLAUDE_DIR. A fresh isolated home (below) rescans that
+        // whole shared tree in a single pass, so a same-named file would
+        // collide session ids with an unrelated fixture's edit events and
+        // hijack this event's project via that dominant-root vote -- a test
+        // fixture hazard, not something a real install can hit. A unique
+        // name sidesteps it.
+        fs.writeFileSync(path.join(cDir, 'wt-prevent-sess.jsonl'), jsonl([
+          // Prompt only -- deliberately NO edit tool_use in this session, the
+          // exact shape rehomeEvents' dominant-root logic cannot redirect.
+          { type: 'user', message: { role: 'user', content: 'investigate the flaky test from the worktree' }, cwd: wtLive, timestamp: '2026-07-29T09:00:00.000Z' },
+        ]));
+
+        process.env.MEMBRIDGE_HOME = wtHome;
+        util.ensureConfig();
+        syncOnce();
+
+        const afterFirst = util.loadState();
+        const keys = Object.keys(afterFirst.projects || {}).map(np);
+        assert.ok(!keys.includes(np(wtLive)) && !keys.includes(np(fs.realpathSync(wtLive))),
+          'a worktree fragment project was minted on the very first sync');
+        const mainKey = Object.keys(afterFirst.projects || {}).find(k => np(k) === np(wtMain) || np(k) === np(wtMainReal));
+        assert.ok(mainKey, 'the main repo project is missing');
+        assert.ok((afterFirst.projects[mainKey].events || []).some(e => e.text === 'investigate the flaky test from the worktree'),
+          'the prompt-only worktree event never reached the main repo project');
+
+        // THE REGRESSION GUARD: a second full syncOnce must fold nothing --
+        // steady state, not a repair loop. logSize/slice mirrors the existing
+        // log-delta pattern used elsewhere in this suite.
+        let logBefore = 0;
+        try { logBefore = fs.statSync(util.logPath()).size; } catch {}
+        syncOnce();
+        let logDelta = '';
+        try { logDelta = fs.readFileSync(util.logPath(), 'utf8').slice(logBefore); } catch {}
+        assert.ok(!logDelta.includes('worktree fold: merged'),
+          `second syncOnce should have folded nothing, log said: ${JSON.stringify(logDelta)}`);
+
+        const afterSecond = util.loadState();
+        assert.strictEqual(scan.foldWorktreeProjects(afterSecond, util.getConfig()).length, 0,
+          'nothing should be left for the migration fold to do in steady state');
+      } finally {
+        process.env.MEMBRIDGE_HOME = savedHome;
+      }
+    });
   }
 
   // --- update check (version compare + cached, fail-silent release lookup) ---
@@ -21015,6 +21166,10 @@ const repoRoot = require('../lib/repo-root');
       assert.ok(proj, 'the project must appear in /api/savings');
       assert.strictEqual(proj.notesInjectedTokens, cost);
       assert.ok(pay.totals.notesInjectedTokens >= cost);
+      // The injection COUNT rides the wire too now (assists breakdown) --
+      // same fold, same fixture, one real delivery.
+      assert.strictEqual(proj.notesInjections, 1);
+      assert.ok(pay.totals.notesInjections >= 1);
       // A plain number on the wire: the dedupe evidence behind it is
       // bookkeeping and stays off, exactly like holdout.seenKeys already does.
       assert.strictEqual(typeof proj.notesInjectedTokens, 'number');
@@ -21809,6 +21964,148 @@ const repoRoot = require('../lib/repo-root');
   check('a small but day-old symptom is broken', () => {
     assert.equal(apiInsights.severityOf({ failing: 1, population: 100, sinceHours: 48 }), 'broken');
   });
+
+  // ===== Assists breakdown: "answered by our memory first should be a
+  // better stat -- it should be any instance where the memory helped" (the
+  // owner's own words). `answeredFirst` on `skeleton` only ever measured one
+  // channel (avoided.serves); `assistsFrom` widens that to every channel
+  // this machine can actually observe, as a COUNT (never a token figure, so
+  // it can never violate spec §9 -- see lib/server.js above savingsPayload).
+  // Pure-function tests against apiInsights.assistsFrom directly: no server,
+  // no team, no mock-supabase -- the same reasoning severityOf's tests above
+  // use for the same kind of pure fold.
+  {
+    const assistsLedgerStore = require('../lib/ledger-store');
+    const mcpUsageLib = require('../lib/mcp-usage');
+
+    check('assists: total equals the sum of its parts, from real ledger fixtures with different per-channel values', () => {
+      const ap = path.join(ROOT, 'assists-proj');
+      fs.mkdirSync(ap, { recursive: true });
+      assistsLedgerStore.writeLedger(ap, {
+        updatedAt: new Date().toISOString(), sessions: 1, requests: 1, volume: 1000,
+        reads: { first: 1, sameSession: 0, crossSession: 0 },
+        hotPaths: [],
+        // Different values per channel on purpose -- a bug that swaps two
+        // channels, or double-counts one of them, would still pass a test
+        // built from equal fixture numbers.
+        avoided: { tokens: 4000, serves: 2, tierA: 1, tierB: 1, partialWins: 0, netNegatives: 0 },
+        holdout: { skips: 5, callTokens: 900 }, // deliberately nonzero and NOT an assists channel -- see the rejection test below
+        notes: { injections: 7, tokens: 1200, seenKeys: [] },
+        seenKeys: [], readKeys: [], sessionIds: ['s1'], fileReaders: {},
+      });
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      // Its own MEMBRIDGE_HOME, same isolation reasoning the existing
+      // 'mcp-usage: records within the allowlist...' test uses: the tally
+      // lives under util.homeDir(), and by this point in the suite the
+      // shared home's tally file may already carry entries from the real
+      // MCP-tool-registration exercises earlier in this file. An isolated
+      // home is what makes the mcpQueries assertion below exact.
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'assists-mcp-home');
+      try {
+        const now = Date.now();
+        mcpUsageLib.recordToolUse('recall', { config: {}, now });
+        mcpUsageLib.recordToolUse('search_memory', { config: {}, now });
+        util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [ap]: { name: 'assists-proj', events: [] } } });
+        const payload = savingsPayload();
+        const assists = apiInsights.assistsFrom(payload);
+        assert.strictEqual(assists.available, true);
+        assert.deepStrictEqual(assists.byKind, { recallServed: 2, teammateNotes: 7, mcpQueries: 2 });
+        assert.strictEqual(assists.total, 2 + 7 + 2, 'total must be the exact sum of its parts, not a re-derived figure');
+        // holdout.skips (5) must never leak into the count -- it measures
+        // what a call WOULD have cost, not a delivered instance.
+        assert.strictEqual(assists.total, 11, 'holdout must not be folded in');
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
+    });
+
+    check('assists: a missing mcp-usage.json yields zero for that channel, not a crash', () => {
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'assists-mcp-home-empty');
+      try {
+        assert.ok(!fs.existsSync(mcpUsageLib.tallyPath()), 'precondition: no tally file exists yet on this machine');
+        const savings = { totals: { avoided: { tokens: 0, serves: 3, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 }, notesInjections: 1 } };
+        const assists = apiInsights.assistsFrom(savings);
+        assert.strictEqual(assists.available, true);
+        assert.strictEqual(assists.byKind.mcpQueries, 0, 'absence must read as zero, never throw');
+        assert.strictEqual(assists.total, 4);
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
+    });
+
+    check('assists: a missing/empty totals shape yields {available:false}, not a fabricated zero', () => {
+      assert.deepStrictEqual(apiInsights.assistsFrom(undefined), { available: false });
+      assert.deepStrictEqual(apiInsights.assistsFrom({}), { available: false });
+      assert.deepStrictEqual(apiInsights.assistsFrom({ totals: {} }), { available: false });
+      // avoided present but notesInjections absent -- a daemon build that
+      // predates this field, talking to a newer UI.
+      assert.deepStrictEqual(
+        apiInsights.assistsFrom({ totals: { avoided: { tokens: 0, serves: 4, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 } } }),
+        { available: false });
+    });
+
+    // Spec §9, ported to the injection COUNT: the plan asks for this to be
+    // confirmed by reading; reading does not survive the next edit, this
+    // does. Mirrors the existing 'no net-savings expression references the
+    // injected-notes figure' guard (Task 6/9, above in this file) for the
+    // TOKEN figure -- this is the same invariant for the COUNT this session
+    // added. Every arithmetic line touching notesInjections in either module
+    // that owns the assists surface is checked on the source, not on a value.
+    check('assists: no net-savings expression references the injection COUNT figure (spec §9)', () => {
+      const srcs = [
+        fs.readFileSync(path.join(__dirname, '..', 'lib', 'server.js'), 'utf8'),
+        fs.readFileSync(path.join(__dirname, '..', 'lib', 'api-insights.js'), 'utf8'),
+      ];
+      for (const src of srcs) {
+        for (const raw of src.split('\n')) {
+          const line = raw.trim();
+          if (!/notesInjections\b/.test(line) || line.startsWith('//')) continue;
+          // Broader than "no operator", same reasoning the existing guard
+          // uses: the shapes that would net the two
+          // (`totals.avoided.tokens -= notesInjections`,
+          // `pxSavingsPct(tokens - notesInjections, volume)`) all read the
+          // avoidance figures on the SAME line, whatever operator sits
+          // between them.
+          assert.ok(!/avoided\.(tokens|serves)|\bvolume\b|SavingsPct/.test(line),
+            `notesInjections must never meet the avoidance figures: ${line}`);
+          // Accumulating into its own total is the only compound assignment
+          // allowed.
+          if (/[-+*/]=/.test(line)) {
+            assert.ok(/^totals\.notesInjections \+=/.test(line),
+              `the only compound assignment allowed is into its own total: ${line}`);
+          }
+        }
+      }
+    });
+
+    check('assists: injecting notes moves neither avoided.tokens nor avoided.serves -- the count sits outside the net', () => {
+      const tp = path.join(ROOT, 'assists-outside-net');
+      fs.mkdirSync(tp, { recursive: true });
+      assistsLedgerStore.writeLedger(tp, {
+        updatedAt: new Date().toISOString(), sessions: 1, requests: 1, volume: 500,
+        reads: { first: 1, sameSession: 0, crossSession: 0 }, hotPaths: [],
+        avoided: { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+        holdout: { skips: 0, callTokens: 0 },
+        notes: { injections: 9, tokens: 3000, seenKeys: [] },
+        seenKeys: [], readKeys: [], sessionIds: ['s1'], fileReaders: {},
+      });
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'assists-outside-net-home');
+      try {
+        util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [tp]: { name: 'assists-outside-net', events: [] } } });
+        const payload = savingsPayload();
+        assert.deepStrictEqual(payload.totals.avoided,
+          { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+          'nine teammate-note injections must not conjure an avoidance figure that was never earned');
+        const assists = apiInsights.assistsFrom(payload);
+        assert.strictEqual(assists.byKind.teammateNotes, 9, 'but the assist itself is still counted');
+        assert.strictEqual(assists.byKind.recallServed, 0);
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
+    });
+  }
 
   {
     const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
@@ -22712,20 +23009,23 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
-  // See the REAL_CONFIG_PATH comment at the top of this file: this is the
-  // actual regression guard, run last so it observes everything the suite
-  // did, not just one code path's isolation.
+  // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
+  // file: these are the actual regression guards, run last so they observe
+  // everything the suite did, not just one code path's isolation.
   check('the suite never wrote to the real (non-MEMBRIDGE_HOME) ~/.membridge/config.json', () => {
     assert.strictEqual(snapshotRealConfig(), realConfigBeforeSuite,
       'the real user config changed during this run -- MEMBRIDGE_HOME isolation leaked');
+  });
+  check('the suite never leaked one of its own OS-temp fixture paths into the real ~/.membridge/state.json', () => {
+    const leaked = realStateLeakedFixtureKeys();
+    assert.deepStrictEqual(leaked, [],
+      `the real state.json tracks a project shaped like this suite's own fixtures: ${JSON.stringify(leaked)}`);
   });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-  try {
-    fs.rmSync(ROOT, { recursive: true, force: true });
-  } catch {}
+  cleanupRoot();
   if (failed.length) process.exit(1);
 }
 
