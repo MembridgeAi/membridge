@@ -13774,6 +13774,65 @@ async function main() {
     });
   }
 
+  // --- 14b. search engine (lib/search.js): pure ranked scoring ---
+  {
+    const search = require('../lib/search');
+
+    check('search: tokenize keeps identifiers and file names whole, drops stopwords', () => {
+      assert.deepStrictEqual(search.tokenize('Rotated auth.js and JWT_SECRET handling.'),
+        ['rotated', 'auth.js', 'jwt_secret', 'handling']);
+      assert.deepStrictEqual(search.tokenize('the and of'), []);
+      assert.deepStrictEqual(search.tokenize(''), []);
+      assert.deepStrictEqual(search.tokenize(null), []);
+    });
+
+    check('search: deliberate fields (decisions) outrank harvested prose (summary)', () => {
+      const a = { ts: '2026-07-01T00:00:00.000Z', summary: 'touched auth flow' };
+      const b = { ts: '2025-01-01T00:00:00.000Z', decisions: 'auth stays in middleware' };
+      const ranked = search.rankEntries([a, b], 'auth');
+      assert.strictEqual(ranked.length, 2);
+      assert.strictEqual(ranked[0].decisions, 'auth stays in middleware');
+      assert.ok(ranked[0].score > ranked[1].score);
+    });
+
+    check('search: an old exact hit beats a recent partial one (no recency weighting)', () => {
+      const recentPartial = { ts: '2026-07-01T00:00:00.000Z', summary: 'token cleanup pass' };
+      const oldExact = {
+        ts: '2026-01-01T00:00:00.000Z', headline: 'rewrote token refresh',
+        decisions: 'token refresh lives in the gotrue passthrough',
+        files: ['lib/token-refresh.js'],
+      };
+      const ranked = search.rankEntries([recentPartial, oldExact], 'token refresh');
+      assert.strictEqual(ranked[0].headline, 'rewrote token refresh');
+    });
+
+    check('search: multi-term queries are AND-biased — one flooded term is not a match', () => {
+      const noise = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth auth auth everywhere auth' };
+      assert.deepStrictEqual(search.rankEntries([noise], 'auth vault rotation epochs'), []);
+    });
+
+    check('search: file-only team rows are findable (ask/summary null on most team rows)', () => {
+      const row = { ts: '2026-07-01T00:00:00.000Z', ask: null, summary: null, files: ['infra/vault.tf'] };
+      const ranked = search.rankEntries([row], 'vault');
+      assert.strictEqual(ranked.length, 1);
+      assert.deepStrictEqual(ranked[0].matched, ['files']);
+    });
+
+    check('search: rankEntries never mutates its inputs', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth' };
+      const before = JSON.stringify(e);
+      search.rankEntries([e], 'auth');
+      assert.strictEqual(JSON.stringify(e), before);
+    });
+
+    check('search: equal scores tiebreak newest-first', () => {
+      const older = { ts: '2026-01-01T00:00:00.000Z', summary: 'vault work' };
+      const newer = { ts: '2026-06-01T00:00:00.000Z', summary: 'vault work' };
+      const ranked = search.rankEntries([older, newer], 'vault');
+      assert.strictEqual(ranked[0].ts, '2026-06-01T00:00:00.000Z');
+    });
+  }
+
   // --- 15. Provenance (lib/provenance.js): `membridge why <file>` ---
   // File-level only: which sessions edited a file, newest first. Event
   // fixtures are passed as plain proj objects (same planting style as the
