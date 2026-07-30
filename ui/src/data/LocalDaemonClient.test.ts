@@ -69,6 +69,87 @@ describe('LocalDaemonClient feed coalescing', () => {
   })
 })
 
+// Finding 2: every screen mounts useStatus() + useSettings() together (Shell
+// always does, and most feature pages call both directly too), and
+// getSettings() independently re-fetches /api/status and /api/team inside
+// itself -- so every screen used to fire /api/status and /api/team TWICE
+// each on mount. These tests drive the real fetch-counting behavior a
+// browser would see, same approach as the feed-coalescing tests above.
+describe('LocalDaemonClient status/team coalescing', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  const fakeStatus = {
+    running: true, version: '0.1.7', solo: true, setupDone: true, projectCount: 0,
+    lastSync: null, teamLastSync: null, tools: [],
+    encryption: { enabled: true, plaintextOff: true, paused: null, keyAlerts: 0 },
+    auth: { paused: null, detail: null, since: null },
+  }
+  const fakeSettingsRaw = {
+    intervalSec: 300, hookInstalled: true, distill: { enabled: true },
+    startAtLogin: true, daemonPort: 7391, updateAvailable: null,
+    redactExtra: [], exclude: [], targets: [], extraTargets: {}, extraTargetFiles: {},
+  }
+
+  function stubFetch() {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        const u = String(url)
+        if (u.startsWith('/api/team/members')) return { members: [] }
+        if (u.startsWith('/api/team/feed')) return { entries: [] }
+        if (u.startsWith('/api/team')) return { teams: [], viewerId: null, inviteCode: null }
+        if (u.startsWith('/api/status')) return fakeStatus
+        if (u.startsWith('/api/settings')) return fakeSettingsRaw
+        if (u.startsWith('/api/feed')) return { entries: [] }
+        return {}
+      },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  const callsTo = (fetchMock: ReturnType<typeof vi.fn>, prefix: string) =>
+    fetchMock.mock.calls.filter(([url]) => String(url).startsWith(prefix)).length
+
+  it('fires exactly one /api/status request when getStatus() and getSettings() run concurrently', async () => {
+    const fetchMock = stubFetch()
+    const client = new LocalDaemonClient()
+
+    await Promise.all([client.getStatus(), client.getSettings()])
+
+    expect(callsTo(fetchMock, '/api/status')).toBe(1)
+  })
+
+  it('fires exactly one /api/team request when getMembers() and getSettings() run concurrently', async () => {
+    const fetchMock = stubFetch()
+    const client = new LocalDaemonClient()
+
+    await Promise.all([client.getMembers(), client.getSettings()])
+
+    expect(callsTo(fetchMock, '/api/team')).toBe(1)
+  })
+
+  it('clears the cache on leaveTeam so the next read is fresh', async () => {
+    const fetchMock = stubFetch()
+    const client = new LocalDaemonClient()
+
+    await client.getStatus()
+    expect(callsTo(fetchMock, '/api/status')).toBe(1)
+
+    await client.leaveTeam('team-1')
+    await client.getStatus()
+    expect(callsTo(fetchMock, '/api/status')).toBe(2)
+  })
+})
+
 describe('LocalDaemonClient capabilities', () => {
   // teamAdminSupported says the daemon transport CAN carry admin calls -- it
   // is not, and must never be read as, permission for the current viewer to

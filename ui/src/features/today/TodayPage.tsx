@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { useLiveSessions, useProjects, useSkeletonStats, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
 import type { LiveSession, Project, SkeletonStats } from '../../data/types'
@@ -75,6 +76,18 @@ export function TodayPage() {
   const syncProject = useSyncProject()
   const syncAll = useSyncAll()
 
+  const liveSessions = liveQuery.data ?? []
+  // Perf (spec §7): Today re-renders every 10s poll tick. Without this
+  // memo, `memberNames` would be a brand-new object on every one of those
+  // renders regardless of whether liveSessions actually changed, which would
+  // defeat ProjectRow's React.memo below (a new object prop always fails the
+  // shallow-equality check memo relies on) -- react-query's structural
+  // sharing keeps `liveSessions` itself referentially stable across a poll
+  // with no real change, so this recomputes only when it actually changed.
+  // Hooks must run unconditionally (rules-of-hooks), so this sits above the
+  // hasError early return below, alongside every other hook in this component.
+  const memberNames = useMemo(() => nameLookup(liveSessions), [liveSessions])
+
   const hasError = statusQuery.isError || projectsQuery.isError || liveQuery.isError
   if (hasError) {
     const message = errorMessage(statusQuery.error ?? projectsQuery.error ?? liveQuery.error)
@@ -88,8 +101,6 @@ export function TodayPage() {
   const solo = statusQuery.data?.solo ?? true
   const teamLastSync = statusQuery.data?.teamLastSync ?? null
   const projects = projectsQuery.data ?? []
-  const liveSessions = liveQuery.data ?? []
-  const memberNames = nameLookup(liveSessions)
   // A load failure or a still-in-flight fetch degrades to "pending", the same
   // as a ledger with nothing in it -- never a guessed number.
   const skeleton: SkeletonStats = skeletonQuery.data ?? { available: false }
@@ -147,7 +158,7 @@ export function TodayPage() {
                 key={project.path}
                 project={project}
                 memberNames={memberNames}
-                onSync={() => syncProject.mutate(project.path)}
+                onSyncProject={syncProject.mutate}
               />
             ))
           )}

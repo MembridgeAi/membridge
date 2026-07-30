@@ -2,14 +2,18 @@
 // through the pure functions in ./mappers.ts. Kept thin on purpose -- see
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
-import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry } from './types'
+import type {
+  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats,
+  Status, StreamEntry,
+} from './types'
 import {
-  dedupeLiveSessions, lastSharedAtByAuthor, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
-  projectCountsByAuthor, syncStateOf,
-  type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawTeamFeedEntry,
+  dedupeLiveSessions, feedQueryString, lastSharedAtByAuthor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
+  mapStreamEntry, projectCountsByAuthor, syncStateOf,
+  type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import { mapSettings, type RawSettingsPayload, type RawTeamMeta, type RawTeamRow } from './settingsMapper'
 import { skeletonStatsFrom, type RawSavingsPayload } from './skeletonStats'
+import { ShortTtlCache } from './requestCache'
 
 export { syncStateOf }
 
@@ -33,20 +37,13 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
   return (res.status === 204 ? undefined : await res.json()) as T
 }
 
-// TTL for the coalesced /api/feed cache below -- long enough to absorb a
-// burst of same-tick callers (Today mounts useProjects()+useLiveSessions()
-// together, and useLiveSessions() re-polls every 10s), short enough that the
-// UI never reads meaningfully stale feed data.
-const FEED_CACHE_TTL_MS = 5000
-
-async function teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
-  const data = await get<{ teams: RawTeamRow[]; viewerId: string | null; inviteCode: string | null }>('/api/team')
-  return { team: data.teams[0] || null, viewerId: data.viewerId ?? null, inviteCode: data.inviteCode ?? null }
-}
-
-async function firstTeam(): Promise<RawTeamRow | null> {
-  return (await teamMeta()).team
-}
+// TTL for the coalesced request cache below -- long enough to absorb a burst
+// of same-tick callers (Today mounts useProjects()+useLiveSessions()
+// together, and useLiveSessions() re-polls every 10s; every screen mounts
+// useStatus()+useSettings() together, and getSettings() independently
+// re-fetches /api/status internally), short enough that the UI never reads
+// meaningfully stale data.
+const REQUEST_CACHE_TTL_MS = 5000
 
 // The one remaining sentinel for a method with genuinely no daemon endpoint
 // to call yet. getAccessMatrix and getAudit used to reject through this too
@@ -60,39 +57,39 @@ export class LocalDaemonClient implements DataClient {
 
   // The Today screen mounts useProjects() and useLiveSessions() together, and
   // useLiveSessions() polls every 10s on top -- both hit the SAME /api/feed
-  // page (spec §7: one request per screen). This cache, keyed by the query
-  // string, coalesces those into one real fetch: a call that lands while the
-  // previous one for the same key is still in flight (or finished less than
-  // FEED_CACHE_TTL_MS ago) gets the same promise instead of firing again.
-  // Eviction is a timestamp comparison made at read time, not a scheduled
-  // setTimeout -- no timer handle to outlive a call or keep anything alive.
-  private feedCache = new Map<string, { promise: Promise<{ entries: RawFeedEntry[] }>; fetchedAt: number }>()
+  // page (spec §7: one request per screen). getStatus() and teamMeta() have
+  // the same shape of duplicate: useStatus()+useSettings() mount together on
+  // every screen, and getSettings() below independently re-fetches
+  // /api/status and /api/team. One cache, keyed by endpoint+query, coalesces
+  // all of these: a call that lands while a previous one for the same key is
+  // still in flight (or finished less than REQUEST_CACHE_TTL_MS ago) gets the
+  // same promise instead of firing again.
+  private requestCache = new ShortTtlCache(REQUEST_CACHE_TTL_MS)
 
   private feed(query = ''): Promise<{ entries: RawFeedEntry[] }> {
-    const now = Date.now()
-    const cached = this.feedCache.get(query)
-    if (cached && now - cached.fetchedAt < FEED_CACHE_TTL_MS) return cached.promise
-
-    const promise = get<{ entries: RawFeedEntry[] }>(`/api/feed?limit=${FEED_LIMIT}${query}`)
-    this.feedCache.set(query, { promise, fetchedAt: now })
-    // A rejected fetch must not squat the cache for the rest of the TTL
-    // window -- drop it so the next caller retries instead of replaying the
-    // same failure.
-    promise.catch(() => {
-      if (this.feedCache.get(query)?.promise === promise) this.feedCache.delete(query)
-    })
-    return promise
+    return this.requestCache.get(`feed:${query}`, () => get<{ entries: RawFeedEntry[] }>(`/api/feed?limit=${FEED_LIMIT}${query}`))
   }
 
   // syncProject/syncAll can add events the cached feed page doesn't have yet;
   // clearing here (rather than waiting out the TTL) keeps the post-sync read
   // honest without reintroducing a duplicate-fetch window on every render.
   private invalidateFeedCache(): void {
-    this.feedCache.clear()
+    this.requestCache.deleteMatching('feed:')
+  }
+
+  private teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
+    return this.requestCache.get('team', async () => {
+      const data = await get<{ teams: RawTeamRow[]; viewerId: string | null; inviteCode: string | null }>('/api/team')
+      return { team: data.teams[0] || null, viewerId: data.viewerId ?? null, inviteCode: data.inviteCode ?? null }
+    })
+  }
+
+  private async firstTeam(): Promise<RawTeamRow | null> {
+    return (await this.teamMeta()).team
   }
 
   getStatus(): Promise<Status> {
-    return get<Status>('/api/status')
+    return this.requestCache.get('status', () => get<Status>('/api/status'))
   }
 
   async getProjects(): Promise<Project[]> {
@@ -108,6 +105,19 @@ export class LocalDaemonClient implements DataClient {
   async getProjectStream(projectPath: string): Promise<StreamEntry[]> {
     const f = await this.feed(`&project=${encodeURIComponent(projectPath)}`)
     return f.entries.map(mapStreamEntry)
+  }
+
+  // The Feed screen's cross-project, filtered, paged request -- deliberately
+  // NOT routed through the private feed() helper above, which hardcodes
+  // limit=FEED_LIMIT ahead of its query string: appending a second `limit`
+  // here would produce `?limit=100&limit=<n>`, and URLSearchParams.get on
+  // the server keeps the FIRST value, silently discarding the caller's page
+  // size. Keyed under the same 'feed:' prefix as that helper's cache entries
+  // so syncProject/syncAll's invalidateFeedCache() clears both.
+  async getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }): Promise<FeedPage> {
+    const qs = feedQueryString(filters, opts)
+    const raw = await this.requestCache.get(`feed:page:${qs}`, () => get<RawFeedPayload>(`/api/feed?${qs}`))
+    return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null }
   }
 
   async syncProject(projectPath: string): Promise<void> {
@@ -173,7 +183,7 @@ export class LocalDaemonClient implements DataClient {
   // previously make (team, members, feed -> +team/feed), traded for not
   // fabricating a value the daemon can actually answer.
   async getMembers(): Promise<Member[]> {
-    const team = await firstTeam()
+    const team = await this.firstTeam()
     if (!team) return []
     const [membersRes, f, teamFeedRes] = await Promise.all([
       get<{ members: RawMemberRow[] }>(`/api/team/members?teamId=${encodeURIComponent(team.team_id)}`),
@@ -204,13 +214,13 @@ export class LocalDaemonClient implements DataClient {
   }
 
   async setMemberRole(memberId: string, role: Role): Promise<void> {
-    const team = await firstTeam()
+    const team = await this.firstTeam()
     if (!team) throw new Error('setMemberRole requires a team, and this machine is not on one.')
     await post('/api/team/set-role', { teamId: team.team_id, userId: memberId, role })
   }
 
   async removeMember(memberId: string): Promise<void> {
-    const team = await firstTeam()
+    const team = await this.firstTeam()
     if (!team) throw new Error('removeMember requires a team, and this machine is not on one.')
     await post('/api/team/remove-member', { teamId: team.team_id, userId: memberId })
   }
@@ -236,11 +246,16 @@ export class LocalDaemonClient implements DataClient {
     return skeletonStatsFrom(raw)
   }
 
+  // getStatus()/teamMeta() route through the same requestCache keys ('status',
+  // 'team') that the standalone getStatus() method and useStatus() query use
+  // -- so a screen that mounts useStatus()+useSettings() together (every
+  // screen does) fires ONE /api/status request and ONE /api/team request,
+  // not two of each.
   async getSettings(): Promise<Settings> {
     const [raw, status, meta] = await Promise.all([
       get<RawSettingsPayload>('/api/settings'),
-      get<Status>('/api/status'),
-      teamMeta(),
+      this.getStatus(),
+      this.teamMeta(),
     ])
     return mapSettings(raw, status, meta.team, { viewerId: meta.viewerId, inviteCode: meta.inviteCode })
   }
@@ -273,6 +288,10 @@ export class LocalDaemonClient implements DataClient {
 
   async leaveTeam(teamId: string): Promise<void> {
     await post<{ left: boolean }>('/api/team/leave', { teamId })
+    // Wide-reaching effect (this machine's team membership just changed) that
+    // the request cache can't infer from the URL alone -- clear it all
+    // rather than risk a stale team/status read for the rest of the TTL.
+    this.requestCache.clear()
   }
 
   async addProject(path: string): Promise<void> {

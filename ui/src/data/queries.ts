@@ -3,11 +3,30 @@
 // stays false so a hidden tab stops polling WITHOUT unmounting the tree or
 // clearing its cached data (a previous implementation unmounted on
 // document.hidden and blanked the dashboard mid screen-recording).
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDataClient } from './DataClientProvider'
-import type { AccessMatrix, Role } from './types'
+import type { AccessMatrix, FeedFilters, Role } from './types'
 
 const LIVE = { refetchInterval: 10_000, refetchIntervalInBackground: false } as const
+
+// The Feed screen's page size. Not "live" (no poll) -- an infinite list
+// re-fetching its first page every 10s would fight the reader's scroll
+// position and reshuffle "Show more" state underneath them.
+export const FEED_PAGE_SIZE = 30
+
+// Cache tuning (spec §7: tab switch < 100ms, no spinner for cached data).
+// Everything below is data that does not change on its own between explicit
+// user actions -- members, settings, audit rows, access grants. Without a
+// staleTime these default to 0, so simply switching tabs away and back
+// (unmount + remount, since each screen only renders while its route is
+// active) re-fetched every one of them on every single visit, even a second
+// after the first fetch. STANDARD_STALE_MS matches the value useProjects()
+// already used before this pass -- reused here rather than inventing a
+// second number, so "how fresh is fresh enough" has one answer across the
+// non-live queries. Cached data still renders INSTANTLY on remount either
+// way; this only decides whether react-query also fires a silent background
+// refetch behind it.
+const STANDARD_STALE_MS = 15_000
 
 // ---------------------------------------------------------------------------
 // Queries
@@ -19,7 +38,7 @@ export function useStatus() {
 
 export function useProjects() {
   const c = useDataClient()
-  return useQuery({ queryKey: ['projects'], queryFn: () => c.getProjects(), staleTime: 15_000 })
+  return useQuery({ queryKey: ['projects'], queryFn: () => c.getProjects(), staleTime: STANDARD_STALE_MS })
 }
 
 export function useLiveSessions() {
@@ -37,13 +56,29 @@ export function useProjectStream(projectPath: string | null) {
   })
 }
 
+// The Feed screen: cross-project, filtered, paged backwards by `before`.
+// `filters` is part of the queryKey, so changing a filter starts a FRESH
+// infinite query (page one, server-filtered) rather than re-slicing
+// whatever pages happened to already be cached under the old filter --
+// paging stays correct because there's never a mix of pages fetched under
+// two different filters in the same list.
+export function useFeed(filters: FeedFilters) {
+  const c = useDataClient()
+  return useInfiniteQuery({
+    queryKey: ['feed', filters],
+    queryFn: ({ pageParam }) => c.getFeed(filters, { limit: FEED_PAGE_SIZE, before: pageParam }),
+    initialPageParam: null as string | null,
+    getNextPageParam: lastPage => lastPage.nextBefore,
+  })
+}
+
 // GET /api/team/access-matrix is owner/admin-only -- 403 for a member (Task
 // 8). `enabled` defaults true for existing/simple callers, but the projects
 // grid (Task 10) must pass false for a member role so this never fires a
 // request the daemon is going to refuse.
 export function useAccessMatrix(enabled: boolean = true) {
   const c = useDataClient()
-  return useQuery({ queryKey: ['accessMatrix'], queryFn: () => c.getAccessMatrix(), enabled })
+  return useQuery({ queryKey: ['accessMatrix'], queryFn: () => c.getAccessMatrix(), enabled, staleTime: STANDARD_STALE_MS })
 }
 
 // Per-project visibility flags (who on the team can see THIS project), for
@@ -59,37 +94,43 @@ export function useProjectAccess(projectPath: string | null) {
     queryKey: ['projectAccess', projectPath],
     queryFn: () => c.getProjectAccess(projectPath as string),
     enabled: !!projectPath,
+    staleTime: STANDARD_STALE_MS,
   })
 }
 
-export function useMembers() {
+// `enabled` defaults true for existing/simple callers (same convention as
+// useAccessMatrix above). Feed passes `!solo`: getMembers() already returns
+// [] on a solo machine (no team to list), but there is no reason to fire the
+// /api/team + /api/team/members round trip at all when the Feed screen's
+// person filter is going to be absent regardless.
+export function useMembers(enabled: boolean = true) {
   const c = useDataClient()
-  return useQuery({ queryKey: ['members'], queryFn: () => c.getMembers() })
+  return useQuery({ queryKey: ['members'], queryFn: () => c.getMembers(), enabled, staleTime: STANDARD_STALE_MS })
 }
 
 export function useInvites() {
   const c = useDataClient()
-  return useQuery({ queryKey: ['invites'], queryFn: () => c.getInvites() })
+  return useQuery({ queryKey: ['invites'], queryFn: () => c.getInvites(), staleTime: STANDARD_STALE_MS })
 }
 
 export function useAudit(limit?: number) {
   const c = useDataClient()
-  return useQuery({ queryKey: ['audit', limit], queryFn: () => c.getAudit(limit) })
+  return useQuery({ queryKey: ['audit', limit], queryFn: () => c.getAudit(limit), staleTime: STANDARD_STALE_MS })
 }
 
 export function useInsights(window: 7 | 30 | 90) {
   const c = useDataClient()
-  return useQuery({ queryKey: ['insights', window], queryFn: () => c.getInsights(window) })
+  return useQuery({ queryKey: ['insights', window], queryFn: () => c.getInsights(window), staleTime: STANDARD_STALE_MS })
 }
 
 export function useSkeletonStats() {
   const c = useDataClient()
-  return useQuery({ queryKey: ['skeletonStats'], queryFn: () => c.getSkeletonStats() })
+  return useQuery({ queryKey: ['skeletonStats'], queryFn: () => c.getSkeletonStats(), staleTime: STANDARD_STALE_MS })
 }
 
 export function useSettings() {
   const c = useDataClient()
-  return useQuery({ queryKey: ['settings'], queryFn: () => c.getSettings() })
+  return useQuery({ queryKey: ['settings'], queryFn: () => c.getSettings(), staleTime: STANDARD_STALE_MS })
 }
 
 // ---------------------------------------------------------------------------

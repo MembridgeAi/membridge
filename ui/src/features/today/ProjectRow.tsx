@@ -1,3 +1,4 @@
+import { memo, useCallback } from 'react'
 import { Avatar } from '../../components/Avatar'
 import { Sparkline } from '../../components/Sparkline'
 import { SyncStateView } from '../../components/SyncState'
@@ -10,14 +11,26 @@ interface ProjectRowProps {
    *  id -- Today has no member roster to resolve against (that's Members'
    *  getMembers(), not consumed here). */
   memberNames: Record<string, string>
-  onSync: () => void
+  /** Takes the project path itself, rather than being pre-bound per row, so
+   *  the caller can pass a mutation's own stable `.mutate` reference straight
+   *  through (TodayPage.tsx) instead of a fresh closure on every render --
+   *  that stability is what lets React.memo below actually skip work on
+   *  Today's 10s poll tick when this project's own data hasn't changed. */
+  onSyncProject: (path: string) => void
 }
 
 /** One "Projects · this week" row: name/tag/avatars + latest summary on the
  *  left, a right-anchored metric+sync line with the sparkline directly
- *  beneath it on the right. `data-testid="project-row"` per the task brief. */
-export function ProjectRow({ project, memberNames, onSync }: ProjectRowProps) {
+ *  beneath it on the right. `data-testid="project-row"` per the task brief.
+ *
+ *  Wrapped in React.memo (perf, spec §7): Today polls every 10s, and a poll
+ *  that returns identical data must not repaint every row -- react-query's
+ *  structural sharing already keeps an unchanged `project` object's identity
+ *  stable across a poll, so memo here only re-renders a row whose own data
+ *  actually changed. */
+function ProjectRowImpl({ project, memberNames, onSyncProject }: ProjectRowProps) {
   const behind = project.sync.state === 'behind'
+  const handleSync = useCallback(() => onSyncProject(project.path), [onSyncProject, project.path])
   return (
     <div className="project-row" data-testid="project-row">
       <div className="project-left">
@@ -42,10 +55,12 @@ export function ProjectRow({ project, memberNames, onSync }: ProjectRowProps) {
       <div className="project-right">
         <div className="project-metric-line">
           <span className="mono project-metric">{project.sessionsThisWeek} sessions · last 7 days</span>
-          <SyncStateView state={project.sync} onSync={behind ? onSync : undefined} />
+          <SyncStateView state={project.sync} onSync={behind ? handleSync : undefined} />
         </div>
         <Sparkline values={project.dailyCounts} muted={project.sync.state !== 'up-to-date'} />
       </div>
     </div>
   )
 }
+
+export const ProjectRow = memo(ProjectRowImpl)
