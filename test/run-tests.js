@@ -14265,6 +14265,73 @@ async function main() {
       assert.ok(!JSON.stringify(sDecide).includes('sk-tamper-mcp'), 'secret leaked');
     });
 
+    // ===== The revocation probe must fail safe =====
+    // visibleProjectIds is the ONLY input to a destructive decision (drop
+    // teamEntries, prune the durable archive), so every answer it cannot
+    // stand behind has to be null. Acting on a wrong "nothing is visible"
+    // wipes every archive on the machine; missing one revocation does not.
+    {
+      const cfg = util.getConfig();
+      const fakeCreds = { userId: 'u1', accessToken: 't' };
+
+      await check('teamsync: a probe that throws is inconclusive (null), never "nothing visible"', async () => {
+        // No backend listening on this port -- rest() rejects.
+        const out = await teamsync.visibleProjectIds(
+          { ...cfg, team: { url: 'http://127.0.0.1:1', anonKey: 'x' } }, fakeCreds, 'team-1');
+        assert.strictEqual(out, null, 'a failed probe must not read as "you may see nothing"');
+      });
+
+      await check('teamsync: a missing teamId is inconclusive, not empty', async () => {
+        assert.strictEqual(await teamsync.visibleProjectIds(cfg, fakeCreds, null), null);
+      });
+    }
+
+    // ===== Revocation must reach the MCP read path =====
+    // Access control is enforced server-side (025_enforce_project_access.sql),
+    // but search_memory never makes a network call — it reads teamEntries and
+    // the durable archive straight off disk, so RLS cannot reach it. Without
+    // this guard a revoked member keeps answering questions about the project
+    // indefinitely, and the archive is capped by row count rather than age so
+    // it never rolls over on its own.
+    {
+      const stBefore = util.loadState();
+      const revKey = Object.keys(stBefore.projects).find(k => path.resolve(k) === path.resolve(projMcp));
+      stBefore.projects[revKey].teamAccessLost = '2026-07-30T00:00:00.000Z';
+      util.saveState(stBefore);
+
+      const { data: revoked } = await callJson('search_memory', { query: 'vault rotation' });
+      const { data: revokedRecent } = await callJson('get_recent_activity', { limit: 50 });
+
+      check('mcp: a revoked project serves no teammate rows through search_memory', () => {
+        assert.ok(!revoked.results.some(r => r.author === 'Priya'),
+          'search_memory still served a teammate row from a project this machine may no longer read');
+        assert.ok(!JSON.stringify(revoked).includes('vault.tf'),
+          'revoked teammate file paths still reachable through search');
+      });
+
+      check('mcp: a revoked project serves no teammate rows through get_recent_activity either', () => {
+        assert.ok(!revokedRecent.entries.some(e => e.author === 'Priya'),
+          'get_recent_activity still served a revoked teammate row');
+      });
+
+      check('mcp: revocation hides only TEAM rows — the user keeps their own local work', () => {
+        const mine = revokedRecent.entries.filter(e => e.author !== 'Priya');
+        assert.ok(mine.length > 0,
+          'the local entries were dropped too — revocation must not delete the user\'s own memory');
+      });
+
+      // Restore for every later assertion in this block, which assumes the
+      // teammate fixtures are readable.
+      const stAfter = util.loadState();
+      delete stAfter.projects[revKey].teamAccessLost;
+      util.saveState(stAfter);
+      const { data: restored } = await callJson('search_memory', { query: 'vault rotation' });
+      check('mcp: clearing the flag restores teammate rows (access regained)', () => {
+        assert.ok(restored.results.some(r => r.author === 'Priya'),
+          'teammate rows did not come back after access was restored');
+      });
+    }
+
     check('mcp: search results are ranked (score desc) and carry matched fields', () => {
       assert.ok(sDecide.results.every(r => typeof r.score === 'number' && Array.isArray(r.matched)));
       const scores = sDecide.results.map(r => r.score);
