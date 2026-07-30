@@ -195,6 +195,13 @@
 <div class="toast" id="toast"></div>
 
 <script>
+// Where invite links point. Verified live before this was switched off the
+// pages.dev default — an invite that 404s is worse for the recipient than one
+// that looks unpolished, so this only ever moves after the hostname answers.
+// The join page must stay PUBLIC: it is for people who do not have accounts
+// yet, so no Access application belongs in front of it.
+const JOIN_BASE = 'https://join.membridge.me';
+
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const num = n => (n === null || n === undefined ? '—' : Number(n).toLocaleString());
@@ -424,7 +431,7 @@ function render(d) {
     }).join('')}</table>`
     : '<p class="note" style="margin:0">No invites issued yet.</p>';
   [...$('invites').querySelectorAll('button[data-tok]')].forEach(btn => btn.onclick = () => {
-    const link = `https://membridge.app/join#${btn.dataset.tok}`;
+    const link = `${JOIN_BASE}/#${btn.dataset.tok}`;
     navigator.clipboard.writeText(link).then(() => toast('Invite link copied'), () => toast(link, true));
   });
 
@@ -491,7 +498,7 @@ async function refresh() {
       const r = await act('onboard', { team_name: name, note: $('obNote').value.trim() || null, days: Number($('obDays').value) || 14 });
       $('obName').value = ''; $('obNote').value = '';
       await refresh(); showTab('onboard');
-      const link = `https://membridge.app/join#${r?.token || ''}`;
+      const link = `${JOIN_BASE}/#${r?.token || ''}`;
       navigator.clipboard.writeText(link).then(() => toast('Invite created — link copied'), () => toast('Created: ' + link));
     } catch (e) { toast(e.message, true); }
     finally { $('obGo').disabled = false; }

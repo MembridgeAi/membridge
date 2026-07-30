@@ -17,6 +17,7 @@ function lib(m) {
 }
 const util = lib('util');
 const { syncOnce } = lib('scan');
+const notesStore = lib('teammate-notes-store');
 const { startServer } = lib('server');
 const teamsync = lib('teamsync');
 const hooks = lib('hooks');
@@ -68,6 +69,13 @@ async function runSync() {
     // Team pulls mark the affected project dirty. Re-render immediately so
     // every local AI tool sees new teammate context in the same timer pass.
     for (const projectPath of teamResult.changed) syncOnce({ project: projectPath });
+    // Same post-pull step the CLI daemon runs: rebuild the teammate-notes
+    // index for changed projects and backfill any project whose entries
+    // predate the feature. This loop and bin/membridge.js's are the two sync
+    // loops in the product; the shared logic lives in the store so neither
+    // can drift from the other (the first version lived only in bin/, and the
+    // tray app -- the normal install -- never built an index at all).
+    notesStore.afterTeamPull(teamResult.changed);
     lastSync = new Date();
   } catch (err) {
     util.log(`tray app sync error: ${err.stack || err}`);

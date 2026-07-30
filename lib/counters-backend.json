@@ -1,0 +1,4 @@
+{
+  "$comment": "Anonymous product-health counter endpoint (lib/counters.js). Deliberately a SEPARATE file from backend.json: nothing should be able to fall back from the counter endpoint to the Supabase project that holds customer data. Empty or absent means clients never send, which is the correct default for self-hosted and open-source builds. THIS URL IS COMPILED INTO EVERY RELEASE and old installs never update it, so counters.membridge.app has to keep answering for as long as any client from this era is running — do not repoint it casually.",
+  "url": "https://counters.membridge.app"
+}

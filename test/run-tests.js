@@ -5292,6 +5292,18 @@ async function main() {
     assert.ok(
       !/saved/i.test(pxProjectSavingsLine({ tokens: 0 }, { sameSession: 5, crossSession: 1 })),
       'the new state must never say "saved" either');
+    // Ride-along billed accrual (spec §7.5): a positive billed figure leads,
+    // with the once-only figure kept beside it. billed zero or absent (older
+    // payloads, serves too fresh to have ridden) keeps the old line exactly.
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 3830, serves: 1 }, null, { tokens: 26810 }),
+      '27k avoided across requests (4k at first load) · 1 reads answered');
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 3830, serves: 1 }, null, { tokens: 0 }),
+      '4k avoided · 1 reads answered',
+      'billed zero falls back to the once-only line');
+    assert.ok(!/saved/i.test(pxProjectSavingsLine({ tokens: 3830, serves: 1 }, null, { tokens: 26810 })),
+      'the billed line must never say "saved"');
   });
   check('dashboard: pxHomeSavingsLine reads "<total> tokens of file reading avoided · <pct>% of context loaded"', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5340,6 +5352,22 @@ async function main() {
     assert.ok(
       !/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { sameSession: 5, crossSession: 1 } })),
       'no dollar figure in the new state either');
+    // Ride-along billed accrual (spec §7.5): when billed.tokens is present
+    // and positive the roll-up leads with the actual per-request figure and
+    // keeps the once-only figure beside it -- still "avoided", still tokens,
+    // and the % now compares like with like (billed and volume both count
+    // every request's context).
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 9249 }, billed: { tokens: 105000 }, volume: 21540983 }),
+      '105k tokens of request context avoided (9k at first load) · 0.5% of all context');
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 1400000 }, billed: { tokens: 0 }, volume: 21540983 }),
+      '1.4M tokens of file reading avoided · 6.1% of context loaded',
+      'billed zero (serves too fresh to have ridden yet) falls back to the once-only line');
+    assert.ok(!/saved/i.test(pxHomeSavingsLine({ avoided: { tokens: 9249 }, billed: { tokens: 105000 }, volume: 21540983 })),
+      'the billed line must never say "saved" either');
+    assert.ok(!/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 9249 }, billed: { tokens: 105000 }, volume: 21540983 })),
+      'no dollar figure on the billed line');
   });
   check('dashboard: the Projects grid row renders the per-project savings line from pxData.savingsByPath', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -7252,6 +7280,21 @@ async function main() {
     assert.strictEqual(fractional.avoidedTokensOptimistic, 623);
   });
 
+  check('recall: a no-limit call is capped at the Read tool\'s own 2000-line ceiling, never the whole file', () => {
+    // Claude Code's Read returns at most ~2000 lines on a no-limit call, so
+    // pricing a bigger file at size/4 claims tokens the read would never have
+    // loaded -- the one estimator bias that pointed in the flattering
+    // direction. The cap is 2000 * 12 (the same tokens-per-line rate the
+    // limit branch already uses), applied ONLY to the no-limit branch: an
+    // explicit limit is the caller's own stated call shape.
+    const recall = require('../lib/recall');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 1000000 }), 24000, 'a 1MB file prices at the cap, not 250k');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 96000 }), 24000, 'exactly at the boundary: 96000/4 === the cap');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 95996 }), 23999, 'just under the boundary is untouched');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), 673, 'ordinary files are unaffected');
+    assert.strictEqual(recall.estimateCallTokens(3000, { size: 1000000 }), 36000, 'an explicit limit is never capped -- it is the actual call shape');
+  });
+
   check('recall: decide() refuses unless tracked is the explicit literal true (fail-closed, never intercepts untracked/paused)', () => {
     // FIX ROUND 1, FINDING 2 (HIGH): the old gate only refused on an
     // EXPLICIT `tracked === false`, so an omitted/undefined `tracked` fell
@@ -8622,6 +8665,150 @@ async function main() {
       });
     }
 
+    // C3 MIRROR (accuracy pass, 2026-07-29): the serve side already refuses
+    // to answer a Grep/Glob as though the whole file had been read (decide()'s
+    // non-read-tool gate), but the CORRECTION side still priced a follow-up
+    // Grep at full file size -- a grep that returns three lines clawed back
+    // thousands of tokens, understating real savings and (worse) able to
+    // cross a healthy serve into 'negative' and burn a rejection strike.
+    // Three grep-heavy sessions could permanently disable recall on a path
+    // it was serving perfectly. PIN: only content-bearing reads (Read,
+    // NotebookRead, or a legacy event with no tool field) may correct a
+    // serve; Grep/Glob never do.
+    {
+      const projGrep = seedT6Project('t6-grep-never-claws-back');
+      const relGrep = 'src/grep-target.js';
+      const tsGrepServe = '2026-07-28T10:00:00.000Z';
+      const tGrepServe = Date.parse(tsGrepServe);
+      recallStoreT6.put(projGrep, relGrep, { contentHash: 'hgrep', skeleton: 'SKELGREP', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      writeServeRows(projGrep, tsGrepServe, 'sess-grep', relGrep, 'B', 4210, 380);
+      const ledGrep1 = ledgerStoreT6.updateLedger(projGrep, [], util.getConfig(), () => tGrepServe + 10);
+      assert.strictEqual(ledGrep1.avoided.tokens, 3830, 'setup: serve settles full');
+
+      const grepEvent = { ...readEvent('sess-grep', relGrep, '2026-07-28T10:00:01.000Z', projGrep, { toolUseId: 'fu-grep-1' }), tool: 'Grep' };
+      const globEvent = { ...readEvent('sess-grep', relGrep, '2026-07-28T10:00:02.000Z', projGrep, { toolUseId: 'fu-glob-1' }), tool: 'Glob' };
+      const ledGrep2 = ledgerStoreT6.updateLedger(projGrep, [grepEvent, globEvent], util.getConfig(), () => tGrepServe + 20);
+      check('ledger-fold-recall-open-serves (C3 mirror): a follow-up Grep/Glob never claws back a serve or burns a rejection', () => {
+        assert.strictEqual(ledGrep2.avoided.tokens, 3830, 'net must be untouched by non-content-bearing follow-ups');
+        assert.strictEqual(ledGrep2.openServes[0].correctedBy.length, 0);
+        assert.strictEqual(ledGrep2.openServes[0].classified, 'full');
+        assert.strictEqual(recallStoreT6.get(projGrep, relGrep).rejections, 0);
+      });
+
+      // A legacy event with NO tool field (older adapters, existing fixtures)
+      // must keep correcting exactly as before -- the narrowing is Grep/Glob
+      // only, never a silent behaviour change for old data.
+      const legacyRead = readEvent('sess-grep', relGrep, '2026-07-28T10:00:03.000Z', projGrep, { toolUseId: 'fu-legacy-1', limit: 50 });
+      delete legacyRead.tool;
+      const ledGrep3 = ledgerStoreT6.updateLedger(projGrep, [legacyRead], util.getConfig(), () => tGrepServe + 30);
+      check('ledger-fold-recall-open-serves (C3 mirror): a legacy no-tool read event still corrects', () => {
+        assert.strictEqual(ledGrep3.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledGrep3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // === Ride-along accrual (spec §7.5, added 2026-07-29): the actual number.
+    // A serve's netRecorded counts tokens kept out of context ONCE, but in a
+    // real session those tokens would have re-billed on every subsequent
+    // request through the cache. billed.tokens = netRecorded x the session's
+    // OBSERVED subsequent non-sidechain requests -- measured from the same
+    // usage stream the ledger already folds, not modelled. ===
+    {
+      const usageEvent = (sessionId, ts, messageId, opts) => ({
+        ts, kind: 'usage', session: sessionId, messageId, source: 'Claude Code',
+        model: 'claude-opus-4-6', sidechain: !!(opts && opts.sidechain),
+        usage: { input_tokens: (opts && opts.ctx) || 5000, output_tokens: (opts && opts.out) || 50 },
+      });
+
+      const projRide = seedT6Project('t6-ride-along-accrual');
+      const relRide = 'src/ride.js';
+      const tsRideServe = '2026-07-28T10:00:00.000Z';
+      const tRideServe = Date.parse(tsRideServe);
+      recallStoreT6.put(projRide, relRide, { contentHash: 'hride', skeleton: 'SKELRIDE', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      writeServeRows(projRide, tsRideServe, 'sess-ride', relRide, 'B', 4210, 380);
+
+      // Two countable requests after the serve; one request BEFORE the serve,
+      // one from another session, one sidechain -- all three must not count.
+      const ridePass1 = [
+        usageEvent('sess-ride', '2026-07-28T09:59:59.000Z', 'm0'),
+        usageEvent('sess-ride', '2026-07-28T10:00:01.000Z', 'm1', { ctx: 5000, out: 50 }),
+        usageEvent('sess-ride', '2026-07-28T10:00:02.000Z', 'm2', { ctx: 5100, out: 50 }),
+        usageEvent('sess-other', '2026-07-28T10:00:03.000Z', 'm3'),
+        usageEvent('sess-ride', '2026-07-28T10:00:04.000Z', 'm4', { sidechain: true }),
+      ];
+      const ledRide1 = ledgerStoreT6.updateLedger(projRide, ridePass1, util.getConfig(), () => tRideServe + 10000);
+      check('ride-along: billed.tokens = net x observed same-session subsequent requests (pre-serve, foreign-session, sidechain excluded)', () => {
+        assert.strictEqual(ledRide1.avoided.tokens, 3830, 'direct avoidance is untouched by ride-along accrual');
+        assert.deepStrictEqual(ledRide1.billed, { tokens: 7660 }, 'net 3830 x 2 counted requests');
+        assert.strictEqual(ledRide1.openServes[0].rideRequests, 2);
+      });
+
+      // The same events re-presented (the sliding window re-shows everything
+      // it still holds every pass) must not double-count: the frontier is the
+      // dedupe evidence.
+      const ledRide2 = ledgerStoreT6.updateLedger(projRide, ridePass1, util.getConfig(), () => tRideServe + 20000);
+      check('ride-along: re-presenting the same usage events never double-counts (frontier dedupe)', () => {
+        assert.deepStrictEqual(ledRide2.billed, { tokens: 7660 });
+        assert.strictEqual(ledRide2.openServes[0].rideRequests, 2);
+      });
+
+      // A NEW request in a later pass keeps accruing.
+      const ridePass3 = ridePass1.concat([usageEvent('sess-ride', '2026-07-28T10:00:05.000Z', 'm5', { ctx: 5200, out: 50 })]);
+      const ledRide3 = ledgerStoreT6.updateLedger(projRide, ridePass3, util.getConfig(), () => tRideServe + 30000);
+      check('ride-along: a new request in a later pass accrues one more net', () => {
+        assert.deepStrictEqual(ledRide3.billed, { tokens: 11490 }, 'net 3830 x 3');
+      });
+
+      // A follow-up read that revises net down must retro-adjust billed to
+      // newNet x rides -- the ride multiplier applies to the CORRECTED net,
+      // never the optimistic one.
+      const rideFollowUp = readEvent('sess-ride', relRide, '2026-07-28T10:00:06.000Z', projRide, { toolUseId: 'fu-ride-1', limit: 50 });
+      const ledRide4 = ledgerStoreT6.updateLedger(projRide, ridePass3.concat([rideFollowUp]), util.getConfig(), () => tRideServe + 40000);
+      check('ride-along: a correction retro-adjusts billed to the corrected net x rides', () => {
+        assert.strictEqual(ledRide4.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.deepStrictEqual(ledRide4.billed, { tokens: 9690 }, 'corrected net 3230 x 3');
+      });
+    }
+
+    // Ride-along stops at a context reset: a compaction wipes the avoided
+    // content out of what any later request would have carried, so counting
+    // past it would fabricate accrual. Reset detection is the SAME epoch rule
+    // lib/ledger.js's streamEpochs uses (shared, not re-derived).
+    {
+      const usageEvent = (sessionId, ts, messageId, opts) => ({
+        ts, kind: 'usage', session: sessionId, messageId, source: 'Claude Code',
+        model: 'claude-opus-4-6', sidechain: false,
+        usage: { input_tokens: (opts && opts.ctx) || 5000, output_tokens: (opts && opts.out) || 50 },
+      });
+      const projReset = seedT6Project('t6-ride-along-reset');
+      const relReset = 'src/reset.js';
+      const tsResetServe = '2026-07-28T10:00:00.000Z';
+      const tResetServe = Date.parse(tsResetServe);
+      recallStoreT6.put(projReset, relReset, { contentHash: 'hreset', skeleton: 'SKELRESET', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      writeServeRows(projReset, tsResetServe, 'sess-reset', relReset, 'B', 4210, 380);
+      const resetEvents = [
+        usageEvent('sess-reset', '2026-07-28T10:00:01.000Z', 'r1', { ctx: 5000, out: 50 }),
+        // ctx collapses 5000 -> 1000: gap = 1000 - 5000 - 50 = -4050, far past
+        // the -15% epoch threshold -- a compaction/reset.
+        usageEvent('sess-reset', '2026-07-28T10:00:02.000Z', 'r2', { ctx: 1000, out: 50 }),
+        usageEvent('sess-reset', '2026-07-28T10:00:03.000Z', 'r3', { ctx: 1100, out: 50 }),
+      ];
+      const ledReset1 = ledgerStoreT6.updateLedger(projReset, resetEvents, util.getConfig(), () => tResetServe + 10000);
+      check('ride-along: a context reset closes accrual -- the reset request and everything after it never count', () => {
+        assert.deepStrictEqual(ledReset1.billed, { tokens: 3830 }, 'net 3830 x 1 (only the pre-reset request)');
+        assert.strictEqual(ledReset1.openServes[0].rideRequests, 1);
+        assert.strictEqual(ledReset1.openServes[0].rideClosed, true);
+      });
+      // Closed stays closed on later passes with more requests.
+      const ledReset2 = ledgerStoreT6.updateLedger(projReset,
+        resetEvents.concat([usageEvent('sess-reset', '2026-07-28T10:00:04.000Z', 'r4', { ctx: 1200, out: 50 })]),
+        util.getConfig(), () => tResetServe + 20000);
+      check('ride-along: a closed receipt never resumes counting', () => {
+        assert.deepStrictEqual(ledReset2.billed, { tokens: 3830 });
+        assert.strictEqual(ledReset2.openServes[0].rideRequests, 1);
+      });
+    }
+
     // Holdout rows (spec §7.2) must accumulate ONLY into `holdout`, and must
     // never touch `avoided` -- the two are strictly separate arms.
     const proj4T6 = seedT6Project('t6-holdout-isolated');
@@ -8872,14 +9059,20 @@ async function main() {
       assert.strictEqual(payload.projects[0].notesInjectedTokens, 0);
       assert.strictEqual(payload.totals.notesInjectedTokens, 0);
       assert.ok(!('notesInjectedTokens' in payload.projects[0].avoided));
+      // Ride-along billed accrual (spec §7.5): a FLAT sibling of avoided,
+      // tokens only, defaulted to zero on a ledger that predates the field --
+      // and never a member of `avoided`, so §7.1 arithmetic can't reach it.
+      assert.deepStrictEqual(payload.projects[0].billed, { tokens: 0 });
+      assert.deepStrictEqual(payload.totals.billed, { tokens: 0 });
+      assert.ok(!('billedTokens' in payload.projects[0].avoided));
       // Whitelist: the payload is an explicit projection, so accumulation
       // bookkeeping (dedupe keys, per-path reader sets, notes.seenKeys) can
       // never leak onto the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['avoided', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'billed', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
       assert.deepStrictEqual(Object.keys(payload.totals).sort(),
-        ['avoided', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
+        ['avoided', 'billed', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
@@ -10231,6 +10424,227 @@ async function main() {
       delete process.env.MEMBRIDGE_TEAM_URL;
       delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
       await new Promise(r => mockWP.server.close(r));
+    }
+  }
+
+  // The cache (proj.teamEntries) keeps only the newest MAX_TEAM_ENTRIES (100)
+  // rows per project — pullProject slices the tail off after every pull,
+  // discarding older teammate history from this machine forever. Every pull
+  // must also append its mapped rows to the durable archive (lib/team-archive)
+  // BEFORE that slice runs, so search's historical reach survives the cap.
+  {
+    const mockArc = createMockSupabase();
+    const MOCK_PORT_ARC = P(64);
+    await new Promise(r => mockArc.server.listen(MOCK_PORT_ARC, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_ARC;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projArc = path.join(ROOT, 'projects', 'archive-cap-app');
+      fs.mkdirSync(projArc, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'archivist@test.dev', 'pw-arc', 'ArchivistOwner');
+      const teamArc = await teamsync.createTeam(util.getConfig(), 'ArchiveTeam');
+      const linkArc = await teamsync.linkProject(util.getConfig(), projArc, teamArc.team_id, 'ArchiveTeam');
+      const credsArc = await teamsync.getAccessToken(util.getConfig());
+      // Seed 120 teammate rows through the mock server, run one pull pass.
+      // The cache must hold the newest 100; the archive must hold all 120.
+      const arcBase = Date.UTC(2026, 0, 1);
+      for (let i = 0; i < 120; i++) {
+        mockArc.entries.push({
+          project_id: linkArc.projectId, author_id: 'user-archive-teammate', author_name: 'Teammate',
+          ts: new Date(arcBase + i * 60000).toISOString(), source: 'Claude Code', session: `sArc${i}`,
+          ask: null, summary: `archive row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: new Date(arcBase + i * 60000).toISOString(),
+        });
+      }
+      const projArcState = { teamEntries: [], teamPullTs: undefined };
+      await teamsync.pullProject(util.getConfig(), credsArc, projArcState, linkArc, null);
+      check('teamsync: a pull archives every mapped row, beyond the cache cap', () => {
+        assert.strictEqual(projArcState.teamEntries.length, 100, 'cache cap changed — update this test deliberately');
+        const arc = require('../lib/team-archive').loadArchive(linkArc.projectId);
+        assert.strictEqual(arc.rows.length, 120, 'rows sliced from cache were not archived');
+        assert.ok(arc.rows[0].ts < projArcState.teamEntries[0].ts, 'archive lost the pre-cap tail');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockArc.server.close(r));
+    }
+  }
+
+  // Task 7 (backfill history older than the cursor): existing installs have
+  // teamPullTs far past their team's origin, so history below that cursor was
+  // pulled once (if at all) and never revisited by the forward pull. The
+  // backward walker (backfillArchivePage) is meant to drain it, one page per
+  // sync pass, newest-first, until exhausted (backfill.done flips true on the
+  // first short/empty page) — and NEVER touch proj.teamPullTs, which the
+  // forward pull alone owns.
+  //
+  // The mock's memory_entries GET handler (handleEntries, above) now honors
+  // `id=lt.` and `order=id.desc` (added alongside the pre-existing
+  // `gt.`/ascending forward-pull shape) specifically so this section can
+  // exercise a real backward walk, not just the plumbing. Paging on `id`
+  // rather than `created_at` is Fix #2 (final whole-branch review): every
+  // seeded row below carries its own unique `id`, exactly like Postgres's
+  // bigint identity column, whereas created_at could tie within a batch. This
+  // first block covers a SHORT single page (fewer rows than PULL_LIMIT); the
+  // multi-page drain across PULL_LIMIT boundaries is covered separately below.
+  {
+    const mockBF = createMockSupabase();
+    const MOCK_PORT_BF = P(65);
+    await new Promise(r => mockBF.server.listen(MOCK_PORT_BF, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_BF;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projBF = path.join(ROOT, 'projects', 'backfill-app');
+      fs.mkdirSync(projBF, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'backfiller@test.dev', 'pw-bf', 'Backfiller');
+      const teamBF = await teamsync.createTeam(util.getConfig(), 'BackfillTeam');
+      const linkBF = await teamsync.linkProject(util.getConfig(), projBF, teamBF.team_id, 'BackfillTeam');
+      const credsBF = await teamsync.getAccessToken(util.getConfig());
+      // Historical rows an "existing install" shape would have already
+      // advanced its forward cursor past — present so a real backend would
+      // hand them back to a genuine backward walk.
+      const bfBase = Date.UTC(2026, 0, 1);
+      for (let i = 0; i < 10; i++) {
+        mockBF.entries.push({
+          project_id: linkBF.projectId, author_id: 'user-bf-teammate', author_name: 'Teammate',
+          ts: new Date(bfBase + i * 60000).toISOString(), source: 'Claude Code', session: `sBF${i}`,
+          ask: null, summary: `history row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: new Date(bfBase + i * 60000).toISOString(),
+        });
+      }
+      const projBFState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      const savedCursor = projBFState.teamPullTs;
+      await check('teamsync: backfillArchivePage flips done on an empty page, never refetches once done, and never moves the forward cursor', async () => {
+        const before1 = await teamsync.backfillArchivePage(util.getConfig(), credsBF, projBFState, linkBF, null);
+        assert.strictEqual(typeof before1, 'number', 'backfillArchivePage must return a row count');
+        const arc = require('../lib/team-archive').loadArchive(linkBF.projectId);
+        assert.strictEqual(arc.backfill.done, true, 'backfill did not flip done on the empty/short page');
+        // Prove "a done backfill must never fetch again" for real: point the
+        // backend at an address nothing listens on. If backfillArchivePage
+        // tried to fetch, this would reject (ECONNREFUSED); it must not try.
+        const savedUrl = process.env.MEMBRIDGE_TEAM_URL;
+        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:1';
+        let before2;
+        try {
+          before2 = await teamsync.backfillArchivePage(util.getConfig(), credsBF, projBFState, linkBF, null);
+        } finally {
+          process.env.MEMBRIDGE_TEAM_URL = savedUrl;
+        }
+        assert.strictEqual(before2, 0, 'a done backfill fetched again');
+        assert.strictEqual(projBFState.teamPullTs, savedCursor, 'backfill moved the FORWARD cursor');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockBF.server.close(r));
+    }
+  }
+
+  // Task 7, multi-page drain: 450 historical rows, the forward cursor already
+  // advanced past all of them (the "existing install" shape this whole task
+  // exists for). PULL_LIMIT is 200, so a full drain takes exactly three
+  // backfillArchivePage passes: 200, 200, 50 — newest rows first each time.
+  {
+    const mockDrain = createMockSupabase();
+    const MOCK_PORT_DRAIN = P(66);
+    await new Promise(r => mockDrain.server.listen(MOCK_PORT_DRAIN, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_DRAIN;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projDrain = path.join(ROOT, 'projects', 'backfill-drain-app');
+      fs.mkdirSync(projDrain, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'drainer@test.dev', 'pw-drain', 'Drainer');
+      const teamDrain = await teamsync.createTeam(util.getConfig(), 'DrainTeam');
+      const linkDrain = await teamsync.linkProject(util.getConfig(), projDrain, teamDrain.team_id, 'DrainTeam');
+      const credsDrain = await teamsync.getAccessToken(util.getConfig());
+      const drainBase = Date.UTC(2025, 0, 1);
+      for (let i = 0; i < 450; i++) {
+        const ts = new Date(drainBase + i * 60000).toISOString();
+        mockDrain.entries.push({
+          project_id: linkDrain.projectId, author_id: 'user-drain-teammate', author_name: 'Teammate',
+          ts, source: 'Claude Code', session: `sDrain${i}`,
+          ask: null, summary: `history row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: ts,
+        });
+      }
+      // The forward pull's own cursor, already parked well past all 450
+      // seeded rows — exactly the shape of an existing install that has been
+      // running the forward pull for a while.
+      const projDrainState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      const savedCursor = projDrainState.teamPullTs;
+      await check('teamsync: backfillArchivePage drains 450 rows of real history backward in 200/200/50 pages, then stops forever, without ever moving the forward cursor', async () => {
+        const p1 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        const p2 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        const p3 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        assert.deepStrictEqual([p1, p2, p3], [200, 200, 50],
+          `page sizes did not drain in order: ${JSON.stringify([p1, p2, p3])}`);
+        const arc = require('../lib/team-archive').loadArchive(linkDrain.projectId);
+        assert.strictEqual(arc.rows.length, 450, `archive did not end up holding all 450 rows: got ${arc.rows.length}`);
+        assert.strictEqual(arc.backfill.done, true, 'backfill did not mark itself done after exhausting history');
+        // A 4th pass must find nothing and cost no network round trip.
+        const p4 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        assert.strictEqual(p4, 0, 'a done backfill fetched again');
+        assert.strictEqual(projDrainState.teamPullTs, savedCursor, 'backfill moved the FORWARD cursor');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockDrain.server.close(r));
+    }
+  }
+
+  // Fix #2 regression guard (final whole-branch review): the bug this fix
+  // closes needs TIED created_at values straddling a page boundary to show
+  // up at all — the 450-row drain above never ties (each row's ts is a
+  // distinct minute), so it would pass unchanged even with the old
+  // created_at cursor. Here, 250 rows share ONE created_at (a batched
+  // same-transaction push — Postgres's now() is constant within a
+  // transaction, so this is the normal shape, not a contrived one) with
+  // PULL_LIMIT=200: the old created_at=lt. cursor would request "everything
+  // before T1" on page two and get zero rows back (nothing IS before T1),
+  // silently stranding the other 50 forever. The id cursor has no such gap.
+  {
+    const mockTie = createMockSupabase();
+    const MOCK_PORT_TIE = P(67);
+    await new Promise(r => mockTie.server.listen(MOCK_PORT_TIE, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_TIE;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projTie = path.join(ROOT, 'projects', 'backfill-tie-app');
+      fs.mkdirSync(projTie, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'tiebreaker@test.dev', 'pw-tie', 'Tiebreaker');
+      const teamTie = await teamsync.createTeam(util.getConfig(), 'TieTeam');
+      const linkTie = await teamsync.linkProject(util.getConfig(), projTie, teamTie.team_id, 'TieTeam');
+      const credsTie = await teamsync.getAccessToken(util.getConfig());
+      const tieCreatedAt = new Date(Date.UTC(2025, 5, 1)).toISOString(); // ONE shared created_at
+      for (let i = 0; i < 250; i++) {
+        mockTie.entries.push({
+          project_id: linkTie.projectId, author_id: 'user-tie-teammate', author_name: 'Teammate',
+          ts: new Date(Date.UTC(2025, 5, 1) + i * 60000).toISOString(), source: 'Claude Code', session: `sTie${i}`,
+          ask: null, summary: `tied row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: tieCreatedAt, // every row ties on created_at; id alone orders them
+        });
+      }
+      const projTieState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      await check('teamsync: backfillArchivePage drains every row even when a whole batch ties on created_at (id-cursor paging)', async () => {
+        const p1 = await teamsync.backfillArchivePage(util.getConfig(), credsTie, projTieState, linkTie, null);
+        const p2 = await teamsync.backfillArchivePage(util.getConfig(), credsTie, projTieState, linkTie, null);
+        assert.deepStrictEqual([p1, p2], [200, 50],
+          `tied rows did not drain in order: ${JSON.stringify([p1, p2])}`);
+        const arc = require('../lib/team-archive').loadArchive(linkTie.projectId);
+        assert.strictEqual(arc.rows.length, 250,
+          `a created_at cursor would have stranded rows past the tie; got ${arc.rows.length} of 250`);
+        assert.strictEqual(arc.backfill.done, true);
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockTie.server.close(r));
     }
   }
 
@@ -12786,6 +13200,43 @@ async function main() {
     assert.ok(b.includes('[redacted:anthropic-key]'), 'anthropic marker missing from Result line');
     assert.ok(b.includes('[redacted:credentials]'), 'connection marker missing from Result line');
   });
+  // Cloudflare credentials. Added from a live incident: a cfut_ token pasted
+  // into an agent session went through every layer untouched — no prefix rule
+  // matched it, and the entropy backstop skipped it. Anyone deploying Workers
+  // or Pages from an agent will paste one eventually.
+  //
+  // The mid-sentence case is the one that matters: real pastes are prose ("here
+  // is the cloudflare: cfut_..."), not bare tokens on their own line, and a
+  // \b-anchored rule that only fires at a line start would pass this test while
+  // failing every real leak.
+  check('redact: a Cloudflare API token is redacted, alone and mid-sentence', () => {
+    const CFUT = 'cfut_' + 'a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXyZ012345';
+    const compiled = digest.compileRedactions({});
+    assert.ok(!digest.redactText(CFUT, compiled).includes(CFUT), 'bare token survived');
+    const prose = `here is the cloudflare token: ${CFUT} — use it for the deploy`;
+    const out = digest.redactText(prose, compiled);
+    assert.ok(!out.includes(CFUT), 'token survived inside a sentence');
+    assert.ok(out.includes('[redacted:cloudflare-token]'), 'expected a named marker');
+    assert.ok(out.includes('use it for the deploy'), 'redaction ate surrounding prose');
+  });
+  check('redact: a Cloudflare Origin CA key is redacted', () => {
+    const CAKEY = 'v1.0-' + 'aaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const compiled = digest.compileRedactions({});
+    const out = digest.redactText(`origin ca key ${CAKEY} rotated`, compiled);
+    assert.ok(!out.includes(CAKEY), 'origin CA key survived');
+    assert.ok(out.includes('[redacted:cloudflare-origin-ca]'), 'expected a named marker');
+  });
+  // Regression guard for the claim that started this: the Supabase service_role
+  // key WAS already covered by the jwt rule. Pinned so a future narrowing of
+  // that pattern cannot silently expose the single most dangerous credential in
+  // the stack — service_role bypasses row-level security entirely.
+  check('redact: a Supabase service_role JWT is redacted', () => {
+    const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.c2lnbmF0dXJlLXBsYWNlaG9sZGVy';
+    const out = digest.redactText(`service role: ${JWT}`, digest.compileRedactions({}));
+    assert.ok(!out.includes(JWT), 'service_role JWT survived');
+    assert.ok(out.includes('[redacted:jwt]'), 'expected the jwt marker');
+  });
+
   check('redact: memory.md and memory.json redact prompt, checkpoint, and todo item', () => {
     const mem = read(path.join(projRed, '.membridge', 'memory.md'));
     const db = read(path.join(projRed, '.membridge', 'memory.json'));
@@ -13334,9 +13785,26 @@ async function main() {
       state.projects[mcpKey].teamEntries = [{
         author: 'Priya', ts: mcpTsAgo(30), source: 'Codex', session: 'p1',
         ask: 'rotate creds token=sk-tamper-mcp-999',
+        goal: 'rotate all vault credentials',
+        decisions: 'JWT rotation happens in vault, never in app config',
+        gotchas: 'terraform apply needs a manual approve step',
+        headline: 'Rotated vault tokens',
         summary: 'stored the new token api_key=sk-tamper-mcp-888 in the vault',
         files: ['infra/vault.tf'],
         changes: [{ file: 'infra/vault.tf', status: 'edited', add: 3, del: 1, note: 'rotated token=sk-tamper-mcp-777', dep: false }],
+      }, {
+        // Fixed (NOT mcpTsAgo-relative) timestamps straddling one calendar-day
+        // boundary, so the since/until bare-date regression checks below never
+        // drift with wall-clock time. Query term 'beacon' is unique to these
+        // three rows so they never interfere with the 'vault' fixtures above.
+        author: 'Priya', ts: '2020-03-14T23:00:00.000Z', source: 'Codex', session: 'db-before',
+        ask: 'beacon check the day before the boundary', files: [],
+      }, {
+        author: 'Priya', ts: '2020-03-15T08:00:00.000Z', source: 'Codex', session: 'db-on',
+        ask: 'beacon check on the boundary day itself', files: [],
+      }, {
+        author: 'Priya', ts: '2020-03-16T01:00:00.000Z', source: 'Codex', session: 'db-after',
+        ask: 'beacon check the day after the boundary', files: [],
       }];
       state.projects[projPaused] = { events: [{ ts: mcpTsAgo(10), source: 'Claude Code', kind: 'prompt', text: 'paused project work', session: 'x1' }] };
       util.saveState(state);
@@ -13412,6 +13880,25 @@ async function main() {
         'secret leaked into recent activity');
     });
 
+    const { data: recent2 } = await callJson('get_recent_activity', { limit: 20 });
+    check('mcp: deferred git derivation never leaks _highlights into a response', () => {
+      assert.ok(!JSON.stringify(recent2).includes('_highlights'), '_highlights leaked');
+    });
+    check('mcp: buildEntries on the MCP path defers git-change derivation', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(src.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
+      assert.ok(src.includes('deriveEntryChanges'), 'no derive-for-survivors pass');
+    });
+
+    check('mcp: team rows carry session/goal/decisions/gotchas/headline through to activity', () => {
+      const priya = recent.entries.find(e => e.author === 'Priya');
+      assert.strictEqual(priya.session, 'p1', 'session dropped');
+      assert.strictEqual(priya.goal, 'rotate all vault credentials', 'goal dropped');
+      assert.ok(/vault/.test(priya.decisions || ''), 'decisions dropped');
+      assert.ok(/manual approve/.test(priya.gotchas || ''), 'gotchas dropped');
+      assert.strictEqual(priya.headline, 'Rotated vault tokens', 'headline dropped');
+    });
+
     const { data: search } = await callJson('search_memory', { query: 'webhook' });
     check('mcp: search_memory finds a keyword match across ask/summary and redacts it', () => {
       assert.ok(search.results.length >= 1, 'expected at least one match');
@@ -13422,6 +13909,132 @@ async function main() {
     const { data: searchNone } = await callJson('search_memory', { query: 'zzz-no-such-keyword-zzz' });
     check('mcp: search_memory returns no results for a non-matching query', () => {
       assert.deepStrictEqual(searchNone.results, []);
+    });
+
+    const { data: sDecide } = await callJson('search_memory', { query: 'vault rotation' });
+    check('mcp: search_memory matches team decisions, not just ask/summary', () => {
+      assert.ok(sDecide.results.some(r => r.author === 'Priya'),
+        'a decisions-only match was missed (query terms only appear in the decisions field)');
+      assert.ok(!JSON.stringify(sDecide).includes('sk-tamper-mcp'), 'secret leaked');
+    });
+
+    check('mcp: search results are ranked (score desc) and carry matched fields', () => {
+      assert.ok(sDecide.results.every(r => typeof r.score === 'number' && Array.isArray(r.matched)));
+      const scores = sDecide.results.map(r => r.score);
+      assert.deepStrictEqual(scores, [...scores].sort((a, b) => b - a), 'results not score-ordered');
+    });
+
+    // Fix #1 (final whole-branch review, Finding #1): the tool's own
+    // description tells an agent to ask "who touched X" -- but tokenize
+    // keeps 'touched' as a real (non-stopword) term, so the strict
+    // majority-of-terms pass needs it to match too, and it never appears in
+    // memory prose. Before the fallback, this returned nothing; after, the
+    // relaxed (>=1 term) pass finds the file-only match on the existing
+    // Priya/vault.tf fixture above -- no new fixture needed.
+    const { data: sQuestion } = await callJson('search_memory', { query: 'who touched vault.tf' });
+    check('mcp: search_memory answers a question-shaped query ("who touched X") via the natural-language fallback', () => {
+      assert.ok(sQuestion.results.length >= 1,
+        'expected the relaxed fallback pass to find the planted vault.tf entry for a question-shaped query');
+      assert.ok(sQuestion.results.some(r => (r.files || []).some(f => f.includes('vault.tf')) && r.author === 'Priya'),
+        'expected Priya\'s vault.tf entry to surface via the relaxed pass');
+    });
+
+    const { data: sFile } = await callJson('search_memory', { query: 'vault', file: 'vault.tf' });
+    check('mcp: search_memory file filter narrows to entries touching the file', () => {
+      assert.ok(sFile.results.length >= 1, 'file-filtered search found nothing');
+      assert.ok(sFile.results.every(r => (r.files || []).some(f => f.includes('vault.tf'))));
+    });
+
+    const { data: sAuthor } = await callJson('search_memory', { query: 'vault', author: 'priya' });
+    check('mcp: search_memory author filter is a case-insensitive substring', () => {
+      assert.ok(sAuthor.results.length >= 1 && sAuthor.results.every(r => r.author === 'Priya'));
+    });
+
+    const { data: sTool } = await callJson('search_memory', { query: 'vault', tool: 'Codex' });
+    check('mcp: search_memory tool filter matches the source exactly', () => {
+      assert.ok(sTool.results.length >= 1 && sTool.results.every(r => r.source === 'Codex'));
+    });
+
+    // Regression: a bare-date bound (e.g. "2026-06-01", as the schema itself
+    // invites) must include that whole day, not be byte-compared against a
+    // full ISO instant -- otherwise every entry on the until day sorts
+    // lexicographically GREATER than the bare date and is silently dropped.
+    // The db-before/db-on/db-after fixture rows above (fixed 2020-03-* dates)
+    // straddle one calendar-day boundary so this never depends on wall clock.
+    const { data: sUntilDay } = await callJson('search_memory', { query: 'beacon', until: '2020-03-15' });
+    check('mcp: search_memory bare-date until includes the whole boundary day', () => {
+      assert.ok(sUntilDay.results.some(r => r.ts === '2020-03-15T08:00:00.000Z'),
+        'a full ISO ts on the until day was wrongly excluded by a bare-date bound');
+      assert.ok(!sUntilDay.results.some(r => r.ts === '2020-03-16T01:00:00.000Z'),
+        'the day after the until bound should still be excluded');
+    });
+
+    const { data: sSinceDay } = await callJson('search_memory', { query: 'beacon', since: '2020-03-15' });
+    check('mcp: search_memory bare-date since excludes the day before and includes the day after', () => {
+      assert.ok(!sSinceDay.results.some(r => r.ts === '2020-03-14T23:00:00.000Z'),
+        'the day before the since bound should be excluded');
+      assert.ok(sSinceDay.results.some(r => r.ts === '2020-03-16T01:00:00.000Z'),
+        'the day after the since bound was wrongly excluded');
+    });
+
+    // A 60-day-old archived row — far outside the working cache (proj.teamEntries)
+    // — must be findable by search_memory (it reads cache + durable archive
+    // merged), but must NOT appear in get_recent_activity (which stays
+    // cache-only so its payload never grows unbounded). Link projMcp to a
+    // known projectId via .membridge/team.json, the same shape existing
+    // team-link tests write (see the notes-hook team.json fixture above).
+    {
+      const teamArchiveForMcp = require('../lib/team-archive');
+      const oldTs = new Date(Date.now() - 60 * 86400000).toISOString();
+      teamArchiveForMcp.appendRows('mcp-app-project-uuid', [{
+        // Stored RAW at rest, like proj.teamEntries — the planted secret here
+        // only gets scrubbed if this archive-sourced row passes through the
+        // same normalizeTeam redact closure as a cache row (constraint: the
+        // suite's sk-tamper-* discipline must cover the new archive path too).
+        author: 'Priya', ts: oldTs, source: 'Codex', session: 'p0',
+        ask: null, summary: null, goal: null,
+        decisions: 'chose libsodium sealed boxes over NaCl streams for epoch keys',
+        gotchas: 'legacy configs still embed token=sk-tamper-archive-555, rotate on sight',
+        headline: null, distilled: true,
+        files: ['lib/teamcrypto.js'], changes: null,
+      }, {
+        // Fix #1 (final whole-branch review) regression guard: matches only
+        // ONE of the three "sealed boxes epoch" query terms ('sealed', not
+        // 'boxes' or 'epoch') — proves the strict AND-bias still excludes a
+        // partial match even when the query already has a real hit elsewhere
+        // (the p0 row above), i.e. the relaxed fallback pass must never fire
+        // once strict results exist.
+        author: 'Priya', ts: new Date(Date.now() - 61 * 86400000).toISOString(), source: 'Codex', session: 'p0-sealed-only',
+        ask: null, summary: null, goal: null,
+        decisions: 'sealed the release notes doc, nothing crypto related',
+        gotchas: null, headline: null, distilled: true,
+        files: [], changes: null,
+      }]);
+      fs.writeFileSync(path.join(projMcp, '.membridge', 'team.json'),
+        JSON.stringify({ teamId: 'mcp-team-1', projectId: 'mcp-app-project-uuid', teamName: 'MCP Team' }));
+    }
+
+    const { data: sArchive } = await callJson('search_memory', { query: 'sealed boxes epoch' });
+    check('mcp: search reaches archived history older than the team cache', () => {
+      const hit = sArchive.results.find(r => /sealed boxes/.test(r.decisions || ''));
+      assert.ok(hit, '60-day-old archived decision not found');
+      assert.strictEqual(hit.author, 'Priya');
+    });
+    check('mcp: archive rows pass through the same redaction boundary as cache rows', () => {
+      assert.ok(!JSON.stringify(sArchive).includes('sk-tamper-archive-555'),
+        'secret planted in a raw-at-rest archive row leaked past normalizeTeam redaction');
+      const hit = sArchive.results.find(r => /sealed boxes/.test(r.decisions || ''));
+      assert.ok(hit && /\[redacted/.test(hit.gotchas || ''), 'archived gotchas field was not redacted');
+    });
+    check('mcp: search_memory keeps its strict AND-bias when results already exist (a one-term partial match stays excluded)', () => {
+      assert.ok(!sArchive.results.some(r => r.session === 'p0-sealed-only'),
+        'a row matching only one of three query terms leaked into a multi-term search result set');
+    });
+
+    const { data: recent3 } = await callJson('get_recent_activity', { limit: 50 });
+    check('mcp: recent activity does NOT read the archive (payload stays bounded)', () => {
+      assert.ok(!JSON.stringify(recent3).includes('sealed boxes'),
+        'archive rows leaked into get_recent_activity');
     });
 
     // recall: the same Tier B "header + skeleton" body decide() would serve,
@@ -13613,6 +14226,199 @@ async function main() {
         'must not advise an install that a plain `npm install` already performs'
       );
       assert.ok(!out.stdout.includes('UNREACHABLE'), 'execution continued past the throw');
+    });
+  }
+
+  // --- 14b. search engine (lib/search.js): pure ranked scoring ---
+  {
+    const search = require('../lib/search');
+
+    check('search: tokenize keeps identifiers and file names whole, drops stopwords', () => {
+      assert.deepStrictEqual(search.tokenize('Rotated auth.js and JWT_SECRET handling.'),
+        ['rotated', 'auth.js', 'jwt_secret', 'handling']);
+      assert.deepStrictEqual(search.tokenize('the and of'), []);
+      assert.deepStrictEqual(search.tokenize(''), []);
+      assert.deepStrictEqual(search.tokenize(null), []);
+    });
+
+    check('search: deliberate fields (decisions) outrank harvested prose (summary)', () => {
+      const a = { ts: '2026-07-01T00:00:00.000Z', summary: 'touched auth flow' };
+      const b = { ts: '2025-01-01T00:00:00.000Z', decisions: 'auth stays in middleware' };
+      const ranked = search.rankEntries([a, b], 'auth');
+      assert.strictEqual(ranked.length, 2);
+      assert.strictEqual(ranked[0].decisions, 'auth stays in middleware');
+      assert.ok(ranked[0].score > ranked[1].score);
+    });
+
+    check('search: an old exact hit beats a recent partial one (no recency weighting)', () => {
+      const recentPartial = { ts: '2026-07-01T00:00:00.000Z', summary: 'token cleanup pass' };
+      const oldExact = {
+        ts: '2026-01-01T00:00:00.000Z', headline: 'rewrote token refresh',
+        decisions: 'token refresh lives in the gotrue passthrough',
+        files: ['lib/token-refresh.js'],
+      };
+      const ranked = search.rankEntries([recentPartial, oldExact], 'token refresh');
+      assert.strictEqual(ranked[0].headline, 'rewrote token refresh');
+    });
+
+    check('search: multi-term queries are AND-biased — one flooded term is not a match', () => {
+      const noise = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth auth auth everywhere auth' };
+      assert.deepStrictEqual(search.rankEntries([noise], 'auth vault rotation epochs'), []);
+    });
+
+    // Fix #1 (final whole-branch review, Finding #1): rankEntries/scoreEntry
+    // grew an opts.minTerms override so lib/mcp.js can relax the AND-bias as
+    // a fallback pass without this module holding any fallback policy itself.
+    check('search: minTerms is off by default — omitting opts is byte-identical to the old strict-majority behavior', () => {
+      const partial = { ts: '2026-07-01T00:00:00.000Z', summary: 'only vault, no other terms' };
+      assert.deepStrictEqual(search.rankEntries([partial], 'vault rotation epochs'), [],
+        'a one-of-three-term match must still score 0 with no opts passed');
+    });
+
+    check('search: minTerms:1 relaxes the AND-bias — a one-term match now scores', () => {
+      const partial = { ts: '2026-07-01T00:00:00.000Z', summary: 'only vault, no other terms' };
+      const ranked = search.rankEntries([partial], 'vault rotation epochs', { minTerms: 1 });
+      assert.strictEqual(ranked.length, 1, 'minTerms:1 must let a single matched term through');
+      assert.deepStrictEqual(ranked[0].matched, ['summary']);
+    });
+
+    check('search: minTerms never loosens a query that already has a strict match — the AND-bias survives when results exist', () => {
+      const full = { ts: '2026-07-01T00:00:00.000Z', decisions: 'vault rotation happens every epoch' };
+      const partial = { ts: '2026-06-01T00:00:00.000Z', decisions: 'vault only, nothing else here' };
+      const ranked = search.rankEntries([full, partial], 'vault rotation epochs');
+      assert.strictEqual(ranked.length, 1, 'the strict pass must exclude the one-term partial match');
+      assert.strictEqual(ranked[0].decisions, 'vault rotation happens every epoch');
+    });
+
+    check('search: file-only team rows are findable (ask/summary null on most team rows)', () => {
+      const row = { ts: '2026-07-01T00:00:00.000Z', ask: null, summary: null, files: ['infra/vault.tf'] };
+      const ranked = search.rankEntries([row], 'vault');
+      assert.strictEqual(ranked.length, 1);
+      assert.deepStrictEqual(ranked[0].matched, ['files']);
+    });
+
+    check('search: rankEntries never mutates its inputs', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth' };
+      const before = JSON.stringify(e);
+      search.rankEntries([e], 'auth');
+      assert.strictEqual(JSON.stringify(e), before);
+    });
+
+    check('search: equal scores tiebreak newest-first', () => {
+      const older = { ts: '2026-01-01T00:00:00.000Z', summary: 'vault work' };
+      const newer = { ts: '2026-06-01T00:00:00.000Z', summary: 'vault work' };
+      const ranked = search.rankEntries([older, newer], 'vault');
+      assert.strictEqual(ranked[0].ts, '2026-06-01T00:00:00.000Z');
+    });
+  }
+
+  // --- 14c. team archive (lib/team-archive.js): durable pulled-row history ---
+  {
+    const teamArchive = require('../lib/team-archive');
+
+    check('team-archive: append merges by (author|ts|source), replaces on re-push, sorts by ts', () => {
+      const pid = 'arc-proj-1';
+      teamArchive.appendRows(pid, [
+        { author: 'A', ts: '2026-01-02T00:00:00.000Z', source: 'Codex', summary: 'v1' },
+      ]);
+      teamArchive.appendRows(pid, [
+        { author: 'A', ts: '2026-01-02T00:00:00.000Z', source: 'Codex', summary: 'v2' },
+        { author: 'B', ts: '2026-01-01T00:00:00.000Z', source: 'Claude Code', summary: 'older' },
+      ]);
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 2, 're-pushed row duplicated instead of replaced');
+      assert.strictEqual(arc.rows[0].author, 'B', 'rows not ts-ascending');
+      assert.strictEqual(arc.rows[1].summary, 'v2', 'replace-on-collision lost the newer version');
+    });
+
+    check('team-archive: a corrupt file fails open as an empty archive', () => {
+      const p = teamArchive.archivePath('arc-bad');
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, '{definitely not json');
+      const arc = teamArchive.loadArchive('arc-bad');
+      assert.deepStrictEqual(arc.rows, []);
+      assert.strictEqual(arc.backfill.done, false);
+    });
+
+    check('team-archive: the cap keeps the newest rows', () => {
+      const pid = 'arc-cap';
+      const mk = i => ({
+        author: 'A', source: 'Codex', summary: `row ${i}`,
+        ts: new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString(),
+      });
+      teamArchive.appendRows(pid, Array.from({ length: 5010 }, (_, i) => mk(i)));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 5000);
+      assert.strictEqual(arc.rows[arc.rows.length - 1].summary, 'row 5009', 'newest row lost to the cap');
+      assert.strictEqual(arc.rows[0].summary, 'row 10', 'cap kept the oldest instead of the newest');
+    });
+
+    check('team-archive: setBackfill round-trips and survives appends', () => {
+      const pid = 'arc-bf';
+      teamArchive.setBackfill(pid, { done: false, beforeId: 42 });
+      teamArchive.appendRows(pid, [{ author: 'A', ts: '2026-06-01T00:00:00.000Z', source: 'Codex' }]);
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.beforeId, 42);
+      assert.strictEqual(arc.backfill.done, false);
+    });
+
+    check('team-archive: setBackfill with a missing/malformed argument fails open instead of throwing', () => {
+      const pid = 'arc-bf-noarg';
+      // No second argument at all — must not throw (module contract: "every
+      // function fails open"), and must leave a sane, empty-looking backfill
+      // state rather than propagate a caller bug into a broken pull/sync pass.
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid));
+      let arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, false);
+      assert.strictEqual(arc.backfill.beforeId, null);
+      // Same for null/undefined passed explicitly, and a non-object.
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid, null));
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid, undefined));
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid, 'not-an-object'));
+      arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, false);
+      assert.strictEqual(arc.backfill.beforeId, null);
+    });
+
+    // Fix #2 (final whole-branch review): backfill now pages on memory_entries.id
+    // (total-ordered, no ties), not created_at (timestamptz default now() —
+    // constant within a transaction, so a batched push can tie many rows'
+    // created_at, and a created_at cursor with no secondary sort key silently
+    // and permanently skips whichever tied siblings fell past a page boundary).
+    check('team-archive: an archive written by the previous created_at-cursor format loads safely, restarting the walk rather than misreading the cursor', () => {
+      const pid = 'arc-legacy-format';
+      const p = teamArchive.archivePath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify({
+        version: 1, projectId: pid,
+        backfill: { done: false, before: '2026-05-01T00:00:00.000Z' }, // old shape
+        rows: [],
+      }));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, false, 'loading an old-format archive must not throw or crash');
+      assert.strictEqual(arc.backfill.beforeId, null,
+        'a stale created_at cursor must never be reinterpreted as an id cursor');
+    });
+
+    check('team-archive: a COMPLETED legacy-format backfill stays done (never restarts a finished walk)', () => {
+      const pid = 'arc-legacy-done';
+      const p = teamArchive.archivePath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify({
+        version: 1, projectId: pid,
+        backfill: { done: true, before: '2026-05-01T00:00:00.000Z' }, // old shape, finished
+        rows: [],
+      }));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, true, 'a finished legacy backfill must not be treated as unfinished');
+    });
+  }
+
+  {
+    check('mcp: every tool handler records usage through the tally', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(src.includes("require('./mcp-usage')"), 'mcp-usage not wired');
+      assert.ok((src.match(/recordToolUse\(/g) || []).length >= 1, 'no recordToolUse call');
     });
   }
 
@@ -16546,6 +17352,129 @@ async function main() {
       const parsed = JSON.parse(body);
       assert.deepStrictEqual(Object.keys(parsed).sort(), ['counters', 'install_id', 'version']);
     });
+
+    check('counters: mcp_tool_used rides buildCounters, one per used tool, allowlisted', () => {
+      const built = counters.buildCounters({ mcpToolsUsed: ['search_memory', 'why', 'not_a_tool'] });
+      const mcp = built.filter(c => c.name === 'mcp_tool_used');
+      assert.deepStrictEqual(mcp.map(c => c.dims.tool).sort(), ['search_memory', 'why'],
+        'unknown tool leaked or a known one dropped');
+      assert.ok(counters.signatureOf(built).includes('search_memory'),
+        'usage change must change the signature so it actually sends');
+    });
+
+    check('counters: buildCounters collapses duplicate tool names to one entry each', () => {
+      const built = counters.buildCounters({ mcpToolsUsed: ['why', 'why', 'search_memory'] });
+      const mcp = built.filter(c => c.name === 'mcp_tool_used');
+      assert.deepStrictEqual(mcp.map(c => c.dims.tool).sort(), ['search_memory', 'why'],
+        'a repeated tool in the input must still produce exactly one mcp_tool_used entry per distinct tool');
+    });
+
+    check('counters: worker allowlist mirrors the client (drift check)', () => {
+      const worker = fs.readFileSync(path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js'), 'utf8');
+      assert.ok(worker.includes("'mcp_tool_used'"), 'worker COUNTER_NAMES missing mcp_tool_used');
+      for (const t of counters.MCP_TOOLS) {
+        assert.ok(worker.includes(`'${t}'`), `worker DIM_VALUES missing tool ${t}`);
+      }
+    });
+
+    // Direct unit tests of the Worker's own validate() -- it is a plain ES
+    // module (cloudflare/counters-worker/package.json: "type": "module"), so
+    // a dynamic import() loads and exercises the real exported function, no
+    // wrangler/miniflare runtime needed. This pins the exact defect a real
+    // multi-tool-a-day install used to hit: the dedup key used to be the
+    // counter NAME alone, so two mcp_tool_used points (different tools, same
+    // name) zeroed out the whole payload, heartbeat included.
+    const workerPath = path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js');
+    const workerModule = await import(workerPath);
+    const workerInstallId = '12345678-1234-1234-1234-123456789012';
+
+    await check('worker: validate() accepts heartbeat + one mcp_tool_used point per allowlisted tool', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'heartbeat', dims: {} },
+          ...counters.MCP_TOOLS.map(tool => ({ name: 'mcp_tool_used', dims: { tool } })),
+        ],
+      };
+      const points = workerModule.validate(payload);
+      assert.strictEqual(points.length, counters.MCP_TOOLS.length + 1,
+        'a counter name repeating with distinct dim values must not zero out the whole payload');
+      const tools = points.filter(p => p.blobs[0] === 'mcp_tool_used').map(p => p.blobs[3]).sort();
+      assert.deepStrictEqual(tools, [...counters.MCP_TOOLS].sort());
+    });
+
+    await check('worker: validate() still rejects an exact-duplicate (name, dim) pair', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'mcp_tool_used', dims: { tool: 'why' } },
+          { name: 'mcp_tool_used', dims: { tool: 'why' } },
+        ],
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [],
+        'repeating the IDENTICAL (name, dim) pair is still the inflation case and must reject the whole payload');
+    });
+
+    await check('worker: validate() rejects two recall_state entries with different values', async () => {
+      // Distinct dim values means the (name, dimKey, dimValue) identity check
+      // alone would let both through -- this is the case that only the
+      // per-name dedup catches. Kept well under MAX_COUNTERS so this exercises
+      // the dedup rule itself, not the length cap.
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'recall_state', dims: { state: 'serving' } },
+          { name: 'recall_state', dims: { state: 'no_hot_paths' } },
+        ],
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [],
+        'recall_state is a single-value counter -- a repeated name must reject the whole payload even with different dim values');
+    });
+
+    await check('worker: validate() rejects two dimensionless heartbeat entries', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'heartbeat', dims: {} },
+          { name: 'heartbeat', dims: {} },
+        ],
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [],
+        'heartbeat is dimensionless and single-value -- a repeated entry must reject the whole payload');
+    });
+
+    await check('worker: validate() rejects a payload over MAX_COUNTERS', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: Array.from({ length: workerModule.MAX_COUNTERS + 1 }, () => ({ name: 'heartbeat', dims: {} })),
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [], 'a payload over MAX_COUNTERS must still be rejected outright');
+    });
+
+    check('mcp-usage: records within the allowlist, honors the kill switch, reads back a 24h window', () => {
+      // Its own MEMBRIDGE_HOME: section 14 above exercises the real MCP tools
+      // through registerTools()'s tracked() wrapper, which writes this same
+      // tally file under the shared test home. Isolating the path here is
+      // what makes the assertion below exact rather than order-dependent.
+      const mcpUsage = require('../lib/mcp-usage');
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'mcp-usage-home');
+      try {
+        const now = Date.now();
+        mcpUsage.recordToolUse('search_memory', { config: {}, now });
+        mcpUsage.recordToolUse('why', { config: {}, now: now - 25 * 3600000 });      // stale
+        mcpUsage.recordToolUse('not_a_tool', { config: {}, now });                    // rejected
+        mcpUsage.recordToolUse('recall', { config: { diagnostics: { enabled: false } }, now }); // killed
+        assert.deepStrictEqual(mcpUsage.toolsUsedWithin(24 * 3600000, { now }), ['search_memory']);
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
+    });
   }
 
 // ---- wire keys: one rule for monorepo depth AND worktrees (spec §7) ----
@@ -18974,6 +19903,34 @@ const repoRoot = require('../lib/repo-root');
       assert.deepStrictEqual(projectDetail(bare).teammateNotes, { fresh: [], total: 0 });
     });
 
+    // The kill switch (spec §10) disables ALL FIVE delivery points, and Task 1
+    // made delivery point 1 this payload. Found by the Task 12 end-to-end
+    // proof: projectDetail read the index unconditionally, so a user who
+    // switched the feature off kept seeing teammate decisions on the project
+    // page for as long as the index sat on disk — which is forever, since the
+    // rebuild only stops writing and never deletes. Every agent surface had
+    // gone quiet; the browser had not.
+    //
+    // The control is what makes this discriminating: the SAME project, the
+    // SAME index, switch on -> the notes are there. So the empty payload below
+    // is the switch working, not an empty fixture.
+    check('notes-dash: the kill switch silences the project payload too', () => {
+      const saved = util.loadUserConfig();
+      try {
+        trackDashProject(dashDir);
+        notesStore.write(dashDir, notes.buildIndex(
+          [decisionRow('Andrew', '2026-07-28T09:55:00Z', 'do not touch validate.ts yet')], null, NOW3));
+        util.saveUserConfig({ ...saved, teammateNotes: { enabled: true } });
+        assert.strictEqual(projectDetail(dashDir).teammateNotes.total, 1,
+          'control failed: nothing to silence, so this check would pass against no gate at all');
+        util.saveUserConfig({ ...saved, teammateNotes: { enabled: false } });
+        assert.deepStrictEqual(projectDetail(dashDir).teammateNotes, { fresh: [], total: 0 },
+          'the dashboard kept serving teammate decisions after the kill switch');
+      } finally {
+        util.saveUserConfig(saved);
+      }
+    });
+
     // The index's own redaction (lib/teammate-notes.js's clean) is
     // DEFAULTS-ONLY. Everything else on this payload — teamEntries' ask,
     // summary, decisions, gotchas — is re-run through the user's configured
@@ -20848,6 +21805,79 @@ const repoRoot = require('../lib/repo-root');
       if (ORIGINAL_UI_DIST_ROOT === undefined) delete process.env.MEMBRIDGE_UI_DIST_ROOT;
       else process.env.MEMBRIDGE_UI_DIST_ROOT = ORIGINAL_UI_DIST_ROOT;
     }
+  }
+  // ---- teammate notes: first-install backfill (Task 13 dogfood finding) ----
+  // The daemon only rebuilt the index for projects whose pull brought NEW rows,
+  // so teammate decisions already sitting in state when this feature arrives
+  // stayed invisible until a teammate happened to push again. Measured live:
+  // 65 team entries, 7 with decisions, no index. backfillProjects closes it.
+  {
+    const bfRoot = path.join(ROOT, 'projects', 'backfill-proj');
+    fs.mkdirSync(bfRoot, { recursive: true });
+    const storedRow = { author: 'Andrew', ts: '2026-07-28T09:00:00Z', decisions: 'upgraded users must still see this', gotchas: '', changes: [{ file: 'lib/x.js', note: 'careful here' }] };
+    const bfState = { projects: {
+      [bfRoot]: { teamEntries: [storedRow] },
+      [path.join(ROOT, 'projects', 'no-team')]: { events: [] },
+      [path.join(ROOT, 'projects', 'empty-team')]: { teamEntries: [] },
+    } };
+
+    check('notes-backfill: builds an index for existing entries with no index file', () => {
+      const rebuilt = notesStore.backfillProjects(bfState, '2026-07-28T10:00:00Z');
+      assert.deepStrictEqual(rebuilt, [bfRoot], 'exactly the project with team entries and no index');
+      const ix = notesStore.read(bfRoot);
+      assert.strictEqual(ix.prose[0].author, 'Andrew', 'the stored-shape author must survive');
+      assert.ok(ix.byFile['lib/x.js'], 'file notes must ride along');
+    });
+
+    check('notes-backfill: an existing index is never rewritten by the backfill', () => {
+      const before = fs.statSync(notesStore.notesPath(bfRoot)).mtimeMs;
+      const again = notesStore.backfillProjects(bfState, '2026-07-28T11:00:00Z');
+      assert.deepStrictEqual(again, [], 'a project with an index must be left alone');
+      assert.strictEqual(fs.statSync(notesStore.notesPath(bfRoot)).mtimeMs, before, 'the index file was rewritten');
+    });
+
+    check('notes-backfill: no teamEntries means no file conjured', () => {
+      assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'no-team'))));
+      assert.ok(!fs.existsSync(notesStore.notesPath(path.join(ROOT, 'projects', 'empty-team'))));
+    });
+
+    // afterTeamPull is the shared post-pull entry point BOTH sync loops call
+    // (bin daemon + tray app). Guard the two properties the loops rely on:
+    // the kill switch is inside it, and app/main.js actually invokes it.
+    check('notes-backfill: afterTeamPull honours the kill switch', () => {
+      const kp = path.join(ROOT, 'projects', 'backfill-killed');
+      fs.mkdirSync(kp, { recursive: true });
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [kp]: { teamEntries: [{ author: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'x', gotchas: '' }] } } });
+      const cfg = util.getConfig();
+      util.saveUserConfig({ ...cfg, teammateNotes: { enabled: false } });
+      try {
+        notesStore.afterTeamPull([]);
+        assert.ok(!fs.existsSync(notesStore.notesPath(kp)), 'the kill switch must stop the backfill too');
+      } finally {
+        util.saveUserConfig(cfg);
+      }
+      notesStore.afterTeamPull([]);
+      assert.ok(fs.existsSync(notesStore.notesPath(kp)), 'with the switch back on, the backfill must run');
+    });
+
+    check('notes-backfill: the tray app loop calls afterTeamPull (both loops share it)', () => {
+      // Source-shape check with teeth: the app has its OWN sync loop, and the
+      // first version of this feature lived only in bin/ glue — app users
+      // never got an index while everything was green. Pin the call site.
+      const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'main.js'), 'utf8');
+      const i = appSrc.indexOf('async function runSync');
+      assert.ok(i !== -1, 'app/main.js runSync not found');
+      const body = appSrc.slice(i, appSrc.indexOf('\nfunction tick', i));
+      assert.ok(/afterTeamPull\s*\(/.test(body), "the tray app's runSync no longer calls afterTeamPull");
+      const binSrc = fs.readFileSync(path.join(__dirname, '..', 'bin', 'membridge.js'), 'utf8');
+      assert.ok(/afterTeamPull\s*\(/.test(binSrc), 'the CLI loop no longer calls afterTeamPull');
+    });
+
+    check('notes-backfill: malformed state yields [] and never throws', () => {
+      assert.deepStrictEqual(notesStore.backfillProjects(null, 'x'), []);
+      assert.deepStrictEqual(notesStore.backfillProjects({ projects: 'nope' }, 'x'), []);
+    });
   }
 
   // --- summary ---

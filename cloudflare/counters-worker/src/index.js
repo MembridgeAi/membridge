@@ -21,19 +21,25 @@
  * dashboard rather than to the sender.
  */
 
-// Must stay in sync with lib/counters.js. Anything outside these sets is
-// dropped rather than stored: a fixed allowlist is what stops an unexpected
-// value (a path, a branch name, a stray identifier) from ever landing in the
-// dataset, however the client changes.
-const COUNTER_NAMES = new Set(['heartbeat', 'recall_state', 'hook_registration', 'environment']);
+// Must stay in sync with lib/counters.js -- including MCP_TOOLS there, which
+// is the source of the `tool` set below (lib/mcp-usage.js's presence tally
+// of the six read-only MCP tools). Anything outside these sets is dropped
+// rather than stored: a fixed allowlist is what stops an unexpected value (a
+// path, a branch name, a stray identifier) from ever landing in the dataset,
+// however the client changes.
+const COUNTER_NAMES = new Set(['heartbeat', 'recall_state', 'hook_registration', 'environment', 'mcp_tool_used']);
 const DIM_VALUES = {
   state: new Set(['serving', 'no_hot_paths', 'empty_store', 'all_rejected', 'ready_unserved']),
   shape: new Set(['single', 'worktree', 'mixed', 'none']),
   result: new Set(['wrote', 'current', 'failed']),
+  tool: new Set(['get_project_memory', 'get_recent_activity', 'list_projects', 'recall', 'search_memory', 'why']),
 };
 
-const MAX_BODY_BYTES = 2048;   // a valid payload is ~200 bytes
-const MAX_COUNTERS = 8;
+const MAX_BODY_BYTES = 2048;   // a valid payload is ~200 bytes, the real backstop
+// Exported so tests can assert against the real cap rather than a copied
+// magic number. 4 base (heartbeat/recall_state/environment/hook_registration)
+// + up to 6 mcp_tool_used (one per allowlisted MCP tool), with headroom.
+export const MAX_COUNTERS = 16;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}(-[0-9A-Za-z.-]{1,20})?$/;
 
@@ -58,10 +64,6 @@ export function validate(payload) {
   for (const c of payload.counters) {
     if (!c || typeof c !== 'object') return [];
     if (typeof c.name !== 'string' || !COUNTER_NAMES.has(c.name)) return [];
-    // One datapoint per counter name per request. A repeated name is a client
-    // bug or an inflation attempt; either way the whole payload is suspect.
-    if (seen.has(c.name)) return [];
-    seen.add(c.name);
 
     const dims = c.dims;
     if (dims !== undefined && (typeof dims !== 'object' || dims === null || Array.isArray(dims))) return [];
@@ -77,6 +79,29 @@ export function validate(payload) {
       dimValue = dims[dimKey];
       if (typeof dimValue !== 'string' || !allowed.has(dimValue)) return [];
     }
+
+    // Only mcp_tool_used legitimately repeats a NAME in one payload (one
+    // entry per tool actually used, each with a distinct dim value). Every
+    // other counter has a single value per request by construction -- a
+    // repeated name there is still a client bug or an inflation attempt, and
+    // still rejects the whole payload outright, same as before this file
+    // learned about mcp_tool_used. Tracking bare names in `seen` (separately
+    // from the (name, dimKey, dimValue) identities below -- the two never
+    // collide, since every identity string contains a `|`) is what makes this
+    // check load-bearing: keeps the original anti-inflation guarantee for
+    // recall_state/environment/hook_registration on this public, effectively
+    // unauthenticated endpoint.
+    if (c.name !== 'mcp_tool_used') {
+      if (seen.has(c.name)) return [];
+      seen.add(c.name);
+    }
+
+    // One datapoint per (name, dimKey, dimValue) per request. Repeating the
+    // exact same (name, dim) pair -- including two identical mcp_tool_used
+    // entries for the same tool -- is still rejected outright.
+    const identity = `${c.name}|${dimKey}|${dimValue}`;
+    if (seen.has(identity)) return [];
+    seen.add(identity);
 
     points.push({
       // Analytics Engine allows one index, used as the sampling key. Keying on

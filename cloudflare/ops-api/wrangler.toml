@@ -8,24 +8,34 @@ compatibility_date = "2026-07-01"
 # itself (src/index.js) — this is the belt, that is the braces.
 workers_dev = false
 
-# [[routes]]
-# pattern = "ops.membridge.me/api"
-# custom_domain = true
+# A PATH route, not a custom_domain: ops.membridge.me already belongs to the
+# Pages project, and the panel calls /api on its own origin because same-origin
+# is half the CSRF defence (see src/index.js). Workers routes take precedence
+# over Pages on the same hostname, so this claims /api* and Pages keeps the rest.
+[[routes]]
+pattern = "ops.membridge.me/api*"
+zone_name = "membridge.me"
 
 # Non-secret config.
 [vars]
 ACCESS_TEAM_DOMAIN = "weathered-sky-8f4e.cloudflareaccess.com"
 ACCESS_AUD = "ce8ae1ef05b71f3245bd11441a382d6f2c9bbbd0b7a23840e96b34dfc3a66646"
-ALLOWED_EMAILS = "marco@melika.com"
+ALLOWED_EMAILS = "marco@melika.me,marco@melika.com,andrewludwigbrown@gmail.com"
+# Not secrets, so they live here rather than as `wrangler secret put` prompts.
+# The account id appears in every dashboard URL; the Supabase project URL already
+# ships publicly in lib/backend.json. Treating non-secrets as secrets just adds
+# steps and makes the two that ARE sensitive easier to lose track of.
+CF_ACCOUNT_ID = "a699188326d9ffcbf6499e943228a8f2"
+SUPABASE_URL = "https://mefgbiecvoszjorwzkfz.supabase.co"
 # Team ids to leave out of every business figure — the operator's own
 # dogfooding teams. JSON array of uuids, or [] for everything.
 EXCLUDE_TEAMS = "[]"
 
-# Secrets — NEVER put these in this file. Set with `wrangler secret put <NAME>`:
-#   CF_ACCOUNT_ID         Cloudflare account id
+# Secrets — exactly TWO, and NEVER in this file. Set with
+# `wrangler secret put <NAME>` (it prompts; the value never touches your shell
+# history or argv):
 #   CF_API_TOKEN          scoped to Account Analytics: Read, nothing else
-#   SUPABASE_URL          https://<project>.supabase.co
-#   SUPABASE_SERVICE_KEY  service role key
+#   SUPABASE_SERVICE_KEY  Supabase service role key
 #
 # On SUPABASE_SERVICE_KEY, stated plainly rather than hidden: this is the one
 # high-privilege credential in the design. It is required because ops_snapshot()

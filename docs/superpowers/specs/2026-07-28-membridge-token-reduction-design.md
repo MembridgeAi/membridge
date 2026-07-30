@@ -204,6 +204,21 @@ Therefore: *"avoided 1.4M tokens of file reading"* is defensible. *"Your spend f
 
 It also cannot tell you whether the agent would have made that targeted follow-up read anyway, without our skeleton. That question is unanswerable per-read — which is precisely what the holdout is for. This formula makes the diagnostic honest; the holdout remains the number you would actually quote about causation.
 
+### 7.5 Ride-along accrual — the actual number (added 2026-07-29, Marco's direction)
+
+§7.1's `avoided.tokens` counts a serve's net exactly **once**, but a session re-sends its whole context on every subsequent request: tokens a serve kept out of context are kept out of every one of those requests too. The once-only figure is therefore a floor, and at real session lengths (hundreds of requests) it hides most of the effect. Marco's direction: show the actual number.
+
+`billed.tokens` is that same net **accrued over the session's observed subsequent requests**:
+
+- Per receipt, `billed = netRecorded × rideRequests`, where `rideRequests` counts the serve's own session's **non-sidechain** requests with a ts after the serve's — measured off the usage stream the ledger already folds, never modelled from an average. A sidechain (subagent) request carries its own context and never counts.
+- Counting **stops permanently at the first context reset** (compaction), detected with the same epoch rule the volume ledger uses: once the window is compacted, the read's content would have been summarized away regardless, so crediting later requests would fabricate accrual.
+- Corrections propagate: billed is recomputed from the **corrected** net each pass, so a follow-up read retro-adjusts every ride already credited, and a serve that crosses negative drags its billed figure negative with it. Like `avoided.tokens`, this total may move down.
+- When a receipt expires (24h TTL) or is evicted, its last figure stands — the same contract corrections accept.
+
+`billed` is a **flat sibling** of `avoided` (the notes precedent), never a field inside it: §7.1 arithmetic stays once-only, and nothing doing that arithmetic can pick the multiplied figure up by accident. It is still tokens (§8.1) and still "avoided" (§8.2) — "kept out of N requests" claims nothing about the invoice.
+
+Two estimator corrections landed with it, same date: a no-limit call is capped at the Read tool's real ~2000-line ceiling (big files could previously claim tokens the read would never have returned — the one bias that pointed in the flattering direction), and only content-bearing reads (Read/NotebookRead) may correct a serve (a follow-up **Grep** was priced as a full-file re-read, understating net and able to burn rejection strikes toward disabling recall on healthy paths).
+
 ## 8. UI
 
 ### 8.1 Unit: tokens, never spend
