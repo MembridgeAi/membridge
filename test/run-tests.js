@@ -10418,6 +10418,83 @@ async function main() {
     }
   }
 
+  // Task 7 (backfill history older than the cursor): existing installs have
+  // teamPullTs far past their team's origin, so history below that cursor was
+  // pulled once (if at all) and never revisited by the forward pull. The
+  // backward walker (backfillArchivePage) is meant to drain it, one page per
+  // sync pass, newest-first, until exhausted (backfill.done flips true on the
+  // first short/empty page) — and NEVER touch proj.teamPullTs, which the
+  // forward pull alone owns.
+  //
+  // Mock coverage note: the mock's memory_entries GET handler (handleEntries,
+  // above) only implements the forward-pull filter shape it was written
+  // against (`created_at=gt.<cursor>`, ascending sort) — it has no
+  // `created_at=lt.`/`order=desc` support, so a backfill-shaped query always
+  // comes back empty from this test double regardless of what history is
+  // seeded (verified empirically: a `lt.` filter's value is never stripped of
+  // its "lt." prefix by the mock's regex, and no real created_at timestamp is
+  // ever lexicographically greater than a string starting with the letter
+  // "l"). That's a real gap in the test double, out of scope for this task's
+  // file list (lib/teamsync.js, lib/team-archive.js, test/run-tests.js only)
+  // — see the task report. This test therefore proves what the mock CAN
+  // prove: the function is wired end-to-end over real HTTP, an empty page
+  // flips backfill.done, a done backfill never fetches again, and the
+  // forward cursor is left untouched. It does not exercise multi-page
+  // draining of real historical rows.
+  {
+    const mockBF = createMockSupabase();
+    const MOCK_PORT_BF = P(65);
+    await new Promise(r => mockBF.server.listen(MOCK_PORT_BF, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_BF;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projBF = path.join(ROOT, 'projects', 'backfill-app');
+      fs.mkdirSync(projBF, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'backfiller@test.dev', 'pw-bf', 'Backfiller');
+      const teamBF = await teamsync.createTeam(util.getConfig(), 'BackfillTeam');
+      const linkBF = await teamsync.linkProject(util.getConfig(), projBF, teamBF.team_id, 'BackfillTeam');
+      const credsBF = await teamsync.getAccessToken(util.getConfig());
+      // Historical rows an "existing install" shape would have already
+      // advanced its forward cursor past — present so a real backend would
+      // hand them back to a genuine backward walk.
+      const bfBase = Date.UTC(2026, 0, 1);
+      for (let i = 0; i < 10; i++) {
+        mockBF.entries.push({
+          project_id: linkBF.projectId, author_id: 'user-bf-teammate', author_name: 'Teammate',
+          ts: new Date(bfBase + i * 60000).toISOString(), source: 'Claude Code', session: `sBF${i}`,
+          ask: null, summary: `history row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: new Date(bfBase + i * 60000).toISOString(),
+        });
+      }
+      const projBFState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      const savedCursor = projBFState.teamPullTs;
+      await check('teamsync: backfillArchivePage flips done on an empty page, never refetches once done, and never moves the forward cursor', async () => {
+        const before1 = await teamsync.backfillArchivePage(util.getConfig(), credsBF, projBFState, linkBF, null);
+        assert.strictEqual(typeof before1, 'number', 'backfillArchivePage must return a row count');
+        const arc = require('../lib/team-archive').loadArchive(linkBF.projectId);
+        assert.strictEqual(arc.backfill.done, true, 'backfill did not flip done on the empty/short page');
+        // Prove "a done backfill must never fetch again" for real: point the
+        // backend at an address nothing listens on. If backfillArchivePage
+        // tried to fetch, this would reject (ECONNREFUSED); it must not try.
+        const savedUrl = process.env.MEMBRIDGE_TEAM_URL;
+        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:1';
+        let before2;
+        try {
+          before2 = await teamsync.backfillArchivePage(util.getConfig(), credsBF, projBFState, linkBF, null);
+        } finally {
+          process.env.MEMBRIDGE_TEAM_URL = savedUrl;
+        }
+        assert.strictEqual(before2, 0, 'a done backfill fetched again');
+        assert.strictEqual(projBFState.teamPullTs, savedCursor, 'backfill moved the FORWARD cursor');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockBF.server.close(r));
+    }
+  }
+
   // Task 6 (per-session prompt sharing): POST /api/share-session persists the
   // per-session flag into proj.sharedSessions (authoritative for future
   // normal pushes) and calls teamsync.reshareSession to retroactively
@@ -13990,6 +14067,24 @@ async function main() {
       const arc = teamArchive.loadArchive(pid);
       assert.strictEqual(arc.backfill.before, '2026-05-01T00:00:00.000Z');
       assert.strictEqual(arc.backfill.done, false);
+    });
+
+    check('team-archive: setBackfill with a missing/malformed argument fails open instead of throwing', () => {
+      const pid = 'arc-bf-noarg';
+      // No second argument at all — must not throw (module contract: "every
+      // function fails open"), and must leave a sane, empty-looking backfill
+      // state rather than propagate a caller bug into a broken pull/sync pass.
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid));
+      let arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, false);
+      assert.strictEqual(arc.backfill.before, null);
+      // Same for null/undefined passed explicitly, and a non-object.
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid, null));
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid, undefined));
+      assert.doesNotThrow(() => teamArchive.setBackfill(pid, 'not-an-object'));
+      arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, false);
+      assert.strictEqual(arc.backfill.before, null);
     });
   }
 
