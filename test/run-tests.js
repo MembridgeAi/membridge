@@ -5238,6 +5238,18 @@ async function main() {
     assert.ok(
       !/saved/i.test(pxProjectSavingsLine({ tokens: 0 }, { sameSession: 5, crossSession: 1 })),
       'the new state must never say "saved" either');
+    // Ride-along billed accrual (spec §7.5): a positive billed figure leads,
+    // with the once-only figure kept beside it. billed zero or absent (older
+    // payloads, serves too fresh to have ridden) keeps the old line exactly.
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 3830, serves: 1 }, null, { tokens: 26810 }),
+      '27k avoided across requests (4k at first load) · 1 reads answered');
+    assert.strictEqual(
+      pxProjectSavingsLine({ tokens: 3830, serves: 1 }, null, { tokens: 0 }),
+      '4k avoided · 1 reads answered',
+      'billed zero falls back to the once-only line');
+    assert.ok(!/saved/i.test(pxProjectSavingsLine({ tokens: 3830, serves: 1 }, null, { tokens: 26810 })),
+      'the billed line must never say "saved"');
   });
   check('dashboard: pxHomeSavingsLine reads "<total> tokens of file reading avoided · <pct>% of context loaded"', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -5286,6 +5298,22 @@ async function main() {
     assert.ok(
       !/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 0 }, volume: 1, reads: { sameSession: 5, crossSession: 1 } })),
       'no dollar figure in the new state either');
+    // Ride-along billed accrual (spec §7.5): when billed.tokens is present
+    // and positive the roll-up leads with the actual per-request figure and
+    // keeps the once-only figure beside it -- still "avoided", still tokens,
+    // and the % now compares like with like (billed and volume both count
+    // every request's context).
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 9249 }, billed: { tokens: 105000 }, volume: 21540983 }),
+      '105k tokens of request context avoided (9k at first load) · 0.5% of all context');
+    assert.strictEqual(
+      pxHomeSavingsLine({ avoided: { tokens: 1400000 }, billed: { tokens: 0 }, volume: 21540983 }),
+      '1.4M tokens of file reading avoided · 6.1% of context loaded',
+      'billed zero (serves too fresh to have ridden yet) falls back to the once-only line');
+    assert.ok(!/saved/i.test(pxHomeSavingsLine({ avoided: { tokens: 9249 }, billed: { tokens: 105000 }, volume: 21540983 })),
+      'the billed line must never say "saved" either');
+    assert.ok(!/\$/.test(pxHomeSavingsLine({ avoided: { tokens: 9249 }, billed: { tokens: 105000 }, volume: 21540983 })),
+      'no dollar figure on the billed line');
   });
   check('dashboard: the Projects grid row renders the per-project savings line from pxData.savingsByPath', () => {
     const src = require('../lib/dashboard/client')('', '');
@@ -7198,6 +7226,21 @@ async function main() {
     assert.strictEqual(fractional.avoidedTokensOptimistic, 623);
   });
 
+  check('recall: a no-limit call is capped at the Read tool\'s own 2000-line ceiling, never the whole file', () => {
+    // Claude Code's Read returns at most ~2000 lines on a no-limit call, so
+    // pricing a bigger file at size/4 claims tokens the read would never have
+    // loaded -- the one estimator bias that pointed in the flattering
+    // direction. The cap is 2000 * 12 (the same tokens-per-line rate the
+    // limit branch already uses), applied ONLY to the no-limit branch: an
+    // explicit limit is the caller's own stated call shape.
+    const recall = require('../lib/recall');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 1000000 }), 24000, 'a 1MB file prices at the cap, not 250k');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 96000 }), 24000, 'exactly at the boundary: 96000/4 === the cap');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 95996 }), 23999, 'just under the boundary is untouched');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), 673, 'ordinary files are unaffected');
+    assert.strictEqual(recall.estimateCallTokens(3000, { size: 1000000 }), 36000, 'an explicit limit is never capped -- it is the actual call shape');
+  });
+
   check('recall: decide() refuses unless tracked is the explicit literal true (fail-closed, never intercepts untracked/paused)', () => {
     // FIX ROUND 1, FINDING 2 (HIGH): the old gate only refused on an
     // EXPLICIT `tracked === false`, so an omitted/undefined `tracked` fell
@@ -8568,6 +8611,150 @@ async function main() {
       });
     }
 
+    // C3 MIRROR (accuracy pass, 2026-07-29): the serve side already refuses
+    // to answer a Grep/Glob as though the whole file had been read (decide()'s
+    // non-read-tool gate), but the CORRECTION side still priced a follow-up
+    // Grep at full file size -- a grep that returns three lines clawed back
+    // thousands of tokens, understating real savings and (worse) able to
+    // cross a healthy serve into 'negative' and burn a rejection strike.
+    // Three grep-heavy sessions could permanently disable recall on a path
+    // it was serving perfectly. PIN: only content-bearing reads (Read,
+    // NotebookRead, or a legacy event with no tool field) may correct a
+    // serve; Grep/Glob never do.
+    {
+      const projGrep = seedT6Project('t6-grep-never-claws-back');
+      const relGrep = 'src/grep-target.js';
+      const tsGrepServe = '2026-07-28T10:00:00.000Z';
+      const tGrepServe = Date.parse(tsGrepServe);
+      recallStoreT6.put(projGrep, relGrep, { contentHash: 'hgrep', skeleton: 'SKELGREP', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      writeServeRows(projGrep, tsGrepServe, 'sess-grep', relGrep, 'B', 4210, 380);
+      const ledGrep1 = ledgerStoreT6.updateLedger(projGrep, [], util.getConfig(), () => tGrepServe + 10);
+      assert.strictEqual(ledGrep1.avoided.tokens, 3830, 'setup: serve settles full');
+
+      const grepEvent = { ...readEvent('sess-grep', relGrep, '2026-07-28T10:00:01.000Z', projGrep, { toolUseId: 'fu-grep-1' }), tool: 'Grep' };
+      const globEvent = { ...readEvent('sess-grep', relGrep, '2026-07-28T10:00:02.000Z', projGrep, { toolUseId: 'fu-glob-1' }), tool: 'Glob' };
+      const ledGrep2 = ledgerStoreT6.updateLedger(projGrep, [grepEvent, globEvent], util.getConfig(), () => tGrepServe + 20);
+      check('ledger-fold-recall-open-serves (C3 mirror): a follow-up Grep/Glob never claws back a serve or burns a rejection', () => {
+        assert.strictEqual(ledGrep2.avoided.tokens, 3830, 'net must be untouched by non-content-bearing follow-ups');
+        assert.strictEqual(ledGrep2.openServes[0].correctedBy.length, 0);
+        assert.strictEqual(ledGrep2.openServes[0].classified, 'full');
+        assert.strictEqual(recallStoreT6.get(projGrep, relGrep).rejections, 0);
+      });
+
+      // A legacy event with NO tool field (older adapters, existing fixtures)
+      // must keep correcting exactly as before -- the narrowing is Grep/Glob
+      // only, never a silent behaviour change for old data.
+      const legacyRead = readEvent('sess-grep', relGrep, '2026-07-28T10:00:03.000Z', projGrep, { toolUseId: 'fu-legacy-1', limit: 50 });
+      delete legacyRead.tool;
+      const ledGrep3 = ledgerStoreT6.updateLedger(projGrep, [legacyRead], util.getConfig(), () => tGrepServe + 30);
+      check('ledger-fold-recall-open-serves (C3 mirror): a legacy no-tool read event still corrects', () => {
+        assert.strictEqual(ledGrep3.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledGrep3.openServes[0].correctedBy.length, 1);
+      });
+    }
+
+    // === Ride-along accrual (spec §7.5, added 2026-07-29): the actual number.
+    // A serve's netRecorded counts tokens kept out of context ONCE, but in a
+    // real session those tokens would have re-billed on every subsequent
+    // request through the cache. billed.tokens = netRecorded x the session's
+    // OBSERVED subsequent non-sidechain requests -- measured from the same
+    // usage stream the ledger already folds, not modelled. ===
+    {
+      const usageEvent = (sessionId, ts, messageId, opts) => ({
+        ts, kind: 'usage', session: sessionId, messageId, source: 'Claude Code',
+        model: 'claude-opus-4-6', sidechain: !!(opts && opts.sidechain),
+        usage: { input_tokens: (opts && opts.ctx) || 5000, output_tokens: (opts && opts.out) || 50 },
+      });
+
+      const projRide = seedT6Project('t6-ride-along-accrual');
+      const relRide = 'src/ride.js';
+      const tsRideServe = '2026-07-28T10:00:00.000Z';
+      const tRideServe = Date.parse(tsRideServe);
+      recallStoreT6.put(projRide, relRide, { contentHash: 'hride', skeleton: 'SKELRIDE', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      writeServeRows(projRide, tsRideServe, 'sess-ride', relRide, 'B', 4210, 380);
+
+      // Two countable requests after the serve; one request BEFORE the serve,
+      // one from another session, one sidechain -- all three must not count.
+      const ridePass1 = [
+        usageEvent('sess-ride', '2026-07-28T09:59:59.000Z', 'm0'),
+        usageEvent('sess-ride', '2026-07-28T10:00:01.000Z', 'm1', { ctx: 5000, out: 50 }),
+        usageEvent('sess-ride', '2026-07-28T10:00:02.000Z', 'm2', { ctx: 5100, out: 50 }),
+        usageEvent('sess-other', '2026-07-28T10:00:03.000Z', 'm3'),
+        usageEvent('sess-ride', '2026-07-28T10:00:04.000Z', 'm4', { sidechain: true }),
+      ];
+      const ledRide1 = ledgerStoreT6.updateLedger(projRide, ridePass1, util.getConfig(), () => tRideServe + 10000);
+      check('ride-along: billed.tokens = net x observed same-session subsequent requests (pre-serve, foreign-session, sidechain excluded)', () => {
+        assert.strictEqual(ledRide1.avoided.tokens, 3830, 'direct avoidance is untouched by ride-along accrual');
+        assert.deepStrictEqual(ledRide1.billed, { tokens: 7660 }, 'net 3830 x 2 counted requests');
+        assert.strictEqual(ledRide1.openServes[0].rideRequests, 2);
+      });
+
+      // The same events re-presented (the sliding window re-shows everything
+      // it still holds every pass) must not double-count: the frontier is the
+      // dedupe evidence.
+      const ledRide2 = ledgerStoreT6.updateLedger(projRide, ridePass1, util.getConfig(), () => tRideServe + 20000);
+      check('ride-along: re-presenting the same usage events never double-counts (frontier dedupe)', () => {
+        assert.deepStrictEqual(ledRide2.billed, { tokens: 7660 });
+        assert.strictEqual(ledRide2.openServes[0].rideRequests, 2);
+      });
+
+      // A NEW request in a later pass keeps accruing.
+      const ridePass3 = ridePass1.concat([usageEvent('sess-ride', '2026-07-28T10:00:05.000Z', 'm5', { ctx: 5200, out: 50 })]);
+      const ledRide3 = ledgerStoreT6.updateLedger(projRide, ridePass3, util.getConfig(), () => tRideServe + 30000);
+      check('ride-along: a new request in a later pass accrues one more net', () => {
+        assert.deepStrictEqual(ledRide3.billed, { tokens: 11490 }, 'net 3830 x 3');
+      });
+
+      // A follow-up read that revises net down must retro-adjust billed to
+      // newNet x rides -- the ride multiplier applies to the CORRECTED net,
+      // never the optimistic one.
+      const rideFollowUp = readEvent('sess-ride', relRide, '2026-07-28T10:00:06.000Z', projRide, { toolUseId: 'fu-ride-1', limit: 50 });
+      const ledRide4 = ledgerStoreT6.updateLedger(projRide, ridePass3.concat([rideFollowUp]), util.getConfig(), () => tRideServe + 40000);
+      check('ride-along: a correction retro-adjusts billed to the corrected net x rides', () => {
+        assert.strictEqual(ledRide4.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.deepStrictEqual(ledRide4.billed, { tokens: 9690 }, 'corrected net 3230 x 3');
+      });
+    }
+
+    // Ride-along stops at a context reset: a compaction wipes the avoided
+    // content out of what any later request would have carried, so counting
+    // past it would fabricate accrual. Reset detection is the SAME epoch rule
+    // lib/ledger.js's streamEpochs uses (shared, not re-derived).
+    {
+      const usageEvent = (sessionId, ts, messageId, opts) => ({
+        ts, kind: 'usage', session: sessionId, messageId, source: 'Claude Code',
+        model: 'claude-opus-4-6', sidechain: false,
+        usage: { input_tokens: (opts && opts.ctx) || 5000, output_tokens: (opts && opts.out) || 50 },
+      });
+      const projReset = seedT6Project('t6-ride-along-reset');
+      const relReset = 'src/reset.js';
+      const tsResetServe = '2026-07-28T10:00:00.000Z';
+      const tResetServe = Date.parse(tsResetServe);
+      recallStoreT6.put(projReset, relReset, { contentHash: 'hreset', skeleton: 'SKELRESET', skeletonTokens: 380, fileTokens: 4210, rejections: 0 });
+      writeServeRows(projReset, tsResetServe, 'sess-reset', relReset, 'B', 4210, 380);
+      const resetEvents = [
+        usageEvent('sess-reset', '2026-07-28T10:00:01.000Z', 'r1', { ctx: 5000, out: 50 }),
+        // ctx collapses 5000 -> 1000: gap = 1000 - 5000 - 50 = -4050, far past
+        // the -15% epoch threshold -- a compaction/reset.
+        usageEvent('sess-reset', '2026-07-28T10:00:02.000Z', 'r2', { ctx: 1000, out: 50 }),
+        usageEvent('sess-reset', '2026-07-28T10:00:03.000Z', 'r3', { ctx: 1100, out: 50 }),
+      ];
+      const ledReset1 = ledgerStoreT6.updateLedger(projReset, resetEvents, util.getConfig(), () => tResetServe + 10000);
+      check('ride-along: a context reset closes accrual -- the reset request and everything after it never count', () => {
+        assert.deepStrictEqual(ledReset1.billed, { tokens: 3830 }, 'net 3830 x 1 (only the pre-reset request)');
+        assert.strictEqual(ledReset1.openServes[0].rideRequests, 1);
+        assert.strictEqual(ledReset1.openServes[0].rideClosed, true);
+      });
+      // Closed stays closed on later passes with more requests.
+      const ledReset2 = ledgerStoreT6.updateLedger(projReset,
+        resetEvents.concat([usageEvent('sess-reset', '2026-07-28T10:00:04.000Z', 'r4', { ctx: 1200, out: 50 })]),
+        util.getConfig(), () => tResetServe + 20000);
+      check('ride-along: a closed receipt never resumes counting', () => {
+        assert.deepStrictEqual(ledReset2.billed, { tokens: 3830 });
+        assert.strictEqual(ledReset2.openServes[0].rideRequests, 1);
+      });
+    }
+
     // Holdout rows (spec §7.2) must accumulate ONLY into `holdout`, and must
     // never touch `avoided` -- the two are strictly separate arms.
     const proj4T6 = seedT6Project('t6-holdout-isolated');
@@ -8818,14 +9005,20 @@ async function main() {
       assert.strictEqual(payload.projects[0].notesInjectedTokens, 0);
       assert.strictEqual(payload.totals.notesInjectedTokens, 0);
       assert.ok(!('notesInjectedTokens' in payload.projects[0].avoided));
+      // Ride-along billed accrual (spec §7.5): a FLAT sibling of avoided,
+      // tokens only, defaulted to zero on a ledger that predates the field --
+      // and never a member of `avoided`, so §7.1 arithmetic can't reach it.
+      assert.deepStrictEqual(payload.projects[0].billed, { tokens: 0 });
+      assert.deepStrictEqual(payload.totals.billed, { tokens: 0 });
+      assert.ok(!('billedTokens' in payload.projects[0].avoided));
       // Whitelist: the payload is an explicit projection, so accumulation
       // bookkeeping (dedupe keys, per-path reader sets, notes.seenKeys) can
       // never leak onto the wire just because it was added to ledger.json.
       assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
-        ['avoided', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
+        ['avoided', 'billed', 'holdout', 'hotPaths', 'name', 'notesInjectedTokens', 'path', 'reads', 'requests', 'sessions', 'updatedAt', 'volume'],
         'the /api/savings project shape must stay exactly this set');
       assert.deepStrictEqual(Object.keys(payload.totals).sort(),
-        ['avoided', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
+        ['avoided', 'billed', 'holdout', 'notesInjectedTokens', 'reads', 'requests', 'volume'],
         'the /api/savings totals shape must stay exactly this set');
     } finally {
       fs.writeFileSync(util.statePath(), savedState);
