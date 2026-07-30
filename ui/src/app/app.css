@@ -1,0 +1,119 @@
+/* App shell layout — imported once from main.tsx, alongside
+ * components/components.css. Same rules apply here (see that file's header):
+ * one --r radius everywhere, no cards, no gradients, hover changes
+ * background/border only. The status dot below intentionally uses --r
+ * instead of a circle — border-radius: 50% is reserved for avatars only. */
+
+.shell {
+  display: flex;
+  height: 100vh;
+}
+
+.rail {
+  width: 170px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: 12px 10px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.logo-mark {
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.team-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 6px 8px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+.team-switch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  color: var(--text2);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+}
+.nav-item:hover {
+  background: var(--panel2);
+}
+.nav-item-active {
+  border-left: 2px solid var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.nav-icon {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.nav-group-label {
+  margin: 12px 8px 4px;
+  color: var(--text3);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.create-team {
+  margin: 4px 0 0;
+  padding: 8px;
+  text-align: left;
+  background: transparent;
+  color: var(--text2);
+  border: 1px dashed var(--line2);
+}
+
+.rail-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 0;
+  border-top: 1px solid var(--line);
+  color: var(--text2);
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--green);
+  flex-shrink: 0;
+}
+
+.shell-main {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}

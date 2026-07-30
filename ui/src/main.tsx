@@ -1,19 +1,28 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { App } from './app/App'
+import { DataClientProvider } from './data/DataClientProvider'
+import { LocalDaemonClient } from './data/LocalDaemonClient'
 import './styles/tokens.css'
 import './styles/base.css'
 import './components/components.css'
+import './app/app.css'
 
-// Placeholder root render. The real app shell, routing, and pages are
-// scaffolded in later tasks — this only proves the Vite/React/token
-// pipeline builds and boots end to end.
 const rootEl = document.getElementById('root')
 if (!rootEl) {
   throw new Error('Root element #root not found')
 }
 
+const queryClient = new QueryClient()
+const dataClient = new LocalDaemonClient()
+
 createRoot(rootEl).render(
   <StrictMode>
-    <div className="mono">MemBridge</div>
+    <QueryClientProvider client={queryClient}>
+      <DataClientProvider client={dataClient}>
+        <App />
+      </DataClientProvider>
+    </QueryClientProvider>
   </StrictMode>,
 )
