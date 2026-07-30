@@ -1,0 +1,240 @@
+/* Insights page — imported once from InsightsPage.tsx (per-feature CSS, same
+ * precedent as today.css/members.css/projects.css). One --r radius
+ * everywhere except avatars (circles), no shadows on resting content, no
+ * gradients, hover changes background/border only. */
+
+.insights-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.insights-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.insights-title {
+  margin: 0;
+  font-size: 14px;
+}
+.insights-count {
+  color: var(--text3);
+  font-size: 11px;
+}
+.insights-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Segmented window control (7 / 30 / 90 days). */
+.seg {
+  display: flex;
+  border: 1px solid var(--line2);
+}
+.seg-btn {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  background: transparent;
+  border: none;
+  color: var(--text2);
+}
+.seg-btn-on {
+  background: var(--accent-dim);
+  color: var(--accent2);
+  font-weight: 600;
+}
+
+.insights-btn-ghost {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+  white-space: nowrap;
+}
+.insights-btn-ghost:hover {
+  background: var(--panel2);
+}
+
+.insights-error {
+  margin: 12px 16px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
+.insights-restricted,
+.insights-loading-note {
+  margin: 0;
+  padding: 14px 16px;
+  color: var(--text3);
+}
+
+/* Two-column body: activity + skeleton + projects on the left, problems +
+ * concentration + tool reach on the right. Stacks on narrow viewports. */
+.insights-cols {
+  display: flex;
+}
+.insights-colL {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.insights-colR {
+  width: 340px;
+  flex-shrink: 0;
+}
+@media (max-width: 1000px) {
+  .insights-cols {
+    flex-direction: column;
+  }
+  .insights-colL {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .insights-colR {
+    width: auto;
+  }
+}
+
+.insights-sect {
+  padding: 12px 16px 6px;
+  color: var(--text3);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.insights-hint {
+  margin-left: 6px;
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.insights-empty-note {
+  margin: 0;
+  padding: 6px 16px 12px;
+  color: var(--text3);
+  font-size: 11px;
+}
+.insights-foot {
+  margin: 0;
+  padding: 9px 16px;
+  color: var(--text3);
+  font-size: 10.5px;
+  border-top: 1px solid var(--line);
+}
+
+/* Activity-by-person bars. */
+.person-bars {
+  padding-bottom: 4px;
+}
+.person-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.person-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 96px;
+  flex-shrink: 0;
+}
+.person-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.person-bar-track {
+  flex: 1;
+  height: 11px;
+  background: var(--panel2);
+  position: relative;
+  overflow: hidden;
+}
+.person-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  background: var(--accent2);
+}
+.person-value {
+  width: 110px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text2);
+  font-size: 10.5px;
+}
+
+/* Generic single-line ruled row, reused by the skeleton panel and the
+ * plain lists (most active projects, knowledge concentration, cross-tool
+ * reach). `role="row"` is only added where a test needs to count rows
+ * within a specific panel (the skeleton panel) -- see InsightsPage.tsx. */
+.lrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.lrow-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lrow-muted {
+  color: var(--text3);
+  font-size: 10px;
+}
+.lrow-value {
+  color: var(--text2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.lrow-value-good {
+  color: var(--green);
+}
+
+.skeleton-panel {
+  padding-bottom: 4px;
+}
+
+/* Broken / minor problems. */
+.problem-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.problem-body {
+  flex: 1;
+  min-width: 0;
+}
+.problem-headline {
+  font-weight: 600;
+}
+.problem-headline-bad {
+  color: var(--red);
+}
+.problem-scale {
+  margin-top: 1px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
