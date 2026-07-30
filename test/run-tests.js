@@ -10648,6 +10648,72 @@ async function main() {
     }
   }
 
+  // Retention rewrite (team-search-engine): the archive's row cap must never
+  // silently eat backward progress. Pre-fill a project's archive straight to
+  // the cap (as if years of forward pulls alone had run for a busy team --
+  // exactly the shape this bug hid in), then run the backward walker. It
+  // must not trim away the page it fetches, must not claim a clean "done" it
+  // never earned, and the "archive is already full" check must cost no
+  // network round trip -- proved the same way the existing "never refetch
+  // once done" test above does, by pointing the backend at a dead address.
+  {
+    const mockCap = createMockSupabase();
+    const MOCK_PORT_CAP = P(68);
+    await new Promise(r => mockCap.server.listen(MOCK_PORT_CAP, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_CAP;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projCap = path.join(ROOT, 'projects', 'backfill-cap-app');
+      fs.mkdirSync(projCap, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'capwalker@test.dev', 'pw-cap', 'CapWalker');
+      const teamCap = await teamsync.createTeam(util.getConfig(), 'CapTeam');
+      const linkCap = await teamsync.linkProject(util.getConfig(), projCap, teamCap.team_id, 'CapTeam');
+      const credsCap = await teamsync.getAccessToken(util.getConfig());
+      const teamArchiveCap = require('../lib/team-archive');
+      const cap = teamArchiveCap.MAX_ARCHIVE_ROWS;
+      teamArchiveCap.appendRows(linkCap.projectId, Array.from({ length: cap }, (_, i) => ({
+        author: 'Forward', ts: new Date(Date.UTC(2020, 0, 1) + i * 60000).toISOString(),
+        source: 'Claude Code', summary: `forward row ${i}`,
+      })), { source: 'forward' });
+      // Genuine older history the backward walker would fetch, were it able to.
+      for (let i = 0; i < 10; i++) {
+        mockCap.entries.push({
+          project_id: linkCap.projectId, author_id: 'user-cap-teammate', author_name: 'Teammate',
+          ts: new Date(Date.UTC(2019, 0, 1) + i * 60000).toISOString(), source: 'Claude Code', session: `sCap${i}`,
+          ask: null, summary: `deep history row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: new Date(Date.UTC(2019, 0, 1) + i * 60000).toISOString(),
+        });
+      }
+      const projCapState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      await check('teamsync: backfillArchivePage at a full archive stops honestly (archive-full), never trims what it already holds, and never refetches', async () => {
+        const before = await teamsync.backfillArchivePage(util.getConfig(), credsCap, projCapState, linkCap, null);
+        assert.strictEqual(before, 0, 'a full archive should not even attempt a page (no rows to safely keep)');
+        const arc = teamArchiveCap.loadArchive(linkCap.projectId);
+        assert.strictEqual(arc.backfill.done, false, 'a cap-stopped backfill must not claim it finished walking history');
+        assert.strictEqual(arc.backfill.stopped, 'archive-full', 'backfill did not record the honest reason it stopped');
+        assert.strictEqual(arc.rows.length, cap, 'the pre-existing forward rows were disturbed by the cap check');
+        // Prove the "already full" check is a local, no-network check: point
+        // the backend at an address nothing listens on and confirm a further
+        // pass still costs nothing (same proof style as the earlier
+        // "never refetches once done" test).
+        const savedUrl = process.env.MEMBRIDGE_TEAM_URL;
+        process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:1';
+        let after;
+        try {
+          after = await teamsync.backfillArchivePage(util.getConfig(), credsCap, projCapState, linkCap, null);
+        } finally {
+          process.env.MEMBRIDGE_TEAM_URL = savedUrl;
+        }
+        assert.strictEqual(after, 0, 'an archive-full backfill fetched again');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockCap.server.close(r));
+    }
+  }
+
   // Task 6 (per-session prompt sharing): POST /api/share-session persists the
   // per-session flag into proj.sharedSessions (authoritative for future
   // normal pushes) and calls teamsync.reshareSession to retroactively
@@ -14313,6 +14379,11 @@ async function main() {
   }
 
   // --- 14c. team archive (lib/team-archive.js): durable pulled-row history ---
+  // Format is NDJSON rows (<projectId>.ndjson, append-only) plus a small
+  // metadata sidecar (<projectId>.meta.json — backfill cursor, format
+  // version, row count) so a plain "is backfill done" check never has to
+  // parse the (potentially large) rows file. A legacy whole-file install
+  // (<projectId>.json) migrates transparently on first touch.
   {
     const teamArchive = require('../lib/team-archive');
 
@@ -14331,26 +14402,82 @@ async function main() {
       assert.strictEqual(arc.rows[1].summary, 'v2', 'replace-on-collision lost the newer version');
     });
 
-    check('team-archive: a corrupt file fails open as an empty archive', () => {
-      const p = teamArchive.archivePath('arc-bad');
+    check('team-archive: a corrupt rows file fails open as an empty archive', () => {
+      const p = teamArchive.archivePath('arc-bad-rows');
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, '{definitely not json');
-      const arc = teamArchive.loadArchive('arc-bad');
+      fs.writeFileSync(p, '{definitely not json\nnor is this a valid row line');
+      const arc = teamArchive.loadArchive('arc-bad-rows');
       assert.deepStrictEqual(arc.rows, []);
       assert.strictEqual(arc.backfill.done, false);
     });
 
-    check('team-archive: the cap keeps the newest rows', () => {
-      const pid = 'arc-cap';
+    check('team-archive: a corrupt sidecar fails open as an empty archive', () => {
+      const pid = 'arc-bad-meta';
+      const mp = teamArchive.metaPath(pid);
+      fs.mkdirSync(path.dirname(mp), { recursive: true });
+      fs.writeFileSync(mp, '{not json either');
+      assert.doesNotThrow(() => teamArchive.loadArchive(pid));
+      const arc = teamArchive.loadArchive(pid);
+      assert.deepStrictEqual(arc.rows, []);
+      assert.strictEqual(arc.backfill.done, false);
+      assert.strictEqual(arc.backfill.beforeId, null);
+    });
+
+    check('team-archive: the cap keeps the newest rows on a forward append', () => {
+      const pid = 'arc-cap-forward';
+      const cap = teamArchive.MAX_ARCHIVE_ROWS;
       const mk = i => ({
         author: 'A', source: 'Codex', summary: `row ${i}`,
         ts: new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString(),
       });
-      teamArchive.appendRows(pid, Array.from({ length: 5010 }, (_, i) => mk(i)));
+      teamArchive.appendRows(pid, Array.from({ length: cap + 10 }, (_, i) => mk(i)), { source: 'forward' });
       const arc = teamArchive.loadArchive(pid);
-      assert.strictEqual(arc.rows.length, 5000);
-      assert.strictEqual(arc.rows[arc.rows.length - 1].summary, 'row 5009', 'newest row lost to the cap');
+      assert.strictEqual(arc.rows.length, cap);
+      assert.strictEqual(arc.rows[arc.rows.length - 1].summary, `row ${cap + 9}`, 'newest row lost to the cap');
       assert.strictEqual(arc.rows[0].summary, 'row 10', 'cap kept the oldest instead of the newest');
+    });
+
+    // The crux of the retention bug this rewrite fixes: at a full archive,
+    // the BACKWARD walker's page is entirely OLDER rows than everything
+    // already archived. A naive "keep the newest N" trim would discard the
+    // page it just fetched, on arrival, every single pass — see the
+    // module header in lib/team-archive.js. A backfill append must never be
+    // trimmed on arrival.
+    check('team-archive: a BACKFILL append at the cap is not trimmed away', () => {
+      const pid = 'arc-cap-backfill';
+      const cap = teamArchive.MAX_ARCHIVE_ROWS;
+      teamArchive.appendRows(pid, Array.from({ length: cap }, (_, i) => ({
+        author: 'A', source: 'Codex', summary: `fwd${i}`,
+        ts: new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString(),
+      })), { source: 'forward' });
+      // Older-than-everything-else rows, exactly what the backward walker fetches.
+      const oldRows = Array.from({ length: 50 }, (_, i) => ({
+        author: 'A', source: 'Codex', summary: `old${i}`,
+        ts: new Date(Date.UTC(2020, 0, 1) + i * 60000).toISOString(),
+      }));
+      teamArchive.appendRows(pid, oldRows, { source: 'backfill' });
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, cap + 50,
+        'backfill rows were trimmed away on arrival at the cap');
+      assert.ok(arc.rows.some(r => r.summary === 'old0'), 'oldest backfill row missing');
+      assert.ok(arc.rows.some(r => r.summary === `fwd${cap - 1}`), 'newest forward row missing');
+    });
+
+    check('team-archive: a subsequent FORWARD append at/over the cap still trims the oldest', () => {
+      const pid = 'arc-cap-then-forward';
+      const cap = teamArchive.MAX_ARCHIVE_ROWS;
+      teamArchive.appendRows(pid, Array.from({ length: cap }, (_, i) => ({
+        author: 'A', source: 'Codex', summary: `row${i}`,
+        ts: new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString(),
+      })), { source: 'forward' });
+      teamArchive.appendRows(pid, [{
+        author: 'A', source: 'Codex', summary: 'newest',
+        ts: new Date(Date.UTC(2030, 0, 1)).toISOString(), // well past every row above
+      }], { source: 'forward' });
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, cap, 'forward append did not re-enforce the cap');
+      assert.strictEqual(arc.rows[arc.rows.length - 1].summary, 'newest');
+      assert.ok(!arc.rows.some(r => r.summary === 'row0'), 'oldest row was not trimmed');
     });
 
     check('team-archive: setBackfill round-trips and survives appends', () => {
@@ -14387,7 +14514,7 @@ async function main() {
     // and permanently skips whichever tied siblings fell past a page boundary).
     check('team-archive: an archive written by the previous created_at-cursor format loads safely, restarting the walk rather than misreading the cursor', () => {
       const pid = 'arc-legacy-format';
-      const p = teamArchive.archivePath(pid);
+      const p = teamArchive.legacyPath(pid);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, JSON.stringify({
         version: 1, projectId: pid,
@@ -14402,7 +14529,7 @@ async function main() {
 
     check('team-archive: a COMPLETED legacy-format backfill stays done (never restarts a finished walk)', () => {
       const pid = 'arc-legacy-done';
-      const p = teamArchive.archivePath(pid);
+      const p = teamArchive.legacyPath(pid);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, JSON.stringify({
         version: 1, projectId: pid,
@@ -14411,6 +14538,61 @@ async function main() {
       }));
       const arc = teamArchive.loadArchive(pid);
       assert.strictEqual(arc.backfill.done, true, 'a finished legacy backfill must not be treated as unfinished');
+    });
+
+    check('team-archive: legacy whole-file archive migrates transparently -- rows and a mid-walk backfill cursor both survive', () => {
+      const pid = 'arc-legacy-migrate';
+      const p = teamArchive.legacyPath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify({
+        version: 1, projectId: pid,
+        backfill: { done: false, beforeId: 77 }, // mid-walk, current-format cursor
+        rows: [
+          { author: 'A', ts: '2026-02-01T00:00:00.000Z', source: 'Codex', summary: 'legacy row 1' },
+          { author: 'B', ts: '2026-02-02T00:00:00.000Z', source: 'Claude Code', summary: 'legacy row 2' },
+        ],
+      }));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 2, 'legacy rows lost in migration');
+      assert.strictEqual(arc.rows[0].summary, 'legacy row 1');
+      assert.strictEqual(arc.backfill.done, false);
+      assert.strictEqual(arc.backfill.beforeId, 77, 'mid-walk backfill cursor lost in migration');
+      assert.ok(!fs.existsSync(p), 'legacy file was not cleaned up after migration');
+      // Subsequent reads/writes work off the migrated new-format files.
+      teamArchive.appendRows(pid, [{ author: 'C', ts: '2026-02-03T00:00:00.000Z', source: 'Codex', summary: 'post-migration' }]);
+      const arc2 = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc2.rows.length, 3, 'append after migration did not land');
+      assert.strictEqual(arc2.backfill.beforeId, 77, 'backfill state lost on the first post-migration write');
+    });
+
+    check('team-archive: pruneArchive removes both files for a removed project and leaves others untouched', () => {
+      const pidGone = 'arc-prune-gone';
+      const pidStay = 'arc-prune-stay';
+      teamArchive.appendRows(pidGone, [{ author: 'A', ts: '2026-03-01T00:00:00.000Z', source: 'Codex', summary: 'x' }]);
+      teamArchive.setBackfill(pidGone, { done: false, beforeId: 5 });
+      teamArchive.appendRows(pidStay, [{ author: 'A', ts: '2026-03-01T00:00:00.000Z', source: 'Codex', summary: 'y' }]);
+      assert.ok(fs.existsSync(teamArchive.archivePath(pidGone)));
+      assert.ok(fs.existsSync(teamArchive.metaPath(pidGone)));
+      teamArchive.pruneArchive(pidGone);
+      assert.ok(!fs.existsSync(teamArchive.archivePath(pidGone)), 'rows file survived pruning');
+      assert.ok(!fs.existsSync(teamArchive.metaPath(pidGone)), 'meta sidecar survived pruning');
+      const staying = teamArchive.loadArchive(pidStay);
+      assert.strictEqual(staying.rows.length, 1, 'pruning an unrelated project affected this one');
+      // Pruning an id with nothing on disk must not throw.
+      assert.doesNotThrow(() => teamArchive.pruneArchive('arc-never-existed'));
+    });
+
+    check('team-archive: unlinking a project prunes its durable archive', () => {
+      const projUnlinkArc = path.join(ROOT, 'projects', 'archive-unlink-app');
+      fs.mkdirSync(path.join(projUnlinkArc, '.membridge'), { recursive: true });
+      const pidUnlinkArc = 'arc-unlink-wired';
+      fs.writeFileSync(path.join(projUnlinkArc, '.membridge', 'team.json'),
+        JSON.stringify({ teamId: 'team-unlink-wired', projectId: pidUnlinkArc, teamName: 'UnlinkWiredTeam' }));
+      teamArchive.appendRows(pidUnlinkArc, [{ author: 'A', ts: '2026-04-01T00:00:00.000Z', source: 'Codex', summary: 'z' }]);
+      assert.ok(fs.existsSync(teamArchive.archivePath(pidUnlinkArc)), 'fixture setup: archive rows file missing before unlink');
+      assert.ok(teamsync.unlinkProject(projUnlinkArc), 'unlinkProject reported no team.json to remove');
+      assert.ok(!fs.existsSync(teamArchive.archivePath(pidUnlinkArc)), 'unlinkProject did not prune the archive rows file');
+      assert.ok(!fs.existsSync(teamArchive.metaPath(pidUnlinkArc)), 'unlinkProject did not prune the archive sidecar');
     });
   }
 
