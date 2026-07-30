@@ -13476,6 +13476,19 @@ async function main() {
         summary: 'stored the new token api_key=sk-tamper-mcp-888 in the vault',
         files: ['infra/vault.tf'],
         changes: [{ file: 'infra/vault.tf', status: 'edited', add: 3, del: 1, note: 'rotated token=sk-tamper-mcp-777', dep: false }],
+      }, {
+        // Fixed (NOT mcpTsAgo-relative) timestamps straddling one calendar-day
+        // boundary, so the since/until bare-date regression checks below never
+        // drift with wall-clock time. Query term 'beacon' is unique to these
+        // three rows so they never interfere with the 'vault' fixtures above.
+        author: 'Priya', ts: '2020-03-14T23:00:00.000Z', source: 'Codex', session: 'db-before',
+        ask: 'beacon check the day before the boundary', files: [],
+      }, {
+        author: 'Priya', ts: '2020-03-15T08:00:00.000Z', source: 'Codex', session: 'db-on',
+        ask: 'beacon check on the boundary day itself', files: [],
+      }, {
+        author: 'Priya', ts: '2020-03-16T01:00:00.000Z', source: 'Codex', session: 'db-after',
+        ask: 'beacon check the day after the boundary', files: [],
       }];
       state.projects[projPaused] = { events: [{ ts: mcpTsAgo(10), source: 'Claude Code', kind: 'prompt', text: 'paused project work', session: 'x1' }] };
       util.saveState(state);
@@ -13609,6 +13622,28 @@ async function main() {
     const { data: sTool } = await callJson('search_memory', { query: 'vault', tool: 'Codex' });
     check('mcp: search_memory tool filter matches the source exactly', () => {
       assert.ok(sTool.results.length >= 1 && sTool.results.every(r => r.source === 'Codex'));
+    });
+
+    // Regression: a bare-date bound (e.g. "2026-06-01", as the schema itself
+    // invites) must include that whole day, not be byte-compared against a
+    // full ISO instant -- otherwise every entry on the until day sorts
+    // lexicographically GREATER than the bare date and is silently dropped.
+    // The db-before/db-on/db-after fixture rows above (fixed 2020-03-* dates)
+    // straddle one calendar-day boundary so this never depends on wall clock.
+    const { data: sUntilDay } = await callJson('search_memory', { query: 'beacon', until: '2020-03-15' });
+    check('mcp: search_memory bare-date until includes the whole boundary day', () => {
+      assert.ok(sUntilDay.results.some(r => r.ts === '2020-03-15T08:00:00.000Z'),
+        'a full ISO ts on the until day was wrongly excluded by a bare-date bound');
+      assert.ok(!sUntilDay.results.some(r => r.ts === '2020-03-16T01:00:00.000Z'),
+        'the day after the until bound should still be excluded');
+    });
+
+    const { data: sSinceDay } = await callJson('search_memory', { query: 'beacon', since: '2020-03-15' });
+    check('mcp: search_memory bare-date since excludes the day before and includes the day after', () => {
+      assert.ok(!sSinceDay.results.some(r => r.ts === '2020-03-14T23:00:00.000Z'),
+        'the day before the since bound should be excluded');
+      assert.ok(sSinceDay.results.some(r => r.ts === '2020-03-16T01:00:00.000Z'),
+        'the day after the since bound was wrongly excluded');
     });
 
     // recall: the same Tier B "header + skeleton" body decide() would serve,
