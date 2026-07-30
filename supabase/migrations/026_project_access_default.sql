@@ -1,4 +1,4 @@
--- 025_project_access_default.sql — Task 17: "new members join with access"
+-- 026_project_access_default.sql — Task 17: "new members join with access"
 -- per-project default (the Project page toggle). Additive on top of 023/024
 -- — do not edit those files. Apply in the Supabase SQL editor (single
 -- transaction) or `supabase db push`; with psql use `psql -1 -f` to keep

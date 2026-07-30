@@ -76,7 +76,7 @@ lib/
   api-access.js           CREATE: project access read/write + audit
   api-insights.js         CREATE: insights aggregation
 supabase/migrations/
-  023_project_access_and_audit.sql   CREATE
+  024_project_access_and_audit.sql   CREATE
 test/
   run-tests.js            MODIFY: add cases for new endpoints + EOL
 ```
@@ -1229,7 +1229,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 Server-side foundation for Tasks 9-11. No UI.
 
 **Files:**
-- Create: `supabase/migrations/023_project_access_and_audit.sql`, `lib/api-access.js`
+- Create: `supabase/migrations/024_project_access_and_audit.sql`, `lib/api-access.js`
 - Modify: `lib/server.js` (route wiring), `test/run-tests.js`
 
 **Interfaces:**
@@ -1247,7 +1247,7 @@ Expected: `022_ops_snapshot_v3.sql` is the highest. If a higher number exists, u
 
 - [ ] **Step 2: Write the migration**
 
-`supabase/migrations/023_project_access_and_audit.sql`:
+`supabase/migrations/024_project_access_and_audit.sql`:
 
 ```sql
 create table if not exists project_access (
@@ -1387,7 +1387,7 @@ Expected: all passing, count = previous baseline + 4.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add supabase/migrations/023_project_access_and_audit.sql lib/api-access.js lib/server.js test/run-tests.js
+git add supabase/migrations/024_project_access_and_audit.sql lib/api-access.js lib/server.js test/run-tests.js
 git commit -m "feat(api): per-project access control and team audit trail
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"

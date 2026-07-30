@@ -1,4 +1,4 @@
--- 023_project_access_and_audit.sql — Task 8: per-project access control
+-- 024_project_access_and_audit.sql — Task 8: per-project access control
 -- (who on the team can see a given shared project) and the team audit trail
 -- (a record of every sharing/admin change). Additive, re-runnable — apply in
 -- the Supabase SQL editor (single transaction) or `supabase db push`; with

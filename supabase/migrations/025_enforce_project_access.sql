@@ -1,4 +1,4 @@
--- 024_enforce_project_access.sql — Task 8 security fixup: ENFORCE can_see on
+-- 025_enforce_project_access.sql — Task 8 security fixup: ENFORCE can_see on
 -- every read path instead of merely recording it. 023 created project_access
 -- rows, but nothing read them: memory_entries, project_stats and the
 -- team_feed RPC were still gated on team membership alone, so revoking a

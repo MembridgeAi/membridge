@@ -32,7 +32,7 @@ function createMockSupabase() {
   const memberRole = (teamId, userId) => (members.find(m => m.teamId === teamId && m.userId === userId) || {}).role || null;
   const isManager = (teamId, userId) => ['owner', 'admin'].includes(memberRole(teamId, userId));
   const projectTeam = projectId => (projects.find(p => p.id === projectId) || {}).teamId;
-  // 024_enforce_project_access.sql §1 (can_see_project): default-allow — a
+  // 025_enforce_project_access.sql §1 (can_see_project): default-allow — a
   // project with no project_access row for this member is visible; an
   // explicit can_see=false row for THIS user is a revoke and wins. Mirrors
   // the predicate exactly, not a permissive stand-in.
@@ -213,7 +213,7 @@ function createMockSupabase() {
       if (p) p.archivedAt = null;
       return json(res, 200, null);
     }
-    // 025_project_access_default.sql: "new members join with access" toggle.
+    // 026_project_access_default.sql: "new members join with access" toggle.
     // Same manager gate as archive/unarchive, same security-definer shape.
     if (fn === 'set_project_access_default') {
       const teamId = projectTeam(body.p_project);
@@ -364,7 +364,7 @@ function createMockSupabase() {
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const idEq = (url.searchParams.get('id') || '').replace(/^eq\./, '');
         if (idEq) {
-          // 025_project_access_default.sql: single-project default_access
+          // 026_project_access_default.sql: single-project default_access
           // lookup (lib/api-access.js readAccess). Same projects_select
           // policy as the auto-link fetch below (is_team_member(team_id)).
           const p = projects.find(x => x.id === idEq && isMember(x.teamId, userId));
@@ -462,7 +462,7 @@ function createMockSupabase() {
           .map(k => ({ epoch: k.epoch, member_user_id: k.member_user_id, sealed_team_key: k.sealed_team_key }));
         return json(res, 200, rows);
       }
-      // ---- 023_project_access_and_audit.sql tables, RLS mirrored from its policies ----
+      // ---- 024_project_access_and_audit.sql tables, RLS mirrored from its policies ----
       if (url.pathname === '/rest/v1/project_access') {
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
