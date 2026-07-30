@@ -17125,6 +17125,13 @@ async function main() {
         'usage change must change the signature so it actually sends');
     });
 
+    check('counters: buildCounters collapses duplicate tool names to one entry each', () => {
+      const built = counters.buildCounters({ mcpToolsUsed: ['why', 'why', 'search_memory'] });
+      const mcp = built.filter(c => c.name === 'mcp_tool_used');
+      assert.deepStrictEqual(mcp.map(c => c.dims.tool).sort(), ['search_memory', 'why'],
+        'a repeated tool in the input must still produce exactly one mcp_tool_used entry per distinct tool');
+    });
+
     check('counters: worker allowlist mirrors the client (drift check)', () => {
       const worker = fs.readFileSync(path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js'), 'utf8');
       assert.ok(worker.includes("'mcp_tool_used'"), 'worker COUNTER_NAMES missing mcp_tool_used');
@@ -17171,6 +17178,36 @@ async function main() {
       };
       assert.deepStrictEqual(workerModule.validate(payload), [],
         'repeating the IDENTICAL (name, dim) pair is still the inflation case and must reject the whole payload');
+    });
+
+    await check('worker: validate() rejects two recall_state entries with different values', async () => {
+      // Distinct dim values means the (name, dimKey, dimValue) identity check
+      // alone would let both through -- this is the case that only the
+      // per-name dedup catches. Kept well under MAX_COUNTERS so this exercises
+      // the dedup rule itself, not the length cap.
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'recall_state', dims: { state: 'serving' } },
+          { name: 'recall_state', dims: { state: 'no_hot_paths' } },
+        ],
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [],
+        'recall_state is a single-value counter -- a repeated name must reject the whole payload even with different dim values');
+    });
+
+    await check('worker: validate() rejects two dimensionless heartbeat entries', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'heartbeat', dims: {} },
+          { name: 'heartbeat', dims: {} },
+        ],
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [],
+        'heartbeat is dimensionless and single-value -- a repeated entry must reject the whole payload');
     });
 
     await check('worker: validate() rejects a payload over MAX_COUNTERS', async () => {

@@ -80,12 +80,25 @@ export function validate(payload) {
       if (typeof dimValue !== 'string' || !allowed.has(dimValue)) return [];
     }
 
-    // One datapoint per (name, dimKey, dimValue) per request. A counter name
-    // may legitimately repeat with a DIFFERENT allowlisted dim value in the
-    // same payload (mcp_tool_used: one entry per tool actually used) -- that
-    // is not inflation. Repeating the exact same (name, dim) pair is still
-    // rejected outright, whole payload included: that can only be a client
-    // bug or an inflation attempt, same as before.
+    // Only mcp_tool_used legitimately repeats a NAME in one payload (one
+    // entry per tool actually used, each with a distinct dim value). Every
+    // other counter has a single value per request by construction -- a
+    // repeated name there is still a client bug or an inflation attempt, and
+    // still rejects the whole payload outright, same as before this file
+    // learned about mcp_tool_used. Tracking bare names in `seen` (separately
+    // from the (name, dimKey, dimValue) identities below -- the two never
+    // collide, since every identity string contains a `|`) is what makes this
+    // check load-bearing: keeps the original anti-inflation guarantee for
+    // recall_state/environment/hook_registration on this public, effectively
+    // unauthenticated endpoint.
+    if (c.name !== 'mcp_tool_used') {
+      if (seen.has(c.name)) return [];
+      seen.add(c.name);
+    }
+
+    // One datapoint per (name, dimKey, dimValue) per request. Repeating the
+    // exact same (name, dim) pair -- including two identical mcp_tool_used
+    // entries for the same tool -- is still rejected outright.
     const identity = `${c.name}|${dimKey}|${dimValue}`;
     if (seen.has(identity)) return [];
     seen.add(identity);
