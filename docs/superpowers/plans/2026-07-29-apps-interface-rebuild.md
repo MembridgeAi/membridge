@@ -1276,7 +1276,15 @@ alter table project_access enable row level security;
 alter table team_audit enable row level security;
 ```
 
-Add RLS policies matching the existing convention in `supabase/migrations/011_backend_hardening.sql` — read that file first and mirror its helper functions rather than inventing new predicates. Requirements: `project_access` readable by any member of the team, writable only by owner/admin. `team_audit` readable only by owner/admin, insertable only by owner/admin.
+Add RLS policies matching the existing convention in `supabase/migrations/011_backend_hardening.sql` — read that file first and mirror its helper functions rather than inventing new predicates. Requirements:
+
+- `project_access`: writable only by owner/admin. **Readable only by owner/admin**
+  — a member must not be able to enumerate the grid, which would reveal projects
+  they have no access to and other members' flags. A member reading their own
+  access is served by `GET /api/project/access` for a project they can already see.
+- `team_audit`: readable only by owner/admin; insertable only by owner/admin **and
+  only with `actor_id = auth.uid()`** — a role check alone lets an admin write a
+  row blaming someone else. No update or delete policy: the trail is append-only.
 
 - [ ] **Step 3: Write the failing tests**
 
@@ -1318,6 +1326,54 @@ Use the suite's existing request helper names; if `api`/`apiAs` do not exist, ad
 
 Run: `node test/run-tests.js 2>&1 | grep -B2 -A5 "access-matrix"`
 Expected: FAIL — 404 on the new routes.
+
+- [ ] **Step 4b: ENFORCE `can_see` on the read paths — the feature is otherwise cosmetic**
+
+Creating `project_access` records intent. Nothing reads it, so revoking a member
+changes nothing about what they can actually fetch. Close that in this task.
+
+Add a predicate beside the other helpers, in the same `security definer` /
+`set search_path = public` style:
+
+```sql
+-- Default-allow: absence of a row means the team default applies. A row with
+-- can_see=false is an explicit revoke and must win everywhere project content
+-- is read, not just where it is displayed.
+create or replace function public.can_see_project(p_project uuid)
+returns boolean language sql security definer set search_path = public stable as $$
+  select not exists (
+    select 1 from public.project_access a
+    where a.project_key = p_project::text
+      and a.member_id = auth.uid()
+      and a.can_see = false
+  );
+$$;
+```
+
+Then AND it into every path that returns project content:
+
+- the `select` policy on `memory_entries`
+- the `select` policy on `project_stats`
+- the `where` clause of the `team_feed` RPC (it is `security definer`, so RLS
+  does not apply to it automatically — this is the one most likely to be missed)
+
+Tests, in `test/run-tests.js`, that must fail before the predicate exists:
+
+```javascript
+test('a member revoked from a project cannot read its entries', async () => {
+  await apiAs('owner', 'POST', '/api/project/access', { path: PROJECT, memberId: MEMBER_ID, canSee: false });
+  const res = await apiAs('member', 'GET', '/api/feed?project=' + encodeURIComponent(PROJECT));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.entries.filter(e => e.project === PROJECT_NAME).length, 0,
+    'revoked member must receive zero entries for that project');
+});
+
+test('revoking one member does not hide the project from everyone else', async () => {
+  const res = await apiAs('owner', 'GET', '/api/feed?project=' + encodeURIComponent(PROJECT));
+  assert.ok(res.body.entries.some(e => e.project === PROJECT_NAME),
+    'an owner keeps access after revoking someone else');
+});
+```
 
 - [ ] **Step 5: Implement `lib/api-access.js` and wire the routes**
 
