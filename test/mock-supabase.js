@@ -250,11 +250,27 @@ function createMockSupabase() {
     }
     const eq = (p.get('project_id') || '').replace(/^eq\./, '');
     const neq = (p.get('author_id') || '').replace(/^neq\./, '');
-    const gt = decodeURIComponent((p.get('created_at') || '').replace(/^gt\./, ''));
+    // created_at carries one of two PostgREST operators depending on which
+    // direction teamsync is walking: `gt.` for the forward pull (ascending,
+    // "everything since the cursor"), `lt.` for the backward backfill walker
+    // (descending, "everything before this checkpoint"). Real PostgREST would
+    // AND both if both were sent; teamsync only ever sends one, so matching
+    // just the one present is enough here.
+    const createdAtRaw = p.get('created_at') || '';
+    const isGt = /^gt\./.test(createdAtRaw);
+    const isLt = /^lt\./.test(createdAtRaw);
+    const createdAtBound = decodeURIComponent(createdAtRaw.replace(/^(?:gt|lt)\./, ''));
+    const desc = (p.get('order') || '') === 'created_at.desc';
     if (!isMember(projectTeam(eq), userId)) return json(res, 200, []);
-    const rows = entries
-      .filter(e => e.project_id === eq && e.author_id !== neq && e.created_at > gt)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
+    if (isGt) rows = rows.filter(e => e.created_at > createdAtBound);
+    if (isLt) rows = rows.filter(e => e.created_at < createdAtBound);
+    // Order THEN limit — a descending page must return the NEWEST rows below
+    // the bound (the tail closest to `before`), not just the first `limit`
+    // rows encountered in storage order before sorting.
+    rows = rows
+      .slice()
+      .sort((a, b) => desc ? b.created_at.localeCompare(a.created_at) : a.created_at.localeCompare(b.created_at))
       .slice(0, parseInt(p.get('limit') || '200', 10));
     // Real PostgREST only returns the requested columns — project to
     // selectCols (when the caller sent one) so a dropped-and-retried select

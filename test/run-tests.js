@@ -10426,21 +10426,12 @@ async function main() {
   // first short/empty page) — and NEVER touch proj.teamPullTs, which the
   // forward pull alone owns.
   //
-  // Mock coverage note: the mock's memory_entries GET handler (handleEntries,
-  // above) only implements the forward-pull filter shape it was written
-  // against (`created_at=gt.<cursor>`, ascending sort) — it has no
-  // `created_at=lt.`/`order=desc` support, so a backfill-shaped query always
-  // comes back empty from this test double regardless of what history is
-  // seeded (verified empirically: a `lt.` filter's value is never stripped of
-  // its "lt." prefix by the mock's regex, and no real created_at timestamp is
-  // ever lexicographically greater than a string starting with the letter
-  // "l"). That's a real gap in the test double, out of scope for this task's
-  // file list (lib/teamsync.js, lib/team-archive.js, test/run-tests.js only)
-  // — see the task report. This test therefore proves what the mock CAN
-  // prove: the function is wired end-to-end over real HTTP, an empty page
-  // flips backfill.done, a done backfill never fetches again, and the
-  // forward cursor is left untouched. It does not exercise multi-page
-  // draining of real historical rows.
+  // The mock's memory_entries GET handler (handleEntries, above) now honors
+  // `created_at=lt.` and `order=created_at.desc` (added alongside the
+  // pre-existing `gt.`/ascending forward-pull shape) specifically so this
+  // section can exercise a real backward walk, not just the plumbing. This
+  // first block covers a SHORT single page (fewer rows than PULL_LIMIT); the
+  // multi-page drain across PULL_LIMIT boundaries is covered separately below.
   {
     const mockBF = createMockSupabase();
     const MOCK_PORT_BF = P(65);
@@ -10492,6 +10483,60 @@ async function main() {
       delete process.env.MEMBRIDGE_TEAM_URL;
       delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
       await new Promise(r => mockBF.server.close(r));
+    }
+  }
+
+  // Task 7, multi-page drain: 450 historical rows, the forward cursor already
+  // advanced past all of them (the "existing install" shape this whole task
+  // exists for). PULL_LIMIT is 200, so a full drain takes exactly three
+  // backfillArchivePage passes: 200, 200, 50 — newest rows first each time.
+  {
+    const mockDrain = createMockSupabase();
+    const MOCK_PORT_DRAIN = P(66);
+    await new Promise(r => mockDrain.server.listen(MOCK_PORT_DRAIN, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_DRAIN;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projDrain = path.join(ROOT, 'projects', 'backfill-drain-app');
+      fs.mkdirSync(projDrain, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'drainer@test.dev', 'pw-drain', 'Drainer');
+      const teamDrain = await teamsync.createTeam(util.getConfig(), 'DrainTeam');
+      const linkDrain = await teamsync.linkProject(util.getConfig(), projDrain, teamDrain.team_id, 'DrainTeam');
+      const credsDrain = await teamsync.getAccessToken(util.getConfig());
+      const drainBase = Date.UTC(2025, 0, 1);
+      for (let i = 0; i < 450; i++) {
+        const ts = new Date(drainBase + i * 60000).toISOString();
+        mockDrain.entries.push({
+          project_id: linkDrain.projectId, author_id: 'user-drain-teammate', author_name: 'Teammate',
+          ts, source: 'Claude Code', session: `sDrain${i}`,
+          ask: null, summary: `history row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: ts,
+        });
+      }
+      // The forward pull's own cursor, already parked well past all 450
+      // seeded rows — exactly the shape of an existing install that has been
+      // running the forward pull for a while.
+      const projDrainState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      const savedCursor = projDrainState.teamPullTs;
+      await check('teamsync: backfillArchivePage drains 450 rows of real history backward in 200/200/50 pages, then stops forever, without ever moving the forward cursor', async () => {
+        const p1 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        const p2 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        const p3 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        assert.deepStrictEqual([p1, p2, p3], [200, 200, 50],
+          `page sizes did not drain in order: ${JSON.stringify([p1, p2, p3])}`);
+        const arc = require('../lib/team-archive').loadArchive(linkDrain.projectId);
+        assert.strictEqual(arc.rows.length, 450, `archive did not end up holding all 450 rows: got ${arc.rows.length}`);
+        assert.strictEqual(arc.backfill.done, true, 'backfill did not mark itself done after exhausting history');
+        // A 4th pass must find nothing and cost no network round trip.
+        const p4 = await teamsync.backfillArchivePage(util.getConfig(), credsDrain, projDrainState, linkDrain, null);
+        assert.strictEqual(p4, 0, 'a done backfill fetched again');
+        assert.strictEqual(projDrainState.teamPullTs, savedCursor, 'backfill moved the FORWARD cursor');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockDrain.server.close(r));
     }
   }
 
