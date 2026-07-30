@@ -360,15 +360,20 @@ export interface StreamEntry {
   files: string[]
 }
 
+/** Only what one machine can actually observe about a teammate.
+ *  `team_members_list` (supabase/migrations/002_team_v2.sql:267) returns just
+ *  user_id, display_name, role, joined_at. A teammate's paused daemon or expired
+ *  token lives on THEIR machine and is not knowable here — so this models
+ *  "when did anything of theirs last arrive", never a diagnosis. */
 export interface Member {
   id: string
   name: string
   email: string
   role: Role
+  joinedAt: string
   projectCount: number
-  sync: SyncState
-  keyVerified: boolean
-  syncDetail: string | null
+  lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
+  keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
 }
 
 export interface Invite {
@@ -568,8 +573,8 @@ export class FakeDataClient implements DataClient {
   }
   getMembers() {
     return this.guard<Member[]>([
-      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: 'owner', projectCount: 3, sync: { state: 'up-to-date' }, keyVerified: true, syncDetail: null },
-      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', projectCount: 1, sync: { state: 'paused' }, keyVerified: true, syncDetail: 'token expired' },
+      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
+      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
     ])
   }
   getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
@@ -592,7 +597,7 @@ export class FakeDataClient implements DataClient {
       perPerson: [{ id: 'me', name: 'Marco', sessions: 214, shared: 205 }],
       topProjects: [{ name: 'membridge', sessions: 184, people: 3 }],
       problems: [
-        { id: 'p1', severity: 'broken', headline: "Sarah's summaries never arrive", scale: '47 of 47 sessions · hook not installed since she joined', action: { label: 'Send setup steps', kind: 'setup-steps' } },
+        { id: 'p1', severity: 'broken', headline: 'Nothing has arrived from Sarah', scale: 'joined 3 days ago · 0 entries shared', action: { label: 'Send setup steps', kind: 'setup-steps' } },
         { id: 'p2', severity: 'minor', headline: '2 sessions missing summaries', scale: 'of 412 · both crashed mid-session', action: null },
       ],
       concentration: [{ projectName: 'billing-poc', onlyPerson: 'Andrew', detail: '41 sessions' }],
@@ -1440,7 +1445,7 @@ Matches `team-v1b.html`.
 - Consumes: `useMembers`, `useInvites`, `useAudit`, `useSetMemberRole`, `useRemoveMember`, `useInviteMember`, `useRevokeInvite`.
 - Produces: `<MembersPage />`.
 
-Layout: pending invites first (email, expiry, Resend, Revoke); member rows (name/email, role select with Owner fixed, project count, sync state, key-verified); a `⋯` menu per row with *Change role*, *Remove from team*, and — Owner only — *Transfer ownership*; a Defaults row; and the audit list in a right column. Removal opens a confirm dialog stating that access to every shared project is revoked immediately. The dialog is the one place a subtle shadow is allowed.
+Layout: pending invites first (email, expiry, Resend, Revoke); member rows (name/email, role select with Owner fixed, project count, and what has actually arrived from them — `last shared <relative>` or `nothing shared yet` — plus a key-changed warning when `keyAlert`); a `⋯` menu per row with *Change role*, *Remove from team*, and — Owner only — *Transfer ownership*; a Defaults row; and the audit list in a right column. Removal opens a confirm dialog stating that access to every shared project is revoked immediately. The dialog is the one place a subtle shadow is allowed.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1453,9 +1458,11 @@ it('confirms before removing a member and says what removal does', async () => {
   expect(dialog).toHaveTextContent(/revokes .*access to every shared project/i)
 })
 
-it('states a broken member plainly', async () => {
+it('says plainly when a member has shared nothing, without guessing why', async () => {
   renderApp({}, <MembersPage />)
-  expect(await screen.findByText(/token expired/)).toBeInTheDocument()
+  expect(await screen.findByText(/nothing shared yet/i)).toBeInTheDocument()
+  // We cannot see a teammate's machine, so no cause may be asserted.
+  expect(screen.queryByText(/token expired|hook not installed/i)).toBeNull()
 })
 
 it('does not offer role changes on the owner row', async () => {
@@ -1494,6 +1501,15 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Produces: `GET /api/team/insights?window=7|30|90` → the `Insights` shape from Task 3. 403 for a member role. Aggregation happens server-side; raw rows are never shipped to the client.
 
 Severity rule, implemented in one place and unit-tested: a problem is `broken` when the failing share of its population is at or above 50% **or** the condition has persisted at least 24 hours; otherwise `minor`. Every problem carries its denominator in `scale`.
+
+**Observability limit — binding.** Problems may only be built from what this
+machine can see: local daemon/hook/sync state, and what has arrived over team
+sync. A teammate's own daemon, hook, or token state is NOT visible here
+(`team_members_list` returns only user_id, display_name, role, joined_at —
+`supabase/migrations/002_team_v2.sql:267`). So a teammate problem is phrased as
+absence ("nothing has arrived from X · joined Nd ago · 0 entries shared"), never
+as a diagnosis ("their hook isn't installed"). Deriving `lastSharedAt` from the
+newest `team_feed` row authored by that member is the supported signal.
 
 Skeleton stats come from `savingsPayload()` (`lib/server.js:298`): `repeatOpens = reads.sameSession + reads.crossSession`, `answeredFirst = avoided.serves`. When `reads` or `avoided` is missing, return `{available:false}`. **No dollar figure — tokens only** (see Global Constraints).
 
@@ -1569,14 +1585,16 @@ it('separates broken problems from minor ones and shows each denominator', async
   renderApp({}, <InsightsPage />)
   const broken = await screen.findByTestId('problems-broken')
   const minor = screen.getByTestId('problems-minor')
-  expect(within(broken).getByText(/summaries never arrive/)).toBeInTheDocument()
-  expect(within(broken).getByText(/47 of 47 sessions/)).toBeInTheDocument()
+  expect(within(broken).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
+  expect(within(broken).getByText(/0 entries shared/)).toBeInTheDocument()
   expect(within(minor).getByText(/of 412/)).toBeInTheDocument()
 })
 
 it('offers the fixing action on a broken problem', async () => {
   renderApp({}, <InsightsPage />)
   expect(await screen.findByRole('button', { name: /send setup steps/i })).toBeInTheDocument()
+  // The action asks them to check; it must not diagnose their machine.
+  expect(screen.queryByText(/hook not installed|token expired/i)).toBeNull()
 })
 
 it('renders no dollar figure anywhere', async () => {
