@@ -32,6 +32,15 @@ function createMockSupabase() {
   const memberRole = (teamId, userId) => (members.find(m => m.teamId === teamId && m.userId === userId) || {}).role || null;
   const isManager = (teamId, userId) => ['owner', 'admin'].includes(memberRole(teamId, userId));
   const projectTeam = projectId => (projects.find(p => p.id === projectId) || {}).teamId;
+  // 024_enforce_project_access.sql §1 (can_see_project): default-allow — a
+  // project with no project_access row for this member is visible; an
+  // explicit can_see=false row for THIS user is a revoke and wins. Mirrors
+  // the predicate exactly, not a permissive stand-in.
+  const canSeeProject = (projectId, userId) => {
+    const row = projectAccess.find(r =>
+      r.team_id === projectTeam(projectId) && r.project_key === projectId && r.member_id === userId);
+    return !row || row.can_see !== false;
+  };
 
   function newSession(user) {
     const access = `at-${uuid()}`;
@@ -175,6 +184,9 @@ function createMockSupabase() {
         .map(e => ({ ...e, project_name: (projects.find(p => p.id === e.project_id) || {}).name }))
         .filter(e => projectTeam(e.project_id) === body.p_team)
         .filter(e => !(projects.find(p => p.id === e.project_id) || {}).archivedAt)
+        // 024 §4: team_feed is security definer, so RLS does not cover it —
+        // the can_see_project predicate is written into the RPC body itself.
+        .filter(e => canSeeProject(e.project_id, userId))
         .filter(e => !body.p_author || e.author_id === body.p_author)
         .filter(e => !body.p_project || e.project_id === body.p_project)
         .filter(e => !body.p_source || e.source === body.p_source)
@@ -253,7 +265,9 @@ function createMockSupabase() {
     const eq = (p.get('project_id') || '').replace(/^eq\./, '');
     const neq = (p.get('author_id') || '').replace(/^neq\./, '');
     const gt = decodeURIComponent((p.get('created_at') || '').replace(/^gt\./, ''));
-    if (!isMember(projectTeam(eq), userId)) return json(res, 200, []);
+    // 024 §2: memory_entries_select ANDs can_see_project onto the membership
+    // check — a revoked member's direct pull sees nothing for this project.
+    if (!isMember(projectTeam(eq), userId) || !canSeeProject(eq, userId)) return json(res, 200, []);
     const rows = entries
       .filter(e => e.project_id === eq && e.author_id !== neq && e.created_at > gt)
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
@@ -314,12 +328,15 @@ function createMockSupabase() {
       }
       if (url.pathname === '/rest/v1/project_stats' && req.method === 'GET') {
         // The security_invoker view: per-project last activity / contributor /
-        // entry counts, RLS-filtered to the caller's teams.
+        // entry counts, RLS-filtered to the caller's teams. 024 §3 ANDs
+        // can_see_project into the view itself — a revoked member's row
+        // disappears entirely, not just its stats.
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const teamEq = (url.searchParams.get('team_id') || '').replace(/^eq\./, '');
         const rows = projects
-          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) && !p.archivedAt)
+          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) && !p.archivedAt &&
+            canSeeProject(p.id, userId))
           .map(p => {
             const es = entries.filter(e => e.project_id === p.id);
             return {
@@ -449,11 +466,13 @@ function createMockSupabase() {
           res.writeHead(201);
           return res.end();
         }
-        // GET (023: project_access_select policy) — any team member may read.
+        // GET (024 §6: project_access_select narrowed to owner/admin — a
+        // member reading the whole grid would learn about projects they
+        // cannot see and every other member's flags).
         const q = url.searchParams;
         const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
         const keyEq = (q.get('project_key') || '').replace(/^eq\./, '');
-        if (teamEq && !isMember(teamEq, userId)) return json(res, 200, []);
+        if (teamEq && !isManager(teamEq, userId)) return json(res, 200, []);
         const rows = projectAccess.filter(r =>
           (!teamEq || r.team_id === teamEq) && (!keyEq || r.project_key === keyEq));
         return json(res, 200, rows.map(r => ({ project_key: r.project_key, member_id: r.member_id, can_see: r.can_see })));
@@ -464,11 +483,18 @@ function createMockSupabase() {
         if (req.method === 'POST') {
           // Manager-only insert, no update/delete route at all — append-only
           // (023: team_audit_insert is the only write policy on this table).
+          // 024 §5 additionally requires actor_id = auth.uid(): a role check
+          // alone let an owner/admin POST with someone else's id and blame
+          // them for the write.
           const rows = Array.isArray(body) ? body : [body];
           for (const r of rows) {
             if (!isManager(r.team_id, userId)) return json(res, 403, { message: 'row-level security violation' });
+            const actorId = r.actor_id || userId;
+            if (actorId !== userId) {
+              return json(res, 403, { message: 'row-level security violation: actor_id must equal auth.uid()' });
+            }
             teamAudit.unshift({
-              id: uuid(), team_id: r.team_id, actor_id: r.actor_id || userId,
+              id: uuid(), team_id: r.team_id, actor_id: actorId,
               action: r.action, object_type: r.object_type, object_key: r.object_key || null,
               detail: r.detail === undefined ? null : r.detail,
               created_at: new Date(Date.now() + teamAudit.length).toISOString(),

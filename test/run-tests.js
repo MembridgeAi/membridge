@@ -20088,6 +20088,7 @@ const repoRoot = require('../lib/repo-root');
     const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
     const portFor = { owner: PORT_OWNER, member: PORT_MEMBER };
     const PROJECT = path.join(ROOT, 'projects', 'access-app');
+    const PROJECT_NAME = path.basename(PROJECT);
 
     // The suite has no api()/apiAs() helper yet (the brief's test bodies used
     // those names illustratively) — added here in the file's own style,
@@ -20116,16 +20117,16 @@ const repoRoot = require('../lib/repo-root');
 
       process.env.MEMBRIDGE_HOME = HOME_OWNER;
       util.ensureConfig();
-      await teamsync.signup(util.getConfig(), 'access-owner@test.dev', 'pw-ao', 'Owner');
+      const ownerCreds = await teamsync.signup(util.getConfig(), 'access-owner@test.dev', 'pw-ao', 'Owner');
       const accTeam = await teamsync.createTeam(util.getConfig(), 'AccessCo');
       const stOwner = util.loadState();
       stOwner.projects[PROJECT] = { events: [] };
       util.saveState(stOwner);
-      await teamsync.linkProject(util.getConfig(), PROJECT, accTeam.team_id, 'AccessCo');
+      const accLink = await teamsync.linkProject(util.getConfig(), PROJECT, accTeam.team_id, 'AccessCo');
 
       process.env.MEMBRIDGE_HOME = HOME_MEMBER;
       util.ensureConfig();
-      await teamsync.signup(util.getConfig(), 'access-member@test.dev', 'pw-am', 'Member');
+      const memberCreds = await teamsync.signup(util.getConfig(), 'access-member@test.dev', 'pw-am', 'Member');
       await teamsync.joinTeam(util.getConfig(), accTeam.invite_code);
 
       await check('GET /api/team/access-matrix returns one row per project with a flag per member', async () => {
@@ -20164,6 +20165,70 @@ const repoRoot = require('../lib/repo-root');
 
       await check('GET /api/team/audit is refused for a member role', async () => {
         assert.strictEqual((await apiAs('member', 'GET', '/api/team/audit')).status, 403);
+      });
+
+      // ===== Finding 3: access-matrix has no manager gate =====
+      await check('GET /api/team/access-matrix is refused for a member role', async () => {
+        assert.strictEqual((await apiAs('member', 'GET', '/api/team/access-matrix')).status, 403);
+      });
+
+      // ===== Finding 2: team_audit insert must pin actor_id = auth.uid() =====
+      // Bypasses lib/api-access.js entirely (a raw PostgREST request, the same
+      // shape a hostile client could send) to prove the BACKEND policy itself
+      // rejects a forged actor_id, not just the Node layer, which always sends
+      // an honest one anyway and so could never exercise this gate.
+      await check('team_audit insert rejects a forged actor_id, accepts an honest one', async () => {
+        const postAudit = actorId => fetch(`http://127.0.0.1:${ACCESS_MOCK_PORT}/rest/v1/team_audit`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: 'anon-test',
+            Authorization: `Bearer ${ownerCreds.accessToken}`,
+          },
+          body: JSON.stringify({
+            team_id: accTeam.team_id, actor_id: actorId,
+            action: 'access-revoked', object_type: 'project', object_key: accLink.projectId,
+          }),
+        });
+        const forged = await postAudit(memberCreds.userId);
+        assert.strictEqual(forged.status, 403, 'an owner must not be able to blame another member for an audit event');
+        const honest = await postAudit(ownerCreds.userId);
+        assert.strictEqual(honest.status, 201, 'an honest actor_id (the caller\'s own) must still be accepted');
+      });
+
+      // ===== Finding 1 (Critical): can_see must be ENFORCED, not just recorded =====
+      // Seed one memory entry for PROJECT directly into the mock's backing
+      // store (same shortcut the existing team_feed fixtures in this suite
+      // use elsewhere) — proving the read gate does not require exercising the
+      // full push pipeline.
+      mockAccess.entries.push({
+        id: mockAccess.entries.length + 1,
+        project_id: accLink.projectId,
+        author_id: ownerCreds.userId,
+        author_name: 'Owner',
+        ts: '2026-07-20T10:00:00.000Z',
+        source: 'Claude Code',
+        ask: null,
+        files: [],
+        session: 's-access-1',
+        created_at: new Date().toISOString(),
+      });
+
+      await check('a member revoked from a project cannot read its entries', async () => {
+        const revoke = await apiAs('owner', 'POST', '/api/project/access',
+          { path: PROJECT, memberId: memberCreds.userId, canSee: false });
+        assert.strictEqual(revoke.status, 200);
+        const res = await apiAs('member', 'GET', `/api/feed?project=${encodeURIComponent(PROJECT)}`);
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(
+          res.body.entries.filter(e => e.project === PROJECT_NAME).length, 0,
+          'revoked member must receive zero entries for that project');
+      });
+
+      await check('revoking one member does not hide the project from everyone else', async () => {
+        const res = await apiAs('owner', 'GET', `/api/feed?project=${encodeURIComponent(PROJECT)}`);
+        assert.ok(res.body.entries.some(e => e.project === PROJECT_NAME),
+          'an owner keeps access after revoking someone else');
       });
     } finally {
       delete process.env.MEMBRIDGE_TEAM_URL;
