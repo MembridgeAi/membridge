@@ -99,6 +99,11 @@ function ago(date) {
 
 const dashboardUrl = () => `http://127.0.0.1:${util.getConfig().dashboardPort}`;
 
+// The desktop window opens the rebuilt UI at /app. The legacy dashboard is
+// still served at / and stays reachable — nothing is deleted — so reverting
+// this line is the whole rollback if the new UI turns out to be wrong.
+const windowUrl = () => `${dashboardUrl()}/app/`;
+
 function openDashboard() {
   if (win && !win.isDestroyed()) {
     win.show();
@@ -112,7 +117,7 @@ function openDashboard() {
     autoHideMenuBar: true,
     icon: nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png')),
   });
-  win.loadURL(dashboardUrl());
+  win.loadURL(windowUrl());
   // Anything the dashboard opens as a popup (the GitHub sign-in round trip)
   // goes to the default browser — GitHub is already signed in there, and
   // nothing external ever renders inside the app window.
