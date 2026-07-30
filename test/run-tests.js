@@ -1355,10 +1355,14 @@ async function main() {
     });
 
     check('lastSync: a paused/excluded project does NOT claim it synced', () => {
-      const rc = util.loadUserConfig();
-      const before = rc.exclude;
-      rc.exclude = [...(before || []), syncProj];
-      util.saveUserConfig(rc);
+      // Uses the per-project `.membridge-off` kill switch (util.js
+      // isProjectOff) rather than the config exclude list: this suite's own
+      // last-line guard exists because a fixture path once leaked into the
+      // real ~/.membridge config's exclude array, and a test has no business
+      // mutating global user config when a file in its own fixture dir
+      // exercises the identical branch.
+      const off = path.join(syncProj, '.membridge-off');
+      fs.writeFileSync(off, '');
       try {
         const st = util.loadState();
         st.projects[syncProj] = { events: [], lastSync: '2026-07-30T19:51:48.006Z' };
@@ -1368,11 +1372,9 @@ async function main() {
 
         const proj = util.loadState().projects[syncProj];
         assert.strictEqual(proj.lastSync, '2026-07-30T19:51:48.006Z',
-          'an excluded project was deliberately not synced — stamping it would be a false success flag');
+          'a switched-off project was deliberately not synced — stamping it would be a false success flag');
       } finally {
-        const rc2 = util.loadUserConfig();
-        rc2.exclude = before;
-        util.saveUserConfig(rc2);
+        fs.rmSync(off, { force: true });
       }
     });
 
