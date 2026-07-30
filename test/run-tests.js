@@ -10427,9 +10427,12 @@ async function main() {
   // forward pull alone owns.
   //
   // The mock's memory_entries GET handler (handleEntries, above) now honors
-  // `created_at=lt.` and `order=created_at.desc` (added alongside the
-  // pre-existing `gt.`/ascending forward-pull shape) specifically so this
-  // section can exercise a real backward walk, not just the plumbing. This
+  // `id=lt.` and `order=id.desc` (added alongside the pre-existing
+  // `gt.`/ascending forward-pull shape) specifically so this section can
+  // exercise a real backward walk, not just the plumbing. Paging on `id`
+  // rather than `created_at` is Fix #2 (final whole-branch review): every
+  // seeded row below carries its own unique `id`, exactly like Postgres's
+  // bigint identity column, whereas created_at could tie within a batch. This
   // first block covers a SHORT single page (fewer rows than PULL_LIMIT); the
   // multi-page drain across PULL_LIMIT boundaries is covered separately below.
   {
@@ -10537,6 +10540,57 @@ async function main() {
       delete process.env.MEMBRIDGE_TEAM_URL;
       delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
       await new Promise(r => mockDrain.server.close(r));
+    }
+  }
+
+  // Fix #2 regression guard (final whole-branch review): the bug this fix
+  // closes needs TIED created_at values straddling a page boundary to show
+  // up at all — the 450-row drain above never ties (each row's ts is a
+  // distinct minute), so it would pass unchanged even with the old
+  // created_at cursor. Here, 250 rows share ONE created_at (a batched
+  // same-transaction push — Postgres's now() is constant within a
+  // transaction, so this is the normal shape, not a contrived one) with
+  // PULL_LIMIT=200: the old created_at=lt. cursor would request "everything
+  // before T1" on page two and get zero rows back (nothing IS before T1),
+  // silently stranding the other 50 forever. The id cursor has no such gap.
+  {
+    const mockTie = createMockSupabase();
+    const MOCK_PORT_TIE = P(67);
+    await new Promise(r => mockTie.server.listen(MOCK_PORT_TIE, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_TIE;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projTie = path.join(ROOT, 'projects', 'backfill-tie-app');
+      fs.mkdirSync(projTie, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'tiebreaker@test.dev', 'pw-tie', 'Tiebreaker');
+      const teamTie = await teamsync.createTeam(util.getConfig(), 'TieTeam');
+      const linkTie = await teamsync.linkProject(util.getConfig(), projTie, teamTie.team_id, 'TieTeam');
+      const credsTie = await teamsync.getAccessToken(util.getConfig());
+      const tieCreatedAt = new Date(Date.UTC(2025, 5, 1)).toISOString(); // ONE shared created_at
+      for (let i = 0; i < 250; i++) {
+        mockTie.entries.push({
+          project_id: linkTie.projectId, author_id: 'user-tie-teammate', author_name: 'Teammate',
+          ts: new Date(Date.UTC(2025, 5, 1) + i * 60000).toISOString(), source: 'Claude Code', session: `sTie${i}`,
+          ask: null, summary: `tied row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: tieCreatedAt, // every row ties on created_at; id alone orders them
+        });
+      }
+      const projTieState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      await check('teamsync: backfillArchivePage drains every row even when a whole batch ties on created_at (id-cursor paging)', async () => {
+        const p1 = await teamsync.backfillArchivePage(util.getConfig(), credsTie, projTieState, linkTie, null);
+        const p2 = await teamsync.backfillArchivePage(util.getConfig(), credsTie, projTieState, linkTie, null);
+        assert.deepStrictEqual([p1, p2], [200, 50],
+          `tied rows did not drain in order: ${JSON.stringify([p1, p2])}`);
+        const arc = require('../lib/team-archive').loadArchive(linkTie.projectId);
+        assert.strictEqual(arc.rows.length, 250,
+          `a created_at cursor would have stranded rows past the tie; got ${arc.rows.length} of 250`);
+        assert.strictEqual(arc.backfill.done, true);
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockTie.server.close(r));
     }
   }
 
@@ -13775,6 +13829,21 @@ async function main() {
       assert.deepStrictEqual(scores, [...scores].sort((a, b) => b - a), 'results not score-ordered');
     });
 
+    // Fix #1 (final whole-branch review, Finding #1): the tool's own
+    // description tells an agent to ask "who touched X" -- but tokenize
+    // keeps 'touched' as a real (non-stopword) term, so the strict
+    // majority-of-terms pass needs it to match too, and it never appears in
+    // memory prose. Before the fallback, this returned nothing; after, the
+    // relaxed (>=1 term) pass finds the file-only match on the existing
+    // Priya/vault.tf fixture above -- no new fixture needed.
+    const { data: sQuestion } = await callJson('search_memory', { query: 'who touched vault.tf' });
+    check('mcp: search_memory answers a question-shaped query ("who touched X") via the natural-language fallback', () => {
+      assert.ok(sQuestion.results.length >= 1,
+        'expected the relaxed fallback pass to find the planted vault.tf entry for a question-shaped query');
+      assert.ok(sQuestion.results.some(r => (r.files || []).some(f => f.includes('vault.tf')) && r.author === 'Priya'),
+        'expected Priya\'s vault.tf entry to surface via the relaxed pass');
+    });
+
     const { data: sFile } = await callJson('search_memory', { query: 'vault', file: 'vault.tf' });
     check('mcp: search_memory file filter narrows to entries touching the file', () => {
       assert.ok(sFile.results.length >= 1, 'file-filtered search found nothing');
@@ -13833,6 +13902,18 @@ async function main() {
         gotchas: 'legacy configs still embed token=sk-tamper-archive-555, rotate on sight',
         headline: null, distilled: true,
         files: ['lib/teamcrypto.js'], changes: null,
+      }, {
+        // Fix #1 (final whole-branch review) regression guard: matches only
+        // ONE of the three "sealed boxes epoch" query terms ('sealed', not
+        // 'boxes' or 'epoch') — proves the strict AND-bias still excludes a
+        // partial match even when the query already has a real hit elsewhere
+        // (the p0 row above), i.e. the relaxed fallback pass must never fire
+        // once strict results exist.
+        author: 'Priya', ts: new Date(Date.now() - 61 * 86400000).toISOString(), source: 'Codex', session: 'p0-sealed-only',
+        ask: null, summary: null, goal: null,
+        decisions: 'sealed the release notes doc, nothing crypto related',
+        gotchas: null, headline: null, distilled: true,
+        files: [], changes: null,
       }]);
       fs.writeFileSync(path.join(projMcp, '.membridge', 'team.json'),
         JSON.stringify({ teamId: 'mcp-team-1', projectId: 'mcp-app-project-uuid', teamName: 'MCP Team' }));
@@ -13849,6 +13930,10 @@ async function main() {
         'secret planted in a raw-at-rest archive row leaked past normalizeTeam redaction');
       const hit = sArchive.results.find(r => /sealed boxes/.test(r.decisions || ''));
       assert.ok(hit && /\[redacted/.test(hit.gotchas || ''), 'archived gotchas field was not redacted');
+    });
+    check('mcp: search_memory keeps its strict AND-bias when results already exist (a one-term partial match stays excluded)', () => {
+      assert.ok(!sArchive.results.some(r => r.session === 'p0-sealed-only'),
+        'a row matching only one of three query terms leaked into a multi-term search result set');
     });
 
     const { data: recent3 } = await callJson('get_recent_activity', { limit: 50 });
@@ -14086,6 +14171,30 @@ async function main() {
       assert.deepStrictEqual(search.rankEntries([noise], 'auth vault rotation epochs'), []);
     });
 
+    // Fix #1 (final whole-branch review, Finding #1): rankEntries/scoreEntry
+    // grew an opts.minTerms override so lib/mcp.js can relax the AND-bias as
+    // a fallback pass without this module holding any fallback policy itself.
+    check('search: minTerms is off by default — omitting opts is byte-identical to the old strict-majority behavior', () => {
+      const partial = { ts: '2026-07-01T00:00:00.000Z', summary: 'only vault, no other terms' };
+      assert.deepStrictEqual(search.rankEntries([partial], 'vault rotation epochs'), [],
+        'a one-of-three-term match must still score 0 with no opts passed');
+    });
+
+    check('search: minTerms:1 relaxes the AND-bias — a one-term match now scores', () => {
+      const partial = { ts: '2026-07-01T00:00:00.000Z', summary: 'only vault, no other terms' };
+      const ranked = search.rankEntries([partial], 'vault rotation epochs', { minTerms: 1 });
+      assert.strictEqual(ranked.length, 1, 'minTerms:1 must let a single matched term through');
+      assert.deepStrictEqual(ranked[0].matched, ['summary']);
+    });
+
+    check('search: minTerms never loosens a query that already has a strict match — the AND-bias survives when results exist', () => {
+      const full = { ts: '2026-07-01T00:00:00.000Z', decisions: 'vault rotation happens every epoch' };
+      const partial = { ts: '2026-06-01T00:00:00.000Z', decisions: 'vault only, nothing else here' };
+      const ranked = search.rankEntries([full, partial], 'vault rotation epochs');
+      assert.strictEqual(ranked.length, 1, 'the strict pass must exclude the one-term partial match');
+      assert.strictEqual(ranked[0].decisions, 'vault rotation happens every epoch');
+    });
+
     check('search: file-only team rows are findable (ask/summary null on most team rows)', () => {
       const row = { ts: '2026-07-01T00:00:00.000Z', ask: null, summary: null, files: ['infra/vault.tf'] };
       const ranked = search.rankEntries([row], 'vault');
@@ -14151,10 +14260,10 @@ async function main() {
 
     check('team-archive: setBackfill round-trips and survives appends', () => {
       const pid = 'arc-bf';
-      teamArchive.setBackfill(pid, { done: false, before: '2026-05-01T00:00:00.000Z' });
+      teamArchive.setBackfill(pid, { done: false, beforeId: 42 });
       teamArchive.appendRows(pid, [{ author: 'A', ts: '2026-06-01T00:00:00.000Z', source: 'Codex' }]);
       const arc = teamArchive.loadArchive(pid);
-      assert.strictEqual(arc.backfill.before, '2026-05-01T00:00:00.000Z');
+      assert.strictEqual(arc.backfill.beforeId, 42);
       assert.strictEqual(arc.backfill.done, false);
     });
 
@@ -14166,14 +14275,47 @@ async function main() {
       assert.doesNotThrow(() => teamArchive.setBackfill(pid));
       let arc = teamArchive.loadArchive(pid);
       assert.strictEqual(arc.backfill.done, false);
-      assert.strictEqual(arc.backfill.before, null);
+      assert.strictEqual(arc.backfill.beforeId, null);
       // Same for null/undefined passed explicitly, and a non-object.
       assert.doesNotThrow(() => teamArchive.setBackfill(pid, null));
       assert.doesNotThrow(() => teamArchive.setBackfill(pid, undefined));
       assert.doesNotThrow(() => teamArchive.setBackfill(pid, 'not-an-object'));
       arc = teamArchive.loadArchive(pid);
       assert.strictEqual(arc.backfill.done, false);
-      assert.strictEqual(arc.backfill.before, null);
+      assert.strictEqual(arc.backfill.beforeId, null);
+    });
+
+    // Fix #2 (final whole-branch review): backfill now pages on memory_entries.id
+    // (total-ordered, no ties), not created_at (timestamptz default now() —
+    // constant within a transaction, so a batched push can tie many rows'
+    // created_at, and a created_at cursor with no secondary sort key silently
+    // and permanently skips whichever tied siblings fell past a page boundary).
+    check('team-archive: an archive written by the previous created_at-cursor format loads safely, restarting the walk rather than misreading the cursor', () => {
+      const pid = 'arc-legacy-format';
+      const p = teamArchive.archivePath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify({
+        version: 1, projectId: pid,
+        backfill: { done: false, before: '2026-05-01T00:00:00.000Z' }, // old shape
+        rows: [],
+      }));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, false, 'loading an old-format archive must not throw or crash');
+      assert.strictEqual(arc.backfill.beforeId, null,
+        'a stale created_at cursor must never be reinterpreted as an id cursor');
+    });
+
+    check('team-archive: a COMPLETED legacy-format backfill stays done (never restarts a finished walk)', () => {
+      const pid = 'arc-legacy-done';
+      const p = teamArchive.archivePath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify({
+        version: 1, projectId: pid,
+        backfill: { done: true, before: '2026-05-01T00:00:00.000Z' }, // old shape, finished
+        rows: [],
+      }));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.done, true, 'a finished legacy backfill must not be treated as unfinished');
     });
   }
 

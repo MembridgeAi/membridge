@@ -186,8 +186,10 @@ per shared project under `~/.membridge/team-archive/`. The working cache
 only holds each project's newest entries — under a week's worth for a busy
 five-person team — so once an entry aged out of the cache it used to be
 gone for good; now every pulled entry is appended to the archive too, and
-the daemon walks backward through history until the team's earliest entry
-is captured. The archive lives in the same trust boundary as everything
+the daemon walks backward through history, keeping a large but bounded
+window of the team's past activity (the archive caps out at 5,000 entries
+per project — plenty for search, but not literally everything since day
+one for a large, long-running team). The archive lives in the same trust boundary as everything
 else here — same machine, same account — and is redacted at every read,
 never trusted as already-clean at rest.
 

@@ -250,27 +250,34 @@ function createMockSupabase() {
     }
     const eq = (p.get('project_id') || '').replace(/^eq\./, '');
     const neq = (p.get('author_id') || '').replace(/^neq\./, '');
-    // created_at carries one of two PostgREST operators depending on which
-    // direction teamsync is walking: `gt.` for the forward pull (ascending,
-    // "everything since the cursor"), `lt.` for the backward backfill walker
-    // (descending, "everything before this checkpoint"). Real PostgREST would
-    // AND both if both were sent; teamsync only ever sends one, so matching
-    // just the one present is enough here.
+    // created_at carries the forward pull's operator: `gt.` (ascending,
+    // "everything since the cursor"). The backward backfill walker now pages
+    // on `id` instead (an id cursor has no ties; see lib/teamsync.js
+    // backfillArchivePage for why created_at's ties made it unsafe to page
+    // on). Real PostgREST would AND every filter sent; teamsync only ever
+    // sends one shape per call, so matching just what is present is enough.
     const createdAtRaw = p.get('created_at') || '';
     const isGt = /^gt\./.test(createdAtRaw);
-    const isLt = /^lt\./.test(createdAtRaw);
-    const createdAtBound = decodeURIComponent(createdAtRaw.replace(/^(?:gt|lt)\./, ''));
-    const desc = (p.get('order') || '') === 'created_at.desc';
+    const createdAtBound = decodeURIComponent(createdAtRaw.replace(/^gt\./, ''));
+    const idRaw = p.get('id') || '';
+    const isIdLt = /^lt\./.test(idRaw);
+    const idBound = isIdLt ? Number(decodeURIComponent(idRaw.replace(/^lt\./, ''))) : null;
+    const order = p.get('order') || '';
+    const descById = order === 'id.desc';
+    const descByCreatedAt = order === 'created_at.desc';
     if (!isMember(projectTeam(eq), userId)) return json(res, 200, []);
     let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
     if (isGt) rows = rows.filter(e => e.created_at > createdAtBound);
-    if (isLt) rows = rows.filter(e => e.created_at < createdAtBound);
+    if (isIdLt) rows = rows.filter(e => Number(e.id) < idBound);
     // Order THEN limit — a descending page must return the NEWEST rows below
-    // the bound (the tail closest to `before`), not just the first `limit`
+    // the bound (the tail closest to the cursor), not just the first `limit`
     // rows encountered in storage order before sorting.
     rows = rows
       .slice()
-      .sort((a, b) => desc ? b.created_at.localeCompare(a.created_at) : a.created_at.localeCompare(b.created_at))
+      .sort((a, b) => {
+        if (descById) return b.id - a.id;
+        return descByCreatedAt ? b.created_at.localeCompare(a.created_at) : a.created_at.localeCompare(b.created_at);
+      })
       .slice(0, parseInt(p.get('limit') || '200', 10));
     // Real PostgREST only returns the requested columns — project to
     // selectCols (when the caller sent one) so a dropped-and-retried select
