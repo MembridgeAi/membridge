@@ -332,7 +332,7 @@ export interface Project {
   tools: string[]
   shared: boolean
   memberIds: string[]
-  sessionsLast7Days: number
+  sessionsThisWeek: number
   dailyCounts: number[]     // exactly 7 entries, oldest first
   latestSummary: { text: string; author: string; at: string } | null
   sync: SyncState
@@ -523,7 +523,7 @@ export class FakeDataClient implements DataClient {
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
         shared: !this.opts.solo, memberIds: this.opts.solo ? ['me'] : ['me', 'andrew', 'sarah'],
-        sessionsLast7Days: 31, dailyCounts: [5, 8, 4, 10, 7, 12, 13],
+        sessionsThisWeek: 31, dailyCounts: [5, 8, 4, 10, 7, 12, 13],
         latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
         sync: { state: 'up-to-date' },
       },
@@ -532,7 +532,7 @@ export class FakeDataClient implements DataClient {
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
         shared: false, memberIds: ['me'],
-        sessionsLast7Days: 4, dailyCounts: [2, 2, 4, 2, 2, 3, 2],
+        sessionsThisWeek: 4, dailyCounts: [2, 2, 4, 2, 2, 3, 2],
         latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
         sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
       },
@@ -683,12 +683,55 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 Read these and write down the field names you will consume — do not guess:
 `lib/server.js:149` (`statusPayload`), `:241` (`projectsPayload`), `:298` (`savingsPayload`), `:366` (`feedPayload`), `:677` (`projectDetail`).
 
-Mapping rules that are NOT optional:
-- `Project.shared` ← `projectsPayload().team` being non-null.
-- `Project.sync` ← derive: `paused` → `{state:'paused'}`; else if `lastActivity > lastSync` → `{state:'behind', lastSyncedAt: lastSync}`; else `{state:'up-to-date'}`.
-- `Project.sessionsLast7Days` and `dailyCounts` ← count non-plumbing events per day over the trailing 7 days. The daemon sends `sessionsTotal` (lifetime), which is a different number — do not substitute it.
-- `LiveSession.intent` ← the captured prompt only. If absent, `null`, and the UI renders nothing rather than a placeholder sentence.
-- `Insights.skeleton` ← `/api/savings`: `repeatOpens = reads.sameSession + reads.crossSession`, `answeredFirst = avoided.serves`. If `/api/savings` returns no `reads`/`avoided`, emit `{available:false}`.
+**Field sources — resolved against the real code, do not re-derive:**
+
+| UI field | Source | Notes |
+| --- | --- | --- |
+| `Project.shared` | `projectsPayload().team` non-null | |
+| `Project.sync` | derived (see rule below) | |
+| `Project.sessionsThisWeek` | `memorydb.projectStats()` → `sessionsThisWeek` | counts distinct sessions in the trailing 7 days. **Currently only on `/api/project?path=` (as `stats`), not on `/api/projects`** — see Step 1b. |
+| `Project.dailyCounts` | not emitted anywhere today | must be added server-side — see Step 1b |
+| `Project.latestSummary` | `/api/feed` entry for that project: `headline \|\| summary`, plus `author` and `ts` | the feed is already fetched by Today; do not add a request |
+| `Project.memberIds` | `/api/team/projects` + team entry `authorId`s | |
+| `LiveSession.intent` | feed entry `goal` (fall back to `ask`) | `lib/dashboard/client.js:4113` renders exactly this as its Intent row |
+| `LiveSession.live` / `StreamEntry.live` | **a session with no summary yet** | `lib/dashboard/client.js:4108` — `wip = glance.kind === 'none'`, rendered "Working now". This is an absence-of-summary rule, NOT a recency heuristic. Use the same rule; do not invent a time window. |
+| `StreamEntry.outcome` | `headline \|\| summary` | `normalizeLocal` (`lib/feed.js:19-67`) carries both |
+| `StreamEntry.id` | `session` + `ts` composite | `session` alone is not unique per entry |
+| `Insights.skeleton` | `/api/savings`: `repeatOpens = reads.sameSession + reads.crossSession`, `answeredFirst = avoided.serves` | emit `{available:false}` when `reads`/`avoided` are absent |
+
+Sync rule: `paused` → `{state:'paused'}`; else if `lastActivity > lastSync` → `{state:'behind', lastSyncedAt: lastSync}`; else `{state:'up-to-date'}`.
+
+Intent rule: when `goal` and `ask` are both absent, `intent` is `null` and the UI renders nothing — never a placeholder sentence.
+
+- [ ] **Step 1b: Extend `projectsPayload()` with the two missing fields**
+
+`/api/projects` must carry everything the Today page needs, because spec §7 requires
+one request per screen — fetching `/api/project` per project would be N requests.
+
+In `lib/server.js:241` `projectsPayload()`, inside the loop that already walks
+`proj.events`, additionally compute and emit:
+
+- `sessionsThisWeek` — distinct non-plumbing `ev.session` values whose `ev.ts` falls in the trailing 7 days. Reuse `memorydb.projectStats(key, proj).sessionsThisWeek` rather than writing a second counter.
+- `dailyCounts` — an array of exactly 7 integers, oldest first, counting distinct non-plumbing sessions per day across the trailing 7 days.
+
+Exclude plumbing events with the existing `digest.isPlumbing(ev)` predicate — the
+loop above it already does, and counting token/usage traffic would inflate the
+figure roughly 7:1 (see the comment at `lib/server.js:252-257`).
+
+Add a test in `test/run-tests.js`:
+
+```javascript
+test('/api/projects carries a 7-day session series for the sparkline', async () => {
+  const res = await api('/api/projects');
+  assert.equal(res.status, 200);
+  for (const p of res.body) {
+    assert.ok(Array.isArray(p.dailyCounts) && p.dailyCounts.length === 7, `${p.name} dailyCounts`);
+    assert.ok(p.dailyCounts.every(n => Number.isInteger(n) && n >= 0), `${p.name} counts are non-negative ints`);
+    assert.equal(typeof p.sessionsThisWeek, 'number');
+    assert.ok(p.sessionsThisWeek <= p.sessionsTotal, `${p.name}: week count cannot exceed lifetime`);
+  }
+});
+```
 
 - [ ] **Step 2: Write `ui/src/data/LocalDaemonClient.ts`**
 
