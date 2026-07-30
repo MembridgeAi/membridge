@@ -22148,72 +22148,81 @@ const repoRoot = require('../lib/repo-root');
   // our routing, but an encoded '..%2f' or an encoded backslash survives
   // that normalization intact and must be caught by resolveAppAsset's own
   // decode-then-check guard.
-  {
-    const APP_PORT = P(91);
-    const srvApp = startServer(APP_PORT, { retries: 0 });
-    try {
-      const base = 'http://127.0.0.1:' + APP_PORT;
-      await waitForHttp(base + '/api/status');
-      const raw = p => fetch(base + p);
+  // These exercise the /app static route, which needs a real Vite build in
+  // ui/dist. A fresh checkout has none (ui/dist is gitignored and never
+  // committed), and CI builds the UI AFTER this suite runs — so skip loudly
+  // rather than fail on an absent build. Run `npm run build` inside ui/ to
+  // exercise them locally.
+  if (!fs.existsSync(path.join(__dirname, '..', 'ui', 'dist', 'index.html'))) {
+    console.log('  skip  /app static serving (7 checks) — no ui/dist build present; run `npm run build` in ui/');
+  } else {
+    {
+      const APP_PORT = P(91);
+      const srvApp = startServer(APP_PORT, { retries: 0 });
+      try {
+        const base = 'http://127.0.0.1:' + APP_PORT;
+        await waitForHttp(base + '/api/status');
+        const raw = p => fetch(base + p);
 
-      const shellRes = await raw('/app/');
-      const shellText = await shellRes.text();
-      await check('GET /app serves the new UI shell', () => {
-        assert.strictEqual(shellRes.status, 200);
-        assert.ok(/<div id="root">/.test(shellText), 'SPA root element present');
-      });
+        const shellRes = await raw('/app/');
+        const shellText = await shellRes.text();
+        await check('GET /app serves the new UI shell', () => {
+          assert.strictEqual(shellRes.status, 200);
+          assert.ok(/<div id="root">/.test(shellText), 'SPA root element present');
+        });
 
-      await check('the shell response is never cached', () => {
-        assert.match(String(shellRes.headers.get('cache-control') || ''), /no-store/);
-      });
+        await check('the shell response is never cached', () => {
+          assert.match(String(shellRes.headers.get('cache-control') || ''), /no-store/);
+        });
 
-      await check('an unknown /app path falls back to the SPA shell', async () => {
-        const res = await raw('/app/team/members');
-        const text = await res.text();
-        assert.strictEqual(res.status, 200);
-        assert.ok(/<div id="root">/.test(text));
-      });
+        await check('an unknown /app path falls back to the SPA shell', async () => {
+          const res = await raw('/app/team/members');
+          const text = await res.text();
+          assert.strictEqual(res.status, 200);
+          assert.ok(/<div id="root">/.test(text));
+        });
 
-      await check('a missing /app asset is a 404, not the shell', async () => {
-        const res = await raw('/app/assets/nope-does-not-exist.js');
-        assert.strictEqual(res.status, 404);
-      });
+        await check('a missing /app asset is a 404, not the shell', async () => {
+          const res = await raw('/app/assets/nope-does-not-exist.js');
+          assert.strictEqual(res.status, 404);
+        });
 
-      await check('the legacy dashboard still serves at /, unchanged', async () => {
-        const res = await raw('/');
-        const text = await res.text();
-        assert.strictEqual(res.status, 200);
-        assert.ok(text.length > 0);
-        assert.ok(!/id="root"/.test(text), 'the legacy dashboard must not have started serving the new shell');
-      });
+        await check('the legacy dashboard still serves at /, unchanged', async () => {
+          const res = await raw('/');
+          const text = await res.text();
+          assert.strictEqual(res.status, 200);
+          assert.ok(text.length > 0);
+          assert.ok(!/id="root"/.test(text), 'the legacy dashboard must not have started serving the new shell');
+        });
 
-      await check('a real hashed asset is served with a long, immutable cache lifetime', async () => {
-        const distAssets = path.join(__dirname, '..', 'ui', 'dist', 'assets');
-        const jsFile = fs.readdirSync(distAssets).find(f => f.endsWith('.js'));
-        assert.ok(jsFile, 'ui/dist/assets must contain a built JS bundle for this test to check against');
-        const res = await raw(`/app/assets/${jsFile}`);
-        assert.strictEqual(res.status, 200);
-        assert.match(String(res.headers.get('cache-control') || ''), /max-age=\d+/);
-      });
+        await check('a real hashed asset is served with a long, immutable cache lifetime', async () => {
+          const distAssets = path.join(__dirname, '..', 'ui', 'dist', 'assets');
+          const jsFile = fs.readdirSync(distAssets).find(f => f.endsWith('.js'));
+          assert.ok(jsFile, 'ui/dist/assets must contain a built JS bundle for this test to check against');
+          const res = await raw(`/app/assets/${jsFile}`);
+          assert.strictEqual(res.status, 200);
+          assert.match(String(res.headers.get('cache-control') || ''), /max-age=\d+/);
+        });
 
-      // ---- path-traversal rejection: the three cases the plan calls out ----
+        // ---- path-traversal rejection: the three cases the plan calls out ----
 
-      await check('path traversal via a raw ../ cannot escape /app (never a 200)', async () => {
-        const res = await raw('/app/../../../etc/passwd');
-        assert.notStrictEqual(res.status, 200);
-      });
+        await check('path traversal via a raw ../ cannot escape /app (never a 200)', async () => {
+          const res = await raw('/app/../../../etc/passwd');
+          assert.notStrictEqual(res.status, 200);
+        });
 
-      await check('path traversal via an encoded ..%2f is rejected (404, not the file)', async () => {
-        const res = await raw('/app/..%2f..%2f..%2fetc%2fpasswd');
-        assert.strictEqual(res.status, 404);
-      });
+        await check('path traversal via an encoded ..%2f is rejected (404, not the file)', async () => {
+          const res = await raw('/app/..%2f..%2f..%2fetc%2fpasswd');
+          assert.strictEqual(res.status, 404);
+        });
 
-      await check('path traversal via an encoded backslash (%5c) separator is rejected', async () => {
-        const res = await raw('/app/assets%5c..%5c..%5csecret.json');
-        assert.strictEqual(res.status, 404);
-      });
-    } finally {
-      await new Promise(r => srvApp.close(r));
+        await check('path traversal via an encoded backslash (%5c) separator is rejected', async () => {
+          const res = await raw('/app/assets%5c..%5c..%5csecret.json');
+          assert.strictEqual(res.status, 404);
+        });
+      } finally {
+        await new Promise(r => srvApp.close(r));
+      }
     }
   }
 
