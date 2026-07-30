@@ -21959,6 +21959,154 @@ const repoRoot = require('../lib/repo-root');
     }
   }
 
+  // ===== Task 12 regression: a dominant author must not hide a real
+  // teammate behind a false "nothing has arrived" problem =====
+  // Reproduces the bug reported against the live backend: perPerson showed
+  // a teammate with real shared entries in the SAME response where
+  // `problems` claimed "0 entries shared" for that same teammate. Root
+  // cause was `problems` reading a separate, single newest-first
+  // TEAM_FEED_PAGE-sized page (lib/teamsync.js team_feed's own page cap)
+  // that a high-volume author can fill entirely, pushing the teammate's own
+  // newest row off the page. This fixture reproduces exactly that: the
+  // viewer authors more rows than one page holds, all newer than the
+  // teammate's single row, so the teammate's row cannot survive a
+  // single-page read but must survive the paginated one `perPerson` already
+  // uses.
+  {
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const mockDom = createMockSupabase();
+    const DOM_MOCK_PORT = P(93);
+    const HOME_OWNER = path.join(ROOT, 'home-insights-dom-owner');
+    const HOME_MEMBER = path.join(ROOT, 'home-insights-dom-member');
+    const PORT_OWNER = P(94);
+    const PORT_MEMBER = P(95);
+    const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
+    const portFor = { owner: PORT_OWNER, member: PORT_MEMBER };
+    const PROJECT = path.join(ROOT, 'projects', 'insights-dom-app');
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    // The RPC's own hard page cap (013_e2e_feed.sql:64, TEAM_FEED_PAGE in
+    // lib/api-insights.js) -- the viewer must out-produce a single page of
+    // this size for the teammate's one row to fall off a newest-first page.
+    const TEAM_FEED_PAGE = 200;
+
+    async function apiAs(role, method, pathname, body) {
+      process.env.MEMBRIDGE_HOME = homeFor[role];
+      const port = portFor[role];
+      const srv = startServer(port, { retries: 0 });
+      try {
+        await waitForHttp(`http://127.0.0.1:${port}/api/status`);
+        const res = method === 'GET' ? await fetch(`http://127.0.0.1:${port}${pathname}`)
+          : await post(`http://127.0.0.1:${port}${pathname}`, body);
+        return { status: res.status, body: await res.json().catch(() => null) };
+      } finally {
+        await new Promise(r => srv.close(r));
+      }
+    }
+
+    await new Promise(r => mockDom.server.listen(DOM_MOCK_PORT, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${DOM_MOCK_PORT}`;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      fs.mkdirSync(PROJECT, { recursive: true });
+
+      process.env.MEMBRIDGE_HOME = HOME_OWNER;
+      util.ensureConfig();
+      const ownerCreds = await teamsync.signup(util.getConfig(), 'insights-dom-owner@test.dev', 'pw-ido', 'DomOwner');
+      const domTeam = await teamsync.createTeam(util.getConfig(), 'DomCo');
+      const link = await teamsync.linkProject(util.getConfig(), PROJECT, domTeam.team_id, 'DomCo');
+
+      process.env.MEMBRIDGE_HOME = HOME_MEMBER;
+      util.ensureConfig();
+      const memberCreds = await teamsync.signup(util.getConfig(), 'insights-dom-member@test.dev', 'pw-idm', 'DomMember');
+      await teamsync.joinTeam(util.getConfig(), domTeam.invite_code);
+
+      const now = Date.now();
+      // Backdate the join past the 24h grace period (silentTeammateProblems
+      // skips anyone who joined less than a day ago) -- the join RPC always
+      // stamps "now", so this rewrites the mock's own member row directly,
+      // same shortcut the "Ghost" fixture in the Task 12 block above uses.
+      const memberRow = mockDom.members.find(m => m.userId === memberCreds.userId);
+      memberRow.joinedAt = new Date(now - 8 * DAY_MS).toISOString();
+      // The teammate: one real entry, 5 days ago -- well inside the 30-day
+      // window, joined long enough ago to clear the 24h grace period.
+      mockDom.entries.push({
+        id: 1, project_id: link.projectId, author_id: memberCreds.userId,
+        author_name: 'DomMember', ts: new Date(now - 5 * DAY_MS).toISOString(),
+        source: 'Claude Code', ask: null, files: [], session: 's-member-1',
+        created_at: new Date(now - 5 * DAY_MS).toISOString(),
+      });
+      // The viewer: enough same-day rows to fill (and overflow) one
+      // TEAM_FEED_PAGE, every one of them newer than the teammate's row --
+      // on a single newest-first page, none of the teammate's row survives.
+      const dominatingCount = TEAM_FEED_PAGE + 5;
+      for (let i = 0; i < dominatingCount; i++) {
+        mockDom.entries.push({
+          id: 100 + i, project_id: link.projectId, author_id: ownerCreds.userId,
+          author_name: 'DomOwner', ts: new Date(now - 1 * DAY_MS).toISOString(),
+          source: 'Claude Code', ask: null, files: [], session: `s-owner-${i}`,
+          created_at: new Date(now - 1 * DAY_MS + i).toISOString(),
+        });
+      }
+      // A third teammate with genuinely zero entries -- the case this fix
+      // must NOT break: absence must still be reported when it's real.
+      // Pushed straight into the mock's member table (bypassing the join
+      // RPC, which always stamps "now"), same shortcut as DomMember's
+      // backdated join above and the original "Ghost" fixture.
+      const GHOST_ID = 'ghost-dom-1';
+      mockDom.members.push({
+        teamId: domTeam.team_id, userId: GHOST_ID, displayName: 'GhostDom',
+        role: 'member', joinedAt: new Date(now - 8 * DAY_MS).toISOString(),
+      });
+
+      await check('a dominant author does not hide a real teammate behind a false "nothing has arrived" problem', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team/insights?window=30');
+        assert.strictEqual(res.status, 200);
+        const body = res.body;
+        const memberRow = body.perPerson.find(p => p.id === memberCreds.userId);
+        assert.ok(memberRow, 'perPerson must include the teammate');
+        assert.strictEqual(memberRow.shared, 1, 'the teammate really did share one entry this window');
+        const silentProblem = body.problems.find(p => p.id === `silent:${memberCreds.userId}`);
+        assert.strictEqual(silentProblem, undefined,
+          'a teammate with a real entry in-window must never be reported as silent, ' +
+          `even when a dominant author fills a whole team_feed page -- got: ${JSON.stringify(silentProblem)}`);
+      });
+
+      await check('a teammate with genuinely zero rows in the window still produces the absence problem', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team/insights?window=30');
+        assert.strictEqual(res.status, 200);
+        const body = res.body;
+        const ghostRow = body.perPerson.find(p => p.id === GHOST_ID);
+        assert.ok(ghostRow, 'perPerson must still include a genuinely silent teammate');
+        assert.strictEqual(ghostRow.shared, 0, 'GhostDom really did share nothing');
+        const ghostProblem = body.problems.find(p => p.id === `silent:${GHOST_ID}`);
+        assert.ok(ghostProblem, 'a genuinely silent teammate, past the grace period, must still be surfaced');
+        assert.ok(ghostProblem.scale.includes('joined') && ghostProblem.scale.includes('0 entries shared'),
+          `phrasing must stay absence-only, got: "${ghostProblem.scale}"`);
+        assert.ok(!/hook|daemon|install|token|hasn.t configured|misconfigur/i.test(ghostProblem.headline + ghostProblem.scale),
+          'must never diagnose the teammate\'s machine, only report absence');
+      });
+
+      await check('invariant: any member with perPerson.shared > 0 never has a matching silent:<id> problem', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team/insights?window=30');
+        assert.strictEqual(res.status, 200);
+        const body = res.body;
+        assert.ok(body.perPerson.some(p => p.shared > 0), 'fixture sanity: at least one member has real shared entries');
+        for (const person of body.perPerson) {
+          if (person.shared <= 0) continue;
+          const contradicting = body.problems.find(p => p.id === `silent:${person.id}`);
+          assert.strictEqual(contradicting, undefined,
+            `${person.name} shared ${person.shared} entries this window but also has a silent problem: ` +
+            `${JSON.stringify(contradicting)}`);
+        }
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+      await new Promise(r => mockDom.server.close(r));
+    }
+  }
+
   // ===== Task 17: backend for every control the mockups show =====
   // viewerId + inviteCode on /api/team, and POST /api/project/access-default.
   // Same self-contained two-identity shape as the Task 8/12 fixtures above
