@@ -17089,6 +17089,55 @@ async function main() {
       }
     });
 
+    // Direct unit tests of the Worker's own validate() -- it is a plain ES
+    // module (cloudflare/counters-worker/package.json: "type": "module"), so
+    // a dynamic import() loads and exercises the real exported function, no
+    // wrangler/miniflare runtime needed. This pins the exact defect a real
+    // multi-tool-a-day install used to hit: the dedup key used to be the
+    // counter NAME alone, so two mcp_tool_used points (different tools, same
+    // name) zeroed out the whole payload, heartbeat included.
+    const workerPath = path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js');
+    const workerModule = await import(workerPath);
+    const workerInstallId = '12345678-1234-1234-1234-123456789012';
+
+    await check('worker: validate() accepts heartbeat + one mcp_tool_used point per allowlisted tool', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'heartbeat', dims: {} },
+          ...counters.MCP_TOOLS.map(tool => ({ name: 'mcp_tool_used', dims: { tool } })),
+        ],
+      };
+      const points = workerModule.validate(payload);
+      assert.strictEqual(points.length, counters.MCP_TOOLS.length + 1,
+        'a counter name repeating with distinct dim values must not zero out the whole payload');
+      const tools = points.filter(p => p.blobs[0] === 'mcp_tool_used').map(p => p.blobs[3]).sort();
+      assert.deepStrictEqual(tools, [...counters.MCP_TOOLS].sort());
+    });
+
+    await check('worker: validate() still rejects an exact-duplicate (name, dim) pair', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: [
+          { name: 'mcp_tool_used', dims: { tool: 'why' } },
+          { name: 'mcp_tool_used', dims: { tool: 'why' } },
+        ],
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [],
+        'repeating the IDENTICAL (name, dim) pair is still the inflation case and must reject the whole payload');
+    });
+
+    await check('worker: validate() rejects a payload over MAX_COUNTERS', async () => {
+      const payload = {
+        install_id: workerInstallId,
+        version: '1.2.3',
+        counters: Array.from({ length: workerModule.MAX_COUNTERS + 1 }, () => ({ name: 'heartbeat', dims: {} })),
+      };
+      assert.deepStrictEqual(workerModule.validate(payload), [], 'a payload over MAX_COUNTERS must still be rejected outright');
+    });
+
     check('mcp-usage: records within the allowlist, honors the kill switch, reads back a 24h window', () => {
       // Its own MEMBRIDGE_HOME: section 14 above exercises the real MCP tools
       // through registerTools()'s tracked() wrapper, which writes this same

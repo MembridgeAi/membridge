@@ -35,8 +35,11 @@ const DIM_VALUES = {
   tool: new Set(['get_project_memory', 'get_recent_activity', 'list_projects', 'recall', 'search_memory', 'why']),
 };
 
-const MAX_BODY_BYTES = 2048;   // a valid payload is ~200 bytes
-const MAX_COUNTERS = 8;
+const MAX_BODY_BYTES = 2048;   // a valid payload is ~200 bytes, the real backstop
+// Exported so tests can assert against the real cap rather than a copied
+// magic number. 4 base (heartbeat/recall_state/environment/hook_registration)
+// + up to 6 mcp_tool_used (one per allowlisted MCP tool), with headroom.
+export const MAX_COUNTERS = 16;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}(-[0-9A-Za-z.-]{1,20})?$/;
 
@@ -61,10 +64,6 @@ export function validate(payload) {
   for (const c of payload.counters) {
     if (!c || typeof c !== 'object') return [];
     if (typeof c.name !== 'string' || !COUNTER_NAMES.has(c.name)) return [];
-    // One datapoint per counter name per request. A repeated name is a client
-    // bug or an inflation attempt; either way the whole payload is suspect.
-    if (seen.has(c.name)) return [];
-    seen.add(c.name);
 
     const dims = c.dims;
     if (dims !== undefined && (typeof dims !== 'object' || dims === null || Array.isArray(dims))) return [];
@@ -80,6 +79,16 @@ export function validate(payload) {
       dimValue = dims[dimKey];
       if (typeof dimValue !== 'string' || !allowed.has(dimValue)) return [];
     }
+
+    // One datapoint per (name, dimKey, dimValue) per request. A counter name
+    // may legitimately repeat with a DIFFERENT allowlisted dim value in the
+    // same payload (mcp_tool_used: one entry per tool actually used) -- that
+    // is not inflation. Repeating the exact same (name, dim) pair is still
+    // rejected outright, whole payload included: that can only be a client
+    // bug or an inflation attempt, same as before.
+    const identity = `${c.name}|${dimKey}|${dimValue}`;
+    if (seen.has(identity)) return [];
+    seen.add(identity);
 
     points.push({
       // Analytics Engine allows one index, used as the sampling key. Keying on
