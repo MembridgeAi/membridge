@@ -13469,6 +13469,10 @@ async function main() {
       state.projects[mcpKey].teamEntries = [{
         author: 'Priya', ts: mcpTsAgo(30), source: 'Codex', session: 'p1',
         ask: 'rotate creds token=sk-tamper-mcp-999',
+        goal: 'rotate all vault credentials',
+        decisions: 'JWT rotation happens in vault, never in app config',
+        gotchas: 'terraform apply needs a manual approve step',
+        headline: 'Rotated vault tokens',
         summary: 'stored the new token api_key=sk-tamper-mcp-888 in the vault',
         files: ['infra/vault.tf'],
         changes: [{ file: 'infra/vault.tf', status: 'edited', add: 3, del: 1, note: 'rotated token=sk-tamper-mcp-777', dep: false }],
@@ -13545,6 +13549,15 @@ async function main() {
       const blob = JSON.stringify(recent);
       assert.ok(!blob.includes('sk-test1234567890abcdef') && !blob.includes('sk-tamper-mcp-999') && !blob.includes('sk-tamper-mcp-777'),
         'secret leaked into recent activity');
+    });
+
+    check('mcp: team rows carry session/goal/decisions/gotchas/headline through to activity', () => {
+      const priya = recent.entries.find(e => e.author === 'Priya');
+      assert.strictEqual(priya.session, 'p1', 'session dropped');
+      assert.strictEqual(priya.goal, 'rotate all vault credentials', 'goal dropped');
+      assert.ok(/vault/.test(priya.decisions || ''), 'decisions dropped');
+      assert.ok(/manual approve/.test(priya.gotchas || ''), 'gotchas dropped');
+      assert.strictEqual(priya.headline, 'Rotated vault tokens', 'headline dropped');
     });
 
     const { data: search } = await callJson('search_memory', { query: 'webhook' });
