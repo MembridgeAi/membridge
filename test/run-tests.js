@@ -13862,6 +13862,57 @@ async function main() {
     });
   }
 
+  // --- 14c. team archive (lib/team-archive.js): durable pulled-row history ---
+  {
+    const teamArchive = require('../lib/team-archive');
+
+    check('team-archive: append merges by (author|ts|source), replaces on re-push, sorts by ts', () => {
+      const pid = 'arc-proj-1';
+      teamArchive.appendRows(pid, [
+        { author: 'A', ts: '2026-01-02T00:00:00.000Z', source: 'Codex', summary: 'v1' },
+      ]);
+      teamArchive.appendRows(pid, [
+        { author: 'A', ts: '2026-01-02T00:00:00.000Z', source: 'Codex', summary: 'v2' },
+        { author: 'B', ts: '2026-01-01T00:00:00.000Z', source: 'Claude Code', summary: 'older' },
+      ]);
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 2, 're-pushed row duplicated instead of replaced');
+      assert.strictEqual(arc.rows[0].author, 'B', 'rows not ts-ascending');
+      assert.strictEqual(arc.rows[1].summary, 'v2', 'replace-on-collision lost the newer version');
+    });
+
+    check('team-archive: a corrupt file fails open as an empty archive', () => {
+      const p = teamArchive.archivePath('arc-bad');
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, '{definitely not json');
+      const arc = teamArchive.loadArchive('arc-bad');
+      assert.deepStrictEqual(arc.rows, []);
+      assert.strictEqual(arc.backfill.done, false);
+    });
+
+    check('team-archive: the cap keeps the newest rows', () => {
+      const pid = 'arc-cap';
+      const mk = i => ({
+        author: 'A', source: 'Codex', summary: `row ${i}`,
+        ts: new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString(),
+      });
+      teamArchive.appendRows(pid, Array.from({ length: 5010 }, (_, i) => mk(i)));
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 5000);
+      assert.strictEqual(arc.rows[arc.rows.length - 1].summary, 'row 5009', 'newest row lost to the cap');
+      assert.strictEqual(arc.rows[0].summary, 'row 10', 'cap kept the oldest instead of the newest');
+    });
+
+    check('team-archive: setBackfill round-trips and survives appends', () => {
+      const pid = 'arc-bf';
+      teamArchive.setBackfill(pid, { done: false, before: '2026-05-01T00:00:00.000Z' });
+      teamArchive.appendRows(pid, [{ author: 'A', ts: '2026-06-01T00:00:00.000Z', source: 'Codex' }]);
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.backfill.before, '2026-05-01T00:00:00.000Z');
+      assert.strictEqual(arc.backfill.done, false);
+    });
+  }
+
   // --- 15. Provenance (lib/provenance.js): `membridge why <file>` ---
   // File-level only: which sessions edited a file, newest first. Event
   // fixtures are passed as plain proj objects (same planting style as the
