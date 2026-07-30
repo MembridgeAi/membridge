@@ -11,11 +11,6 @@ import { InviteRow } from './InviteRow'
 import { MemberRow } from './MemberRow'
 import './members.css'
 
-// Every DataClient method in this app reserves the literal id 'me' for the
-// viewer (see ProjectsPage.tsx's VIEWER_ID) -- matching that convention is
-// the only way this page can tell "your own row" apart from a teammate's.
-const VIEWER_ID = 'me'
-
 const ROLE_WEIGHT: Record<Role, number> = { owner: 0, admin: 1, member: 2 }
 
 function sortMembers(members: Member[]): Member[] {
@@ -103,6 +98,11 @@ export function MembersPage() {
   const role = settingsQuery.data?.team?.role ?? null
   const canManage = !solo && client.capabilities.teamAdminSupported && (role === 'owner' || role === 'admin')
   const viewerIsOwner = role === 'owner'
+  // Task 18/19: the real viewer id (settings.viewerId, from GET /api/team),
+  // never a hardcoded two-letter placeholder -- a sentinel like that never
+  // matches a real user id, which silently disabled the own-row guard below
+  // (no menu on your own row) in production, same bug ProjectsPage.tsx had.
+  const viewerId = settingsQuery.data?.viewerId ?? null
 
   const ready = statusQuery.data !== undefined && settingsQuery.data !== undefined && membersQuery.data !== undefined
   const hasError = statusQuery.isError || settingsQuery.isError || membersQuery.isError
@@ -235,7 +235,7 @@ export function MembersPage() {
             <MemberRow
               key={member.id}
               member={member}
-              isSelf={member.id === VIEWER_ID}
+              isSelf={member.id === viewerId}
               canManage={canManage}
               viewerIsOwner={viewerIsOwner}
               onSetRole={(memberId, nextRole) => setRoleFromSelect.mutate({ memberId, role: nextRole })}

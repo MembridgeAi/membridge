@@ -57,6 +57,26 @@ describe('MembersPage', () => {
     expect(within(ownerRow).queryByRole('button', { name: /more actions/i })).toBeNull()
   })
 
+  // The own-row guard used to compare a member's id against a hardcoded
+  // two-letter placeholder -- a value the real daemon never sends (a real
+  // user id looks like 'usr_9f2a'), so the guard silently never activated in
+  // production and every member, including the viewer, got a "more
+  // actions" menu on their own row. This drives the fixture with a
+  // REALISTIC id AND role: 'admin' (so the viewer's own row isn't also
+  // hidden by the separate "no menu on the owner row" rule, which would
+  // mask the isSelf bug) to prove the guard now reads settings.viewerId
+  // instead of that sentinel, for both the viewer's own row and a
+  // teammate's row.
+  it('suppresses the own-row menu using the real viewerId, not a hardcoded placeholder', async () => {
+    const client = new FakeDataClient({ viewerId: 'usr_9f2a', role: 'admin' })
+    renderWith(client, <MembersPage />)
+    const ownRow = await screen.findByTestId('member-row-usr_9f2a')
+    expect(within(ownRow).queryByRole('button', { name: /more actions/i })).toBeNull()
+
+    const andrewRow = await screen.findByTestId('member-row-andrew')
+    expect(within(andrewRow).getByRole('button', { name: /more actions for andrew/i })).toBeInTheDocument()
+  })
+
   it('lets an owner or admin send an invite by email through a real DataClient call', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'inviteMember')
