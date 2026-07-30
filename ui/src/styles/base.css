@@ -1,0 +1,12 @@
+*, *::before, *::after { box-sizing: border-box; border-radius: 0; }
+html, body, #root { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--ui); font-size: 12px; line-height: 1.4;
+  scrollbar-gutter: stable;
+}
+button { font: inherit; border-radius: var(--r); cursor: pointer; }
+button:hover { background: var(--panel2); }
+input, select { font: inherit; border-radius: var(--r); background: var(--panel2); color: var(--text); border: 1px solid var(--line2); }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.scroll-x { overflow-x: auto; scrollbar-gutter: stable; }

@@ -1,0 +1,19 @@
+:root {
+  --bg: #0B1120; --panel: #0E1526; --panel2: #111A2E;
+  --text: #F1F5F9; --text2: #94A3B8; --text3: #5B6B84;
+  --line: #1E293B; --line2: #334155;
+  --accent: #4D7CFF; --accent2: #7A9DFF; --accent-dim: rgba(77,124,255,.12);
+  --green: #22C08F; --amber: #E79A3C; --red: #F0616D;
+  --green-dim: rgba(34,192,143,.09); --amber-dim: rgba(231,154,60,.10); --red-dim: rgba(240,97,109,.14);
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace;
+  --r: 4px;
+}
+:root[data-theme="light"] {
+  --bg: #FAFAFA; --panel: #FFFFFF; --panel2: #F1F5F9;
+  --text: #0F172A; --text2: #64748B; --text3: #94A3B8;
+  --line: #E2E8F0; --line2: #CBD5E1;
+  --accent: #0052FF; --accent2: #4D7CFF; --accent-dim: rgba(0,82,255,.06);
+  --green: #0D9673; --amber: #C77414; --red: #D14350;
+  --green-dim: rgba(13,150,115,.08); --amber-dim: rgba(199,116,20,.09); --red-dim: rgba(209,67,80,.08);
+}
