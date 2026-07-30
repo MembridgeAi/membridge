@@ -39,7 +39,7 @@ export class FakeDataClient implements DataClient {
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
         shared: !this.opts.solo, memberIds: this.opts.solo ? ['me'] : ['me', 'andrew', 'sarah'],
-        sessionsThisWeek: 31, dailyCounts: [5, 8, 4, 10, 7, 12, 13],
+        sessionsThisWeek: 31, dailyCounts: [3, 5, 2, 6, 4, 5, 6], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
         sync: { state: 'up-to-date' },
       },
@@ -48,7 +48,7 @@ export class FakeDataClient implements DataClient {
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
         shared: false, memberIds: ['me'],
-        sessionsThisWeek: 4, dailyCounts: [2, 2, 4, 2, 2, 3, 2],
+        sessionsThisWeek: 4, dailyCounts: [1, 0, 1, 0, 1, 1, 0], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
         sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
       },

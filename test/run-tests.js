@@ -19,7 +19,7 @@ delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not 
 const util = require('../lib/util');
 const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('../lib/scan');
 const digest = require('../lib/digest');
-const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload, savingsPayload, saveSettings } = require('../lib/server');
+const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload, savingsPayload, saveSettings, dailySessionBuckets } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
 const { createMockSupabase } = require('./mock-supabase');
 const advisorLib = require('../lib/advisor');
@@ -861,11 +861,50 @@ async function main() {
       { kind: 'todos', session: 's2', ts: iso(2), items: [ { text: 'q', status: 'pending' } ] }, // 1 open
       { kind: 'prompt', source: 'Claude Code', session: 's3', ts: iso(10), text: 'old' }, // outside 7d window
       { kind: 'edit', source: 'Claude Code', session: 's3', ts: iso(10), file: path.join(proj1, 'src/old.js') }, // still counts (files are all-time)
+      // s4 is plumbing-only (kind: 'usage' / 'read', per digest.isPlumbing) --
+      // real product events outnumbered ~7:1 by token bookkeeping that
+      // carries session ids but represents no ask a person made. Regression
+      // for lib/memorydb.js:281's isPlumbing guard: without it, s4 would be
+      // a third in-window session and sessionsThisWeek would read 3.
+      { kind: 'usage', source: 'Claude Code', session: 's4', ts: iso(1) },
+      { kind: 'read', source: 'Claude Code', session: 's4', ts: iso(1), file: path.join(proj1, 'src/login.js') },
     ] };
     const stats = memorydb.projectStats(proj1, proj, now);
-    assert.strictEqual(stats.sessionsThisWeek, 2, `sessions ${stats.sessionsThisWeek}`); // s1, s2 in window; s3 excluded
+    assert.strictEqual(stats.sessionsThisWeek, 2, `sessions ${stats.sessionsThisWeek}`); // s1, s2 in window; s3 outside window; s4 plumbing-only
     assert.strictEqual(stats.filesTouched, 3, `files ${stats.filesTouched}`); // login, api, old (scratch dropped)
     assert.strictEqual(stats.openTodos, 3, `open ${stats.openTodos}`); // s1 latest snapshot = 2 open, s2 = 1 open
+  });
+  // Finding 2: dailySessionBuckets used to count a session in EVERY bucket it
+  // had events in, so a session spanning two days made sum(dailyCounts)
+  // exceed sessionsThisWeek -- two numbers on the same Today card that could
+  // contradict each other. The fix makes dailyCounts a PARTITION of the same
+  // session set projectStats counts: each session lands in exactly one
+  // bucket, the day of its first in-window event.
+  check('dailySessionBuckets: partitions sessionsThisWeek, a two-day session lands in exactly one bucket', () => {
+    const now = Date.parse('2026-07-14T12:00:00.000Z');
+    const iso = d => new Date(now - d * 86400000).toISOString();
+    const proj = { events: [
+      // s1 spans two days: first event 2.5 days ago, last event 1 day ago.
+      // Under the old "every bucket touched" rule this session would add 1
+      // to two different buckets; under the partition rule it adds 1 to
+      // exactly the bucket for its FIRST in-window event (2.5 days ago).
+      { kind: 'prompt', source: 'Claude Code', session: 's1', ts: iso(2.5), text: 'day one' },
+      { kind: 'edit', source: 'Claude Code', session: 's1', ts: iso(1), file: path.join(proj1, 'src/login.js') },
+      { kind: 'prompt', source: 'Codex', session: 's2', ts: iso(0.2), text: 'today' },
+      { kind: 'prompt', source: 'Claude Code', session: 's3', ts: iso(10), text: 'outside window' },
+      { kind: 'usage', source: 'Claude Code', session: 's4', ts: iso(0.5) }, // plumbing -- must not appear in any bucket
+    ] };
+    const buckets = dailySessionBuckets(proj, now);
+    const stats = memorydb.projectStats(proj1, proj, now);
+    assert.strictEqual(buckets.length, 7, 'dailySessionBuckets must always return 7 days');
+    const total = buckets.reduce((a, b) => a + b, 0);
+    assert.strictEqual(total, stats.sessionsThisWeek,
+      `sum(dailyCounts)=${total} must equal sessionsThisWeek=${stats.sessionsThisWeek} by construction`);
+    assert.strictEqual(total, 2, 's1 and s2 in window; s3 outside; s4 plumbing-only');
+    // s1's first in-window event is 2.5 days ago -> bucket index 6-2=4 (oldest-first).
+    assert.strictEqual(buckets[4], 1, `s1 must land in the 2.5-day-old bucket exactly once, got ${JSON.stringify(buckets)}`);
+    // s2's only event is 0.2 days ago -> today's bucket, index 6.
+    assert.strictEqual(buckets[6], 1, `s2 must land in today's bucket, got ${JSON.stringify(buckets)}`);
   });
   check('relativeLabel: coarse buckets with injectable now', () => {
     const now = Date.parse('2026-07-14T12:00:00.000Z');

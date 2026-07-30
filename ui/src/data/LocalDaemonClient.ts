@@ -31,7 +31,11 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
   return (res.status === 204 ? undefined : await res.json()) as T
 }
 
-const feed = (query = '') => get<{ entries: RawFeedEntry[] }>(`/api/feed?limit=${FEED_LIMIT}${query}`)
+// TTL for the coalesced /api/feed cache below -- long enough to absorb a
+// burst of same-tick callers (Today mounts useProjects()+useLiveSessions()
+// together, and useLiveSessions() re-polls every 10s), short enough that the
+// UI never reads meaningfully stale feed data.
+const FEED_CACHE_TTL_MS = 5000
 
 async function firstTeam(): Promise<RawTeamRow | null> {
   const data = await get<{ teams: RawTeamRow[] }>('/api/team')
@@ -44,31 +48,66 @@ const missingEndpoint = (method: string, endpoint: string): Error =>
 export class LocalDaemonClient implements DataClient {
   readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdmin: true }
 
+  // The Today screen mounts useProjects() and useLiveSessions() together, and
+  // useLiveSessions() polls every 10s on top -- both hit the SAME /api/feed
+  // page (spec §7: one request per screen). This cache, keyed by the query
+  // string, coalesces those into one real fetch: a call that lands while the
+  // previous one for the same key is still in flight (or finished less than
+  // FEED_CACHE_TTL_MS ago) gets the same promise instead of firing again.
+  // Eviction is a timestamp comparison made at read time, not a scheduled
+  // setTimeout -- no timer handle to outlive a call or keep anything alive.
+  private feedCache = new Map<string, { promise: Promise<{ entries: RawFeedEntry[] }>; fetchedAt: number }>()
+
+  private feed(query = ''): Promise<{ entries: RawFeedEntry[] }> {
+    const now = Date.now()
+    const cached = this.feedCache.get(query)
+    if (cached && now - cached.fetchedAt < FEED_CACHE_TTL_MS) return cached.promise
+
+    const promise = get<{ entries: RawFeedEntry[] }>(`/api/feed?limit=${FEED_LIMIT}${query}`)
+    this.feedCache.set(query, { promise, fetchedAt: now })
+    // A rejected fetch must not squat the cache for the rest of the TTL
+    // window -- drop it so the next caller retries instead of replaying the
+    // same failure.
+    promise.catch(() => {
+      if (this.feedCache.get(query)?.promise === promise) this.feedCache.delete(query)
+    })
+    return promise
+  }
+
+  // syncProject/syncAll can add events the cached feed page doesn't have yet;
+  // clearing here (rather than waiting out the TTL) keeps the post-sync read
+  // honest without reintroducing a duplicate-fetch window on every render.
+  private invalidateFeedCache(): void {
+    this.feedCache.clear()
+  }
+
   getStatus(): Promise<Status> {
     return get<Status>('/api/status')
   }
 
   async getProjects(): Promise<Project[]> {
-    const [rows, f] = await Promise.all([get<RawProjectRow[]>('/api/projects'), feed()])
+    const [rows, f] = await Promise.all([get<RawProjectRow[]>('/api/projects'), this.feed()])
     return rows.map(row => mapProjectRow(row, f.entries))
   }
 
   async getLiveSessions(): Promise<LiveSession[]> {
-    const f = await feed()
+    const f = await this.feed()
     return dedupeLiveSessions(f.entries).map(mapLiveSession)
   }
 
   async getProjectStream(projectPath: string): Promise<StreamEntry[]> {
-    const f = await feed(`&project=${encodeURIComponent(projectPath)}`)
+    const f = await this.feed(`&project=${encodeURIComponent(projectPath)}`)
     return f.entries.map(mapStreamEntry)
   }
 
-  syncProject(projectPath: string): Promise<void> {
-    return post<void>('/api/sync', { project: projectPath })
+  async syncProject(projectPath: string): Promise<void> {
+    await post<void>('/api/sync', { project: projectPath })
+    this.invalidateFeedCache()
   }
 
-  syncAll(): Promise<void> {
-    return post<void>('/api/sync', {})
+  async syncAll(): Promise<void> {
+    await post<void>('/api/sync', {})
+    this.invalidateFeedCache()
   }
 
   // /api/projects/toggle flips pause state; it has no "set to X" form. A
@@ -110,7 +149,7 @@ export class LocalDaemonClient implements DataClient {
     if (!team) return []
     const [membersRes, f, teamFeedRes] = await Promise.all([
       get<{ members: RawMemberRow[] }>(`/api/team/members?teamId=${encodeURIComponent(team.team_id)}`),
-      feed(),
+      this.feed(),
       get<{ entries: RawTeamFeedEntry[] }>(`/api/team/feed?teamId=${encodeURIComponent(team.team_id)}&limit=${TEAM_FEED_LIMIT}`),
     ])
     const counts = projectCountsByAuthor(f.entries)

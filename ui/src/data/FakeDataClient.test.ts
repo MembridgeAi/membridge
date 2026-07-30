@@ -34,6 +34,16 @@ describe('FakeDataClient', () => {
     for (const p of await new FakeDataClient().getProjects()) expect(p.dailyCounts).toHaveLength(7)
   })
 
+  // dailyCounts partitions the week's distinct sessions (lib/server.js
+  // dailySessionBuckets) -- the sparkline and the count beside it must never
+  // be able to contradict each other, including in fixture data.
+  it('sums dailyCounts to sessionsThisWeek for every project fixture', async () => {
+    for (const p of await new FakeDataClient().getProjects()) {
+      const sum = p.dailyCounts.reduce((a, b) => a + b, 0)
+      expect(sum).toBe(p.sessionsThisWeek)
+    }
+  })
+
   it('can report skeleton stats as unavailable', async () => {
     const i = await new FakeDataClient({ skeletonAvailable: false }).getInsights(30)
     expect(i.skeleton).toEqual({ available: false })
