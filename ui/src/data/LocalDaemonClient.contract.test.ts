@@ -28,6 +28,12 @@ const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
   // pending invites. Structurally blocked, not merely unwired.
   'getInvites',
   'inviteMember',
+  // pickPaths never has a daemon endpoint to attempt -- it is routed through
+  // the Electron IPC bridge (window.membridge, set by app/preload.js), not
+  // fetch, because the daemon is a separate process with no GUI to show a
+  // dialog from. There is nothing here for this test's "did it try a real
+  // request" check to observe.
+  'pickPaths',
 ])
 
 // One call per DataClient method, argument values chosen only to satisfy the
@@ -64,6 +70,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   openMemoryFile: c => c.openMemoryFile('/x'),
   leaveTeam: c => c.leaveTeam('team-1'),
   addProject: c => c.addProject('/x'),
+  pickPaths: c => c.pickPaths({ kind: 'file' }),
 }
 
 const MISSING_ENDPOINT_SENTINEL = /has no daemon endpoint yet/

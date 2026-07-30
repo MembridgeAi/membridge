@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { FormDialog } from '../../components/FormDialog'
-import { useSetSetting } from '../../data/queries'
+import { useDataClient } from '../../data/DataClientProvider'
+import { usePickPaths, useSetSetting } from '../../data/queries'
 import type { Settings } from '../../data/types'
-import { linesToList, listToLines } from './textList'
+import { linesToList, listToLines, mergeLines } from './textList'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
@@ -22,11 +23,27 @@ interface ContextFilesDialogProps {
  * DataClient.setSetting is single-key; if the first succeeds and the second
  * fails, the error still surfaces and the dialog stays open rather than
  * claiming full success.
+ *
+ * "Choose files" opens a real native Finder/Explorer dialog when the desktop
+ * app's Electron bridge is present (capabilities.filePicker) -- picked paths
+ * are merged into the textarea, not written straight to disk, so the reader
+ * can still edit or remove a line before Save. In a plain browser tab (the
+ * daemon serves this same UI at /app/ over vanilla http, with no Electron
+ * process behind it) there is no bridge to call, so the Browse button is
+ * left out entirely and the textarea's typed-path entry is the only path in.
  */
 export function ContextFilesDialog({ contextFiles, onClose }: ContextFilesDialogProps) {
   const [targetsText, setTargetsText] = useState(listToLines(contextFiles.targets))
   const [extraTargets, setExtraTargets] = useState(contextFiles.extraTargets)
   const setSetting = useSetSetting()
+  const pickPaths = usePickPaths()
+  const { capabilities } = useDataClient()
+
+  async function handleBrowse() {
+    const picked = await pickPaths.mutateAsync({ kind: 'file', multiple: true })
+    if (picked.length === 0) return // cancelled -- leave the list exactly as typed
+    setTargetsText(prev => mergeLines(prev, picked))
+  }
 
   async function handleSave() {
     try {
@@ -42,13 +59,21 @@ export function ContextFilesDialog({ contextFiles, onClose }: ContextFilesDialog
     <FormDialog titleId="context-files-title" title="Choose context files" wide>
       <label className="dialog-field">
         Always written
-        <div className="dialog-field-hint">One file per line, relative to each project's root.</div>
+        <div className="dialog-field-hint">
+          One file per line, relative to each project's root.
+          {!capabilities.filePicker && ' Open MemBridge.app for a Browse button — this browser tab can only take typed paths.'}
+        </div>
         <textarea
           className="dialog-textarea"
           value={targetsText}
           onChange={e => setTargetsText(e.target.value)}
           aria-label="Always-written context files"
         />
+        {capabilities.filePicker && (
+          <button type="button" className="dialog-btn" onClick={handleBrowse} disabled={pickPaths.isPending}>
+            Browse files…
+          </button>
+        )}
       </label>
       <div className="dialog-field">
         Also write when present

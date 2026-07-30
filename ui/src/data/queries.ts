@@ -326,3 +326,15 @@ export function useAddProject() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }) },
   })
 }
+
+// Native Finder/Explorer picker (the Electron bridge). No query cache to
+// invalidate here -- callers merge the returned paths into whatever local
+// form state they're editing themselves, same as typing them by hand would.
+// Callers must check capabilities.filePicker before invoking this; there is
+// no fallback path inside the client.
+export function usePickPaths() {
+  const c = useDataClient()
+  return useMutation({
+    mutationFn: (options: { kind: 'file' | 'folder'; multiple?: boolean }) => c.pickPaths(options),
+  })
+}

@@ -4,7 +4,7 @@
 // the CLI daemon — the app shell is just a face on it.
 const fs = require('fs');
 const path = require('path');
-const { app, Tray, Menu, BrowserWindow, nativeImage, dialog, shell } = require('electron');
+const { app, Tray, Menu, BrowserWindow, nativeImage, dialog, shell, ipcMain } = require('electron');
 
 // lib/ is copied into app/lib by scripts/prepare-app.js (packaged builds);
 // fall back to ../lib when running straight from the repo.
@@ -116,6 +116,17 @@ function openDashboard() {
     title: 'MemBridge',
     autoHideMenuBar: true,
     icon: nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png')),
+    webPreferences: {
+      // This window loads a normal web page from the daemon's own HTTP
+      // server (windowUrl() above) -- it is not trusted app code, so it
+      // gets no Node access. preload.js is the one narrow bridge (see
+      // PICK_PATHS_CHANNEL below): contextIsolation must stay on and
+      // nodeIntegration must stay off, or that page could reach Node/fs
+      // directly. Do not weaken either to "fix" a renderer-side issue.
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
   });
   win.loadURL(windowUrl());
   // Anything the dashboard opens as a popup (the GitHub sign-in round trip)
@@ -129,6 +140,26 @@ function openDashboard() {
     win = null;
   });
 }
+
+// The one capability preload.js exposes to the dashboard window: a native
+// "Open File"/"Open Folder" dialog. The daemon (a separate process with no
+// window of its own) cannot show this -- only the Electron main process can
+// -- which is the whole reason this bridge exists. Validates `kind` itself
+// rather than trusting the renderer, even though the renderer here is our
+// own UI: the point of the allowlist is that this handler can never be
+// turned into a general-purpose fs/dialog passthrough by a future caller.
+const PICK_PATHS_CHANNEL = 'membridge:pick-paths';
+ipcMain.handle(PICK_PATHS_CHANNEL, async (event, options) => {
+  const kind = options && options.kind;
+  if (kind !== 'file' && kind !== 'folder') {
+    throw new Error(`pickPaths: kind must be "file" or "folder", got ${JSON.stringify(kind)}`);
+  }
+  const properties = [kind === 'folder' ? 'openDirectory' : 'openFile'];
+  if (options.multiple) properties.push('multiSelections');
+  const ownerWindow = BrowserWindow.fromWebContents(event.sender) || undefined;
+  const result = await dialog.showOpenDialog(ownerWindow, { properties });
+  return result.canceled ? [] : result.filePaths;
+});
 
 // Check for a newer release. Best-effort and fail-silent. MemBridge has no
 // in-app auto-updater (that would need an Apple Developer signature), so we

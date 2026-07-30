@@ -11,6 +11,12 @@ export interface Capabilities {
   daemonControl: boolean   // restart, start-at-login, interval
   localPaths: boolean      // show filesystem paths, open files
   teamAdminSupported: boolean  // the transport exposes admin endpoints at all
+  // The Electron bridge (app/preload.js's window.membridge) is present, so
+  // pickPaths() can open a real native Finder/Explorer dialog. False when
+  // this UI is loaded in a plain browser tab (the daemon serves the same
+  // /app/ bundle there too) -- callers must fall back to manual path entry
+  // rather than rendering a picker button that silently does nothing.
+  filePicker: boolean
 }
 
 export interface DataClient {
@@ -67,4 +73,11 @@ export interface DataClient {
   openMemoryFile(projectPath: string): Promise<void>
   leaveTeam(teamId: string): Promise<void>
   addProject(path: string): Promise<void>
+
+  // Opens a native OS file/folder picker via the Electron bridge and
+  // resolves to the chosen absolute paths, or [] when the user cancels.
+  // Only call this when capabilities.filePicker is true -- there is no
+  // daemon-side fallback, so an unguarded call in a plain-browser session
+  // rejects.
+  pickPaths(options: { kind: 'file' | 'folder'; multiple?: boolean }): Promise<string[]>
 }

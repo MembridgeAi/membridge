@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
@@ -309,5 +309,111 @@ describe('SettingsPage', () => {
     const dialog = await screen.findByRole('dialog')
     await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
     expect(await screen.findByText(/context save rejected/i)).toBeInTheDocument()
+  })
+
+  // Native picker (Electron bridge) tests -- "Choosing files should open a
+  // finder/file explorer tab not a path." The picker itself lives behind
+  // DataClient.pickPaths; these prove the UI wires it correctly on both
+  // sides (present + absent) rather than assuming it.
+  describe('native file/folder picker', () => {
+    it('opens a native picker for context files when the desktop bridge is available, and merges the picked path into the list', async () => {
+      const client = new FakeDataClient({ pickPathsResult: ['/Users/x/membridge/EXTRA.md'] })
+      const pickSpy = vi.spyOn(client, 'pickPaths')
+      const setSpy = vi.spyOn(client, 'setSetting')
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-context-block')
+      await userEvent.click(within(row).getByRole('button', { name: /choose files/i }))
+      const dialog = await screen.findByRole('dialog')
+
+      await userEvent.click(within(dialog).getByRole('button', { name: /browse files/i }))
+      expect(pickSpy).toHaveBeenCalledWith({ kind: 'file', multiple: true })
+      await waitFor(() => {
+        expect(within(dialog).getByRole('textbox', { name: /always-written context files/i }))
+          .toHaveValue('CLAUDE.md\nAGENTS.md\n/Users/x/membridge/EXTRA.md')
+      })
+
+      await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+      expect(setSpy).toHaveBeenCalledWith('targets', ['CLAUDE.md', 'AGENTS.md', '/Users/x/membridge/EXTRA.md'])
+    })
+
+    it('falls back to typed text entry for context files when the desktop bridge is unavailable, with no dead Browse button', async () => {
+      const client = new FakeDataClient({ filePickerAvailable: false })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-context-block')
+      await userEvent.click(within(row).getByRole('button', { name: /choose files/i }))
+      const dialog = await screen.findByRole('dialog')
+
+      expect(within(dialog).queryByRole('button', { name: /browse/i })).toBeNull()
+      const textarea = within(dialog).getByRole('textbox', { name: /always-written context files/i })
+      await userEvent.type(textarea, '\nEXTRA.md')
+      expect(textarea).toHaveValue('CLAUDE.md\nAGENTS.md\nEXTRA.md')
+    })
+
+    it('leaves the context-files list unchanged when the native picker is cancelled', async () => {
+      const client = new FakeDataClient({ pickPathsResult: [] })
+      const setSpy = vi.spyOn(client, 'setSetting')
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-context-block')
+      await userEvent.click(within(row).getByRole('button', { name: /choose files/i }))
+      const dialog = await screen.findByRole('dialog')
+
+      await userEvent.click(within(dialog).getByRole('button', { name: /browse files/i }))
+      await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+      expect(setSpy).toHaveBeenCalledWith('targets', ['CLAUDE.md', 'AGENTS.md'])
+    })
+
+    it('opens a native folder picker for excluded folders when the desktop bridge is available, and merges the picked path', async () => {
+      const client = new FakeDataClient({ pickPathsResult: ['/Users/x/build'] })
+      const pickSpy = vi.spyOn(client, 'pickPaths')
+      const setSpy = vi.spyOn(client, 'setSetting')
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-excluded')
+      await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+      const dialog = await screen.findByRole('dialog')
+
+      await userEvent.click(within(dialog).getByRole('button', { name: /browse folders/i }))
+      expect(pickSpy).toHaveBeenCalledWith({ kind: 'folder', multiple: true })
+      await waitFor(() => {
+        expect(within(dialog).getByRole('textbox')).toHaveValue('node_modules\ndist\n.git\n/Users/x/build')
+      })
+
+      await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+      expect(setSpy).toHaveBeenCalledWith('exclude', ['node_modules', 'dist', '.git', '/Users/x/build'])
+    })
+
+    it('falls back to typed text entry for excluded folders when the desktop bridge is unavailable, with no dead Browse button', async () => {
+      const client = new FakeDataClient({ filePickerAvailable: false })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-excluded')
+      await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+      const dialog = await screen.findByRole('dialog')
+
+      expect(within(dialog).queryByRole('button', { name: /browse/i })).toBeNull()
+      expect(within(dialog).getByRole('textbox')).toBeInTheDocument()
+    })
+
+    it('leaves the excluded-folders list unchanged when the native picker is cancelled', async () => {
+      const client = new FakeDataClient({ pickPathsResult: [] })
+      const setSpy = vi.spyOn(client, 'setSetting')
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-excluded')
+      await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+      const dialog = await screen.findByRole('dialog')
+
+      await userEvent.click(within(dialog).getByRole('button', { name: /browse folders/i }))
+      await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+      expect(setSpy).toHaveBeenCalledWith('exclude', ['node_modules', 'dist', '.git'])
+    })
+
+    // Redaction patterns are regular expressions, not filesystem paths -- a
+    // folder/file dialog has nothing to offer here, so this dialog must
+    // never render a Browse button, even when the bridge is available.
+    it('never shows a Browse button on the redaction-patterns dialog', async () => {
+      renderApp({}, <SettingsPage />)
+      const row = await screen.findByTestId('setting-redaction')
+      await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).queryByRole('button', { name: /browse/i })).toBeNull()
+    })
   })
 })

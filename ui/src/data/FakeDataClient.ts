@@ -19,13 +19,26 @@ export interface FakeOptions {
   // -- tests that need to prove a guard reads the REAL viewerId, not a
   // hardcoded sentinel, pass a realistic id here (e.g. 'usr_9f2a').
   viewerId?: string
+  // Simulates window.membridge's presence (the Electron bridge). Defaults to
+  // true so most fixtures exercise the native-picker path; a test for the
+  // plain-browser fallback passes filePickerAvailable: false.
+  filePickerAvailable?: boolean
+  // What pickPaths() resolves to when the picker is available. Defaults to
+  // [] (the "user cancelled" case) so a test must opt in to a real
+  // selection rather than getting one by accident.
+  pickPathsResult?: string[]
 }
 
 export class FakeDataClient implements DataClient {
   readonly capabilities: Capabilities
   constructor(private opts: FakeOptions = {}) {
     // Transport support only — the viewer's role decides authorization.
-    this.capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
+    this.capabilities = {
+      daemonControl: true,
+      localPaths: true,
+      teamAdminSupported: true,
+      filePicker: opts.filePickerAvailable ?? true,
+    }
   }
   private guard<T>(value: T): Promise<T> {
     if (this.opts.failWith) return Promise.reject(new Error(this.opts.failWith))
@@ -215,4 +228,11 @@ export class FakeDataClient implements DataClient {
   openMemoryFile() { return this.guard<void>(undefined) }
   leaveTeam() { return this.guard<void>(undefined) }
   addProject() { return this.guard<void>(undefined) }
+
+  pickPaths() {
+    if (!this.capabilities.filePicker) {
+      return Promise.reject(new Error('pickPaths is unavailable: this window has no Electron bridge (window.membridge).'))
+    }
+    return this.guard<string[]>(this.opts.pickPathsResult ?? [])
+  }
 }

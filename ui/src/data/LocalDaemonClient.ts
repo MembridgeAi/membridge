@@ -17,6 +17,18 @@ import { ShortTtlCache } from './requestCache'
 
 export { syncStateOf }
 
+// app/preload.js's contextBridge.exposeInMainWorld('membridge', ...) is the
+// only thing that ever sets this -- a plain browser tab (the daemon serves
+// this same UI at /app/ over vanilla http) never has it, since there is no
+// Electron main process on the other end to answer the IPC call.
+declare global {
+  interface Window {
+    membridge?: {
+      pickPaths(options: { kind: 'file' | 'folder'; multiple?: boolean }): Promise<string[]>
+    }
+  }
+}
+
 const BASE = '' // same origin as the daemon
 const FEED_LIMIT = 100 // covers every tracked project's latest entry in one request
 const TEAM_FEED_LIMIT = 200 // team_feed RPC's hard cap (002_team_v2.sql:320)
@@ -46,7 +58,12 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
 const REQUEST_CACHE_TTL_MS = 5000
 
 export class LocalDaemonClient implements DataClient {
-  readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
+  readonly capabilities: Capabilities = {
+    daemonControl: true,
+    localPaths: true,
+    teamAdminSupported: true,
+    filePicker: typeof window !== 'undefined' && typeof window.membridge?.pickPaths === 'function',
+  }
 
   // The Today screen mounts useProjects() and useLiveSessions() together, and
   // useLiveSessions() polls every 10s on top -- both hit the SAME /api/feed
@@ -295,5 +312,17 @@ export class LocalDaemonClient implements DataClient {
 
   async addProject(path: string): Promise<void> {
     await post<{ path?: string; error?: string }>('/api/projects/add', { path })
+  }
+
+  // Routed through the Electron bridge, never the daemon -- the daemon is a
+  // separate process with no GUI to show a dialog from. Callers must check
+  // capabilities.filePicker first; this rejects rather than silently
+  // returning [] when the bridge is missing, so a caller that forgets the
+  // check fails loudly instead of reading "cancelled" for "unavailable".
+  pickPaths(options: { kind: 'file' | 'folder'; multiple?: boolean }): Promise<string[]> {
+    if (!window.membridge?.pickPaths) {
+      return Promise.reject(new Error('pickPaths is unavailable: this window has no Electron bridge (window.membridge).'))
+    }
+    return window.membridge.pickPaths(options)
   }
 }
