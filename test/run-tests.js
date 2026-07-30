@@ -14820,6 +14820,36 @@ async function main() {
       assert.ok(!arc.rows.some(r => r.summary === 'row0'), 'oldest row was not trimmed');
     });
 
+    // A held append lock is the NORMAL case, not an exotic failure: the CLI
+    // (`membridge team sync`) and the daemon tick both call syncTeams. Before
+    // this, appendRows reported the merged in-memory count regardless, so the
+    // backfill cursor advanced past rows that were never written to disk and
+    // the walk could even flip done:true having dropped a whole page.
+    check('team-archive: a skipped append reports null instead of claiming the rows landed', () => {
+      const pid = 'arc-lockskip';
+      const rows = [{ author: 'A', ts: '2026-02-01T00:00:00.000Z', source: 'Codex', summary: 'first' }];
+      assert.strictEqual(teamArchive.appendRows(pid, rows), 1, 'baseline append should land');
+
+      // Simulate the other process holding the lock for the whole append.
+      const lock = path.join(util.homeDir(), 'team-archive', 'arc-lockskip.lock');
+      fs.mkdirSync(path.dirname(lock), { recursive: true });
+      fs.writeFileSync(lock, '');
+      let out;
+      try {
+        out = teamArchive.appendRows(pid, [
+          { author: 'B', ts: '2026-02-02T00:00:00.000Z', source: 'Codex', summary: 'blocked' },
+        ]);
+      } finally {
+        fs.unlinkSync(lock);
+      }
+      assert.strictEqual(out, null, 'a skipped append must not report a row count');
+
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 1, 'the blocked row must not appear on disk');
+      assert.strictEqual(arc.rowCount === undefined ? 1 : arc.rowCount, 1,
+        'rowCount must not count a row the file does not contain');
+    });
+
     check('team-archive: setBackfill round-trips and survives appends', () => {
       const pid = 'arc-bf';
       teamArchive.setBackfill(pid, { done: false, beforeId: 42 });
