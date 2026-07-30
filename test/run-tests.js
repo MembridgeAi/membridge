@@ -18088,6 +18088,41 @@ async function main() {
       assert.strictEqual(called, false);
     });
 
+    // Regression: fetch resolves for 4xx/5xx and only rejects on transport
+    // failure, so an unchecked `await fetchImpl(...)` reported every refused
+    // POST as a successful send. This is the only success signal a
+    // fire-and-forget diagnostic has — if it lies, a collector rejecting every
+    // install looks identical to one accepting them.
+    await check('counters: an HTTP error is reported as a failed send, not a success', async () => {
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: () => Promise.resolve({ ok: false, status: 500 }),
+        now: 20_000_000,
+      });
+      assert.strictEqual(sent, false, 'a 500 must not be reported as sent');
+    });
+
+    await check('counters: a 2xx is still reported as sent', async () => {
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: () => Promise.resolve({ ok: true, status: 204 }),
+        now: 30_000_000,
+      });
+      assert.strictEqual(sent, true, 'a 204 is the worker\'s success response');
+    });
+
+    // The retry-suppression contract is deliberate and separate from the
+    // return value: a refused send must still record the attempt, or a down
+    // collector gets hammered by every install on the next 60s tick.
+    await check('counters: a refused send still records the attempt (no retry storm)', async () => {
+      const before = util.loadState().countersLastSent || null;
+      await counters.emitCounters({ projects: {} }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: () => Promise.resolve({ ok: false, status: 503 }),
+        now: 40_000_000,
+      });
+      const after = util.loadState().countersLastSent;
+      assert.ok(after, 'countersLastSent must be written even when the POST was refused');
+      assert.notDeepStrictEqual(after, before, 'the attempt was not recorded');
+    });
+
     await check('counters: the payload carries no path, project name or account', async () => {
       let body = null;
       await counters.emitCounters({ projects: { [ROOT]: {} } }, { countersUrl: 'http://127.0.0.1:1/x' }, {
