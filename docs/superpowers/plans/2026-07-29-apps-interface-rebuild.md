@@ -1117,7 +1117,29 @@ Matches `today-v15.html`.
 
 Layout requirements, exact:
 - Header: `Today`, the date, and right-aligned `Copy for AI` + `Sync now`.
-- Stat strip: live now / sessions today / updates shared / members synced. Solo shows three: live now / sessions today / repeat opens answered by memory.
+- Stat strip, and every value must be exactly what its label says:
+  - **live now** — count of live sessions (a session with no summary yet).
+  - **sessions today** — distinct sessions with an event today.
+  - **updates shared** — entries shared to the team today. **Count only entries on
+    SHARED projects** (`Project.shared`) that are themselves marked shared; a private
+    project's summary must never be counted into a team-labelled figure.
+  - **last team sync** — `status.teamLastSync` as a relative label, or `never`.
+    This replaces "members synced", which was unknowable: `team_members_list`
+    exposes no per-member sync state and a teammate's daemon is invisible from
+    this machine. Do not reintroduce a members-synced count.
+  Solo shows three: live now / sessions today / repeat opens answered by memory.
+- **`repeat opens answered by memory` must come from the real ledger**, not a proxy:
+  add `getSkeletonStats()` to `DataClient`, reading `/api/savings`
+  (`repeatOpens = reads.sameSession + reads.crossSession`, `answeredFirst =
+  avoided.serves`), returning the same `{available:false} | {available:true,…}`
+  union used by Insights. When unavailable the stat renders the word `pending` —
+  never a computed stand-in. Tokens only; never a dollar figure.
+- **No dead controls.** `Copy for AI` is NOT on Today: there is no whole-account
+  digest endpoint, only per-project `/api/projects/copy`, so the button belongs on
+  the project page only. A rendered button that silently no-ops is a defect, not a
+  deferral. (This is a deliberate, documented deviation from `today-v15.html`,
+  which shows the button in the Today header.)
+- Every stat that ships must be asserted numerically by a test, not just by label.
 - `HAPPENING NOW` section. Each entry is a 3-column grid (`auto 1fr auto`): column 1 the live dot + avatar; column 2 `<who> · <tool>` with the project name in mono after it; column 3 elapsed time in mono. The intent occupies column 2 of a second row — sharing the name's left edge — prefixed by a muted uppercase `INTENT` label. A 1px hairline separates consecutive entries.
 - `PROJECTS · THIS WEEK`. Each row: left column = name + shared/private tag + overlapping member avatars, then the latest summary beneath it, ellipsized on overflow. Right column, right-anchored: one line with `N sessions · last 7 days` (mono) and the sync state, and the sparkline on the line directly beneath, right-aligned.
 

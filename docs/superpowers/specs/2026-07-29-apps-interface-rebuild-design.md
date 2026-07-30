@@ -52,7 +52,7 @@ The team-first home. Answers "what happened, and is anything broken."
 
 | Region | Content | Source |
 | --- | --- | --- |
-| Stat strip | live now · sessions today · updates shared · members synced | `/api/status`, `/api/feed` |
+| Stat strip | live now · sessions today · updates shared · last team sync | `/api/status`, `/api/feed` |
 | Happening now | one row per running session: person, tool, project, elapsed, and the session's **intent** (its opening ask, verbatim and redacted) | live sessions from `/api/feed` |
 | Projects · this week | per project: name, shared/private, member avatars, latest summary; right-anchored metrics block with `N sessions · last 7 days` and sync state, activity sparkline directly beneath | `/api/projects` |
 
