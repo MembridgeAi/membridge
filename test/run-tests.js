@@ -10705,6 +10705,47 @@ async function main() {
     });
   }
 
+  // EOL-preserving injection (spec §9.1). inject() used to splice a hard-\n
+  // block into the file without checking what line endings were already
+  // there, so a CRLF CLAUDE.md on Windows ended up with mixed endings and a
+  // whole-file diff on every sync. lib/mcp-toml.js already solved this for
+  // TOML files; digest.js now does the same for the markdown targets.
+  {
+    const eolProj = path.join(ROOT, 'projects', 'eol-app');
+    fs.mkdirSync(eolProj, { recursive: true });
+
+    check('digest.inject matches an existing CRLF file: no bare LF leaks in', () => {
+      const target = path.join(eolProj, 'CRLF-CLAUDE.md');
+      fs.writeFileSync(target, '# Title\r\n\r\nSome existing prose.\r\n');
+      const block = [digest.BEGIN, '## Shared AI memory\nline one\nline two', digest.END].join('\n');
+      digest.inject(target, block);
+      const after = read(target);
+      assert.ok(!/(?<!\r)\n/.test(after), 'a bare LF leaked into a CRLF file: ' + JSON.stringify(after));
+      assert.ok(after.includes('\r\n'), 'file must still use CRLF');
+      assert.ok(after.includes(digest.BEGIN) && after.includes(digest.END), 'markers missing');
+    });
+
+    check('digest.inject matches an existing LF file: no CR is introduced', () => {
+      const target = path.join(eolProj, 'LF-CLAUDE.md');
+      fs.writeFileSync(target, '# Title\n\nSome existing prose.\n');
+      const block = [digest.BEGIN, '## Shared AI memory\nline one', digest.END].join('\n');
+      digest.inject(target, block);
+      const after = read(target);
+      assert.ok(!after.includes('\r'), 'an LF file must not gain a CR: ' + JSON.stringify(after));
+    });
+
+    check('digest.removeBlock matches an existing CRLF file: no bare LF leaks in', () => {
+      const target = path.join(eolProj, 'CRLF-REMOVE.md');
+      fs.writeFileSync(target, '# Title\r\n\r\nProse.\r\n');
+      const block = [digest.BEGIN, 'memory body', digest.END].join('\n');
+      digest.inject(target, block);
+      digest.removeBlock(target);
+      const after = read(target);
+      assert.ok(!/(?<!\r)\n/.test(after), 'a bare LF leaked into a CRLF file after removal: ' + JSON.stringify(after));
+      assert.ok(!after.includes(digest.BEGIN), 'marker still present after removal');
+    });
+  }
+
   // BUG 1 (fix/share-live-and-clamp): sharing a LIVE / never-pushed session.
   // reshareSession must refresh stale credentials like every other
   // authenticated call (it used raw loadCredentials, so an expired JWT made
