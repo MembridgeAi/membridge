@@ -213,6 +213,17 @@ function createMockSupabase() {
       if (p) p.archivedAt = null;
       return json(res, 200, null);
     }
+    // 025_project_access_default.sql: "new members join with access" toggle.
+    // Same manager gate as archive/unarchive, same security-definer shape.
+    if (fn === 'set_project_access_default') {
+      const teamId = projectTeam(body.p_project);
+      if (!isManager(teamId, userId)) {
+        return json(res, 403, { message: "only a team owner or admin can change this project's default access" });
+      }
+      const p = projects.find(x => x.id === body.p_project);
+      if (p) p.defaultAccess = !!body.p_default;
+      return json(res, 200, null);
+    }
     json(res, 404, { message: `unknown rpc ${fn}` });
   }
 
@@ -349,9 +360,18 @@ function createMockSupabase() {
         return json(res, 200, rows);
       }
       if (url.pathname === '/rest/v1/projects' && req.method === 'GET') {
-        // Auto-link fetch: RLS means only projects in the caller's teams.
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
+        const idEq = (url.searchParams.get('id') || '').replace(/^eq\./, '');
+        if (idEq) {
+          // 025_project_access_default.sql: single-project default_access
+          // lookup (lib/api-access.js readAccess). Same projects_select
+          // policy as the auto-link fetch below (is_team_member(team_id)).
+          const p = projects.find(x => x.id === idEq && isMember(x.teamId, userId));
+          if (!p) return json(res, 200, []);
+          return json(res, 200, [{ default_access: p.defaultAccess !== false }]);
+        }
+        // Auto-link fetch: RLS means only projects in the caller's teams.
         const rows = projects
           .filter(p => isMember(p.teamId, userId) && p.repoUrl)
           .map(p => ({ id: p.id, team_id: p.teamId, name: p.name, repo_url: p.repoUrl }));

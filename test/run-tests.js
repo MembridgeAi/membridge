@@ -70,9 +70,9 @@ const PORT_BASE = (() => {
   const start = 17900 + ((process.pid % 40) * 100);
   for (let i = 0; i < 40; i++) {
     const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
-    // 41 and 85 bracket the range actually used; a block free at both ends is
-    // in practice a free block.
-    if (free(base + 41) && free(base + 85)) return base;
+    // 41 and 92 bracket the range actually used (Task 17 pushed the high end
+    // from 85 to 92); a block free at both ends is in practice a free block.
+    if (free(base + 41) && free(base + 92)) return base;
   }
   return start; // nothing free anywhere: proceed and let the real bind report it
 })();
@@ -20398,6 +20398,346 @@ const repoRoot = require('../lib/repo-root');
       process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
       await new Promise(r => mockInsights.server.close(r));
     }
+  }
+
+  // ===== Task 17: backend for every control the mockups show =====
+  // viewerId + inviteCode on /api/team, and POST /api/project/access-default.
+  // Same self-contained two-identity shape as the Task 8/12 fixtures above
+  // (own mock backend, own ports, own homes) rather than reusing theirs —
+  // this is a fresh grant of authorization surface and should not depend on
+  // state an earlier test happened to leave behind.
+  {
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const mock17 = createMockSupabase();
+    const MOCK17_PORT = P(86);
+    const HOME_OWNER = path.join(ROOT, 'home-t17-owner');
+    const HOME_MEMBER = path.join(ROOT, 'home-t17-member');
+    const PORT_OWNER = P(87);
+    const PORT_MEMBER = P(88);
+    const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
+    const portFor = { owner: PORT_OWNER, member: PORT_MEMBER };
+    const PROJECT = path.join(ROOT, 'projects', 't17-app');
+
+    async function apiAs(role, method, pathname, body) {
+      process.env.MEMBRIDGE_HOME = homeFor[role];
+      const port = portFor[role];
+      const srv = startServer(port, { retries: 0 });
+      try {
+        await waitForHttp(`http://127.0.0.1:${port}/api/status`);
+        const res = method === 'GET' ? await fetch(`http://127.0.0.1:${port}${pathname}`)
+          : await post(`http://127.0.0.1:${port}${pathname}`, body);
+        return { status: res.status, body: await res.json().catch(() => null) };
+      } finally {
+        await new Promise(r => srv.close(r));
+      }
+    }
+
+    await new Promise(r => mock17.server.listen(MOCK17_PORT, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${MOCK17_PORT}`;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      fs.mkdirSync(PROJECT, { recursive: true });
+
+      process.env.MEMBRIDGE_HOME = HOME_OWNER;
+      util.ensureConfig();
+      const ownerCreds = await teamsync.signup(util.getConfig(), 't17-owner@test.dev', 'pw-t17o', 'Owner17');
+      const t17Team = await teamsync.createTeam(util.getConfig(), 'T17Co');
+      const stOwner = util.loadState();
+      stOwner.projects[PROJECT] = { events: [] };
+      util.saveState(stOwner);
+      await teamsync.linkProject(util.getConfig(), PROJECT, t17Team.team_id, 'T17Co');
+
+      process.env.MEMBRIDGE_HOME = HOME_MEMBER;
+      util.ensureConfig();
+      const memberCreds = await teamsync.signup(util.getConfig(), 't17-member@test.dev', 'pw-t17m', 'Member17');
+      await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
+
+      await check('GET /api/team reports viewerId as the caller\'s own user id, not the literal "me"', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team');
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.body.viewerId, ownerCreds.userId);
+        assert.notStrictEqual(res.body.viewerId, 'me');
+      });
+
+      await check('GET /api/team viewerId differs per identity, so the self-revoke guard actually protects the viewer', async () => {
+        const res = await apiAs('member', 'GET', '/api/team');
+        assert.strictEqual(res.body.viewerId, memberCreds.userId);
+        assert.notStrictEqual(res.body.viewerId, ownerCreds.userId);
+      });
+
+      await check('GET /api/team reports the CURRENT invite code without rotating it on read', async () => {
+        const res1 = await apiAs('owner', 'GET', '/api/team');
+        assert.strictEqual(res1.body.inviteCode, t17Team.invite_code);
+        const res2 = await apiAs('owner', 'GET', '/api/team');
+        assert.strictEqual(res2.body.inviteCode, t17Team.invite_code, 'a plain read must never rotate the code');
+      });
+
+      await check('GET /api/project/access reports the project\'s default_access (true by default)', async () => {
+        const res = await apiAs('owner', 'GET', `/api/project/access?path=${encodeURIComponent(PROJECT)}`);
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.body.defaultAccess, true);
+      });
+
+      await check('POST /api/project/access-default is refused for a member role', async () => {
+        const res = await apiAs('member', 'POST', '/api/project/access-default', { path: PROJECT, defaultAccess: false });
+        assert.strictEqual(res.status, 403);
+        assert.strictEqual(mock17.projects.find(p => p.name === 't17-app').defaultAccess, undefined,
+          'a refused write must never reach the backend');
+      });
+
+      await check('POST /api/project/access-default (owner) persists the flag and writes an audit row', async () => {
+        const before = (await apiAs('owner', 'GET', '/api/team/audit')).body.events.length;
+        const write = await apiAs('owner', 'POST', '/api/project/access-default', { path: PROJECT, defaultAccess: false });
+        assert.strictEqual(write.status, 200);
+        assert.strictEqual(write.body.defaultAccess, false);
+        const read = await apiAs('owner', 'GET', `/api/project/access?path=${encodeURIComponent(PROJECT)}`);
+        assert.strictEqual(read.body.defaultAccess, false, 'the write must be readable back');
+        const after = (await apiAs('owner', 'GET', '/api/team/audit')).body.events;
+        assert.strictEqual(after.length, before + 1);
+        assert.strictEqual(after[0].action, 'access-default-revoked');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+      await new Promise(r => mock17.server.close(r));
+    }
+  }
+
+  // Settings round-trip (startAtLogin, daemonPort, updateAvailable,
+  // redactExtra, exclude) + on-demand update check + POST /api/open. All
+  // solo/local — no team backend needed. autostart.enable/disable/isEnabled
+  // and update-check.check are called via their module objects in
+  // lib/server.js specifically so tests can substitute them here: this suite
+  // must never register a real OS login item or make a real network call
+  // (see the "ABSOLUTE RULE against any test touching the real network"
+  // above the diagnostics fetchImpl fixtures).
+  {
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const HOME_T17 = path.join(ROOT, 'home-t17-local');
+    const T17_PORT = P(89);
+    process.env.MEMBRIDGE_HOME = HOME_T17;
+    util.ensureConfig();
+    const autostartLib = require('../lib/autostart');
+    const updateCheckLib = require('../lib/update-check');
+    const apiMachineLib = require('../lib/api-machine');
+    const srv17 = startServer(T17_PORT, { retries: 0 });
+    try {
+      await waitForHttp(`http://127.0.0.1:${T17_PORT}/api/status`);
+
+      await check('GET /api/settings reports the daemon\'s actually-bound port', async () => {
+        const body = await httpGet(T17_PORT, '/api/settings');
+        assert.strictEqual(body.daemonPort, T17_PORT);
+      });
+
+      await check('GET /api/settings startAtLogin reflects autostart.isEnabled()', async () => {
+        const origIsEnabled = autostartLib.isEnabled;
+        autostartLib.isEnabled = () => true;
+        try {
+          const body = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(body.startAtLogin, true);
+        } finally {
+          autostartLib.isEnabled = origIsEnabled;
+        }
+      });
+
+      await check('POST /api/settings startAtLogin writes through autostart.enable()/disable(), never a real login item', async () => {
+        const origEnable = autostartLib.enable;
+        const origDisable = autostartLib.disable;
+        let enableCalls = 0, disableCalls = 0;
+        autostartLib.enable = () => { enableCalls++; return 'stubbed enable'; };
+        autostartLib.disable = () => { disableCalls++; return 'stubbed disable'; };
+        try {
+          const on = await httpPost(T17_PORT, '/api/settings', { startAtLogin: true });
+          assert.strictEqual(enableCalls, 1, `enable() must be called; response was ${JSON.stringify(on)}`);
+          assert.strictEqual(disableCalls, 0);
+          const off = await httpPost(T17_PORT, '/api/settings', { startAtLogin: false });
+          assert.strictEqual(disableCalls, 1, `disable() must be called; response was ${JSON.stringify(off)}`);
+        } finally {
+          autostartLib.enable = origEnable;
+          autostartLib.disable = origDisable;
+        }
+      });
+
+      await check('POST /api/settings rejects a malformed redactExtra without applying any other field in the same body', async () => {
+        const before = util.getConfig().intervalSec;
+        const res = await post(`http://127.0.0.1:${T17_PORT}/api/settings`, { redactExtra: 'not-an-array', intervalSec: before + 111 });
+        assert.strictEqual(res.status, 400);
+        const body = await res.json();
+        assert.ok(body.error);
+        assert.strictEqual(util.getConfig().intervalSec, before, 'a rejected write must not partially apply');
+      });
+
+      await check('POST /api/settings redactExtra/exclude round-trip through GET /api/settings', async () => {
+        const write = await httpPost(T17_PORT, '/api/settings', {
+          redactExtra: ['sk-[a-z0-9]+', ' ', ''],
+          exclude: ['/tmp/scratch-project', ''],
+        });
+        assert.ok(!write.error, `write failed: ${JSON.stringify(write)}`);
+        const body = await httpGet(T17_PORT, '/api/settings');
+        assert.deepStrictEqual(body.redactExtra, ['sk-[a-z0-9]+']);
+        assert.deepStrictEqual(body.exclude, ['/tmp/scratch-project']);
+      });
+
+      await check('GET /api/settings updateAvailable is cache-only and never triggers a network fetch', async () => {
+        fs.writeFileSync(updateCheckLib.cachePath(), JSON.stringify({ latest: '99.0.0', checkedAt: Date.now() }));
+        const body = await httpGet(T17_PORT, '/api/settings');
+        assert.strictEqual(body.updateAvailable, '99.0.0');
+      });
+
+      await check('POST /api/updates/check runs an on-demand (forced) check and reports the result', async () => {
+        const origCheck = updateCheckLib.check;
+        let sawForce = false;
+        updateCheckLib.check = async opts => { sawForce = !!(opts && opts.force); return { current: '0.1.0', latest: '0.9.0', updateAvailable: true }; };
+        try {
+          const body = await httpPost(T17_PORT, '/api/updates/check', {});
+          assert.strictEqual(body.updateAvailable, '0.9.0');
+          assert.strictEqual(body.latest, '0.9.0');
+          assert.ok(sawForce, 'on-demand check must force past the 6h cache TTL');
+        } finally {
+          updateCheckLib.check = origCheck;
+        }
+      });
+
+      // ---- POST /api/open ----
+      const OPEN_PROJECT = path.join(ROOT, 'projects', 't17-open-app');
+      const OPEN_ESCAPE_PROJECT = path.join(ROOT, 'projects', 't17-escape-app');
+      const EVIL_DIR = path.join(ROOT, 't17-evil-outside');
+      fs.mkdirSync(path.join(OPEN_PROJECT, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(OPEN_PROJECT, '.membridge', 'memory.md'), '# memory\n');
+      fs.mkdirSync(OPEN_ESCAPE_PROJECT, { recursive: true });
+      fs.mkdirSync(EVIL_DIR, { recursive: true });
+      fs.writeFileSync(path.join(EVIL_DIR, 'memory.md'), 'stolen\n');
+      {
+        const st = util.loadState();
+        st.projects[OPEN_PROJECT] = { events: [] };
+        st.projects[OPEN_ESCAPE_PROJECT] = { events: [] };
+        util.saveState(st);
+      }
+
+      const withSpawnStub = async fn => {
+        const origSpawnImpl = apiMachineLib.defaultOpenDeps.spawnImpl;
+        const calls = [];
+        apiMachineLib.defaultOpenDeps.spawnImpl = (...args) => { calls.push(args); return { status: 0 }; };
+        try {
+          await fn(calls);
+        } finally {
+          apiMachineLib.defaultOpenDeps.spawnImpl = origSpawnImpl;
+        }
+      };
+
+      await check('POST /api/open kind=config opens the config file (happy path)', async () => {
+        await withSpawnStub(async calls => {
+          const body = await httpPost(T17_PORT, '/api/open', { kind: 'config' });
+          assert.strictEqual(body.ok, true, `response was ${JSON.stringify(body)}`);
+          assert.strictEqual(calls.length, 1, 'the OS file manager must be invoked exactly once');
+        });
+      });
+
+      await check('POST /api/open kind=project opens the tracked project\'s own folder (happy path)', async () => {
+        await withSpawnStub(async calls => {
+          const body = await httpPost(T17_PORT, '/api/open', { kind: 'project', path: OPEN_PROJECT });
+          assert.strictEqual(body.ok, true, `response was ${JSON.stringify(body)}`);
+          assert.strictEqual(calls.length, 1);
+        });
+      });
+
+      await check('POST /api/open kind=memory opens the project\'s memory.md (happy path)', async () => {
+        await withSpawnStub(async calls => {
+          const body = await httpPost(T17_PORT, '/api/open', { kind: 'memory', path: OPEN_PROJECT });
+          assert.strictEqual(body.ok, true, `response was ${JSON.stringify(body)}`);
+          assert.strictEqual(calls.length, 1);
+        });
+      });
+
+      await check('POST /api/open rejects an invalid kind', async () => {
+        const res = await post(`http://127.0.0.1:${T17_PORT}/api/open`, { kind: 'etc-passwd' });
+        assert.strictEqual(res.status, 400);
+      });
+
+      await check('POST /api/open rejects a traversal attempt (../../etc/passwd)', async () => {
+        await withSpawnStub(async calls => {
+          const res = await post(`http://127.0.0.1:${T17_PORT}/api/open`, { kind: 'project', path: '../../etc/passwd' });
+          assert.strictEqual(res.status, 400);
+          assert.strictEqual(calls.length, 0, 'the OS file manager must never be invoked for a rejected request');
+        });
+      });
+
+      await check('POST /api/open rejects a path outside every tracked project', async () => {
+        await withSpawnStub(async calls => {
+          const outside = path.join(ROOT, 'projects', 't17-never-tracked');
+          fs.mkdirSync(outside, { recursive: true }); // real directory, just never added to state.projects
+          const res = await post(`http://127.0.0.1:${T17_PORT}/api/open`, { kind: 'project', path: outside });
+          assert.strictEqual(res.status, 400);
+          assert.strictEqual(calls.length, 0);
+        });
+      });
+
+      let symlinkSupported = true;
+      try {
+        fs.symlinkSync(EVIL_DIR, path.join(OPEN_ESCAPE_PROJECT, '.membridge'), 'dir');
+      } catch {
+        symlinkSupported = false;
+      }
+      if (symlinkSupported) {
+        await check('POST /api/open rejects a symlink inside a tracked project that resolves outside it', async () => {
+          await withSpawnStub(async calls => {
+            const res = await post(`http://127.0.0.1:${T17_PORT}/api/open`, { kind: 'memory', path: OPEN_ESCAPE_PROJECT });
+            assert.strictEqual(res.status, 400);
+            const body = await res.json();
+            assert.ok(/escapes/.test(body.error || ''), `expected an escape rejection, got: ${JSON.stringify(body)}`);
+            assert.strictEqual(calls.length, 0, 'the OS file manager must never be invoked for a rejected request');
+          });
+        });
+      } else {
+        console.log('  skip  POST /api/open symlink-escape test (symlinkSync unsupported on this platform/permissions)');
+      }
+    } finally {
+      await new Promise(r => srv17.close(r));
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+    }
+  }
+
+  // POST /api/daemon/restart: a real daemon, restarted for real, via the
+  // same spawnSync-a-subprocess pattern the "CLI start/stop lifecycle" test
+  // above already uses (not mocked — this is exactly the process-lifecycle
+  // behavior that needs proving end to end: the HTTP response must land
+  // BEFORE the old process exits, and a NEW process must actually take over).
+  {
+    const HOME_RESTART = path.join(ROOT, 'home-t17-restart');
+    const RESTART_PORT = P(90);
+    fs.mkdirSync(HOME_RESTART, { recursive: true });
+    const env = { ...process.env, MEMBRIDGE_HOME: HOME_RESTART, MEMBRIDGE_PORT: String(RESTART_PORT) };
+    const pidFile = path.join(HOME_RESTART, 'membridge.pid');
+    spawnSync(process.execPath, [BIN, 'start'], { env, encoding: 'utf8' });
+    await waitForHttp(`http://127.0.0.1:${RESTART_PORT}/api/status`);
+    const pidBefore = fs.readFileSync(pidFile, 'utf8').trim();
+
+    const t0 = Date.now();
+    const restartRes = await fetch(`http://127.0.0.1:${RESTART_PORT}/api/daemon/restart`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    });
+    const restartBody = await restartRes.json().catch(() => null);
+    const respondMs = Date.now() - t0;
+
+    let pidAfter = pidBefore;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      try { pidAfter = fs.readFileSync(pidFile, 'utf8').trim(); } catch {}
+      if (pidAfter !== pidBefore) break;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    const backUp = await waitForHttp(`http://127.0.0.1:${RESTART_PORT}/api/status`).then(() => true).catch(() => false);
+
+    check('POST /api/daemon/restart responds success before the process exits, then a new daemon takes over', () => {
+      assert.strictEqual(restartRes.status, 200, `restart endpoint said: ${JSON.stringify(restartBody)}`);
+      assert.ok(restartBody && restartBody.ok, 'restart response must report ok');
+      assert.ok(respondMs < 2000, `the HTTP response must return promptly, not after the restart completed (took ${respondMs}ms)`);
+      assert.notStrictEqual(pidAfter, pidBefore, 'a new daemon process must take over (pid must change)');
+      assert.ok(backUp, 'the dashboard must come back up on the same port after the restart');
+    });
+
+    spawnSync(process.execPath, [BIN, 'stop'], { env, encoding: 'utf8' });
   }
 
   // --- summary ---
