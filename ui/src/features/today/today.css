@@ -140,6 +140,13 @@
   color: var(--text3);
   font-size: 10.5px;
 }
+/* Without its own spacing this sat flush against the project name and read as
+   one token ("Membridge4 sessions"). */
+.live-entry-session-count {
+  margin-left: 8px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
 .live-entry-elapsed {
   padding-top: 2px;
   color: var(--text3);
