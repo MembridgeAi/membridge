@@ -1,5 +1,6 @@
 import { Route, Switch } from 'wouter'
 import { Placeholder } from '../components/Placeholder'
+import { TodayPage } from '../features/today/TodayPage'
 import { Shell } from './Shell'
 import { ROUTES } from './routes'
 
@@ -10,7 +11,7 @@ export function App() {
   return (
     <Shell>
       <Switch>
-        <Route path={ROUTES.today}><Placeholder title="Today" /></Route>
+        <Route path={ROUTES.today}><TodayPage /></Route>
         <Route path={ROUTES.feed}><Placeholder title="Feed" /></Route>
         <Route path={ROUTES.projects}><Placeholder title="Projects" /></Route>
         <Route path={ROUTES.project}>

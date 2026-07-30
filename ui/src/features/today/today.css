@@ -1,0 +1,221 @@
+/* Today page — imported once from TodayPage.tsx (not main.tsx, per the
+ * per-feature CSS precedent set by components.css/app.css). Same rules:
+ * one --r radius everywhere except avatars (circles), no shadows, no
+ * gradients, hover changes background/border only. */
+
+.today-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.today-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.today-title {
+  font-size: 14px;
+  margin: 0;
+}
+.today-date {
+  display: block;
+  margin-top: 2px;
+  color: var(--text3);
+  font-size: 11px;
+}
+.today-header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.today-btn {
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.today-btn-ghost:hover {
+  background: var(--panel2);
+}
+.today-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.today-btn-primary:hover {
+  background: var(--accent2);
+  border-color: var(--accent2);
+}
+
+.section-label {
+  padding: 12px 16px 6px;
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.today-empty-note {
+  margin: 0;
+  padding: 8px 16px 14px;
+  color: var(--text3);
+}
+
+/* Happening now — a 3-column grid (dot+avatar / who+tool+project / elapsed),
+ * the intent on its own row sharing the name's left edge (grid-column: 2). */
+.live-list {
+  border-bottom: 1px solid var(--line);
+}
+.live-entry {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 10px;
+  padding: 8px 16px;
+  align-items: start;
+}
+.live-entry + .live-entry {
+  border-top: 1px solid var(--line);
+}
+.live-entry-avatar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 1px;
+}
+.live-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: var(--r);
+  background: var(--green);
+}
+.live-entry-name-cell {
+  min-width: 0;
+}
+.live-entry-who {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.live-entry-project {
+  margin-left: 8px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.live-entry-elapsed {
+  padding-top: 2px;
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.live-entry-intent {
+  grid-column: 2;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--text2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-entry-intent-label {
+  margin-right: 6px;
+  color: var(--text3);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Projects · this week — left: name/tag/avatars + summary. Right: a
+ * right-anchored metric+sync line with the sparkline directly beneath it. */
+.project-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.project-row:last-child {
+  border-bottom: none;
+}
+.project-left {
+  flex: 1;
+  min-width: 0;
+}
+.project-left-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.project-name {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  background: var(--panel2);
+  color: var(--text2);
+}
+.tag-team {
+  background: var(--accent-dim);
+  color: var(--accent2);
+}
+.tag-private {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+.project-faces {
+  display: flex;
+  flex-shrink: 0;
+}
+.project-faces .avatar {
+  margin-left: -5px;
+  border: 1.5px solid var(--bg);
+}
+.project-faces .avatar:first-child {
+  margin-left: 0;
+}
+.project-summary {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-summary-by {
+  color: var(--text3);
+}
+.project-right {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+.project-metric-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.project-metric {
+  color: var(--text2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.today-error {
+  margin: 12px 16px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
