@@ -12,6 +12,19 @@ describe('FakeDataClient', () => {
     expect(new FakeDataClient({ role: 'member' }).capabilities.teamAdmin).toBe(false)
   })
 
+  it('reports team admin capability by default and for an admin role', async () => {
+    const byDefault = new FakeDataClient()
+    expect(byDefault.capabilities.teamAdmin).toBe(true)
+    expect(new FakeDataClient({ role: 'admin' }).capabilities.teamAdmin).toBe(true)
+    expect((await byDefault.getSettings()).team).toEqual({ name: 'MemBridge HQ', role: 'owner', memberCount: 3 })
+  })
+
+  it('gives the self member a role matching the constructed role', async () => {
+    const members = await new FakeDataClient({ role: 'member' }).getMembers()
+    expect(members.find(m => m.id === 'me')?.role).toBe('member')
+    expect((await new FakeDataClient().getMembers()).find(m => m.id === 'me')?.role).toBe('owner')
+  })
+
   it('exposes a behind project with its last sync date', async () => {
     const behind = (await new FakeDataClient().getProjects()).find(p => p.sync.state === 'behind')
     expect(behind?.sync).toEqual({ state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' })

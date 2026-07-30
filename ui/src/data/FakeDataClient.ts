@@ -84,7 +84,7 @@ export class FakeDataClient implements DataClient {
   }
   getMembers() {
     return this.guard<Member[]>([
-      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: 'owner', projectCount: 3, sync: { state: 'up-to-date' }, keyVerified: true, syncDetail: null },
+      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', projectCount: 3, sync: { state: 'up-to-date' }, keyVerified: true, syncDetail: null },
       { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', projectCount: 1, sync: { state: 'paused' }, keyVerified: true, syncDetail: 'token expired' },
     ])
   }
