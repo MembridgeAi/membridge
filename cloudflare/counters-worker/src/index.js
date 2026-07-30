@@ -21,15 +21,18 @@
  * dashboard rather than to the sender.
  */
 
-// Must stay in sync with lib/counters.js. Anything outside these sets is
-// dropped rather than stored: a fixed allowlist is what stops an unexpected
-// value (a path, a branch name, a stray identifier) from ever landing in the
-// dataset, however the client changes.
-const COUNTER_NAMES = new Set(['heartbeat', 'recall_state', 'hook_registration', 'environment']);
+// Must stay in sync with lib/counters.js -- including MCP_TOOLS there, which
+// is the source of the `tool` set below (lib/mcp-usage.js's presence tally
+// of the six read-only MCP tools). Anything outside these sets is dropped
+// rather than stored: a fixed allowlist is what stops an unexpected value (a
+// path, a branch name, a stray identifier) from ever landing in the dataset,
+// however the client changes.
+const COUNTER_NAMES = new Set(['heartbeat', 'recall_state', 'hook_registration', 'environment', 'mcp_tool_used']);
 const DIM_VALUES = {
   state: new Set(['serving', 'no_hot_paths', 'empty_store', 'all_rejected', 'ready_unserved']),
   shape: new Set(['single', 'worktree', 'mixed', 'none']),
   result: new Set(['wrote', 'current', 'failed']),
+  tool: new Set(['get_project_memory', 'get_recent_activity', 'list_projects', 'recall', 'search_memory', 'why']),
 };
 
 const MAX_BODY_BYTES = 2048;   // a valid payload is ~200 bytes

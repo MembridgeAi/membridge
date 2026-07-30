@@ -14133,6 +14133,14 @@ async function main() {
     });
   }
 
+  {
+    check('mcp: every tool handler records usage through the tally', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(src.includes("require('./mcp-usage')"), 'mcp-usage not wired');
+      assert.ok((src.match(/recordToolUse\(/g) || []).length >= 1, 'no recordToolUse call');
+    });
+  }
+
   // --- 15. Provenance (lib/provenance.js): `membridge why <file>` ---
   // File-level only: which sessions edited a file, newest first. Event
   // fixtures are passed as plain proj objects (same planting style as the
@@ -17062,6 +17070,43 @@ async function main() {
       assert.ok(!body.includes('/'), 'no path-like value may appear in the payload');
       const parsed = JSON.parse(body);
       assert.deepStrictEqual(Object.keys(parsed).sort(), ['counters', 'install_id', 'version']);
+    });
+
+    check('counters: mcp_tool_used rides buildCounters, one per used tool, allowlisted', () => {
+      const built = counters.buildCounters({ mcpToolsUsed: ['search_memory', 'why', 'not_a_tool'] });
+      const mcp = built.filter(c => c.name === 'mcp_tool_used');
+      assert.deepStrictEqual(mcp.map(c => c.dims.tool).sort(), ['search_memory', 'why'],
+        'unknown tool leaked or a known one dropped');
+      assert.ok(counters.signatureOf(built).includes('search_memory'),
+        'usage change must change the signature so it actually sends');
+    });
+
+    check('counters: worker allowlist mirrors the client (drift check)', () => {
+      const worker = fs.readFileSync(path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js'), 'utf8');
+      assert.ok(worker.includes("'mcp_tool_used'"), 'worker COUNTER_NAMES missing mcp_tool_used');
+      for (const t of counters.MCP_TOOLS) {
+        assert.ok(worker.includes(`'${t}'`), `worker DIM_VALUES missing tool ${t}`);
+      }
+    });
+
+    check('mcp-usage: records within the allowlist, honors the kill switch, reads back a 24h window', () => {
+      // Its own MEMBRIDGE_HOME: section 14 above exercises the real MCP tools
+      // through registerTools()'s tracked() wrapper, which writes this same
+      // tally file under the shared test home. Isolating the path here is
+      // what makes the assertion below exact rather than order-dependent.
+      const mcpUsage = require('../lib/mcp-usage');
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'mcp-usage-home');
+      try {
+        const now = Date.now();
+        mcpUsage.recordToolUse('search_memory', { config: {}, now });
+        mcpUsage.recordToolUse('why', { config: {}, now: now - 25 * 3600000 });      // stale
+        mcpUsage.recordToolUse('not_a_tool', { config: {}, now });                    // rejected
+        mcpUsage.recordToolUse('recall', { config: { diagnostics: { enabled: false } }, now }); // killed
+        assert.deepStrictEqual(mcpUsage.toolsUsedWithin(24 * 3600000, { now }), ['search_memory']);
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
     });
   }
 

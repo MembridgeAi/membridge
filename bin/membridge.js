@@ -173,7 +173,11 @@ function cmdDaemon() {
   const countersTick = () => {
     if (countersBusy) return;
     countersBusy = true;
-    counters.emitCounters(util.loadState(), util.getConfig(), { registration })
+    // The MCP process itself never calls out to the network (lib/mcp.js) —
+    // it only tallies locally (lib/mcp-usage.js). This daemon reads that
+    // tally on its own existing cadence and folds it into the same payload.
+    const mcpToolsUsed = require('../lib/mcp-usage').toolsUsedWithin(24 * 3600000, {});
+    counters.emitCounters(util.loadState(), util.getConfig(), { registration, mcpToolsUsed })
       .catch(err => util.log(`counters error: ${err && err.message}`))
       .finally(() => { countersBusy = false; });
   };
