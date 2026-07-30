@@ -13551,6 +13551,16 @@ async function main() {
         'secret leaked into recent activity');
     });
 
+    const { data: recent2 } = await callJson('get_recent_activity', { limit: 20 });
+    check('mcp: deferred git derivation never leaks _highlights into a response', () => {
+      assert.ok(!JSON.stringify(recent2).includes('_highlights'), '_highlights leaked');
+    });
+    check('mcp: buildEntries on the MCP path defers git-change derivation', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      assert.ok(src.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
+      assert.ok(src.includes('deriveEntryChanges'), 'no derive-for-survivors pass');
+    });
+
     check('mcp: team rows carry session/goal/decisions/gotchas/headline through to activity', () => {
       const priya = recent.entries.find(e => e.author === 'Priya');
       assert.strictEqual(priya.session, 'p1', 'session dropped');
