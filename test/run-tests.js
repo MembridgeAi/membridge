@@ -16421,6 +16421,58 @@ async function main() {
       assert.strictEqual(calls, 0, 'diagnostics.enabled:false must suppress the network send');
     });
 
+    // The kill switch must not depend on endpoint resolution: with NO
+    // diagnosticsUrl in config the compiled-in default is live, so if the gate
+    // ever moved below the url check this would start POSTing to the real
+    // backend during the test run.
+    await check('diagnostics: the kill switch suppresses the send even with the compiled-in default live', async () => {
+      const diagProjK = path.join(ROOT, 'projects', 'diag-unit-proj-killswitch-default');
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      const cfg = { ...util.getConfig(), diagnostics: { enabled: false } };
+      delete cfg.diagnosticsUrl;
+      assert.ok(diagnosticsLib.diagnosticsUrl(cfg), 'precondition: the compiled-in default must be non-empty here');
+      const fired = diagnosticsLib.checkNetNegative(diagProjK, negLedger, cfg, { fetchImpl });
+      assert.strictEqual(fired, true);
+      assert.strictEqual(calls, 0);
+    });
+
+    // Same truthiness bug counters had, on the path that carries the RICH
+    // payload: `||` cannot tell an absent diagnosticsUrl from a deliberately
+    // emptied one, so an explicit opt-out fell through to the URL derived from
+    // lib/backend.json -- which ships a real Supabase project.
+    await check('diagnostics: an explicit blank diagnosticsUrl never sends', async () => {
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return { ok: true }; };
+      assert.strictEqual(await diagnosticsLib.sendDiagnostic({ x: 1 }, { diagnosticsUrl: '' }, { fetchImpl }), false);
+      assert.strictEqual(await diagnosticsLib.sendDiagnostic({ x: 1 }, { diagnosticsUrl: '   ' }, { fetchImpl }), false);
+      assert.strictEqual(calls, 0, 'a blank or whitespace-only endpoint must never reach the network');
+    });
+
+    check('diagnostics: an explicit blank endpoint outranks the compiled-in default', () => {
+      const baked = 'https://baked.example.test';
+      const derived = `${baked}/functions/v1/diagnostics`;
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({ diagnosticsUrl: '' }, baked), '');
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({ diagnosticsUrl: ' \t ' }, baked), '');
+      // An ABSENT key is not an opt-out: MemBridge's own builds keep the default.
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({}, baked), derived);
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl(null, baked), derived);
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({ diagnosticsUrl: 'http://x/d' }, baked), 'http://x/d');
+      // a trailing slash on the baked root must not double up
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({}, `${baked}/`), derived);
+    });
+
+    check('diagnostics: an empty or missing url in backend.json means never send', () => {
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({}, ''), '');
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({}, '   '), '');
+      // a backend.json with no "url" key at all yields a non-string
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({}, null), '');
+      // ...while the backend this release ships with still resolves, so a
+      // MemBridge build keeps reporting.
+      const shipped = String(require('../lib/backend.json').url || '').replace(/\/+$/, '');
+      assert.strictEqual(diagnosticsLib.diagnosticsUrl({}), `${shipped}/functions/v1/diagnostics`);
+    });
+
     check('diagnostics: payload has exactly the allowed keys, tracks the ledger figures, and leaks no path/project-identifying strings', () => {
       recallStoreLib.put(diagProjA, 'src/app.ts', { contentHash: 'h1', skeleton: 'x', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
       recallStoreLib.put(diagProjA, 'db/schema.sql', { contentHash: 'h2', skeleton: 'y', skeletonTokens: 10, fileTokens: 100, engine: 'strip', rejections: 0 });
