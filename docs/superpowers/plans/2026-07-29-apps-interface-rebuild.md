@@ -1877,3 +1877,89 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Type consistency.** `SyncState` is the discriminated union from Task 3 and is consumed unchanged in Tasks 5, 7, 9, 10. `Insights.skeleton` is `{available:false} | {available:true,...}` in Task 3, produced by Task 12, consumed by Task 13. `AccessMatrix` is defined in Task 3, produced by Task 8's endpoint, consumed in Task 10. `severityOf` is exported from `lib/api-insights.js` in Task 12 and tested there only.
 
 **Known deviation from the spec, resolved:** spec §9.2 says skeleton stats are blocked on the unmerged recall ledger. They are not — `savingsPayload()` (`lib/server.js:298`) already computes `reads.sameSession`, `reads.crossSession`, and `avoided.serves`. Task 12 uses those and keeps the `{available:false}` path for installs whose ledger is empty.
+
+---
+
+### Task 17: Backend for every control the mockups show
+
+Tasks 9-14 omitted mockup controls that had no backing method, rather than shipping
+no-ops. Marco wants all of them real. This task adds only what is missing; several
+already exist and just need surfacing.
+
+**Already present — do NOT rebuild, wire in Task 18:** `/api/team/leave`,
+`/api/projects/add`, `/api/projects/remove`, `/api/project/memory`,
+`/api/team/rotate-invite`, `/api/projects/copy`, `POST /api/settings`.
+
+**Files:** Modify `lib/server.js`, `lib/api-access.js`, `test/run-tests.js`. Create
+`lib/api-machine.js` (daemon/OS-level actions). Migration only if §5 needs one.
+
+**Interfaces produced:**
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/team` (extend) | add `inviteCode` (current, not rotated) and `viewerId` |
+| `GET /api/settings` (extend) | add `startAtLogin`, `daemonPort`, `updateAvailable`, `redactExtra`, `exclude` |
+| `POST /api/settings` (extend) | accept `startAtLogin`, `redactExtra`, `exclude`, `targets`, `extraTargets` |
+| `POST /api/daemon/restart` | restart the daemon process |
+| `POST /api/updates/check` | run the update check on demand |
+| `POST /api/open` | reveal a known file in the OS file manager |
+| `POST /api/project/access-default` | set a project's "new members join with access" |
+| `POST /api/team/resend-invite` | re-send an invite **only if a mail path exists** |
+
+1. **`viewerId` + `inviteCode` on `/api/team`.** `viewerId` closes the self-id gap:
+   the projects grid currently uses the literal `'me'`, so its self-revoke guard never
+   activates in production. Source it from `creds.userId` (`lib/server.js` already uses
+   it as `selfUserId` for the feed). `inviteCode` comes from the row `teamsync` already
+   reads (`lib/teamsync.js:751` returns `{team_id, invite_code}`) — return the CURRENT
+   code so "Copy invite link" works without rotating anyone's existing link.
+
+2. **Settings round-trip.** `startAtLogin` reads `autostart.isEnabled()` and writes
+   through `autostart.enable()`/`disable()` (`lib/autostart.js:110`). `updateAvailable`
+   uses `lib/update-check.js`. `daemonPort` is the port the server actually bound.
+   `redactExtra` and `exclude` already live in config — expose the current values and
+   accept edits. Validate every write with `zod`.
+
+3. **`POST /api/daemon/restart`.** Respond BEFORE restarting, or the client sees a
+   dropped socket and reports failure. Restart must survive the parent exiting.
+
+4. **`POST /api/open` — security-critical.** It must NOT open an arbitrary path.
+   Accept an enum (`config` | `memory` | `project`), resolve the path server-side, and
+   for `project`/`memory` confirm the resolved path is inside a project MemBridge already
+   tracks. Reject anything else with 400. Use the platform dispatch already in
+   `bin/membridge.js` (`open` / `start` / `xdg-open`), never a shell string built from
+   user input. Tests must include an attempted traversal (`../../etc/passwd`) and a path
+   outside every tracked project, both rejected.
+
+5. **`POST /api/project/access-default`.** Persists whether a newly added member gets
+   access to that project by default. Owner/admin only; writes an audit row. Store it
+   beside the existing access data — if a column is needed, add migration `025`.
+
+6. **`POST /api/team/resend-invite` — conditional.** First determine whether any mail
+   path exists (Supabase auth invite, or anything already used to deliver an invite).
+   **If none exists, do not build it and do not fake it** — say so in your report, and
+   Task 18 will render "Copy invite link" instead of "Resend". An endpoint that returns
+   200 without sending mail is worse than no endpoint.
+
+Every mutation is owner/admin-gated where it affects the team, validated with `zod`, and
+audited where it changes access. Tests must cover each endpoint's happy path, its 403 for
+a member where applicable, and the `/api/open` rejection cases.
+
+### Task 18: Wire every omitted control
+
+Restore the controls Tasks 9-14 left out, now that Task 17 backs them.
+
+- **Members:** "Copy invite link" (from `inviteCode`), "Resend" **only if** Task 17 built
+  it — otherwise omit it permanently and note why in the UI copy.
+- **Settings:** Restart daemon, Check for updates, Leave team (with confirmation), Open
+  config file, Choose context files (`targets`/`extraTargets`), Edit redaction patterns,
+  Edit excluded folders, and a working Start-at-login toggle. Replace every
+  "not reported" row whose value Task 17 now supplies.
+- **Project page:** the `memory.md` link (via `/api/open` with kind `memory`), and the
+  "New members join with access" toggle.
+- **Projects grid:** "Add project".
+- **Projects grid self-id:** replace the `'me'` literal with `viewerId` from `/api/team`,
+  so the self-revoke guard actually protects the viewer.
+
+Rules that still bind: a control that cannot work is not rendered; a destructive action
+confirms in a `role="dialog"`; a failed write must surface, never look successful. Each
+restored control needs a test asserting its `DataClient` method is actually called.
