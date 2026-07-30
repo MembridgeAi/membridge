@@ -84,8 +84,8 @@ export class FakeDataClient implements DataClient {
   }
   getMembers() {
     return this.guard<Member[]>([
-      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', projectCount: 3, sync: { state: 'up-to-date' }, keyVerified: true, syncDetail: null },
-      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', projectCount: 1, sync: { state: 'paused' }, keyVerified: true, syncDetail: 'token expired' },
+      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
+      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
     ])
   }
   getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }

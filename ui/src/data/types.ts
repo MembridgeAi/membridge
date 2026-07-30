@@ -53,15 +53,20 @@ export interface StreamEntry {
   files: string[]
 }
 
+/** Only what one machine can actually observe about a teammate.
+ *  `team_members_list` (supabase/migrations/002_team_v2.sql:267) returns just
+ *  user_id, display_name, role, joined_at. A teammate's paused daemon or expired
+ *  token lives on THEIR machine and is not knowable here — so this models
+ *  "when did anything of theirs last arrive", never a diagnosis. */
 export interface Member {
   id: string
   name: string
   email: string
   role: Role
+  joinedAt: string
   projectCount: number
-  sync: SyncState
-  keyVerified: boolean
-  syncDetail: string | null
+  lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
+  keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
 }
 
 export interface Invite {

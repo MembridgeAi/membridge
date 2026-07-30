@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dedupeLiveSessions, hasSummary, intentOf, latestSummaryFor, mapLiveSession, mapMember, mapProjectRow,
-  mapSettings, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
-  type RawFeedEntry, type RawProjectRow,
+  dedupeLiveSessions, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor, mapLiveSession, mapMember,
+  mapProjectRow, mapSettings, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
+  type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import type { Status } from './types'
 
@@ -138,12 +138,42 @@ describe('projectCountsByAuthor and mapMember', () => {
     ])
     expect(counts).toEqual({ andrew: 2, sarah: 1 })
   })
-  it('fills fields the backend does not expose with honest, non-alarming defaults', () => {
-    const m = mapMember({ user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: null }, { andrew: 3 })
+  it('maps a member row to only what this machine can observe, never a fabricated diagnosis', () => {
+    const m = mapMember(
+      { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-22T18:58:00Z' },
+      { andrew: 3 },
+      { andrew: '2026-07-29T19:00:00Z' },
+    )
     expect(m).toEqual({
-      id: 'andrew', name: 'Andrew', email: '', role: 'admin', projectCount: 3,
-      sync: { state: 'up-to-date' }, keyVerified: true, syncDetail: null,
+      id: 'andrew', name: 'Andrew', email: '', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
+      projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false,
     })
+  })
+  it('falls back joinedAt to an empty string when the row carries no timestamp, rather than asserting one', () => {
+    const m = mapMember({ user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: null }, {}, {})
+    expect(m.joinedAt).toBe('')
+  })
+  it('is null for lastSharedAt when the member has no entry in the team-feed page, never a made-up time', () => {
+    const m = mapMember({ user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z' }, {}, {})
+    expect(m.lastSharedAt).toBeNull()
+  })
+})
+
+describe('lastSharedAtByAuthor', () => {
+  const row = (overrides: Partial<RawTeamFeedEntry> = {}): RawTeamFeedEntry => ({
+    author_id: 'andrew', ts: '2026-07-29T19:00:00Z', ...overrides,
+  })
+
+  it('picks the newest ts per author_id', () => {
+    const out = lastSharedAtByAuthor([
+      row({ author_id: 'andrew', ts: '2026-07-28T00:00:00Z' }),
+      row({ author_id: 'andrew', ts: '2026-07-29T19:00:00Z' }),
+      row({ author_id: 'sarah', ts: '2026-07-20T00:00:00Z' }),
+    ])
+    expect(out).toEqual({ andrew: '2026-07-29T19:00:00Z', sarah: '2026-07-20T00:00:00Z' })
+  })
+  it('ignores rows with no author_id', () => {
+    expect(lastSharedAtByAuthor([row({ author_id: null })])).toEqual({})
   })
 })
 

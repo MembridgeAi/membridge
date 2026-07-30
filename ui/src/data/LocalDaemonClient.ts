@@ -4,15 +4,16 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, Status, StreamEntry } from './types'
 import {
-  dedupeLiveSessions, mapLiveSession, mapMember, mapProjectRow, mapSettings, mapStreamEntry,
+  dedupeLiveSessions, lastSharedAtByAuthor, mapLiveSession, mapMember, mapProjectRow, mapSettings, mapStreamEntry,
   projectCountsByAuthor, syncStateOf,
-  type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSettingsPayload, type RawTeamRow,
+  type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSettingsPayload, type RawTeamFeedEntry, type RawTeamRow,
 } from './mappers'
 
 export { syncStateOf }
 
 const BASE = '' // same origin as the daemon
 const FEED_LIMIT = 100 // covers every tracked project's latest entry in one request
+const TEAM_FEED_LIMIT = 200 // team_feed RPC's hard cap (002_team_v2.sql:320)
 
 async function get<T>(pathAndQuery: string): Promise<T> {
   const res = await fetch(`${BASE}${pathAndQuery}`, { headers: { accept: 'application/json' } })
@@ -97,15 +98,24 @@ export class LocalDaemonClient implements DataClient {
     return Promise.reject(missingEndpoint('getAccessMatrix', 'GET /api/team/access-matrix'))
   }
 
+  // lastSharedAt needs the raw team stream (author_id, ts), which is a
+  // different shape and a different endpoint than the merged /api/feed page
+  // already fetched below for project counts -- /api/team/feed does not
+  // dedupe against local entries or carry headline/distilled, so it can't be
+  // read off that response. That's a third request this method didn't
+  // previously make (team, members, feed -> +team/feed), traded for not
+  // fabricating a value the daemon can actually answer.
   async getMembers(): Promise<Member[]> {
     const team = await firstTeam()
     if (!team) return []
-    const [membersRes, f] = await Promise.all([
+    const [membersRes, f, teamFeedRes] = await Promise.all([
       get<{ members: RawMemberRow[] }>(`/api/team/members?teamId=${encodeURIComponent(team.team_id)}`),
       feed(),
+      get<{ entries: RawTeamFeedEntry[] }>(`/api/team/feed?teamId=${encodeURIComponent(team.team_id)}&limit=${TEAM_FEED_LIMIT}`),
     ])
     const counts = projectCountsByAuthor(f.entries)
-    return membersRes.members.map(m => mapMember(m, counts))
+    const lastShared = lastSharedAtByAuthor(teamFeedRes.entries)
+    return membersRes.members.map(m => mapMember(m, counts, lastShared))
   }
 
   // The daemon can only mint a generic, role-less invite LINK (POST

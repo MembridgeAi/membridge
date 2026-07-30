@@ -1,7 +1,6 @@
 // Pure functions that turn the daemon's real JSON payloads (lib/server.js)
-// into the UI's domain types (./types.ts). Kept separate from
-// LocalDaemonClient.ts so every mapping decision can be unit-tested without a
-// live daemon or a mocked fetch.
+// into the UI's domain types (./types.ts) -- kept separate from
+// LocalDaemonClient.ts so every mapping decision is unit-testable without a live daemon.
 import type { LiveSession, Member, Project, Role, Settings, Status, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
@@ -45,6 +44,12 @@ export interface RawMemberRow {
   display_name: string
   role: Role
   joined_at: string | null
+}
+
+// /api/team/feed row (server.js:1502, team_feed RPC -- 002_team_v2.sql:285) -- raw team stream, not RawFeedEntry's local-merged feed.
+export interface RawTeamFeedEntry {
+  author_id: string | null
+  ts: string
 }
 
 export interface RawTeamRow {
@@ -195,12 +200,11 @@ export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[]): 
 }
 
 // ---------------------------------------------------------------------------
-// Members: team_members_list (lib/teamsync.js) returns only
-// {user_id, display_name, role, joined_at} -- no email, per-member sync
-// health or key-verification state exists anywhere in the API yet. Those
-// fields get the least-alarming honest default (see Task 4 report) rather
-// than a fabricated value; projectCount is genuinely derived, if capped to
-// whatever page of /api/feed is in hand.
+// Members: team_members_list (002_team_v2.sql:267) returns only {user_id,
+// display_name, role, joined_at} -- a teammate's daemon/token state lives on
+// THEIR machine, unseen here. Member models only what this install can
+// observe: lastSharedAt (newest /api/team/feed row by them) and keyAlert
+// (see mapMember). projectCount is capped to whatever /api/feed page is in hand.
 // ---------------------------------------------------------------------------
 export function projectCountsByAuthor(entries: RawFeedEntry[]): Record<string, number> {
   const byAuthor = new Map<string, Set<string>>()
@@ -216,16 +220,31 @@ export function projectCountsByAuthor(entries: RawFeedEntry[]): Record<string, n
   return out
 }
 
-export function mapMember(row: RawMemberRow, projectCounts: Record<string, number>): Member {
+// Newest ts per author_id across a page of /api/team/feed (capped at 200 rows,
+// 002_team_v2.sql:320) -- "the newest we can see", never a fabricated "never".
+export function lastSharedAtByAuthor(entries: RawTeamFeedEntry[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const e of entries) {
+    if (!e.author_id) continue
+    const seen = out[e.author_id]
+    if (!seen || e.ts > seen) out[e.author_id] = e.ts
+  }
+  return out
+}
+
+export function mapMember(row: RawMemberRow, projectCounts: Record<string, number>, lastSharedAt: Record<string, string>): Member {
   return {
     id: row.user_id,
     name: row.display_name,
     email: '',
     role: row.role,
+    // schema.sql has joined_at NOT NULL, but the RPC's return type is
+    // nullable -- fall back rather than assert a value we don't have.
+    joinedAt: row.joined_at || '',
     projectCount: projectCounts[row.user_id] || 0,
-    sync: { state: 'up-to-date' },
-    keyVerified: true,
-    syncDetail: null,
+    lastSharedAt: lastSharedAt[row.user_id] || null,
+    // Known gap: statusPayload (server.js:197) exposes only a COUNT of state.keyAlerts; no per-member endpoint exists.
+    keyAlert: false,
   }
 }
 
