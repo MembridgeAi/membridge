@@ -1,0 +1,367 @@
+/* Members page — imported once from MembersPage.tsx (per-feature CSS, same
+ * precedent as today.css/project.css/projects.css). One --r radius
+ * everywhere except avatars (circles), no shadows on resting content, no
+ * gradients, hover changes background/border only. The confirm dialog at
+ * the bottom is the one deliberate exception (see its comment). */
+
+.members-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.members-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.members-title {
+  margin: 0;
+  font-size: 14px;
+}
+.members-count {
+  color: var(--text3);
+  font-size: 11px;
+}
+.members-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.members-btn {
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.members-btn:hover {
+  background: var(--panel2);
+}
+.members-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.members-btn-primary:hover {
+  background: var(--accent2);
+  border-color: var(--accent2);
+}
+
+.members-error {
+  margin: 12px 16px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
+
+.invite-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.invite-form-email {
+  flex: 1 1 220px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.invite-form-role {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.invite-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--red);
+  font-size: 10.5px;
+}
+
+.members-cols {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.members-list {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.members-side {
+  width: 320px;
+  flex-shrink: 0;
+}
+@media (max-width: 1000px) {
+  .members-cols {
+    flex-direction: column;
+  }
+  .members-list {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .members-side {
+    width: auto;
+  }
+}
+
+.members-empty-note {
+  margin: 0;
+  padding: 14px 16px;
+  color: var(--text3);
+}
+
+/* Pending invites — same row shape as a member row, distinguished by the
+ * Invited tag rather than a card or a different background. */
+.invite-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.invite-email {
+  font-size: 11px;
+}
+.invite-expiry {
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.invite-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.ghost-btn {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.ghost-btn:hover {
+  background: var(--panel2);
+}
+
+/* Member row — an id block (avatar + name/email) that flexes, everything
+ * else clustered to the right, same shape as team-v1b.html's .mrow. */
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.member-row:last-child {
+  border-bottom: none;
+}
+.member-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 180px;
+}
+.member-name {
+  font-weight: 600;
+}
+.member-email {
+  color: var(--text3);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.member-mid {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.member-role-text {
+  color: var(--text2);
+  font-size: 10.5px;
+  text-transform: capitalize;
+}
+.kvi {
+  color: var(--text2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.role-select {
+  padding: 2px 6px;
+  font-size: 10.5px;
+}
+
+/* Tag chips — duplicated small utility, same reasoning noted in
+ * projects.css/project.css: each feature file owns its own copy rather than
+ * importing another feature's stylesheet. */
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  background: var(--panel2);
+  color: var(--text2);
+}
+.tag-owner {
+  background: var(--accent-dim);
+  color: var(--accent2);
+}
+.tag-invited {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+/* The overflow menu — a flat, bordered panel. No shadow here: that
+ * exception is reserved for the confirm dialog below. */
+.member-menu {
+  position: relative;
+}
+.more {
+  padding: 0 4px;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text3);
+  font-size: 14px;
+}
+.more:hover {
+  background: var(--panel2);
+}
+.member-menu-list {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  min-width: 170px;
+  margin-top: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  display: flex;
+  flex-direction: column;
+}
+.member-menu-item {
+  padding: 6px 10px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 11px;
+}
+.member-menu-item:hover {
+  background: var(--panel2);
+}
+
+/* Audit trail — right column, plain ruled rows, no card. */
+.audit-panel {
+  padding-bottom: 10px;
+}
+.audit-error {
+  margin: 0;
+  padding: 6px 16px;
+  color: var(--red);
+  font-size: 11px;
+}
+.audit-empty {
+  margin: 0;
+  padding: 6px 16px;
+  color: var(--text3);
+  font-size: 11px;
+}
+.audit-row {
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text2);
+  font-size: 11px;
+}
+.audit-row:last-child {
+  border-bottom: none;
+}
+.audit-time {
+  color: var(--text3);
+  font-size: 10px;
+  margin-right: 8px;
+}
+.audit-text b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Confirm dialog — the ONE place in this page allowed a subtle shadow
+ * (global constraint: no box-shadow on resting content; one level allowed
+ * only for true overlays). */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+.dialog {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.dialog-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.dialog-message {
+  margin: 0 0 12px;
+  color: var(--text2);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dialog-error {
+  margin: 0 0 12px;
+  color: var(--red);
+  font-size: 11px;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.dialog-btn {
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.dialog-btn:hover {
+  background: var(--panel2);
+}
+.dialog-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.dialog-btn-danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
