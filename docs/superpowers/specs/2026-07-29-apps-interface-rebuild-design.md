@@ -185,6 +185,63 @@ Locked during review (`today-v10` → `v11` established it). Extracted to
 - **Themes:** dark and light from the same tokens, brand blue `#4D7CFF` /
   `#0052FF` retained.
 
+### 4.1 Composition — the part rules alone cannot give you
+
+**Why this section exists.** Two people built from §4 above without seeing the
+mockups: the marketing workstream, and a later implementation pass. Both
+produced something correct against every rule and wrong as a product — "a
+spreadsheet, not an app" from one, "very rigid" from the product owner looking
+at the other. The tokens were not the problem; a rebuild against the exact
+shipped tokens still read as a table. §4 says what things look like and never
+says what the page is MADE OF, so anyone working from it alone lands on a
+ruled table. That is a spec defect, and this section is the fix. Specify parts,
+not adjectives.
+
+**The shell.** A persistent left rail, 170px, `background: var(--panel)`,
+`border-right: 1px solid var(--line)`. Top to bottom:
+
+1. Brand mark + "MemBridge" wordmark.
+2. Team switcher directly beneath it (absent when solo).
+3. Nav in three groups: unlabelled — Today, Feed, Projects; `TEAM` — Members,
+   Insights (owner/admin only, and absent when solo); `YOU` — Settings.
+4. Footer pinned to the bottom: current user and a daemon-live dot.
+
+Active nav item: a 2px left rule in `--accent` plus `--accent-dim` background
+and accent text. Nothing else — no pill, no chevron, no icon tint.
+
+**The live session entry** — a 3-column grid, `auto 1fr auto`:
+
+- col 1: live dot + avatar
+- col 2: `<person> · <tool>` with the project name after it in mono
+- col 3: elapsed time, mono, right-aligned
+- second row, col 2 only: the intent, sharing the name's left edge, prefixed by
+  a muted uppercase `INTENT` label
+
+A 1px hairline separates consecutive entries. When there is no captured intent,
+the second row is omitted entirely — never a placeholder.
+
+**The project row** — a two-column composition, NOT a table row. This single
+part carries most of the "app" read; get it wrong and the whole screen reverts
+to a spreadsheet.
+
+- **Left:** project name, shared/private tag, and an overlapping avatar cluster
+  on one line; the latest summary sentence beneath it, ellipsized on overflow.
+- **Right, right-anchored:** one line carrying `N sessions · last 7 days` (mono,
+  tabular) and the sync chip; a 7-bar activity sparkline directly beneath it,
+  also right-aligned.
+
+**Rhythm.** Sections get more vertical space than the rows inside them; related
+rows sit tighter than unrelated ones; a section header owns real space above it.
+Uniform padding everywhere is what makes a ruled list read as a spreadsheet.
+
+**Reference implementations.** `today-v15.html` (shell, live entry, project row),
+`project-v4.html`, `projects-list-v2.html`, `team-v1b.html`, `insights-v4.html`,
+`settings-solo-v2.html` in `.superpowers/brainstorm/24172-1785362070/content/`.
+They are gitignored and live only in the authoring worktree, which is precisely
+why this section had to exist: **the mockups are not a durable part of the spec,
+so anything they carry that the text does not is lost to the next reader.**
+
+
 ## 5. Architecture
 
 ### 5.1 Stack
