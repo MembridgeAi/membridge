@@ -1,0 +1,92 @@
+// Finding 1 (getAccessMatrix) shipped because FakeDataClient always answers
+// every DataClient method, so no test ever drove a REAL LocalDaemonClient
+// method call end to end -- a client method that still rejects with the
+// "missing endpoint" stub message, for an endpoint that has actually shipped
+// server-side, is invisible to every test that only exercises the fake.
+//
+// This file is that missing check. It calls every DataClient method against
+// a real LocalDaemonClient (with fetch stubbed to a generic response) and
+// fails if the call rejects with the stub sentinel -- the one signal that a
+// method was simply never wired to its daemon endpoint, as opposed to
+// failing for some other, fixture-shape-related reason (which is expected
+// and fine: this test never asserts success, only that the method actually
+// attempted a request instead of short-circuiting).
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DataClient } from './DataClient'
+import { LocalDaemonClient } from './LocalDaemonClient'
+
+type DataClientMethod = Exclude<keyof DataClient, 'capabilities'>
+type Invoker = (client: DataClient) => Promise<unknown>
+
+// Every DataClient method with no live daemon endpoint today, and why.
+// Keeping this list explicit (rather than deriving it) means adding a new
+// DataClient method forces a conscious choice here, via the Record below
+// failing to type-check until it's accounted for.
+const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
+  // GET /api/team/insights does not exist yet -- Task 12 is adding it now.
+  'getInsights',
+  // POST /api/team/invite only mints a generic, role-less link and cannot
+  // list issued invites -- no endpoint accepts email/role, and none lists
+  // pending invites. Structurally blocked, not merely unwired.
+  'getInvites',
+  'inviteMember',
+])
+
+// One call per DataClient method, argument values chosen only to satisfy the
+// signature -- this test never asserts on a successful result, so their
+// content doesn't matter.
+const CALLS: Record<DataClientMethod, Invoker> = {
+  getStatus: c => c.getStatus(),
+  getProjects: c => c.getProjects(),
+  getLiveSessions: c => c.getLiveSessions(),
+  getProjectStream: c => c.getProjectStream('/x'),
+  syncProject: c => c.syncProject('/x'),
+  syncAll: c => c.syncAll(),
+  setProjectPaused: c => c.setProjectPaused('/x', true),
+  copyForAI: c => c.copyForAI('/x'),
+  getProjectAccess: c => c.getProjectAccess('/x'),
+  setProjectAccess: c => c.setProjectAccess('/x', 'm1', true),
+  getAccessMatrix: c => c.getAccessMatrix(),
+  getMembers: c => c.getMembers(),
+  getInvites: c => c.getInvites(),
+  inviteMember: c => c.inviteMember('a@b.com', 'member'),
+  revokeInvite: c => c.revokeInvite('i1'),
+  setMemberRole: c => c.setMemberRole('m1', 'member'),
+  removeMember: c => c.removeMember('m1'),
+  getAudit: c => c.getAudit(),
+  getInsights: c => c.getInsights(30),
+  getSkeletonStats: c => c.getSkeletonStats(),
+  getSettings: c => c.getSettings(),
+  setSetting: c => c.setSetting('k', 'v'),
+}
+
+const MISSING_ENDPOINT_SENTINEL = /has no daemon endpoint yet/
+
+function stubFetch(): void {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))
+}
+
+describe('LocalDaemonClient contract: methods not explicitly exempted must attempt a real request', () => {
+  beforeEach(stubFetch)
+  afterEach(() => vi.unstubAllGlobals())
+
+  const wired = (Object.keys(CALLS) as DataClientMethod[]).filter(name => !LEGITIMATELY_UNBACKED.has(name))
+
+  it.each(wired)('%s does not reject with the "missing endpoint" sentinel', async (name) => {
+    const client = new LocalDaemonClient()
+    try {
+      await CALLS[name](client)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      expect(message).not.toMatch(MISSING_ENDPOINT_SENTINEL)
+    }
+  })
+
+  // The exemption list itself is the thing that let Finding 1 hide -- pin it
+  // down so a future "oh, just add it to the exemption list" edit has to
+  // touch a line that says, in as many words, that this is not one of them.
+  it('does not exempt getAccessMatrix or getAudit -- both endpoints already exist', () => {
+    expect(LEGITIMATELY_UNBACKED.has('getAccessMatrix')).toBe(false)
+    expect(LEGITIMATELY_UNBACKED.has('getAudit')).toBe(false)
+  })
+})

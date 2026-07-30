@@ -43,8 +43,12 @@ async function firstTeam(): Promise<RawTeamRow | null> {
   return data.teams[0] || null
 }
 
-const missingEndpoint = (method: string, endpoint: string): Error =>
-  new Error(`${method} has no daemon endpoint yet -- ${endpoint} does not exist until Task 10 lands.`)
+// The one remaining sentinel for a method with genuinely no daemon endpoint
+// to call yet. getAccessMatrix and getAudit used to reject through this too
+// -- both endpoints have since shipped (see the comments on those methods
+// below), so this is down to its single legitimate caller, getInsights.
+const missingEndpoint = (method: string, endpoint: string, task: string): Error =>
+  new Error(`${method} has no daemon endpoint yet -- ${endpoint} does not exist until ${task} lands.`)
 
 export class LocalDaemonClient implements DataClient {
   readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
@@ -140,8 +144,13 @@ export class LocalDaemonClient implements DataClient {
     await post<{ ok: boolean }>('/api/project/access', { path: projectPath, memberId, canSee })
   }
 
+  // GET /api/team/access-matrix (lib/api-access.js accessMatrix, wired in
+  // lib/server.js since e70744a) already returns exactly this shape -- members
+  // as {id, name} and rows as {projectPath, projectName, shared, access},
+  // every field name matching AccessMatrix verbatim -- so, unlike
+  // getProjectAccess above, there is nothing here to map or drop.
   getAccessMatrix(): Promise<AccessMatrix> {
-    return Promise.reject(missingEndpoint('getAccessMatrix', 'GET /api/team/access-matrix'))
+    return get<AccessMatrix>('/api/team/access-matrix')
   }
 
   // lastSharedAt needs the raw team stream (author_id, ts), which is a
@@ -194,12 +203,20 @@ export class LocalDaemonClient implements DataClient {
     await post('/api/team/remove-member', { teamId: team.team_id, userId: memberId })
   }
 
-  getAudit(_limit?: number): Promise<AuditEvent[]> {
-    return Promise.reject(missingEndpoint('getAudit', 'GET /api/team/audit'))
+  // GET /api/team/audit (lib/api-access.js readAudit) is also already wired
+  // server-side -- found while adding the Task 9/10 contract test below,
+  // same shipped-endpoint-dead-stub shape as getAccessMatrix. It wraps the
+  // array in { events }, and each event already carries id/at/actorName/
+  // action/objectType/objectLabel/detail matching AuditEvent verbatim, so
+  // this only unwraps.
+  async getAudit(limit?: number): Promise<AuditEvent[]> {
+    const query = limit === undefined ? '' : `?limit=${limit}`
+    const r = await get<{ events: AuditEvent[] }>(`/api/team/audit${query}`)
+    return r.events
   }
 
   getInsights(_window: 7 | 30 | 90): Promise<Insights> {
-    return Promise.reject(missingEndpoint('getInsights', 'GET /api/team/insights'))
+    return Promise.reject(missingEndpoint('getInsights', 'GET /api/team/insights', 'Task 12'))
   }
 
   async getSkeletonStats(): Promise<SkeletonStats> {
