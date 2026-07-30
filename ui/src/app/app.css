@@ -60,18 +60,34 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 7px 9px;
+  margin: 1px 0;
   color: var(--text2);
   text-decoration: none;
-  border-left: 2px solid transparent;
+  font-weight: var(--fw-normal);
+  border-left: 3px solid transparent; /* same width as .nav-item-active's
+    accent bar below, so the active row never nudges its neighbors'
+    icon/text out of alignment when the current route changes */
+  border-radius: var(--r);
 }
 .nav-item:hover {
   background: var(--panel2);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .nav-item {
+    transition: background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+}
+/* The active item has to read as unmistakably current: a full-strength
+ * (not dim) accent left bar, a tinted background, accent text, and extra
+ * weight — four cues stacked so it never reads as "just another link". */
 .nav-item-active {
-  border-left: 2px solid var(--accent);
+  border-left: 3px solid var(--accent);
   background: var(--accent-dim);
   color: var(--accent);
+  font-weight: var(--fw-medium);
 }
 .nav-icon {
   width: 14px;
@@ -80,9 +96,9 @@
 }
 
 .nav-group-label {
-  margin: 12px 8px 4px;
+  margin: var(--sp-5) 8px 4px;
   color: var(--text3);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -111,6 +127,9 @@
   border-radius: var(--r);
   background: var(--green);
   flex-shrink: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .status-dot { animation: pulse-live 2.4s ease-in-out infinite; }
 }
 
 .shell-main {

@@ -1,6 +1,8 @@
 /* Projects grid — imported once from ProjectsPage.tsx (per-feature CSS, same
  * precedent as today.css/project.css). One --r radius everywhere except
- * avatars (circles), no shadows, no gradients, hover changes background only. */
+ * avatars (circles), no shadows, no gradients, hover changes background only.
+ * Type/spacing/motion tokens from styles/tokens.css; settle-in keyframe
+ * from styles/base.css. */
 
 .projects-page {
   display: flex;
@@ -13,12 +15,17 @@
   gap: 8px;
   flex-wrap: wrap;
   row-gap: 6px;
-  padding: 10px 16px;
+  padding: var(--sp-4) var(--sp-4);
   border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .projects-header { animation: settle-in var(--dur-base) var(--ease-out) both; }
 }
 .projects-title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
 }
 .projects-count {
   color: var(--text3);
@@ -50,6 +57,9 @@
 .projects-btn-add:hover {
   background: var(--accent2);
   border-color: var(--accent2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .projects-btn-add { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
 }
 
 .projects-error {
@@ -102,11 +112,14 @@
 .projects-table tbody tr:hover {
   background: var(--panel2);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .projects-table tbody tr { transition: background-color var(--dur-fast) var(--ease-out); }
+}
 .projects-table td.who {
   text-align: center;
 }
 .projects-empty-note {
-  padding: 14px 16px;
+  padding: var(--sp-6) var(--sp-4);
   color: var(--text3);
   text-align: center;
 }
@@ -163,6 +176,9 @@
   background: var(--panel2);
   cursor: pointer;
 }
+@media (prefers-reduced-motion: no-preference) {
+  .access-cell { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
 .access-cell:checked {
   background: var(--accent);
   border-color: var(--accent);
@@ -196,6 +212,9 @@
 }
 .proj-btn:hover {
   background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .proj-btn { transition: background-color var(--dur-fast) var(--ease-out); }
 }
 
 .projects-foot {

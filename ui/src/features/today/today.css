@@ -1,7 +1,9 @@
 /* Today page — imported once from TodayPage.tsx (not main.tsx, per the
  * per-feature CSS precedent set by components.css/app.css). Same rules:
  * one --r radius everywhere except avatars (circles), no shadows, no
- * gradients, hover changes background/border only. */
+ * gradients, hover changes background/border only. Type/spacing/motion
+ * tokens from styles/tokens.css; settle-in/pulse-live keyframes from
+ * styles/base.css. */
 
 .today-page {
   display: flex;
@@ -13,18 +15,23 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px 16px;
+  padding: var(--sp-4) var(--sp-4);
   border-bottom: 1px solid var(--line);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .today-header { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
 .today-title {
-  font-size: 14px;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
   margin: 0;
 }
 .today-date {
   display: block;
-  margin-top: 2px;
+  margin-top: 3px;
   color: var(--text3);
-  font-size: 11px;
+  font-size: var(--fs-sm);
 }
 .today-header-actions {
   display: flex;
@@ -48,20 +55,37 @@
   background: var(--accent2);
   border-color: var(--accent2);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .today-btn, .today-btn-primary { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
 
+/* Section headers own real breathing room above them (more than the rows
+ * they introduce need between each other) — that's the separation cue
+ * that groups "Happening now" from "Projects · this week" instead of
+ * uniform padding making the whole page read as one long list. */
 .section-label {
-  padding: 12px 16px 6px;
+  padding: var(--sp-5) var(--sp-4) var(--sp-2);
   color: var(--text3);
-  font-size: 10px;
-  font-weight: 600;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
+/* A quiet state should look composed, not like something failed to load. */
 .today-empty-note {
   margin: 0;
-  padding: 8px 16px 14px;
+  padding: var(--sp-5) var(--sp-4) var(--sp-6);
+  text-align: center;
   color: var(--text3);
+}
+.today-empty-note::before {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 0 auto var(--sp-3);
+  background: var(--line2);
 }
 
 /* Happening now — a 3-column grid (dot+avatar / who+tool+project / elapsed),
@@ -73,8 +97,17 @@
   display: grid;
   grid-template-columns: auto 1fr auto;
   column-gap: 10px;
-  padding: 8px 16px;
+  padding: 9px 16px;
   align-items: start;
+}
+.live-entry:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .live-entry {
+    transition: background-color var(--dur-fast) var(--ease-out);
+    animation: settle-in var(--dur-base) var(--ease-out) both;
+  }
 }
 .live-entry + .live-entry {
   border-top: 1px solid var(--line);
@@ -92,11 +125,14 @@
   border-radius: var(--r);
   background: var(--green);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+}
 .live-entry-name-cell {
   min-width: 0;
 }
 .live-entry-who {
-  font-weight: 600;
+  font-weight: var(--fw-medium);
   white-space: nowrap;
 }
 .live-entry-project {
@@ -112,11 +148,12 @@
 }
 .live-entry-intent {
   grid-column: 2;
-  margin-top: 2px;
+  margin-top: 3px;
   overflow: hidden;
   color: var(--text2);
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: var(--lh-snug);
 }
 .live-entry-intent-label {
   margin-right: 6px;
@@ -132,8 +169,17 @@
   display: flex;
   align-items: flex-start;
   gap: 24px;
-  padding: 9px 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--line);
+}
+.project-row:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .project-row {
+    transition: background-color var(--dur-fast) var(--ease-out);
+    animation: settle-in var(--dur-base) var(--ease-out) both;
+  }
 }
 .project-row:last-child {
   border-bottom: none;

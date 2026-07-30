@@ -2,7 +2,9 @@
  * precedent as today.css/project.css/projects.css). One --r radius
  * everywhere except avatars (circles), no shadows on resting content, no
  * gradients, hover changes background/border only. The confirm dialog at
- * the bottom is the one deliberate exception (see its comment). */
+ * the bottom is the one deliberate exception (see its comment). Type/
+ * spacing/motion tokens from styles/tokens.css; settle-in keyframe from
+ * styles/base.css. */
 
 .members-page {
   display: flex;
@@ -15,12 +17,17 @@
   gap: 8px;
   flex-wrap: wrap;
   row-gap: 6px;
-  padding: 10px 16px;
+  padding: var(--sp-4) var(--sp-4);
   border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .members-header { animation: settle-in var(--dur-base) var(--ease-out) both; }
 }
 .members-title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
 }
 .members-count {
   color: var(--text3);
@@ -51,6 +58,9 @@
 .members-btn-primary:hover {
   background: var(--accent2);
   border-color: var(--accent2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .members-btn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
 }
 
 .members-error {
@@ -116,8 +126,17 @@
 
 .members-empty-note {
   margin: 0;
-  padding: 14px 16px;
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
   color: var(--text3);
+}
+.members-empty-note::before {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 0 auto var(--sp-3);
+  background: var(--line2);
 }
 
 /* Pending invites — same row shape as a member row, distinguished by the
@@ -130,6 +149,12 @@
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
   row-gap: 6px;
+}
+.invite-row:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .invite-row { transition: background-color var(--dur-fast) var(--ease-out); }
 }
 .invite-email {
   font-size: 11px;
@@ -154,6 +179,9 @@
 .ghost-btn:hover {
   background: var(--panel2);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .ghost-btn { transition: background-color var(--dur-fast) var(--ease-out); }
+}
 
 /* Member row — an id block (avatar + name/email) that flexes, everything
  * else clustered to the right, same shape as team-v1b.html's .mrow. */
@@ -165,6 +193,12 @@
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
   row-gap: 6px;
+}
+.member-row:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .member-row { transition: background-color var(--dur-fast) var(--ease-out); }
 }
 .member-row:last-child {
   border-bottom: none;
@@ -257,6 +291,9 @@
   display: flex;
   flex-direction: column;
 }
+@media (prefers-reduced-motion: no-preference) {
+  .member-menu-list { animation: settle-in var(--dur-fast) var(--ease-out) both; }
+}
 .member-menu-item {
   padding: 6px 10px;
   text-align: left;
@@ -281,7 +318,8 @@
 }
 .audit-empty {
   margin: 0;
-  padding: 6px 16px;
+  padding: var(--sp-5) var(--sp-4);
+  text-align: center;
   color: var(--text3);
   font-size: 11px;
 }
@@ -290,6 +328,12 @@
   border-bottom: 1px solid var(--line);
   color: var(--text2);
   font-size: 11px;
+}
+.audit-row:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .audit-row { transition: background-color var(--dur-fast) var(--ease-out); }
 }
 .audit-row:last-child {
   border-bottom: none;

@@ -4,9 +4,14 @@
  * "Global Constraints"): one 4px radius everywhere except avatars (circles)
  * and the Toggle switch (documented exception below); no drop shadow on
  * resting content; no gradients; hover changes background/border only.
+ * Type scale, spacing scale and motion tokens live in styles/tokens.css;
+ * the settle-in/pulse-live keyframes live in styles/base.css and are
+ * referenced by name here.
  */
 
-/* StatStrip — a ruled grid, never a big number inside a rounded card. */
+/* StatStrip — a ruled grid, never a big number inside a rounded card. The
+ * lead stat (first cell) gets the one splash of accent color in the strip
+ * — everything else stays neutral so that tint still means something. */
 .stat-strip {
   display: flex;
   border-top: 1px solid var(--line);
@@ -14,34 +19,53 @@
 }
 .stat-cell {
   flex: 1;
-  padding: 8px 12px;
+  padding: var(--sp-3) var(--sp-3);
   border-left: 1px solid var(--line);
 }
 .stat-cell:first-child {
   border-left: none;
 }
 .stat-value {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+}
+.stat-cell:first-child .stat-value {
+  color: var(--accent2);
 }
 .stat-label {
-  margin-top: 2px;
-  font-size: 10px;
+  margin-top: 3px;
+  font-size: var(--fs-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text2);
 }
 .stat-note {
   margin-top: 2px;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text3);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .stat-cell { animation: settle-in var(--dur-base) var(--ease-out) both; }
+  .stat-cell:nth-child(1) { animation-delay: 0ms; }
+  .stat-cell:nth-child(2) { animation-delay: 30ms; }
+  .stat-cell:nth-child(3) { animation-delay: 60ms; }
+  .stat-cell:nth-child(4) { animation-delay: 90ms; }
+}
 
-/* RuledRow — a flex row, separated by a hairline only. */
+/* RuledRow — a flex row, separated by a hairline only. A quiet hover
+ * background is the one texture cue every ruled row in the system shares,
+ * so scanning a dense list doesn't rely on hairlines alone. */
 .ruled-row {
   display: flex;
   align-items: center;
   border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ruled-row { transition: background-color var(--dur-fast) var(--ease-out); }
+}
+.ruled-row:hover {
+  background: var(--panel2);
 }
 
 /* StateChip — soft tint, --r radius, glyph + words (never color alone). */
@@ -81,6 +105,9 @@
 .btn-warn:hover {
   background: var(--panel2);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .btn-warn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
 
 /* Toggle — DELIBERATE EXCEPTION to the one-radius rule. A switch only reads
  * as a switch when its track is pill-shaped, so this is the sole
@@ -106,7 +133,9 @@
   height: 11px;
   border-radius: 50%; /* exception: the switch's own thumb, same reasoning */
   background: var(--text3);
-  transition: transform 120ms ease, background 120ms ease;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .toggle-thumb { transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
 }
 .toggle-on .toggle-thumb {
   transform: translateX(11px);
@@ -159,6 +188,9 @@
   border: 1px solid var(--line2);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .dialog { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
 .dialog-wide {
   width: 440px;
 }
@@ -193,6 +225,9 @@
 }
 .dialog-btn:hover {
   background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dialog-btn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
 }
 .dialog-btn-primary {
   background: var(--accent);
@@ -258,9 +293,18 @@
   display: grid;
   grid-template-columns: auto 1fr auto;
   column-gap: 10px;
-  padding: 9px 16px;
+  padding: 10px 16px;
   align-items: start;
   border-bottom: 1px solid var(--line);
+}
+.entry-row:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .entry-row {
+    transition: background-color var(--dur-fast) var(--ease-out);
+    animation: settle-in var(--dur-base) var(--ease-out) both;
+  }
 }
 .entry-row-avatar-cell {
   display: flex;
@@ -270,7 +314,7 @@
   min-width: 0;
 }
 .entry-row-who {
-  font-weight: 600;
+  font-weight: var(--fw-medium);
   white-space: nowrap;
 }
 .entry-row-tool {
@@ -292,16 +336,22 @@
   border-radius: var(--r);
   background: var(--green);
 }
+@media (prefers-reduced-motion: no-preference) {
+  .entry-row-meta .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+}
 .entry-row-outcome {
   grid-column: 2;
-  margin-top: 2px;
+  margin-top: 3px;
   color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
 }
 .entry-row-intent {
   grid-column: 2;
-  margin-top: 2px;
+  margin-top: 3px;
   color: var(--text3);
   font-size: 11px;
+  line-height: var(--lh-tight);
 }
 .entry-row-intent-label {
   margin-right: 6px;
@@ -316,17 +366,29 @@
   font-size: 10px;
 }
 
-/* Placeholder — for routes not yet built. */
+/* Placeholder — for routes not yet built. A quiet state should look
+ * composed, not like something failed to load: a small mark, generous
+ * space, and text that's centered rather than clinging to the edge. */
 .placeholder {
-  padding: 24px 12px;
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
   color: var(--text2);
 }
+.placeholder::before {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 0 auto var(--sp-3);
+  background: var(--line2);
+}
 .placeholder-title {
-  font-size: 13px;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   color: var(--text);
 }
 .placeholder-note {
   margin-top: 4px;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--text3);
 }
