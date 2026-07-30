@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **`search_memory` is now relevance-ranked, not substring match.** The MCP
+  tool scores headlines, decisions, gotchas, goals, files touched, per-file
+  change notes, prompts, and summaries, and returns each result's relevance
+  `score` and which fields `matched`, plus a `total`. Deliberately not
+  recency-weighted — cross-teammate overlap has no recency correlation, so
+  old work still surfaces when it's the best match. New optional filters:
+  `author`, `project`, `file`, `tool`, `since`/`until` (a bare date like
+  `2026-06-01` is inclusive of that whole day), and `limit`.
+- **Team activity gets a durable local archive.** The teammate-activity
+  cache only ever kept the newest 100 entries per project — under a week
+  for a busy five-person team — and discarded the rest permanently. Every
+  pulled entry is now also written to a per-project archive under
+  `~/.membridge/team-archive/`, and the daemon backfills it backward until
+  the team's earliest entry is archived. `search_memory` reads the archive
+  so it can answer questions about work far outside the cache window;
+  `get_recent_activity` intentionally does not, to keep its payload small.
+- **Anonymous `mcp_tool_used` counter.** Reports which MCP tools see use —
+  presence only, never call counts or arguments — gated by the same
+  diagnostics kill switch as every other counter (`MEMBRIDGE_NO_DIAGNOSTICS=1`
+  / `diagnostics.enabled: false`).
+
 ## 0.1.0 — 2026-07-22
 
 Public launch. Version numbers reset to 0.1.0; the sections below this release

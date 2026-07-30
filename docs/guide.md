@@ -181,6 +181,16 @@ MemBridge Beta writes are the context files (inside its own markers) and its own
 state in `~/.membridge`; transcripts are read incrementally and never
 modified.
 
+MemBridge also keeps a durable local archive of teammate activity, one file
+per shared project under `~/.membridge/team-archive/`. The working cache
+only holds each project's newest entries — under a week's worth for a busy
+five-person team — so once an entry aged out of the cache it used to be
+gone for good; now every pulled entry is appended to the archive too, and
+the daemon walks backward through history until the team's earliest entry
+is captured. The archive lives in the same trust boundary as everything
+else here — same machine, same account — and is redacted at every read,
+never trusted as already-clean at rest.
+
 Secrets are redacted before any text leaves a transcript, in every path
 (context blocks, memory files, Copy-for-AI, roadmap prompts, team sync).
 The built-in patterns cover AWS/GitHub/Google/Slack/Anthropic/OpenAI key
@@ -247,13 +257,26 @@ boxes and terminal-first teammates aren't second-class:
 | `membridge-beta team setup` | Point at a self-hosted backend |
 | `membridge-beta mcp` | Read-only MCP server over stdio |
 
-`membridge-beta mcp` exposes the shared memory as read-only MCP tools
-(`list_projects`, `get_project_memory`, `get_recent_activity`,
-`search_memory`) for Claude Desktop, Cursor, and other MCP clients. Nothing
-it exposes can write files or trigger sync, and every field passes through
-the same redaction as the context files. The MCP SDK ships with MemBridge —
-there is nothing extra to install. Point your client at
-`{ "command": "membridge", "args": ["mcp"] }`.
+`membridge-beta mcp` exposes the shared memory as read-only MCP tools —
+`list_projects`, `get_project_memory`, `get_recent_activity`,
+`search_memory`, `why`, and `recall` — for Claude Desktop, Cursor, and
+other MCP clients. `search_memory` is relevance-ranked, not a plain keyword
+match: it scores headlines, decisions, gotchas, goals, files touched,
+per-file change notes, prompts, and summaries, and each result carries a
+relevance score plus which fields matched. It's deliberately not
+recency-weighted, so work from months ago still surfaces when it's the
+best match — teammates re-covering old ground is exactly what it's for.
+Narrow it with optional `author`, `project`, `file`, `tool`, and
+`since`/`until` filters (a bare date like `2026-06-01` includes that whole
+day). It also reaches the durable team archive described above, so it can
+answer questions about work outside the recent-activity window;
+`get_recent_activity` intentionally skips the archive to keep its payload
+small. `why` traces a file (or a single line) back to the session that
+touched it, and `recall` returns a cached structural skeleton of a tracked
+file. Nothing any of these tools expose can write files or trigger sync,
+and every field passes through the same redaction as the context files.
+The MCP SDK ships with MemBridge — there is nothing extra to install.
+Point your client at `{ "command": "membridge", "args": ["mcp"] }`.
 
 ## Supported tools
 
