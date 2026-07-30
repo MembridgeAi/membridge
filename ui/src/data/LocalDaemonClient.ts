@@ -7,8 +7,8 @@ import type {
   SkeletonStats, Status, StreamEntry,
 } from './types'
 import {
-  dedupeLiveSessions, feedQueryString, lastSharedAtByAuthor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
-  mapStreamEntry, projectCountsByAuthor, syncStateOf,
+  dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
+  mapStreamEntry, memberActivity, syncStateOf,
   type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import { mapSettings, type RawSettingsPayload, type RawTeamMeta, type RawTeamRow } from './settingsMapper'
@@ -204,24 +204,25 @@ export class LocalDaemonClient implements DataClient {
     return get<AccessMatrix>('/api/team/access-matrix')
   }
 
-  // lastSharedAt needs the raw team stream (author_id, ts), which is a
-  // different shape and a different endpoint than the merged /api/feed page
-  // already fetched below for project counts -- /api/team/feed does not
-  // dedupe against local entries or carry headline/distilled, so it can't be
-  // read off that response. That's a third request this method didn't
-  // previously make (team, members, feed -> +team/feed), traded for not
-  // fabricating a value the daemon can actually answer.
+  // projectCount and lastSharedAt used to come off ONE shared, newest-first
+  // /api/feed or /api/team/feed page, bucketed by author -- whichever member
+  // is most active fills that page, so every quieter teammate's own rows
+  // never made it into the page at all (see mappers.ts's memberActivity
+  // comment; this is the third time this exact assumption has failed here,
+  // same shape of bug lib/api-insights.js already found and fixed once).
+  // Fix: one /api/team/feed request PER MEMBER, scoped with `author=<their
+  // id>` and run in parallel, so the rows this reads for any one member can
+  // never contain another member's entries -- a noisy teammate's volume
+  // structurally cannot crowd out a quiet one anymore.
   async getMembers(): Promise<Member[]> {
     const team = await this.firstTeam()
     if (!team) return []
-    const [membersRes, f, teamFeedRes] = await Promise.all([
-      get<{ members: RawMemberRow[] }>(`/api/team/members?teamId=${encodeURIComponent(team.team_id)}`),
-      this.feed(),
-      get<{ entries: RawTeamFeedEntry[] }>(`/api/team/feed?teamId=${encodeURIComponent(team.team_id)}&limit=${TEAM_FEED_LIMIT}`),
-    ])
-    const counts = projectCountsByAuthor(f.entries)
-    const lastShared = lastSharedAtByAuthor(teamFeedRes.entries)
-    return membersRes.members.map(m => mapMember(m, counts, lastShared))
+    const membersRes = await get<{ members: RawMemberRow[] }>(`/api/team/members?teamId=${encodeURIComponent(team.team_id)}`)
+    const activity = await Promise.all(membersRes.members.map(m =>
+      get<{ entries: RawTeamFeedEntry[] }>(
+        `/api/team/feed?teamId=${encodeURIComponent(team.team_id)}&author=${encodeURIComponent(m.user_id)}&limit=${TEAM_FEED_LIMIT}`,
+      ).then(res => memberActivity(res.entries))))
+    return membersRes.members.map((m, i) => mapMember(m, activity[i]))
   }
 
   // The daemon can only mint a generic, role-less invite LINK (POST

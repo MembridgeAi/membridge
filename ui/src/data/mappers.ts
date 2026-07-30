@@ -60,6 +60,7 @@ export interface RawMemberRow {
 // /api/team/feed row (server.js:1502, team_feed RPC -- 002_team_v2.sql:285) -- raw team stream, not RawFeedEntry's local-merged feed.
 export interface RawTeamFeedEntry {
   author_id: string | null
+  project_id: string | null
   ts: string
 }
 
@@ -346,36 +347,54 @@ export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[], i
 // Members: team_members_list (002_team_v2.sql:267) returns only {user_id,
 // display_name, role, joined_at} -- a teammate's daemon/token state lives on
 // THEIR machine, unseen here. Member models only what this install can
-// observe: lastSharedAt (newest /api/team/feed row by them) and keyAlert
-// (see mapMember). projectCount is capped to whatever /api/feed page is in hand.
+// observe: lastSharedAt (newest /api/team/feed row by them), projectCount
+// (distinct projects they've POSTED into -- see the Member.projectCount doc
+// in types.ts, which this derivation must keep agreeing with), and keyAlert.
+//
+// THIRD TIME THIS EXACT PAGING ASSUMPTION HAS FAILED: a member's facts used
+// to be read off ONE shared, newest-first, capped page (either /api/feed's
+// merged local+team page, or a bare /api/team/feed?limit=200 page) and
+// bucketed by author. Whichever author is most active fills that page
+// entirely, so every quieter teammate's own rows never appear in it at all
+// -- they read as "0 projects, nothing shared yet" while their real rows sit
+// just past the cutoff. This is the identical shape of bug lib/api-insights.js
+// already found and fixed once (a capped page for "last arrived" disagreeing
+// with a full-window count of "how much they shared" in the SAME response --
+// search that file for "97 shared entries"), and it re-appeared here as the
+// reason a "this is their last project" warning couldn't be built on top of
+// Member.projectCount at all: the number was never trustworthy.
+//
+// Fix: memberActivity below takes ONE member's own /api/team/feed rows only
+// (LocalDaemonClient.getMembers() issues one author-scoped request per
+// member, run in parallel, instead of scanning a page shared by everyone).
+// A noisy teammate's volume can no longer crowd a quiet one out, because
+// their rows are never in the same array to begin with -- there is no shared
+// cap left for that to happen to. The trade-off this keeps: each member's
+// OWN request is still capped (TEAM_FEED_LIMIT, LocalDaemonClient.ts) at
+// their 200 most recent rows, so an extremely prolific single member's
+// oldest projects could still be missed -- but that bound is a function of
+// their own volume alone, never a teammate's.
 // ---------------------------------------------------------------------------
-export function projectCountsByAuthor(entries: RawFeedEntry[]): Record<string, number> {
-  const byAuthor = new Map<string, Set<string>>()
-  for (const e of entries) {
-    if (!e.authorId) continue
-    const projectKey = e.projectPath || e.projectId || e.project
-    if (!projectKey) continue
-    if (!byAuthor.has(e.authorId)) byAuthor.set(e.authorId, new Set())
-    byAuthor.get(e.authorId)!.add(projectKey)
-  }
-  const out: Record<string, number> = {}
-  for (const [id, keys] of byAuthor) out[id] = keys.size
-  return out
+export interface MemberActivity {
+  projectCount: number
+  lastSharedAt: string | null
 }
 
-// Newest ts per author_id across a page of /api/team/feed (capped at 200 rows,
-// 002_team_v2.sql:320) -- "the newest we can see", never a fabricated "never".
-export function lastSharedAtByAuthor(entries: RawTeamFeedEntry[]): Record<string, string> {
-  const out: Record<string, string> = {}
+// Distinct project_id count + newest ts, computed from a single author's own
+// team-feed rows. Deliberately takes no author_id/bucketing step -- unlike
+// the two functions this replaced, there is nothing to bucket: every entry
+// passed in already belongs to the one member this result is for.
+export function memberActivity(entries: RawTeamFeedEntry[]): MemberActivity {
+  const projects = new Set<string>()
+  let lastSharedAt: string | null = null
   for (const e of entries) {
-    if (!e.author_id) continue
-    const seen = out[e.author_id]
-    if (!seen || e.ts > seen) out[e.author_id] = e.ts
+    if (e.project_id) projects.add(e.project_id)
+    if (!lastSharedAt || e.ts > lastSharedAt) lastSharedAt = e.ts
   }
-  return out
+  return { projectCount: projects.size, lastSharedAt }
 }
 
-export function mapMember(row: RawMemberRow, projectCounts: Record<string, number>, lastSharedAt: Record<string, string>): Member {
+export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
   return {
     id: row.user_id,
     name: row.display_name,
@@ -384,8 +403,8 @@ export function mapMember(row: RawMemberRow, projectCounts: Record<string, numbe
     // schema.sql has joined_at NOT NULL, but the RPC's return type is
     // nullable -- fall back rather than assert a value we don't have.
     joinedAt: row.joined_at || '',
-    projectCount: projectCounts[row.user_id] || 0,
-    lastSharedAt: lastSharedAt[row.user_id] || null,
+    projectCount: activity.projectCount,
+    lastSharedAt: activity.lastSharedAt,
     // Known gap: statusPayload (server.js:197) exposes only a COUNT of state.keyAlerts; no per-member endpoint exists.
     keyAlert: false,
   }

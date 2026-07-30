@@ -117,6 +117,12 @@ export interface Member {
   email: string
   role: Role
   joinedAt: string
+  // Distinct projects this member has POSTED team-feed entries into -- NOT
+  // "projects they have access to" (that's a different, already-modeled
+  // concept: AccessMatrix / getProjectAccess). Computed from that member's
+  // own team-feed rows only, never a shared page other members' rows also
+  // sit in -- see mappers.ts's memberActivity for why that distinction is
+  // load-bearing.
   projectCount: number
   lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
   keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)

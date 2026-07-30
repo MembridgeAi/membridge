@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf,
-  lastSharedAtByAuthor, latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
-  memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
+  latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
+  memberActivity, memberIdsFor, outcomeOf, streamEntryId,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import type { LiveSession, StreamEntry } from './types'
@@ -257,21 +257,87 @@ describe('mapProjectRow', () => {
   })
 })
 
-describe('projectCountsByAuthor and mapMember', () => {
-  it('counts distinct projects per author across the feed page', () => {
-    const counts = projectCountsByAuthor([
-      entry({ authorId: 'andrew', projectPath: '/a' }),
-      entry({ authorId: 'andrew', projectPath: '/b' }),
-      entry({ authorId: 'andrew', projectPath: '/a' }), // dup, not double-counted
-      entry({ authorId: 'sarah', projectPath: '/a' }),
-    ])
-    expect(counts).toEqual({ andrew: 2, sarah: 1 })
+describe('memberActivity', () => {
+  const row = (overrides: Partial<RawTeamFeedEntry> = {}): RawTeamFeedEntry => ({
+    author_id: 'andrew', project_id: 'proj-a', ts: '2026-07-29T19:00:00Z', ...overrides,
   })
+
+  it('counts distinct projects and picks the newest ts, from one author\'s own rows', () => {
+    const out = memberActivity([
+      row({ project_id: 'proj-a', ts: '2026-07-28T00:00:00Z' }),
+      row({ project_id: 'proj-b', ts: '2026-07-29T19:00:00Z' }),
+      row({ project_id: 'proj-a', ts: '2026-07-27T00:00:00Z' }), // dup project, not double-counted
+    ])
+    expect(out).toEqual({ projectCount: 2, lastSharedAt: '2026-07-29T19:00:00Z' })
+  })
+  it('ignores rows with no project_id for the count, but still tracks their ts', () => {
+    const out = memberActivity([row({ project_id: null, ts: '2026-07-29T19:00:00Z' })])
+    expect(out).toEqual({ projectCount: 0, lastSharedAt: '2026-07-29T19:00:00Z' })
+  })
+  it('is projectCount 0 and lastSharedAt null for an empty page, never a made-up value', () => {
+    expect(memberActivity([])).toEqual({ projectCount: 0, lastSharedAt: null })
+  })
+
+  // THE REGRESSION THIS GUARDS: mapMember/getMembers used to derive a
+  // member's projectCount and lastSharedAt from ONE page shared by every
+  // author on the team (see mappers.ts's members block comment -- "third
+  // time this exact paging assumption has failed"). Whichever teammate is
+  // most active fills that shared page entirely, so a quiet teammate's own
+  // rows never appear in it and they read as a ghost: 0 projects, nothing
+  // shared, even though they demonstrably have both. memberActivity is the
+  // fix -- it only ever sees ONE author's own rows (LocalDaemonClient.ts
+  // fetches with an explicit `author=` query per member), so there is no
+  // shared array left for a noisy teammate to crowd anyone out of. This test
+  // proves the invariant directly: build the quiet author's OWN page (what
+  // an author-scoped /api/team/feed request returns) and show it is correct
+  // no matter how large the OTHER author's volume is -- a noisy teammate's
+  // entries are never even passed in, by construction.
+  it('a quiet teammate\'s facts are correct regardless of a teammate with 20x their volume -- their entries never even reach this function', () => {
+    const NOISY_COUNT = 220 // 20x QUIET_COUNT
+    const QUIET_COUNT = 11
+    // What a single-shared-page implementation would have scanned: one big
+    // combined, newest-first array where the noisy author's 220 recent rows
+    // occupy every slot up to any realistic page cap (100 or 200), and the
+    // quiet author's 11 older rows never surface. Kept here only to make the
+    // "20x volume, one crowds out the other" scenario concrete -- the fixed
+    // code path never builds or reads this combined array at all.
+    const noisyRows = Array.from({ length: NOISY_COUNT }, (_, i) => row({
+      author_id: 'noisy', project_id: i % 2 === 0 ? 'proj-a' : 'proj-b',
+      ts: new Date(2026, 6, 29, 12, 0, i).toISOString(), // all newer than every quiet row below
+    }))
+    const quietRows = [
+      // Newest row deliberately last in this literal array but NOT last in
+      // time, to prove memberActivity finds it by comparing ts, not by
+      // assuming array order.
+      row({ author_id: 'quiet', project_id: 'proj-c', ts: '2026-07-18T09:00:00Z' }),
+      row({ author_id: 'quiet', project_id: 'proj-c', ts: '2026-07-15T09:00:00Z' }),
+      ...Array.from({ length: QUIET_COUNT - 2 }, (_, i) => row({
+        author_id: 'quiet', project_id: 'proj-d', ts: new Date(2026, 6, 10, 9, 0, i).toISOString(),
+      })),
+    ]
+    expect(noisyRows.length).toBe(NOISY_COUNT)
+    expect(quietRows.length).toBe(QUIET_COUNT)
+
+    // The fix: each author's activity is computed from THEIR OWN rows only
+    // (what LocalDaemonClient's author-scoped request returns) -- the noisy
+    // author's 220 rows are simply never in scope for the quiet author's
+    // result, so volume disparity cannot affect correctness at all.
+    const quiet = memberActivity(quietRows)
+    expect(quiet).toEqual({ projectCount: 2, lastSharedAt: '2026-07-18T09:00:00Z' })
+
+    // The noisy author's own numbers stay correct too, independent of the
+    // quiet author's presence or absence.
+    const noisy = memberActivity(noisyRows)
+    expect(noisy.projectCount).toBe(2)
+    expect(noisy.lastSharedAt).toBe(noisyRows[noisyRows.length - 1].ts)
+  })
+})
+
+describe('mapMember', () => {
   it('maps a member row to only what this machine can observe, never a fabricated diagnosis', () => {
     const m = mapMember(
       { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-22T18:58:00Z' },
-      { andrew: 3 },
-      { andrew: '2026-07-29T19:00:00Z' },
+      { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
     )
     expect(m).toEqual({
       id: 'andrew', name: 'Andrew', email: '', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
@@ -279,29 +345,17 @@ describe('projectCountsByAuthor and mapMember', () => {
     })
   })
   it('falls back joinedAt to an empty string when the row carries no timestamp, rather than asserting one', () => {
-    const m = mapMember({ user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: null }, {}, {})
+    const m = mapMember(
+      { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: null },
+      { projectCount: 0, lastSharedAt: null },
+    )
     expect(m.joinedAt).toBe('')
   })
-  it('is null for lastSharedAt when the member has no entry in the team-feed page, never a made-up time', () => {
-    const m = mapMember({ user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z' }, {}, {})
+  it('is null for lastSharedAt when the member has no team-feed rows of their own, never a made-up time', () => {
+    const m = mapMember(
+      { user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z' },
+      { projectCount: 0, lastSharedAt: null },
+    )
     expect(m.lastSharedAt).toBeNull()
-  })
-})
-
-describe('lastSharedAtByAuthor', () => {
-  const row = (overrides: Partial<RawTeamFeedEntry> = {}): RawTeamFeedEntry => ({
-    author_id: 'andrew', ts: '2026-07-29T19:00:00Z', ...overrides,
-  })
-
-  it('picks the newest ts per author_id', () => {
-    const out = lastSharedAtByAuthor([
-      row({ author_id: 'andrew', ts: '2026-07-28T00:00:00Z' }),
-      row({ author_id: 'andrew', ts: '2026-07-29T19:00:00Z' }),
-      row({ author_id: 'sarah', ts: '2026-07-20T00:00:00Z' }),
-    ])
-    expect(out).toEqual({ andrew: '2026-07-29T19:00:00Z', sarah: '2026-07-20T00:00:00Z' })
-  })
-  it('ignores rows with no author_id', () => {
-    expect(lastSharedAtByAuthor([row({ author_id: null })])).toEqual({})
   })
 })

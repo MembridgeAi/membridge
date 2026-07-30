@@ -150,6 +150,102 @@ describe('LocalDaemonClient status/team coalescing', () => {
   })
 })
 
+// Regression for the live bug: a teammate who has genuinely posted entries
+// on 2 shared projects (dozens of them, going back a week) rendered on the
+// Members page as "0 projects · nothing shared yet" -- a ghost. Root cause:
+// getMembers() used to derive projectCount from a page of /api/feed capped
+// at 100 rows, and lastSharedAt from a page of /api/team/feed capped at 200
+// rows -- both newest-first and shared across every author on the team. An
+// owner with 1,723 entries fills either page entirely, so a teammate with 97
+// entries never appears in it at all. This is the third time this exact
+// paging assumption has failed (lib/api-insights.js found and fixed the same
+// shape of bug once already -- see its "97 shared entries" comment). The fix
+// scopes each member's request to their own author id, so this test's fetch
+// stub proves the invariant end to end: it never even asserts anything about
+// implementation, only that the quiet teammate's real numbers come back.
+describe('LocalDaemonClient.getMembers() invariant: a quiet teammate\'s numbers do not depend on a noisy teammate\'s volume', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const NOISY_ID = 'noisy-owner'
+  const QUIET_ID = 'quiet-teammate'
+
+  // 100-200 recent rows for the noisy author -- enough to fill BOTH
+  // /api/feed's 100-row page and /api/team/feed's 200-row page entirely on
+  // its own, mirroring the real report (owner: 1,723 entries; teammate: 97).
+  const noisyLocalEntries = Array.from({ length: 100 }, (_, i) => ({
+    ts: new Date(2026, 6, 29, 12, 0, i).toISOString(), author: 'Noisy', authorId: NOISY_ID, source: 'Codex',
+    session: `s${i}`, project: 'noisy-proj', projectPath: '/x/noisy-proj', projectId: null,
+    ask: '', summary: null, distilled: false, files: [], goal: null, headline: null,
+  }))
+  const noisyTeamRows = Array.from({ length: 200 }, (_, i) => ({
+    author_id: NOISY_ID, project_id: 'proj-noisy', ts: new Date(2026, 6, 29, 12, 0, i).toISOString(),
+  }))
+  const quietTeamRows = [
+    { author_id: QUIET_ID, project_id: 'proj-quiet-a', ts: '2026-07-22T09:00:00Z' },
+    { author_id: QUIET_ID, project_id: 'proj-quiet-b', ts: '2026-07-23T09:00:00Z' },
+  ]
+
+  function stubFetch() {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(String(url), 'http://x')
+      const respond = (body: unknown) => ({ ok: true, status: 200, json: async () => body })
+      if (u.pathname === '/api/team') {
+        return respond({ teams: [{ team_id: 'team-1', role: 'member' }], viewerId: NOISY_ID, inviteCode: null })
+      }
+      if (u.pathname === '/api/team/members') {
+        return respond({
+          members: [
+            { user_id: NOISY_ID, display_name: 'Noisy', role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
+            { user_id: QUIET_ID, display_name: 'Quiet', role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+          ],
+        })
+      }
+      if (u.pathname === '/api/team/feed') {
+        const author = u.searchParams.get('author')
+        if (author === QUIET_ID) return respond({ entries: quietTeamRows })
+        if (author === NOISY_ID) return respond({ entries: noisyTeamRows })
+        // No author filter: a shared newest-first page, entirely filled by
+        // the noisy author -- exactly the real, capped /api/team/feed page
+        // the pre-fix code read for every member at once.
+        return respond({ entries: noisyTeamRows })
+      }
+      if (u.pathname === '/api/feed') {
+        // Local merged feed, capped at 100 -- entirely the noisy author's
+        // own entries, same crowd-out shape (the pre-fix code's OTHER source
+        // of a member's projectCount).
+        return respond({ entries: noisyLocalEntries })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('gives the quiet teammate their real project count and last-shared date, not zero', async () => {
+    stubFetch()
+    const client = new LocalDaemonClient()
+
+    const members = await client.getMembers()
+    const quiet = members.find(m => m.id === QUIET_ID)
+
+    expect(quiet).toBeDefined()
+    expect(quiet!.projectCount).toBe(2)
+    expect(quiet!.lastSharedAt).toBe('2026-07-23T09:00:00Z')
+  })
+
+  it('leaves the noisy teammate\'s own numbers correct too', async () => {
+    stubFetch()
+    const client = new LocalDaemonClient()
+
+    const members = await client.getMembers()
+    const noisy = members.find(m => m.id === NOISY_ID)
+
+    expect(noisy).toBeDefined()
+    expect(noisy!.projectCount).toBe(1)
+    expect(noisy!.lastSharedAt).toBe(noisyTeamRows[noisyTeamRows.length - 1].ts)
+  })
+})
+
 describe('LocalDaemonClient capabilities', () => {
   // teamAdminSupported says the daemon transport CAN carry admin calls -- it
   // is not, and must never be read as, permission for the current viewer to
