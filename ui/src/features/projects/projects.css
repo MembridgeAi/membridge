@@ -1,0 +1,194 @@
+/* Projects grid — imported once from ProjectsPage.tsx (per-feature CSS, same
+ * precedent as today.css/project.css). One --r radius everywhere except
+ * avatars (circles), no shadows, no gradients, hover changes background only. */
+
+.projects-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.projects-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.projects-title {
+  margin: 0;
+  font-size: 14px;
+}
+.projects-count {
+  color: var(--text3);
+  font-size: 11px;
+}
+.projects-header-right {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.projects-search {
+  width: 150px;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  color: var(--text2);
+}
+
+.projects-error {
+  margin: 12px 16px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
+
+/* The one horizontal-scroll boundary in this screen: the table can be wider
+ * than the viewport (one column per member), but the PAGE never scrolls
+ * sideways -- scrollbar-gutter keeps the reserved space stable on Windows
+ * so the table doesn't jump when the scrollbar appears/disappears. */
+.scroll-x {
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.projects-table {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.projects-table thead th {
+  text-align: left;
+  padding: 7px 12px;
+  color: var(--text3);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+.projects-table thead th.who {
+  text-align: center;
+  width: 46px;
+}
+.projects-table tbody td {
+  padding: 8px 12px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--line);
+}
+.projects-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.projects-table tbody tr:hover {
+  background: var(--panel2);
+}
+.projects-table td.who {
+  text-align: center;
+}
+.projects-empty-note {
+  padding: 14px 16px;
+  color: var(--text3);
+  text-align: center;
+}
+
+.proj-name {
+  font-weight: 600;
+}
+.proj-path {
+  display: block;
+  margin-top: 1px;
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 400;
+}
+.num {
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+/* Duplicated from today.css's .tag rules -- see project.css for the same
+ * note: each feature CSS file owns its small utility classes. */
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  background: var(--panel2);
+  color: var(--text2);
+}
+.tag-team {
+  background: var(--accent-dim);
+  color: var(--accent2);
+}
+.tag-private {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+/* Custom-drawn (appearance: none) rather than the native checkbox chrome, so
+ * it carries the same --r radius and state language as the rest of the
+ * system instead of an OS-default square -- matches projects-list-v2.html's
+ * .chk. State is never color-only: checked adds a glyph, not just a fill. */
+.access-cell {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  background: var(--panel2);
+  cursor: pointer;
+}
+.access-cell:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.access-cell:checked::after {
+  content: "✓";
+  position: absolute;
+  inset: 0;
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+.access-cell:disabled {
+  cursor: default;
+}
+.access-cell-na {
+  border-style: dashed;
+  opacity: 0.4;
+}
+
+.proj-btn {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.proj-btn:hover {
+  background: var(--panel2);
+}
+
+.projects-foot {
+  padding: 8px 16px;
+  margin: 0;
+  color: var(--text3);
+  font-size: 10.5px;
+  border-top: 1px solid var(--line);
+}

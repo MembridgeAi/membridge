@@ -37,9 +37,13 @@ export function useProjectStream(projectPath: string | null) {
   })
 }
 
-export function useAccessMatrix() {
+// GET /api/team/access-matrix is owner/admin-only -- 403 for a member (Task
+// 8). `enabled` defaults true for existing/simple callers, but the projects
+// grid (Task 10) must pass false for a member role so this never fires a
+// request the daemon is going to refuse.
+export function useAccessMatrix(enabled: boolean = true) {
   const c = useDataClient()
-  return useQuery({ queryKey: ['accessMatrix'], queryFn: () => c.getAccessMatrix() })
+  return useQuery({ queryKey: ['accessMatrix'], queryFn: () => c.getAccessMatrix(), enabled })
 }
 
 // Per-project visibility flags (who on the team can see THIS project), for
