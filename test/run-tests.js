@@ -16659,6 +16659,43 @@ async function main() {
       assert.strictEqual(called, false);
     });
 
+    // A config key that is present but blank is a deliberate opt-out, and it has
+    // to beat the URL compiled into the release. `||` cannot tell an absent key
+    // from an explicitly emptied one -- both are falsy -- which is how a
+    // self-hosted build carrying countersUrl: '' still POSTed to the MemBridge
+    // endpoint. Whitespace is the same intent typed less precisely, and it used
+    // to be worse than '': truthy, so it sailed past the guard and we POSTed to
+    // the literal string "   ".
+    await check('counters: a whitespace-only endpoint never sends', async () => {
+      let called = false;
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: '   ' }, {
+        fetchImpl: () => { called = true; return Promise.resolve({}); },
+      });
+      assert.strictEqual(sent, false);
+      assert.strictEqual(called, false);
+    });
+
+    check('counters: an explicit blank endpoint outranks the compiled-in default', () => {
+      const baked = 'https://counters.example.test';
+      assert.strictEqual(counters.countersUrl({ countersUrl: '' }, baked), '');
+      assert.strictEqual(counters.countersUrl({ countersUrl: '  \t ' }, baked), '');
+      // An ABSENT key is not an opt-out: our own builds must keep the default.
+      assert.strictEqual(counters.countersUrl({}, baked), baked);
+      assert.strictEqual(counters.countersUrl(null, baked), baked);
+      assert.strictEqual(counters.countersUrl({ countersUrl: 'http://x' }, baked), 'http://x');
+    });
+
+    check('counters: an empty or missing url in counters-backend.json means never send', () => {
+      assert.strictEqual(counters.countersUrl({}, ''), '');
+      assert.strictEqual(counters.countersUrl({}, '   '), '');
+      // A counters-backend.json with no "url" key at all yields a non-string,
+      // which must resolve to never-send rather than to something fetchable.
+      assert.strictEqual(counters.countersUrl({}, null), '');
+      // ...while the URL this release actually ships with still resolves, so a
+      // MemBridge build keeps reporting.
+      assert.strictEqual(counters.countersUrl({}), require('../lib/counters-backend.json').url);
+    });
+
     await check('counters: the diagnostics kill switch suppresses these too', async () => {
       let called = false;
       const sent = await counters.emitCounters({ projects: {} }, {
