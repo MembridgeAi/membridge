@@ -21,6 +21,7 @@ const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('..
 const digest = require('../lib/digest');
 const { startServer, teamPayload, teamProjectsPayload, statusPayload, projectsPayload, feedPayload, projectDetail, planPayload, savingsPayload, saveSettings, dailySessionBuckets } = require('../lib/server');
 const teamsync = require('../lib/teamsync');
+const apiInsights = require('../lib/api-insights');
 const { createMockSupabase } = require('./mock-supabase');
 const advisorLib = require('../lib/advisor');
 const advisors = require('../lib/advisors');
@@ -20235,6 +20236,167 @@ const repoRoot = require('../lib/repo-root');
       delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
       process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
       await new Promise(r => mockAccess.server.close(r));
+    }
+  }
+
+  // ===== Task 12: team insights aggregation =====
+  // severityOf is pure and needs no server -- the three cases from the spec.
+  check('a symptom affecting every session is broken', () => {
+    assert.equal(apiInsights.severityOf({ failing: 47, population: 47, sinceHours: 1 }), 'broken');
+  });
+  check('a symptom affecting two of hundreds is minor', () => {
+    assert.equal(apiInsights.severityOf({ failing: 2, population: 412, sinceHours: 1 }), 'minor');
+  });
+  check('a small but day-old symptom is broken', () => {
+    assert.equal(apiInsights.severityOf({ failing: 1, population: 100, sinceHours: 48 }), 'broken');
+  });
+
+  {
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const mockInsights = createMockSupabase();
+    const INSIGHTS_MOCK_PORT = P(79);
+    const HOME_OWNER = path.join(ROOT, 'home-insights-owner');
+    const HOME_MEMBER = path.join(ROOT, 'home-insights-member');
+    const PORT_OWNER = P(80);
+    const PORT_MEMBER = P(81);
+    const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
+    const portFor = { owner: PORT_OWNER, member: PORT_MEMBER };
+    const PROJECT_A = path.join(ROOT, 'projects', 'insights-app-a');
+    const PROJECT_B = path.join(ROOT, 'projects', 'insights-app-b');
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    // Same self-contained apiAs shape as the Task 8 fixture above, redefined
+    // here rather than hoisted out -- it closes over this block's own
+    // homeFor/portFor, and the file has no shared api-test-harness module.
+    async function apiAs(role, method, pathname, body) {
+      process.env.MEMBRIDGE_HOME = homeFor[role];
+      const port = portFor[role];
+      const srv = startServer(port, { retries: 0 });
+      try {
+        await waitForHttp(`http://127.0.0.1:${port}/api/status`);
+        const res = method === 'GET' ? await fetch(`http://127.0.0.1:${port}${pathname}`)
+          : await post(`http://127.0.0.1:${port}${pathname}`, body);
+        return { status: res.status, body: await res.json().catch(() => null) };
+      } finally {
+        await new Promise(r => srv.close(r));
+      }
+    }
+
+    await new Promise(r => mockInsights.server.listen(INSIGHTS_MOCK_PORT, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${INSIGHTS_MOCK_PORT}`;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      fs.mkdirSync(PROJECT_A, { recursive: true });
+      fs.mkdirSync(PROJECT_B, { recursive: true });
+
+      process.env.MEMBRIDGE_HOME = HOME_OWNER;
+      util.ensureConfig();
+      const ownerCreds = await teamsync.signup(util.getConfig(), 'insights-owner@test.dev', 'pw-io', 'Owner');
+      const insTeam = await teamsync.createTeam(util.getConfig(), 'InsightsCo');
+      const linkA = await teamsync.linkProject(util.getConfig(), PROJECT_A, insTeam.team_id, 'InsightsCo');
+      const linkB = await teamsync.linkProject(util.getConfig(), PROJECT_B, insTeam.team_id, 'InsightsCo');
+
+      process.env.MEMBRIDGE_HOME = HOME_MEMBER;
+      util.ensureConfig();
+      const memberCreds = await teamsync.signup(util.getConfig(), 'insights-member@test.dev', 'pw-im', 'Member');
+      await teamsync.joinTeam(util.getConfig(), insTeam.invite_code);
+
+      // A third member who never shares anything, backdated well past both
+      // the severity rule's 24h floor and the window under test -- pushed
+      // directly into the mock's member table (bypassing the join RPC, which
+      // always stamps "now") because the whole point is a joinedAt in the past.
+      mockInsights.members.push({
+        teamId: insTeam.team_id, userId: 'ghost-user-1', displayName: 'Ghost',
+        role: 'member', joinedAt: new Date(Date.now() - 30 * DAY_MS).toISOString(),
+      });
+
+      // Entries seeded directly into the mock's backing store (same shortcut
+      // the Task 8 fixture above uses) rather than exercising the full
+      // encrypt/push pipeline -- team_feed's plaintext routing columns
+      // (author/project/source/session/ts) are all this endpoint reads, and
+      // that pipeline is proven elsewhere. Two in the current 7-day window
+      // per project (owner x2 on A, member x1 on B, so each project reads as
+      // single-contributor -- a concentration case) and one each in the
+      // prior 7-day window (for the sessions/entries delta).
+      const now = Date.now();
+      const seed = (author, project, daysAgo, session, source) => {
+        mockInsights.entries.push({
+          id: mockInsights.entries.length + 1,
+          project_id: project.projectId,
+          author_id: author.userId,
+          author_name: author.displayName,
+          ts: new Date(now - daysAgo * DAY_MS).toISOString(),
+          source,
+          ask: null,
+          files: [],
+          session,
+          created_at: new Date(now - daysAgo * DAY_MS + mockInsights.entries.length).toISOString(),
+        });
+      };
+      seed(ownerCreds, linkA, 2, 's-owner-1', 'Claude Code');
+      seed(ownerCreds, linkA, 3, 's-owner-2', 'Claude Code');
+      seed(memberCreds, linkB, 0.5, 's-member-1', 'Codex');
+      seed(ownerCreds, linkA, 10, 's-owner-prior', 'Claude Code');
+      seed(memberCreds, linkB, 11, 's-member-prior', 'Codex');
+
+      await check('GET /api/team/insights is refused for a member role', async () => {
+        const res = await apiAs('member', 'GET', '/api/team/insights?window=7');
+        assert.strictEqual(res.status, 403);
+      });
+
+      await check('insights reports skeleton stats as unavailable when the ledger has none', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team/insights?window=30');
+        assert.strictEqual(res.status, 200);
+        assert.ok('available' in res.body.skeleton);
+      });
+
+      await check('insights never returns a dollar figure', async () => {
+        const body = JSON.stringify((await apiAs('owner', 'GET', '/api/team/insights?window=30')).body);
+        assert.ok(!/usd|dollar|"\$/i.test(body), 'no spend figure may appear in insights');
+      });
+
+      await check('insights aggregates sessions, entries, and per-project concentration from observable team_feed rows', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team/insights?window=7');
+        assert.strictEqual(res.status, 200);
+        const body = res.body;
+        assert.strictEqual(body.window, 7);
+        assert.strictEqual(body.sessions.count, 3, 'three distinct sessions fall inside the 7-day window');
+        assert.strictEqual(body.entriesShared.count, 3);
+        assert.strictEqual(body.entriesShared.delta, 1, '3 this window vs 2 the window before');
+        assert.strictEqual(body.membersSyncing.ok, 2, 'owner and member both shared in-window; Ghost did not');
+        assert.strictEqual(body.membersSyncing.total, 3);
+        const projA = body.topProjects.find(p => p.name === path.basename(PROJECT_A));
+        const projB = body.topProjects.find(p => p.name === path.basename(PROJECT_B));
+        assert.strictEqual(projA.sessions, 2);
+        assert.strictEqual(projB.sessions, 1);
+        assert.strictEqual(body.concentration.length, 2, 'both projects were touched by exactly one person this window');
+        assert.ok(body.concentration.every(c => c.onlyPerson === 'Owner' || c.onlyPerson === 'Member'));
+        const tools = Object.fromEntries(body.byTool.map(t => [t.tool, t.sessions]));
+        assert.strictEqual(tools['Claude Code'], 2);
+        assert.strictEqual(tools.Codex, 1);
+      });
+
+      await check('a silent teammate is reported as absence, never a diagnosis of their machine', async () => {
+        const res = await apiAs('owner', 'GET', '/api/team/insights?window=7');
+        const ghostProblem = res.body.problems.find(p => p.headline.includes('Ghost'));
+        assert.ok(ghostProblem, 'Ghost has zero entries and joined 30 days ago -- must be surfaced');
+        assert.strictEqual(ghostProblem.severity, 'broken', 'Ghost is 1 of 2 other teammates -- 50% of the population');
+        assert.ok(ghostProblem.scale.includes('joined') && ghostProblem.scale.includes('0 entries shared'),
+          'phrasing must be absence ("joined Nd ago · 0 entries shared")');
+        const forbidden = /hook|daemon|install|token|hasn.t configured|misconfigur/i;
+        for (const p of res.body.problems) {
+          assert.ok(!forbidden.test(p.headline) && !forbidden.test(p.scale),
+            `problem must not diagnose a remote machine: "${p.headline}" / "${p.scale}"`);
+        }
+        // The viewer's own account never appears in the problem list -- there
+        // is no "nothing has arrived from Owner" about yourself.
+        assert.ok(!res.body.problems.some(p => p.headline.includes('Owner')));
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+      await new Promise(r => mockInsights.server.close(r));
     }
   }
 
