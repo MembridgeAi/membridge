@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dedupeLiveSessions, feedQueryString, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor, mapFeedEntry,
-  mapLiveSession, mapMember, mapProjectRow, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
+  dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor,
+  mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor,
+  streamEntryId,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
+import type { LiveSession } from './types'
 
 const entry = (overrides: Partial<RawFeedEntry> = {}): RawFeedEntry => ({
   ts: '2026-07-29T20:00:00Z',
@@ -47,6 +49,18 @@ describe('intentOf', () => {
   })
   it('is null when goal and ask are both absent, never a placeholder string', () => {
     expect(intentOf(entry({ goal: null, ask: '' }))).toBeNull()
+  })
+  // FIX 1a/1b: lib/memorydb.js:155 mints the literal string "(not captured)"
+  // for a summary with no matching prompt event. It is not a real intent --
+  // the UI must treat it exactly like an absent one, never render it verbatim.
+  it('treats the daemon\'s literal "(not captured)" placeholder as absent', () => {
+    expect(intentOf(entry({ goal: null, ask: '(not captured)' }))).toBeNull()
+  })
+  it('treats "(not captured)" as absent even when it lands in goal, falling back to a real ask', () => {
+    expect(intentOf(entry({ goal: '(not captured)', ask: 'please fix it' }))).toBe('please fix it')
+  })
+  it('treats a whitespace-only ask as absent, not a blank captured intent', () => {
+    expect(intentOf(entry({ goal: null, ask: '   ' }))).toBeNull()
   })
 })
 
@@ -105,6 +119,49 @@ describe('dedupeLiveSessions and mapLiveSession', () => {
   it('maps a live entry to a LiveSession using the entry ts as startedAt', () => {
     const live = mapLiveSession(entry({ goal: 'rebuild the UI' }))
     expect(live).toMatchObject({ id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:00:00Z', intent: 'rebuild the UI' })
+  })
+})
+
+describe('groupLiveSessions', () => {
+  const live = (overrides: Partial<LiveSession> = {}): LiveSession => ({
+    id: 's1', author: 'You', authorId: 'me', tool: 'Claude Code', projectName: 'membridge',
+    startedAt: '2026-07-29T20:00:00Z', intent: null, ...overrides,
+  })
+
+  it('collapses nine same-person, same-project sessions with no intent into one group with no intent', () => {
+    const sessions = Array.from({ length: 9 }, (_, i) => live({ id: `s${i}`, startedAt: `2026-07-29T20:0${i}:00Z` }))
+    const groups = groupLiveSessions(sessions)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].intent).toBeNull()
+    expect(groups[0].sessionCount).toBe(9)
+  })
+
+  it('surfaces the most recent non-empty intent in the group, even when a newer session in it has none', () => {
+    const sessions = [
+      live({ id: 's1', startedAt: '2026-07-29T19:00:00Z', intent: 'first pass at the hook' }),
+      live({ id: 's2', startedAt: '2026-07-29T20:00:00Z', intent: null }),
+    ]
+    expect(groupLiveSessions(sessions)[0].intent).toBe('first pass at the hook')
+  })
+
+  it('keeps two different projects for the same person as two separate rows', () => {
+    const sessions = [live({ id: 's1', projectName: 'membridge' }), live({ id: 's2', projectName: 'sublease' })]
+    expect(groupLiveSessions(sessions)).toHaveLength(2)
+  })
+
+  it('keeps two different people in the same project as two separate rows', () => {
+    const sessions = [live({ id: 's1', authorId: 'me', author: 'You' }), live({ id: 's2', authorId: 'andrew', author: 'Andrew' })]
+    const groups = groupLiveSessions(sessions)
+    expect(groups).toHaveLength(2)
+    expect(groups.every(g => g.sessionCount === 1)).toBe(true)
+  })
+
+  it('uses the OLDEST session in the group as startedAt -- when the work actually began', () => {
+    const sessions = [
+      live({ id: 's1', startedAt: '2026-07-29T18:00:00Z' }),
+      live({ id: 's2', startedAt: '2026-07-29T21:00:00Z' }),
+    ]
+    expect(groupLiveSessions(sessions)[0].startedAt).toBe('2026-07-29T18:00:00Z')
   })
 })
 

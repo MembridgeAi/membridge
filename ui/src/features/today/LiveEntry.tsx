@@ -1,5 +1,5 @@
 import { Avatar } from '../../components/Avatar'
-import type { LiveSession } from '../../data/types'
+import type { LiveSessionGroup } from '../../data/types'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -16,13 +16,19 @@ function elapsedSince(startedAt: string): string {
 }
 
 interface LiveEntryProps {
-  session: LiveSession
+  group: LiveSessionGroup
 }
 
 /** One "Happening now" row: a 3-column grid (dot+avatar / who+tool+project /
  *  elapsed time), with the captured intent on a second row that shares the
  *  name's left edge (grid-column 2). Never infer or narrate intent -- render
  *  the captured string verbatim, or nothing at all when it is null.
+ *
+ *  One row per person+project GOAL, not per session (mappers.ts
+ *  groupLiveSessions): `group.sessionCount` shows "N sessions" only when
+ *  more than one live session shares this goal, and the elapsed clock reads
+ *  from the OLDEST session in the group -- when the work actually started,
+ *  not whichever session most recently touched it.
  *
  *  Deliberately NOT React.memo'd (unlike ProjectRow.tsx): elapsedSince()
  *  reads Date.now() at render time, with no timer of its own -- its "2m ago"
@@ -31,22 +37,25 @@ interface LiveEntryProps {
  *  object's identity stable across a poll with no real change, so memoizing
  *  here would freeze the elapsed label at whatever it read on the last
  *  ACTUAL change, not the last poll -- a real regression, not a safe skip. */
-export function LiveEntry({ session }: LiveEntryProps) {
+export function LiveEntry({ group }: LiveEntryProps) {
   return (
-    <div className="live-entry">
+    <div className="live-entry" data-testid="live-entry">
       <span className="live-entry-avatar">
         <span className="live-dot" role="img" aria-label="Live" />
-        <Avatar name={session.author} id={session.authorId} size={19} />
+        <Avatar name={group.author} id={group.authorId} size={19} />
       </span>
       <span className="live-entry-name-cell">
-        <span className="live-entry-who">{session.author} · {session.tool}</span>
-        <span className="mono live-entry-project">{session.projectName}</span>
+        <span className="live-entry-who">{group.author} · {group.tool}</span>
+        <span className="mono live-entry-project">{group.projectName}</span>
+        {group.sessionCount > 1 && (
+          <span className="mono live-entry-session-count">{group.sessionCount} sessions</span>
+        )}
       </span>
-      <span className="mono live-entry-elapsed">{elapsedSince(session.startedAt)}</span>
-      {session.intent && (
+      <span className="mono live-entry-elapsed">{elapsedSince(group.startedAt)}</span>
+      {group.intent && (
         <div className="live-entry-intent">
           <span className="live-entry-intent-label">Intent</span>
-          {session.intent}
+          {group.intent}
         </div>
       )}
     </div>

@@ -1,7 +1,44 @@
 import { describe, it, expect } from 'vitest'
 import { screen, within } from '@testing-library/react'
-import { renderApp } from '../../test/renderApp'
-import { TodayPage, lastTeamSyncLabel, skeletonPercentLabel, todayDateLabel } from './TodayPage'
+import { renderApp, renderWith } from '../../test/renderApp'
+import { FakeDataClient } from '../../data/FakeDataClient'
+import type { LiveSession, Project } from '../../data/types'
+import { TodayPage, lastTeamSyncLabel, projectsThisWeek, skeletonPercentLabel, todayDateLabel } from './TodayPage'
+
+// Fixture factory for a Project row, used by the "Projects · this week"
+// tests below -- only the fields each test actually varies are overridden.
+function project(overrides: Partial<Project> = {}): Project {
+  return {
+    path: '/x/p', name: 'p', exists: true, paused: false,
+    lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
+    sessionsTotal: 10, tools: ['Claude Code'], shared: false, memberIds: ['me'],
+    sessionsThisWeek: 1, dailyCounts: [0, 0, 0, 0, 0, 0, 1],
+    latestSummary: null, sync: { state: 'up-to-date' },
+    ...overrides,
+  }
+}
+
+// Fixture factory for a LiveSession, used by the "Happening now" grouping
+// tests below (FIX 1c).
+function liveSession(overrides: Partial<LiveSession> = {}): LiveSession {
+  return {
+    id: 's1', author: 'You', authorId: 'me', tool: 'Claude Code', projectName: 'membridge',
+    startedAt: '2026-07-29T20:00:00Z', intent: null, ...overrides,
+  }
+}
+
+// Both fixture clients below override only the one method each block of
+// tests needs, so they can hand TodayPage a project/live-session list the
+// shared FakeDataClient fixture can't express (empty this-week activity,
+// nine live sessions, etc.) without touching that shared fixture at all.
+class ProjectsFixtureClient extends FakeDataClient {
+  constructor(private fixture: Project[]) { super({}) }
+  getProjects() { return Promise.resolve(this.fixture) }
+}
+class LiveSessionsFixtureClient extends FakeDataClient {
+  constructor(private fixture: LiveSession[]) { super({}) }
+  getLiveSessions() { return Promise.resolve(this.fixture) }
+}
 
 // Scopes a StatStrip assertion to the cell for one label, so "1" or "68%"
 // is checked against the right stat, not just anywhere on the page.
@@ -150,5 +187,80 @@ describe('TodayPage', () => {
     const dateEl = await screen.findByText(/^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}$/)
     expect(dateEl).toBeInTheDocument()
     expect(dateEl.textContent).not.toContain(',')
+  })
+
+  // FIX 1c: "Happening now" groups by person + project so a goal doesn't
+  // repeat once per live session.
+  describe('Happening now grouping', () => {
+    it('collapses nine sessions with no intent into one row, with no intent line and no "(not captured)" anywhere', async () => {
+      const sessions = Array.from({ length: 9 }, (_, i) => liveSession({ id: `s${i}` }))
+      renderWith(new LiveSessionsFixtureClient(sessions), <TodayPage />)
+      const rows = await screen.findAllByTestId('live-entry')
+      expect(rows).toHaveLength(1)
+      expect(screen.queryByText('Intent')).toBeNull()
+      expect(screen.queryByText(/not captured/i)).toBeNull()
+    })
+
+    it('shows the one real intent in a group where only one of several sessions captured it', async () => {
+      const sessions = [liveSession({ id: 's1', intent: 'ship the invite flow' }), liveSession({ id: 's2', intent: null })]
+      renderWith(new LiveSessionsFixtureClient(sessions), <TodayPage />)
+      expect(await screen.findByText('ship the invite flow')).toBeInTheDocument()
+      expect(await screen.findAllByTestId('live-entry')).toHaveLength(1)
+    })
+
+    it('keeps two different projects as two separate rows', async () => {
+      const sessions = [liveSession({ id: 's1', projectName: 'membridge' }), liveSession({ id: 's2', projectName: 'sublease' })]
+      renderWith(new LiveSessionsFixtureClient(sessions), <TodayPage />)
+      expect(await screen.findAllByTestId('live-entry')).toHaveLength(2)
+    })
+
+    it('shows the session count only when more than one session shares the goal', async () => {
+      const sessions = [liveSession({ id: 's1' }), liveSession({ id: 's2' })]
+      renderWith(new LiveSessionsFixtureClient(sessions), <TodayPage />)
+      expect(await screen.findByText('2 sessions')).toBeInTheDocument()
+    })
+
+    it('omits the session count for a single live session', async () => {
+      renderWith(new LiveSessionsFixtureClient([liveSession({ id: 's1' })]), <TodayPage />)
+      await screen.findAllByTestId('live-entry')
+      expect(screen.queryByText(/\d+ sessions$/)).toBeNull()
+    })
+  })
+
+  // FIX 2: "Projects · this week" must mean this week.
+  describe('projectsThisWeek', () => {
+    it('drops a project with no sessions this week', () => {
+      const active = project({ path: '/a', name: 'active', sessionsThisWeek: 3 })
+      const idle = project({ path: '/b', name: 'idle', sessionsThisWeek: 0 })
+      expect(projectsThisWeek([active, idle])).toEqual([active])
+    })
+
+    it('orders by most recent activity first', () => {
+      const older = project({ path: '/a', name: 'older', sessionsThisWeek: 2, lastActivity: '2026-07-27T00:00:00Z' })
+      const newer = project({ path: '/b', name: 'newer', sessionsThisWeek: 2, lastActivity: '2026-07-29T00:00:00Z' })
+      expect(projectsThisWeek([older, newer]).map(p => p.name)).toEqual(['newer', 'older'])
+    })
+
+    it('keeps a project that is behind on sync as long as it has activity this week', () => {
+      const behind = project({ path: '/a', name: 'behind', sessionsThisWeek: 2, sync: { state: 'behind', lastSyncedAt: '2026-07-20T00:00:00Z' } })
+      expect(projectsThisWeek([behind])).toEqual([behind])
+    })
+  })
+
+  it('shows only projects with activity this week in the Projects section', async () => {
+    const client = new ProjectsFixtureClient([
+      project({ path: '/a', name: 'active-proj', sessionsThisWeek: 5, lastActivity: '2026-07-29T10:00:00Z' }),
+      project({ path: '/b', name: 'idle-proj', sessionsThisWeek: 0, lastActivity: '2026-07-01T10:00:00Z' }),
+    ])
+    renderWith(client, <TodayPage />)
+    expect(await screen.findByText('active-proj')).toBeInTheDocument()
+    expect(screen.queryByText('idle-proj')).toBeNull()
+  })
+
+  it('renders an honest empty line, not an empty section, when no project has activity this week', async () => {
+    const client = new ProjectsFixtureClient([project({ path: '/a', name: 'idle', sessionsThisWeek: 0 })])
+    renderWith(client, <TodayPage />)
+    expect(await screen.findByText('No project activity in the last 7 days.')).toBeInTheDocument()
+    expect(screen.queryByTestId('project-row')).toBeNull()
   })
 })

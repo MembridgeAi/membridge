@@ -62,8 +62,15 @@ function InvitesSection() {
  * owner/admin only — the audit trail. Matches team-v1b.html. "Resend" on an
  * invite is permanently omitted -- Task 17 confirmed no mail-delivery path
  * exists anywhere in this codebase or backend for team invites, so there is
- * nothing a "resend" could honestly do; "Copy invite link" is real, backed
- * by `settings.team.inviteCode` (Task 17's GET /api/team extension).
+ * nothing a "resend" could honestly do. "Copy invite code" is real, backed
+ * by `settings.team.inviteCode` (Task 17's GET /api/team extension) -- it is
+ * labelled "code", not "link", because it copies the standing invite CODE
+ * (`teams[0].invite_code`, lib/server.js's teamPayload), not a URL: the
+ * hosted /join/<token> page (web/app/join/[token]/page.js) only exists behind
+ * `teamsync.webUrl(config)`, which is empty in the shipped lib/backend.json,
+ * so building a "link" here would 404 for the default install. The daemon's
+ * own join path (`POST /api/team/join { inviteCode }`) accepts this same
+ * code, matching what the button promises.
  */
 export function MembersPage() {
   const client = useDataClient()
@@ -89,7 +96,11 @@ export function MembersPage() {
   const [inviteRole, setInviteRole] = useState<Role>('member')
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [pendingError, setPendingError] = useState<string | null>(null)
-  const [inviteCopyStatus, setInviteCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
+  // 'revealed' is the clipboard-unavailable-or-denied fallback: the code is
+  // shown in the page for the user to select and copy by hand. It must NEVER
+  // read as 'copied' -- a failed clipboard write that still claims success
+  // would leave someone pasting nothing into their teammate's invite prompt.
+  const [inviteCopyStatus, setInviteCopyStatus] = useState<'idle' | 'copied' | 'revealed'>('idle')
 
   // Unknown (still loading, or failed) defaults to solo/no-role, same as
   // Shell.tsx -- a management control never flashes on before its data
@@ -109,8 +120,11 @@ export function MembersPage() {
   const members = sortMembers(membersQuery.data ?? [])
   const inviteCode = settingsQuery.data?.team?.inviteCode ?? null
 
+  // Only the 'copied' confirmation auto-dismisses -- a revealed code stays on
+  // screen until the viewer copies it themselves; hiding it after 2s would
+  // defeat the whole point of revealing it.
   useEffect(() => {
-    if (inviteCopyStatus === 'idle') return
+    if (inviteCopyStatus !== 'copied') return
     const id = setTimeout(() => setInviteCopyStatus('idle'), 2000)
     return () => clearTimeout(id)
   }, [inviteCopyStatus])
@@ -139,14 +153,21 @@ export function MembersPage() {
     }
   }
 
+  // Clipboard failure must not claim success: a browser with no clipboard
+  // API (navigator.clipboard absent -- non-HTTPS context, older WebView) or a
+  // denied/failed write both fall through to 'revealed', never 'copied'.
   async function handleCopyInvite() {
     const code = settingsQuery.data?.team?.inviteCode
     if (!code) return
+    if (!navigator.clipboard) {
+      setInviteCopyStatus('revealed')
+      return
+    }
     try {
       await navigator.clipboard.writeText(code)
       setInviteCopyStatus('copied')
     } catch {
-      setInviteCopyStatus('error')
+      setInviteCopyStatus('revealed')
     }
   }
 
@@ -179,9 +200,16 @@ export function MembersPage() {
         {canManage && (
           <div className="members-header-actions">
             {inviteCode && (
-              <button type="button" className="members-btn" onClick={handleCopyInvite}>
-                {inviteCopyStatus === 'copied' ? 'Copied' : inviteCopyStatus === 'error' ? "Couldn't copy" : 'Copy invite link'}
-              </button>
+              <span className="invite-copy">
+                <button type="button" className="members-btn" onClick={handleCopyInvite}>
+                  {inviteCopyStatus === 'copied' ? 'Copied' : 'Copy invite code'}
+                </button>
+                {inviteCopyStatus === 'revealed' && (
+                  <span className="mono invite-code-reveal" role="status">
+                    Couldn't copy automatically — copy this code: {inviteCode}
+                  </span>
+                )}
+              </span>
             )}
             <button type="button" className="members-btn members-btn-primary" onClick={() => setShowInviteForm(v => !v)}>
               Invite by email

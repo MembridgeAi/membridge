@@ -41,6 +41,23 @@ export interface LiveSession {
   intent: string | null      // the captured opening ask, verbatim; never inferred
 }
 
+// "Happening now" row shape: one entry per person+project GOAL, not per
+// session (mappers.ts groupLiveSessions) -- a goal persists across however
+// many concurrent sessions are working on it. startedAt is the oldest
+// session's start (when the work began); intent is the most recent
+// non-empty intent seen across the group; sessionCount is how many live
+// sessions are folded into this row (the UI shows it only when > 1).
+export interface LiveSessionGroup {
+  id: string
+  author: string
+  authorId: string
+  tool: string
+  projectName: string
+  startedAt: string
+  sessionCount: number
+  intent: string | null
+}
+
 export interface StreamEntry {
   id: string
   author: string

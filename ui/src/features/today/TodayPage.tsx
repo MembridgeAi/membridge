@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
+import { groupLiveSessions } from '../../data/mappers'
 import { useLiveSessions, useProjects, useSkeletonStats, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
 import type { LiveSession, Project, SkeletonStats } from '../../data/types'
 import { LiveEntry } from './LiveEntry'
@@ -66,6 +67,20 @@ const nameLookup = (liveSessions: LiveSession[]): Record<string, string> => {
   return names
 }
 
+// FIX 2: "Projects · this week" must mean this week -- a watched project
+// with zero sessions in the last 7 days is not part of that week's story
+// (it's still visible on the Projects screen, just not here). A project
+// behind on sync still belongs here as long as it has activity: sync lag is
+// a different signal from inactivity, and hiding it would bury exactly the
+// project that most needs to be seen. Sorted most-recent-activity first, so
+// the section reads like what actually happened this week, not alphabetical
+// noise.
+export function projectsThisWeek(projects: Project[]): Project[] {
+  return projects
+    .filter(p => p.sessionsThisWeek > 0)
+    .sort((a, b) => (b.lastActivity ?? '').localeCompare(a.lastActivity ?? ''))
+}
+
 /** The team-first home screen. Solo mode shows three stats and no team
  *  framing (absent, not disabled); team mode adds the two shared/team stats. */
 export function TodayPage() {
@@ -87,6 +102,10 @@ export function TodayPage() {
   // Hooks must run unconditionally (rules-of-hooks), so this sits above the
   // hasError early return below, alongside every other hook in this component.
   const memberNames = useMemo(() => nameLookup(liveSessions), [liveSessions])
+  // FIX 1c: group person+project into one "Happening now" row per goal --
+  // same referential-stability reasoning as memberNames above (react-query's
+  // structural sharing keeps `liveSessions` stable across a no-change poll).
+  const liveGroups = useMemo(() => groupLiveSessions(liveSessions), [liveSessions])
 
   const hasError = statusQuery.isError || projectsQuery.isError || liveQuery.isError
   if (hasError) {
@@ -101,6 +120,7 @@ export function TodayPage() {
   const solo = statusQuery.data?.solo ?? true
   const teamLastSync = statusQuery.data?.teamLastSync ?? null
   const projects = projectsQuery.data ?? []
+  const weekProjects = projectsThisWeek(projects)
   // A load failure or a still-in-flight fetch degrades to "pending", the same
   // as a ledger with nothing in it -- never a guessed number.
   const skeleton: SkeletonStats = skeletonQuery.data ?? { available: false }
@@ -142,8 +162,8 @@ export function TodayPage() {
       <section>
         <div className="section-label">Happening now</div>
         <div className="live-list">
-          {liveSessions.length === 0 && <p className="today-empty-note">Nothing happening right now.</p>}
-          {liveSessions.map(session => <LiveEntry key={session.id} session={session} />)}
+          {liveGroups.length === 0 && <p className="today-empty-note">Nothing happening right now.</p>}
+          {liveGroups.map(group => <LiveEntry key={group.id} group={group} />)}
         </div>
       </section>
 
@@ -152,8 +172,10 @@ export function TodayPage() {
         <div className="project-list">
           {projects.length === 0 ? (
             <p className="today-empty-note">No projects yet — sync your first project to see it here.</p>
+          ) : weekProjects.length === 0 ? (
+            <p className="today-empty-note">No project activity in the last 7 days.</p>
           ) : (
-            projects.map(project => (
+            weekProjects.map(project => (
               <ProjectRow
                 key={project.path}
                 project={project}

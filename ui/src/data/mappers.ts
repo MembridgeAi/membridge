@@ -3,7 +3,7 @@
 // LocalDaemonClient.ts so every mapping decision is unit-testable without a
 // live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
 // to keep this file focused on feed/project/member mapping.
-import type { FeedEntry, FeedFilters, LiveSession, Member, Project, Role, StreamEntry, SyncState } from './types'
+import type { FeedEntry, FeedFilters, LiveSession, LiveSessionGroup, Member, Project, Role, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -86,10 +86,30 @@ export function hasSummary(e: Pick<RawFeedEntry, 'headline' | 'distilled' | 'sum
   return !!(e.distilled && e.summary)
 }
 
-// Intent rule: goal first, ask as fallback, null when both are absent -- the
-// UI must render nothing, never a placeholder sentence.
+// The daemon's own literal placeholder for "a summary landed but no prompt
+// was ever captured for this session" (lib/memorydb.js:155, the `ev.kind ===
+// 'summary'` branch that mints a bare entry with no preceding 'prompt'
+// event). It is stored and pushed like real text -- redaction doesn't touch
+// it, the team wire carries it verbatim -- so nothing upstream of this
+// module ever strips it. Rendered as-is it reads as a real (if useless)
+// captured intent, which is worse than showing nothing.
+const NOT_CAPTURED = '(not captured)'
+
+// Absent, whitespace-only, and the "(not captured)" sentinel all normalize
+// to the same null -- every caller downstream must treat them identically,
+// never render a blank line or the placeholder string for any of them.
+function normalizedIntentText(text: string | null): string | null {
+  if (!text) return null
+  const trimmed = text.trim()
+  if (!trimmed || trimmed === NOT_CAPTURED) return null
+  return trimmed
+}
+
+// Intent rule: goal first, ask as fallback, null when both are absent, are
+// whitespace, or are the daemon's "(not captured)" placeholder -- the UI
+// must render nothing, never a placeholder sentence dressed up as content.
 export function intentOf(e: Pick<RawFeedEntry, 'goal' | 'ask'>): string | null {
-  return e.goal || e.ask || null
+  return normalizedIntentText(e.goal) ?? normalizedIntentText(e.ask)
 }
 
 export function outcomeOf(e: Pick<RawFeedEntry, 'headline' | 'summary'>): string {
@@ -167,6 +187,44 @@ export function mapLiveSession(e: RawFeedEntry): LiveSession {
     startedAt: e.ts,
     intent: intentOf(e),
   }
+}
+
+// "One intent per goal, not one per session": a person can have several
+// sessions open at once against the same project, and one near-identical
+// "Happening now" row per session is noise, not signal -- a goal persists
+// across every session doing it. Groups by person + project into one row:
+// startedAt is the group's OLDEST session (when the work began), intent is
+// the most recent NON-EMPTY intent in the group (even from an older session
+// than the newest one), sessionCount is how many are folded in. Every field
+// is derived by comparing startedAt directly, never by trusting input order.
+export function groupLiveSessions(sessions: LiveSession[]): LiveSessionGroup[] {
+  const order: string[] = []
+  const byKey = new Map<string, LiveSession[]>()
+  for (const s of sessions) {
+    const key = `${s.authorId || s.author}::${s.projectName}`
+    const bucket = byKey.get(key)
+    if (bucket) bucket.push(s)
+    else { byKey.set(key, [s]); order.push(key) }
+  }
+  return order.map(key => {
+    const group = byKey.get(key)!
+    const oldest = group.reduce((a, b) => (a.startedAt <= b.startedAt ? a : b))
+    const newest = group.reduce((a, b) => (a.startedAt >= b.startedAt ? a : b))
+    const withIntent = group.filter(s => s.intent)
+    const latestIntent = withIntent.length > 0
+      ? withIntent.reduce((a, b) => (a.startedAt >= b.startedAt ? a : b)).intent
+      : null
+    return {
+      id: key,
+      author: newest.author,
+      authorId: newest.authorId,
+      tool: newest.tool,
+      projectName: newest.projectName,
+      startedAt: oldest.startedAt,
+      sessionCount: group.length,
+      intent: latestIntent,
+    }
+  })
 }
 
 // ---------------------------------------------------------------------------

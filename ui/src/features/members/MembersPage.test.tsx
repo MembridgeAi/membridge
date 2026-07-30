@@ -106,8 +106,10 @@ describe('MembersPage', () => {
 
   // "Resend" is permanently omitted -- Task 17 confirmed no mail-delivery
   // path exists anywhere in this codebase or backend for team invites.
-  // "Copy invite link" IS real now (Task 18): backed by
-  // settings.team.inviteCode, GET /api/team's Task 17 extension.
+  // "Copy invite code" IS real now (Task 18): backed by
+  // settings.team.inviteCode, GET /api/team's Task 17 extension. Labelled
+  // "code" rather than "link" -- see MembersPage.tsx's comment for why a
+  // "link" would be a fabricated, 404-ing URL for the default install.
   it('never renders "Resend" -- no mail-delivery path exists to back it', async () => {
     renderApp({}, <MembersPage />)
     await screen.findByText('Sarah')
@@ -119,9 +121,41 @@ describe('MembersPage', () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /copy invite link/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /copy invite code/i }))
     expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
     expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
+  })
+
+  // Clipboard failure must not read as success -- a rejected (or denied)
+  // write falls back to revealing the code on the page so the viewer can
+  // select and copy it by hand, instead of showing a false "Copied".
+  it('reveals the code for manual copying when the clipboard write fails, never claiming Copied', async () => {
+    const client = new FakeDataClient()
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /copy invite code/i }))
+    expect(await screen.findByText(/copy this code: INV-7F3K9Q/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^copied$/i })).toBeNull()
+  })
+
+  it('reveals the code for manual copying when no clipboard API exists at all', async () => {
+    const client = new FakeDataClient()
+    Object.assign(navigator, { clipboard: undefined })
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /copy invite code/i }))
+    expect(await screen.findByText(/copy this code: INV-7F3K9Q/i)).toBeInTheDocument()
+  })
+
+  it('renders no invite-copy control at all when the team has no invite code', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getSettings').mockImplementation(async () => {
+      const settings = await new FakeDataClient().getSettings()
+      return { ...settings, team: settings.team && { ...settings.team, inviteCode: null } }
+    })
+    renderWith(client, <MembersPage />)
+    await screen.findByText('Sarah')
+    expect(screen.queryByRole('button', { name: /copy invite/i })).toBeNull()
   })
 
   it('surfaces a failed role change instead of looking like nothing happened', async () => {
