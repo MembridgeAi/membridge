@@ -20066,6 +20066,113 @@ const repoRoot = require('../lib/repo-root');
     }
   });
 
+  // ===== Task 8: per-project access control + team audit trail =====
+  // A fresh, self-contained fixture (its own mock backend, ports, and two
+  // identities simulating a team owner and a plain member) rather than
+  // reusing the giant shared team fixture above — this is the authorization
+  // surface the task exists to prove, so it should not depend on state any
+  // earlier test happened to leave behind. Two identities on one machine are
+  // simulated the same way the archive-project route tests above do it: a
+  // dedicated MEMBRIDGE_HOME + dashboard port per identity, switched (and the
+  // previous server closed) between calls — util.getConfig()/loadCredentials
+  // both read process.env.MEMBRIDGE_HOME fresh on every call, so this is safe
+  // as long as identities are never exercised concurrently.
+  {
+    const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
+    const mockAccess = createMockSupabase();
+    const ACCESS_MOCK_PORT = P(76);
+    const HOME_OWNER = path.join(ROOT, 'home-access-owner');
+    const HOME_MEMBER = path.join(ROOT, 'home-access-member');
+    const PORT_OWNER = P(77);
+    const PORT_MEMBER = P(78);
+    const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
+    const portFor = { owner: PORT_OWNER, member: PORT_MEMBER };
+    const PROJECT = path.join(ROOT, 'projects', 'access-app');
+
+    // The suite has no api()/apiAs() helper yet (the brief's test bodies used
+    // those names illustratively) — added here in the file's own style,
+    // reusing the httpGet/httpPost/waitForHttp/startServer helpers already
+    // established above rather than inventing a new request-plumbing layer.
+    async function apiAs(role, method, pathname, body) {
+      process.env.MEMBRIDGE_HOME = homeFor[role];
+      const port = portFor[role];
+      const srv = startServer(port, { retries: 0 });
+      try {
+        await waitForHttp(`http://127.0.0.1:${port}/api/status`);
+        const res = method === 'GET' ? await fetch(`http://127.0.0.1:${port}${pathname}`)
+          : await post(`http://127.0.0.1:${port}${pathname}`, body);
+        return { status: res.status, body: await res.json().catch(() => null) };
+      } finally {
+        await new Promise(r => srv.close(r));
+      }
+    }
+    const api = pathname => apiAs('owner', 'GET', pathname);
+
+    await new Promise(r => mockAccess.server.listen(ACCESS_MOCK_PORT, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${ACCESS_MOCK_PORT}`;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      fs.mkdirSync(PROJECT, { recursive: true });
+
+      process.env.MEMBRIDGE_HOME = HOME_OWNER;
+      util.ensureConfig();
+      await teamsync.signup(util.getConfig(), 'access-owner@test.dev', 'pw-ao', 'Owner');
+      const accTeam = await teamsync.createTeam(util.getConfig(), 'AccessCo');
+      const stOwner = util.loadState();
+      stOwner.projects[PROJECT] = { events: [] };
+      util.saveState(stOwner);
+      await teamsync.linkProject(util.getConfig(), PROJECT, accTeam.team_id, 'AccessCo');
+
+      process.env.MEMBRIDGE_HOME = HOME_MEMBER;
+      util.ensureConfig();
+      await teamsync.signup(util.getConfig(), 'access-member@test.dev', 'pw-am', 'Member');
+      await teamsync.joinTeam(util.getConfig(), accTeam.invite_code);
+
+      await check('GET /api/team/access-matrix returns one row per project with a flag per member', async () => {
+        const res = await api('/api/team/access-matrix');
+        assert.strictEqual(res.status, 200);
+        assert.ok(Array.isArray(res.body.members) && Array.isArray(res.body.rows));
+        assert.ok(res.body.rows.length > 0, 'the linked project must appear as a row');
+        for (const row of res.body.rows) {
+          for (const m of res.body.members) {
+            assert.strictEqual(typeof row.access[m.id], 'boolean', `member ${m.id} missing from ${row.projectName}`);
+          }
+        }
+      });
+
+      await check('GET /api/project/access lists every member with a canSee flag', async () => {
+        const res = await apiAs('owner', 'GET', `/api/project/access?path=${encodeURIComponent(PROJECT)}`);
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.body.members.length, 2, 'owner + member should both be listed');
+        for (const m of res.body.members) assert.strictEqual(typeof m.canSee, 'boolean');
+      });
+
+      await check('POST /api/project/access is refused for a member role', async () => {
+        const res = await apiAs('member', 'POST', '/api/project/access', { path: PROJECT, memberId: 'other', canSee: false });
+        assert.strictEqual(res.status, 403);
+        assert.strictEqual(mockAccess.projectAccess.length, 0, 'a refused write must never reach the backend');
+      });
+
+      await check('POST /api/project/access writes an audit row', async () => {
+        const before = (await apiAs('owner', 'GET', '/api/team/audit')).body.events.length;
+        const write = await apiAs('owner', 'POST', '/api/project/access', { path: PROJECT, memberId: 'other', canSee: false });
+        assert.strictEqual(write.status, 200);
+        const after = (await apiAs('owner', 'GET', '/api/team/audit')).body.events;
+        assert.strictEqual(after.length, before + 1);
+        assert.strictEqual(after[0].action, 'access-revoked');
+      });
+
+      await check('GET /api/team/audit is refused for a member role', async () => {
+        assert.strictEqual((await apiAs('member', 'GET', '/api/team/audit')).status, 403);
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
+      await new Promise(r => mockAccess.server.close(r));
+    }
+  }
+
   // --- summary ---
   const failed = results.filter(([, e]) => e);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

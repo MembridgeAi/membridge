@@ -17,6 +17,8 @@ function createMockSupabase() {
   const invites = new Map();        // token -> { token, teamId, expiresAt, maxUses, useCount, revokedAt }
   const pubkeys = new Map();        // member_pubkeys: userId -> public_key (009)
   const teamKeys = [];              // team_keys rows: { team_id, epoch, member_user_id, sealed_team_key } (009)
+  const projectAccess = [];         // project_access rows (023): { team_id, project_key, member_id, can_see, updated_at, updated_by }
+  const teamAudit = [];             // team_audit rows (023): { id, team_id, actor_id, action, object_type, object_key, detail, created_at }
   const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0 };
   // Test knobs for backend quirks. rejectSummary is kept for back-compat;
   // rejectColumns is the general form — any column name added here provokes the
@@ -423,11 +425,74 @@ function createMockSupabase() {
           .map(k => ({ epoch: k.epoch, member_user_id: k.member_user_id, sealed_team_key: k.sealed_team_key }));
         return json(res, 200, rows);
       }
+      // ---- 023_project_access_and_audit.sql tables, RLS mirrored from its policies ----
+      if (url.pathname === '/rest/v1/project_access') {
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        if (req.method === 'POST') {
+          // Manager-only write (023: project_access_insert/update policies).
+          // Manual upsert on the (team_id, project_key, member_id) PK — the
+          // on_conflict query param is accepted but not parsed, same as the
+          // team_keys mock above.
+          const rows = Array.isArray(body) ? body : [body];
+          for (const r of rows) {
+            if (!isManager(r.team_id, userId)) return json(res, 403, { message: 'row-level security violation' });
+            const idx = projectAccess.findIndex(x =>
+              x.team_id === r.team_id && x.project_key === r.project_key && x.member_id === r.member_id);
+            const row = {
+              team_id: r.team_id, project_key: r.project_key, member_id: r.member_id,
+              can_see: !!r.can_see, updated_at: r.updated_at || new Date().toISOString(),
+              updated_by: r.updated_by || userId,
+            };
+            if (idx >= 0) projectAccess[idx] = row; else projectAccess.push(row);
+          }
+          res.writeHead(201);
+          return res.end();
+        }
+        // GET (023: project_access_select policy) — any team member may read.
+        const q = url.searchParams;
+        const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        const keyEq = (q.get('project_key') || '').replace(/^eq\./, '');
+        if (teamEq && !isMember(teamEq, userId)) return json(res, 200, []);
+        const rows = projectAccess.filter(r =>
+          (!teamEq || r.team_id === teamEq) && (!keyEq || r.project_key === keyEq));
+        return json(res, 200, rows.map(r => ({ project_key: r.project_key, member_id: r.member_id, can_see: r.can_see })));
+      }
+      if (url.pathname === '/rest/v1/team_audit') {
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        if (req.method === 'POST') {
+          // Manager-only insert, no update/delete route at all — append-only
+          // (023: team_audit_insert is the only write policy on this table).
+          const rows = Array.isArray(body) ? body : [body];
+          for (const r of rows) {
+            if (!isManager(r.team_id, userId)) return json(res, 403, { message: 'row-level security violation' });
+            teamAudit.unshift({
+              id: uuid(), team_id: r.team_id, actor_id: r.actor_id || userId,
+              action: r.action, object_type: r.object_type, object_key: r.object_key || null,
+              detail: r.detail === undefined ? null : r.detail,
+              created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+            });
+          }
+          res.writeHead(201);
+          return res.end();
+        }
+        // GET (023: team_audit_select policy) — manager-only read.
+        const q = url.searchParams;
+        const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        if (!teamEq || !isManager(teamEq, userId)) return json(res, 200, []);
+        const limit = parseInt(q.get('limit') || '50', 10);
+        const rows = [...teamAudit]
+          .filter(r => r.team_id === teamEq)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))
+          .slice(0, Math.max(1, limit));
+        return json(res, 200, rows);
+      }
       json(res, 404, { message: 'not found' });
     });
   });
 
-  return { server, users, sessions, teams, members, projects, entries, invites, pubkeys, teamKeys, stats, flags };
+  return { server, users, sessions, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags };
 }
 
 module.exports = { createMockSupabase };
