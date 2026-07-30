@@ -348,15 +348,14 @@ export function MembersPage() {
             ? `Remove ${pendingAction.member.name} from the team?`
             : `Transfer ownership to ${pendingAction.member.name}?`}
           message={pendingAction.kind === 'remove'
-            // Server-side this is real and immediate (migration 025) -- but
-            // it only stops anything NEW from reaching their machine. Their
-            // local tools read a durable on-disk archive that never
-            // consults the backend, so entries already synced before now
-            // may still be there until it next checks in. Say that plainly
-            // here too, since a confirm dialog is the moment the admin
-            // forms their expectation -- see AccessPanel.tsx's comment for
-            // the full mechanism.
-            ? `Removing ${pendingAction.member.name} cuts off new access to every shared project. Anything already synced to their machine may still be there until it next checks in.`
+            // Server-side this is real and immediate (migration 025), and
+            // prune-on-revocation (see AccessPanel.tsx's comment) means
+            // their local archive for every shared project is cleaned up
+            // the next time their machine syncs -- but a device that never
+            // syncs again keeps whatever it already has; nothing here can
+            // reach it. Say all three plainly, since a confirm dialog is
+            // the moment the admin forms their expectation.
+            ? `Removing ${pendingAction.member.name} cuts off access to every shared project right away — nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.`
             : `${pendingAction.member.name} becomes the team owner immediately. This can't be undone from here.`}
           confirmLabel={pendingAction.kind === 'remove' ? 'Remove from team' : 'Transfer ownership'}
           destructive={pendingAction.kind === 'remove'}

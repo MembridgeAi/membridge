@@ -28,10 +28,30 @@ interface AccessPanelProps {
  * blanket claim: searchMemory on their own machine reads local state plus a
  * durable on-disk archive and never consults the backend, so entries
  * already synced before the toggle stay readable by their local tools until
- * that archive ages out or is overwritten. Toggling this off is real and
- * effective for anything NEW; it does not reach back and erase what already
- * landed on their disk. Say that plainly instead of implying a completeness
- * this control never had.
+ * that archive ages out or is overwritten.
+ *
+ * Prune-on-revocation has since shipped: the next time the member's machine
+ * syncs, its cached rows for this project are dropped, the on-disk archive
+ * is pruned, and MCP search stops serving it -- their own local entries are
+ * never touched. A read-path guard also stops a flagged project from
+ * answering before that sync lands. None of that reaches a machine that
+ * never syncs again; nothing client-side can purge a remote copy, so that
+ * case is stated as a fact, not softened into "may". The note below carries
+ * all three: revoked now, cleaned up next sync, untouched if it never syncs.
+ *
+ * Edge case NOT covered by this note: revoking a member's LAST remaining
+ * shared project (toggling them off here when this happens to be the only
+ * project they can still see) hits the backend's own ambiguity -- an empty
+ * project_stats result from visibleProjectIds (lib/teamsync.js) can't be
+ * told apart from a backend that simply couldn't answer, so that probe
+ * deliberately fails safe and skips pruning rather than risk wiping a
+ * member's whole archive on a false signal. This component doesn't try to
+ * detect that moment and warn differently, because it has no reliable way
+ * to: Member.projectCount (data/types.ts) is capped to whatever /api/feed
+ * page is in hand and counts authored activity, not current access grants,
+ * so it cannot safely answer "is this their only project?". Future dev: if
+ * a real per-member accessible-project count ever becomes available here,
+ * revisit this to surface the fail-safe explicitly at that moment.
  *
  * "New members join with access" is now a real Toggle (Task 17/18): backed
  * by public.projects.default_access via POST /api/project/access-default,
@@ -57,7 +77,7 @@ export function AccessPanel({ rows, defaultAccess, onToggle, onToggleDefault }: 
       ))}
       {hidden.map(row => (
         <p className="access-note" key={row.id}>
-          {row.name} won't get anything new from this project. Anything already synced to their machine may still be there until it next checks in.
+          {row.name} loses access to this project right away — nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.
         </p>
       ))}
       <div className="access-default">

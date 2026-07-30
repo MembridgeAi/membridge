@@ -8,15 +8,19 @@ import { ProjectPage } from './ProjectPage'
 describe('ProjectPage', () => {
   it('states the consequence of revoking a member by name, honestly', async () => {
     renderApp({}, <ProjectPage name="membridge" />)
-    const note = await screen.findByText(/won't get anything new from this project/)
+    const note = await screen.findByText(/loses access to this project/)
     expect(note).toHaveTextContent('Sarah')
-    // The honesty gap this covers: revocation is real and immediate on the
-    // server, but a member's local tools read a durable on-disk archive
-    // that never consults the backend, so entries already synced before
-    // the toggle stay readable there. The note must say that plainly and
-    // must NOT claim existing data on their machine is gone.
-    expect(note).toHaveTextContent(/already synced to their machine may still be there until it next checks in/)
-    expect(note.textContent).not.toMatch(/removed|deleted|purged|erased|retroactive/i)
+    // Three things must all survive here: (1) the backend revokes access
+    // immediately, (2) anything already synced to their machine is cleaned
+    // up the next time it checks in (prune-on-revocation), and (3) a
+    // device that never syncs again keeps its copy -- that case must read
+    // as a fact, not a hedge, and must never be dropped in favor of (1)+(2)
+    // alone (which would imply removal is guaranteed).
+    expect(note).toHaveTextContent(/right away/i)
+    expect(note).toHaveTextContent(/removed the next time it checks in/i)
+    expect(note).toHaveTextContent(/never syncs again/i)
+    expect(note).toHaveTextContent(/keeps its copy/i)
+    expect(note.textContent).not.toMatch(/retroactive/i)
   })
 
   it('leads each stream entry with the outcome and shows the ask as intent', async () => {

@@ -12,14 +12,18 @@ describe('MembersPage', () => {
     await userEvent.click(screen.getByRole('menuitem', { name: /remove from team/i }))
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('Sarah')
-    expect(dialog).toHaveTextContent(/cuts off new access to every shared project/i)
+    expect(dialog).toHaveTextContent(/cuts off access to every shared project/i)
     // This is the moment the admin forms their expectation, so it must
     // carry the same honesty as the project access panel's toggle-off note:
-    // real and immediate for anything NEW, but their local tools read a
-    // durable on-disk archive the backend never reaches, so entries already
-    // synced before now may still be there until it next checks in.
-    expect(dialog).toHaveTextContent(/already synced to their machine may still be there until it next checks in/i)
-    expect(dialog.textContent).not.toMatch(/removed|deleted|purged|erased|retroactive/i)
+    // access is revoked immediately, anything already synced is cleaned up
+    // the next time that machine checks in (prune-on-revocation), and a
+    // device that never syncs again keeps its copy -- stated as fact, not
+    // hedged, and never implying removal is guaranteed or complete.
+    expect(dialog).toHaveTextContent(/right away/i)
+    expect(dialog).toHaveTextContent(/removed the next time it checks in/i)
+    expect(dialog).toHaveTextContent(/never syncs again/i)
+    expect(dialog).toHaveTextContent(/keeps its copy/i)
+    expect(dialog.textContent).not.toMatch(/retroactive/i)
   })
 
   it('says plainly when a member has shared nothing, without guessing why', async () => {
