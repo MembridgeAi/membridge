@@ -5,7 +5,7 @@ import type { Status } from './types'
 describe('mapSettings', () => {
   const status: Status = {
     running: true, version: '0.1.7', solo: false, setupDone: true, projectCount: 2,
-    lastSync: null, teamLastSync: null, tools: [],
+    intervalSec: 60, lastSync: null, teamLastSync: null, tools: [],
     encryption: { enabled: true, plaintextOff: true, paused: null, keyAlerts: 0 },
     auth: { paused: null, detail: null, since: null },
   }

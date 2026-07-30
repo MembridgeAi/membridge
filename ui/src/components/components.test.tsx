@@ -25,6 +25,37 @@ describe('SyncStateView', () => {
     expect(onSync).toHaveBeenCalledOnce()
   })
 
+  // Regression: a bare date cannot tell "minutes ago" from "dead since
+  // midnight" -- both printed today's date under a warning glyph, which is
+  // what made a 12-second lag read as an outage.
+  it('renders a same-day sync as a time, not today\'s date', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-07-30T19:53:00Z'))
+      render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-30T19:51:48Z' }} onSync={() => {}} />)
+      expect(screen.getByText(/behind · 19:51/)).toBeInTheDocument()
+      expect(screen.queryByText(/Jul 30/)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the date for a sync older than today', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-07-30T19:53:00Z'))
+      render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-29T23:59:00Z' }} onSync={() => {}} />)
+      expect(screen.getByText(/behind · Jul 29/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders never when no sync has ever been recorded', () => {
+    render(<SyncStateView state={{ state: 'behind', lastSyncedAt: null }} onSync={() => {}} />)
+    expect(screen.getByText(/behind · never/)).toBeInTheDocument()
+  })
+
   it('renders paused as muted with no button', () => {
     render(<SyncStateView state={{ state: 'paused' }} onSync={() => {}} />)
     expect(screen.getByText('paused')).toBeInTheDocument()

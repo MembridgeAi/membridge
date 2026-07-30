@@ -178,6 +178,59 @@ describe('syncStateOf', () => {
   it('is up to date for a project with no activity at all', () => {
     expect(syncStateOf({ paused: false, lastSync: null, lastActivity: null })).toEqual({ state: 'up-to-date' })
   })
+
+  // Regression: the daemon syncs on a timer, so activity newer than the last
+  // sync is the NORMAL state for most of every interval -- not a fault. The
+  // live app was observed flagging a project "behind" on a lag of 0.5s and
+  // flipping behind/up-to-date on every 10s poll while simply being worked in.
+  describe('grace period (daemon syncs on a timer, not on every write)', () => {
+    it('is up to date when activity lands just after a sync (the reported 0.5s flap)', () => {
+      expect(syncStateOf(
+        { paused: false, lastSync: '2026-07-30T19:51:46.498Z', lastActivity: '2026-07-30T19:51:47.031Z' },
+        60,
+      )).toEqual({ state: 'up-to-date' })
+    })
+
+    it('tolerates a lag up to two full intervals', () => {
+      expect(syncStateOf(
+        { paused: false, lastSync: '2026-07-30T19:00:00Z', lastActivity: '2026-07-30T19:02:00Z' },
+        60,
+      )).toEqual({ state: 'up-to-date' })
+    })
+
+    it('is behind once the lag exceeds two intervals -- a tick was genuinely missed', () => {
+      expect(syncStateOf(
+        { paused: false, lastSync: '2026-07-30T19:00:00Z', lastActivity: '2026-07-30T19:02:01Z' },
+        60,
+      )).toEqual({ state: 'behind', lastSyncedAt: '2026-07-30T19:00:00Z' })
+    })
+
+    it('scales the grace to a custom intervalSec instead of assuming 60s', () => {
+      // A 10-minute interval must not report every project behind for 9 of
+      // every 10 minutes.
+      expect(syncStateOf(
+        { paused: false, lastSync: '2026-07-30T19:00:00Z', lastActivity: '2026-07-30T19:09:00Z' },
+        600,
+      )).toEqual({ state: 'up-to-date' })
+    })
+
+    it('defaults to a 60s interval when the caller has no status to pass', () => {
+      expect(syncStateOf({ paused: false, lastSync: '2026-07-30T19:00:00Z', lastActivity: '2026-07-30T19:01:00Z' }))
+        .toEqual({ state: 'up-to-date' })
+    })
+
+    it('paused still wins over the grace period', () => {
+      expect(syncStateOf(
+        { paused: true, lastSync: '2026-07-30T19:00:00Z', lastActivity: '2026-07-30T19:00:01Z' },
+        60,
+      )).toEqual({ state: 'paused' })
+    })
+
+    it('falls back to string ordering when a timestamp is unparseable', () => {
+      expect(syncStateOf({ paused: false, lastSync: 'not-a-date', lastActivity: 'zzz' }, 60))
+        .toEqual({ state: 'behind', lastSyncedAt: 'not-a-date' })
+    })
+  })
 })
 
 // Task 7 Finding 3: Today's solo stat must read the real ledger, not a
