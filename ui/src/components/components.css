@@ -1,9 +1,10 @@
 /* Shared component styles for the ui/src/components kit. One stylesheet,
  * imported once from main.tsx — no CSS-in-JS, no per-component modules.
  * Global rules (see docs/superpowers/plans/2026-07-29-apps-interface-rebuild.md
- * "Global Constraints"): one 4px radius everywhere except avatars (circles)
- * and the Toggle switch (documented exception below); no drop shadow on
- * resting content; no gradients; hover changes background/border only.
+ * "Global Constraints"): the --r / --r-sm radius scale (see tokens.css)
+ * everywhere except avatars (circles) and the Toggle switch (documented
+ * exception below); no drop shadow on resting content; no gradients; hover
+ * changes background/border only.
  * Type scale, spacing scale and motion tokens live in styles/tokens.css;
  * the settle-in/pulse-live keyframes live in styles/base.css and are
  * referenced by name here.
@@ -68,11 +69,12 @@
   background: var(--panel2);
 }
 
-/* StateChip — soft tint, --r radius, glyph + words (never color alone). */
+/* StateChip — soft tint, --r-sm radius (small control), glyph + words
+ * (never color alone). */
 .chip {
   display: inline-flex;
   align-items: center;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   padding: 2px 6px;
   font-size: 11px;
   white-space: nowrap;
@@ -118,7 +120,8 @@
   height: 15px;
   padding: 0;
   border: 1px solid var(--line2);
-  border-radius: 8px; /* exception: switch track, not the global 4px */
+  border-radius: 8px; /* exception: pill-shaped track, needs >= half its own
+    15px height to read as a switch -- not expressible as --r or --r-sm */
   background: var(--panel2);
 }
 .toggle-on {
@@ -333,7 +336,7 @@
   width: 6px;
   height: 6px;
   margin-left: 3px;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--green);
 }
 @media (prefers-reduced-motion: no-preference) {

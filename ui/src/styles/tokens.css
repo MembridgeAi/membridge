@@ -7,7 +7,25 @@
   --green-dim: rgba(34,192,143,.09); --amber-dim: rgba(231,154,60,.10); --red-dim: rgba(240,97,109,.14);
   --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace;
-  --r: 4px;
+
+  /* Radius scale — softened from the flat 4px-everywhere the UI launched
+     with. Two tiers, not a free-for-all:
+       --r    surfaces and rows (nav items, buttons, inputs, checkboxes,
+              the focus ring) — big enough to read as "rounded", not just
+              anti-aliasing.
+       --r-sm small controls and indicators (StateChip, the status/live
+              dots) — kept at the OLD base value on purpose. Raising it
+              with everything else would round status-dot/live-dot past
+              the point of looking deliberately "not quite a circle", the
+              one distinction that keeps circular avatars visually unique
+              (see app.css's header comment). Same number, new job.
+     Avatars stay border-radius: 50% (true circles) — untouched by this
+     scale, per the existing "only avatars are circles" rule. The dialog
+     overlay and the four .tag label classes never had a radius before
+     this pass and still don't — nothing here adds rounding to a surface
+     that was deliberately square. */
+  --r: 7px;
+  --r-sm: 4px;
 
   /* Type scale — real hierarchy instead of a near-uniform 10-14px band.
      Structural, not a color decision, so dark and light share it as-is;

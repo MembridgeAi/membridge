@@ -1,7 +1,7 @@
 /* App shell layout — imported once from main.tsx, alongside
  * components/components.css. Same rules apply here (see that file's header):
- * one --r radius everywhere, no cards, no gradients, hover changes
- * background/border only. The status dot below intentionally uses --r
+ * the --r / --r-sm scale everywhere, no cards, no gradients, hover changes
+ * background/border only. The status dot below intentionally uses --r-sm
  * instead of a circle — border-radius: 50% is reserved for avatars only. */
 
 .shell {
@@ -29,8 +29,8 @@
 }
 .logo-mark {
   display: block;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
 }
 
@@ -124,7 +124,7 @@
 .status-dot {
   width: 7px;
   height: 7px;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--green);
   flex-shrink: 0;
 }
