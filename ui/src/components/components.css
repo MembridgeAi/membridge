@@ -1,0 +1,151 @@
+/* Shared component styles for the ui/src/components kit. One stylesheet,
+ * imported once from main.tsx — no CSS-in-JS, no per-component modules.
+ * Global rules (see docs/superpowers/plans/2026-07-29-apps-interface-rebuild.md
+ * "Global Constraints"): one 4px radius everywhere except avatars (circles)
+ * and the Toggle switch (documented exception below); no drop shadow on
+ * resting content; no gradients; hover changes background/border only.
+ */
+
+/* StatStrip — a ruled grid, never a big number inside a rounded card. */
+.stat-strip {
+  display: flex;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.stat-cell {
+  flex: 1;
+  padding: 8px 12px;
+  border-left: 1px solid var(--line);
+}
+.stat-cell:first-child {
+  border-left: none;
+}
+.stat-value {
+  font-size: 16px;
+  font-weight: 600;
+}
+.stat-label {
+  margin-top: 2px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text2);
+}
+.stat-note {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text3);
+}
+
+/* RuledRow — a flex row, separated by a hairline only. */
+.ruled-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+
+/* StateChip — soft tint, --r radius, glyph + words (never color alone). */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--r);
+  padding: 2px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chip-ok {
+  background: var(--green-dim);
+  color: var(--green);
+}
+.chip-warn {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+.chip-bad {
+  background: var(--red-dim);
+  color: var(--red);
+}
+.chip-muted {
+  background: var(--panel2);
+  color: var(--text3);
+}
+
+.btn-warn {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line2);
+}
+.btn-warn:hover {
+  background: var(--panel2);
+}
+
+/* Toggle — DELIBERATE EXCEPTION to the one-radius rule. A switch only reads
+ * as a switch when its track is pill-shaped, so this is the sole
+ * non-avatar element allowed a radius other than --r. */
+.toggle {
+  position: relative;
+  width: 26px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--line2);
+  border-radius: 8px; /* exception: switch track, not the global 4px */
+  background: var(--panel2);
+}
+.toggle-on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%; /* exception: the switch's own thumb, same reasoning */
+  background: var(--text3);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.toggle-on .toggle-thumb {
+  transform: translateX(11px);
+  background: var(--accent);
+}
+
+/* Avatar — the one non-switch exception: avatars representing people are
+ * circles, per the global constraint. Nothing else gets border-radius: 50%. */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%; /* exception: people are circles */
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Sparkline — bars, no axis. Color communicates nothing on its own; the
+ * series is described in words via aria-label. */
+.sparkline rect {
+  fill: var(--accent2);
+}
+.sparkline-muted rect {
+  fill: var(--text3);
+}
+
+/* Placeholder — for routes not yet built. */
+.placeholder {
+  padding: 24px 12px;
+  color: var(--text2);
+}
+.placeholder-title {
+  font-size: 13px;
+  color: var(--text);
+}
+.placeholder-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text3);
+}

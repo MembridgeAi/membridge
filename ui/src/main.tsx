@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles/tokens.css'
 import './styles/base.css'
+import './components/components.css'
 
 // Placeholder root render. The real app shell, routing, and pages are
 // scaffolded in later tasks — this only proves the Vite/React/token
