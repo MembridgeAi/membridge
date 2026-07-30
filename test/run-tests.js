@@ -10373,6 +10373,51 @@ async function main() {
     }
   }
 
+  // The cache (proj.teamEntries) keeps only the newest MAX_TEAM_ENTRIES (100)
+  // rows per project — pullProject slices the tail off after every pull,
+  // discarding older teammate history from this machine forever. Every pull
+  // must also append its mapped rows to the durable archive (lib/team-archive)
+  // BEFORE that slice runs, so search's historical reach survives the cap.
+  {
+    const mockArc = createMockSupabase();
+    const MOCK_PORT_ARC = P(64);
+    await new Promise(r => mockArc.server.listen(MOCK_PORT_ARC, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_ARC;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projArc = path.join(ROOT, 'projects', 'archive-cap-app');
+      fs.mkdirSync(projArc, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'archivist@test.dev', 'pw-arc', 'ArchivistOwner');
+      const teamArc = await teamsync.createTeam(util.getConfig(), 'ArchiveTeam');
+      const linkArc = await teamsync.linkProject(util.getConfig(), projArc, teamArc.team_id, 'ArchiveTeam');
+      const credsArc = await teamsync.getAccessToken(util.getConfig());
+      // Seed 120 teammate rows through the mock server, run one pull pass.
+      // The cache must hold the newest 100; the archive must hold all 120.
+      const arcBase = Date.UTC(2026, 0, 1);
+      for (let i = 0; i < 120; i++) {
+        mockArc.entries.push({
+          project_id: linkArc.projectId, author_id: 'user-archive-teammate', author_name: 'Teammate',
+          ts: new Date(arcBase + i * 60000).toISOString(), source: 'Claude Code', session: `sArc${i}`,
+          ask: null, summary: `archive row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: new Date(arcBase + i * 60000).toISOString(),
+        });
+      }
+      const projArcState = { teamEntries: [], teamPullTs: undefined };
+      await teamsync.pullProject(util.getConfig(), credsArc, projArcState, linkArc, null);
+      check('teamsync: a pull archives every mapped row, beyond the cache cap', () => {
+        assert.strictEqual(projArcState.teamEntries.length, 100, 'cache cap changed — update this test deliberately');
+        const arc = require('../lib/team-archive').loadArchive(linkArc.projectId);
+        assert.strictEqual(arc.rows.length, 120, 'rows sliced from cache were not archived');
+        assert.ok(arc.rows[0].ts < projArcState.teamEntries[0].ts, 'archive lost the pre-cap tail');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockArc.server.close(r));
+    }
+  }
+
   // Task 6 (per-session prompt sharing): POST /api/share-session persists the
   // per-session flag into proj.sharedSessions (authoritative for future
   // normal pushes) and calls teamsync.reshareSession to retroactively
