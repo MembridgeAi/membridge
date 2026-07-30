@@ -29,7 +29,9 @@ describe('SettingsPage', () => {
   // rendering "not registered") on a machine where the MCP server was
   // actually working. This is the "installed" render state -- it must read
   // as installed, carry its real detail, and never show the amber "not
-  // registered" wording the false-failure bug produced.
+  // registered" wording the false-failure bug produced. Re-register (Task:
+  // always available) DOES still render here -- that is the whole point of
+  // "always", not "only when missing".
   it('shows the MCP channel as installed, with its real detail, when the daemon reports a real registration', async () => {
     const client = new FakeDataClient()
     const base = await client.getSettings()
@@ -44,13 +46,16 @@ describe('SettingsPage', () => {
     expect(within(row).getByText(/installed/i)).toBeInTheDocument()
     expect(within(row).getByText(/registered with claude code, codex/i)).toBeInTheDocument()
     expect(within(row).queryByText(/not registered/i)).toBeNull()
-    expect(within(row).queryByRole('button', { name: /register/i })).toBeNull()
+    expect(within(row).getByRole('button', { name: /re-register/i })).toBeInTheDocument()
   })
 
   // The "unknown" render state (installed:null -- an older daemon that has
   // not reported a real check for this channel yet). Must say so in words,
   // and must never fall back to "not registered": that would tell the user
-  // something is broken when the truth is simply "never checked".
+  // something is broken when the truth is simply "never checked". Unlike
+  // every other channel's fix control, Re-register stays available here too
+  // -- running it IS how a first check happens (Task: always-available
+  // re-registration).
   it('shows the MCP channel as not checked yet -- never "not registered" -- when the daemon reports no real check', async () => {
     const client = new FakeDataClient()
     const base = await client.getSettings()
@@ -64,7 +69,7 @@ describe('SettingsPage', () => {
     const row = await screen.findByTestId('setting-mcp')
     expect(within(row).getByText(/not checked yet/i)).toBeInTheDocument()
     expect(within(row).queryByText(/not registered/i)).toBeNull()
-    expect(within(row).queryByRole('button', { name: /register/i })).toBeNull()
+    expect(within(row).getByRole('button', { name: /re-register/i })).toBeInTheDocument()
   })
 
   it('omits the Team group entirely in solo mode', async () => {
@@ -74,18 +79,63 @@ describe('SettingsPage', () => {
     expect(screen.queryByRole('button', { name: /leave team/i })).toBeNull()
   })
 
-  // The Register button has no daemon-side handler yet (lib/server.js's
-  // saveSettings does not recognize 'mcpRegistered'), but per the "no dead
-  // controls" rule it still must call the real DataClient.setSetting method
-  // rather than doing nothing locally.
-  it('wires the Register button to a real setSetting call', async () => {
+  // Task: Re-register is ALWAYS available (not only when the channel reports
+  // missing), wired to the real registration path -- POST /api/mcp/register
+  // -> lib/mcp-register.js's registerNow(), the same thing `membridge mcp
+  // register` runs. Driven against the "installed" state specifically,
+  // since the OLD Register button never even rendered there.
+  it('offers Re-register even when MCP already reports installed, and calls the real DataClient method', async () => {
     const user = userEvent.setup()
     const client = new FakeDataClient()
-    const setSpy = vi.spyOn(client, 'setSetting')
+    const base = await client.getSettings()
+    vi.spyOn(client, 'getSettings').mockResolvedValue({
+      ...base,
+      delivery: base.delivery.map(c => c.id === 'mcp' ? { ...c, installed: true, detail: 'registered with Claude Code' } : c),
+    })
+    const registerSpy = vi.spyOn(client, 'registerMcp')
     renderWith(client, <SettingsPage />)
     const row = await screen.findByTestId('setting-mcp')
-    await user.click(within(row).getByRole('button', { name: /register/i }))
-    expect(setSpy).toHaveBeenCalledWith('mcpRegistered', true)
+    await user.click(within(row).getByRole('button', { name: /re-register/i }))
+    expect(registerSpy).toHaveBeenCalled()
+  })
+
+  // The real per-tool result (rows carry a status per agent) must render
+  // afterwards, not just a generic "done".
+  it('reports the per-tool result after Re-register succeeds', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient()
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+    await user.click(within(row).getByRole('button', { name: /re-register/i }))
+    expect(await within(row).findByText(/claude code: registered/i)).toBeInTheDocument()
+    expect(within(row).getByText(/codex: unchanged — already registered/i)).toBeInTheDocument()
+  })
+
+  // A failed row must surface visibly, never read as a silent success.
+  it('surfaces a failed tool in the Re-register result instead of a silent success', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'registerMcp').mockResolvedValue({
+      rows: [{ agent: 'cursor', status: 'failed', detail: 'config file is not writable' }],
+    })
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+    await user.click(within(row).getByRole('button', { name: /re-register/i }))
+    const resultChip = await within(row).findByText(/cursor: failed — config file is not writable/i)
+    expect(resultChip).toBeInTheDocument()
+    expect(resultChip.className).toMatch(/chip-bad/)
+  })
+
+  // A request-level failure (the endpoint itself rejecting) is a different
+  // failure mode than a per-tool 'failed' row, and must surface too.
+  it('surfaces a rejected Re-register call instead of failing silently', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'registerMcp').mockRejectedValue(new Error('daemon unreachable'))
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+    await user.click(within(row).getByRole('button', { name: /re-register/i }))
+    expect(await within(row).findByText(/daemon unreachable/i)).toBeInTheDocument()
   })
 
   // Settings.daemon.port is genuinely null coming off the real daemon when no
@@ -227,6 +277,54 @@ describe('SettingsPage', () => {
     expect(spy).toHaveBeenCalled()
   })
 
+  // Appearance (light/dark/system, Task 1). This is a per-machine display
+  // preference persisted to localStorage rather than through setSetting --
+  // see ui/src/theme/theme.ts's header comment for why -- so these tests
+  // assert on document.documentElement's data-theme attribute directly
+  // instead of spying on the DataClient.
+  describe('Appearance', () => {
+    beforeEach(() => {
+      window.localStorage.clear()
+      document.documentElement.removeAttribute('data-theme')
+    })
+
+    it('selecting Light sets data-theme="light" immediately', async () => {
+      renderApp({}, <SettingsPage />)
+      const row = await screen.findByTestId('setting-appearance')
+      await userEvent.selectOptions(within(row).getByLabelText('Appearance'), 'light')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    })
+
+    it('selecting Dark sets an explicit data-theme="dark"', async () => {
+      renderApp({}, <SettingsPage />)
+      const row = await screen.findByTestId('setting-appearance')
+      await userEvent.selectOptions(within(row).getByLabelText('Appearance'), 'dark')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    })
+
+    it('selecting System resolves against the current OS preference (stubbed matchMedia: dark)', async () => {
+      renderApp({}, <SettingsPage />)
+      const row = await screen.findByTestId('setting-appearance')
+      const select = within(row).getByLabelText('Appearance')
+      await userEvent.selectOptions(select, 'light')
+      await userEvent.selectOptions(select, 'system')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    })
+
+    it('persists the chosen mode across a remount, applying it on first render', async () => {
+      const { unmount } = renderApp({}, <SettingsPage />)
+      const row = await screen.findByTestId('setting-appearance')
+      await userEvent.selectOptions(within(row).getByLabelText('Appearance'), 'light')
+      unmount()
+      document.documentElement.removeAttribute('data-theme')
+
+      renderApp({}, <SettingsPage />)
+      const rowAgain = await screen.findByTestId('setting-appearance')
+      expect(within(rowAgain).getByLabelText('Appearance')).toHaveValue('light')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    })
+  })
+
   it('leaves the team only after confirming in a dialog, through a real DataClient call', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'leaveTeam')
@@ -262,6 +360,9 @@ describe('SettingsPage', () => {
     expect(spy).toHaveBeenCalledWith('redactExtra', ['PATTERN_ONE', 'PATTERN_TWO'])
   })
 
+  // Task 4a: excluded folders are a managed list -- one Remove button per
+  // entry (staged locally, nothing is written until Save), plus a typed-path
+  // "Add" affordance for new ones.
   it('saves edited excluded folders through a real DataClient call', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'setSetting')
@@ -269,11 +370,71 @@ describe('SettingsPage', () => {
     const row = await screen.findByTestId('setting-excluded')
     await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
     const dialog = await screen.findByRole('dialog')
-    const textarea = within(dialog).getByRole('textbox')
-    await userEvent.clear(textarea)
-    await userEvent.type(textarea, 'build')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Remove node_modules' }))
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Remove dist' }))
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Remove .git' }))
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /new excluded folder/i }), 'build')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^add$/i }))
     await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
     expect(spy).toHaveBeenCalledWith('exclude', ['build'])
+  })
+
+  it('removes a single excluded folder without touching the others', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'setSetting')
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-excluded')
+    await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Remove dist' }))
+    await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    expect(spy).toHaveBeenCalledWith('exclude', ['node_modules', '.git'])
+  })
+
+  // "Do not silently auto-delete anything from their config" -- Remove only
+  // ever changes LOCAL dialog state; nothing is written to the daemon until
+  // Save, and Cancel discards the change entirely.
+  it('does not write anything when a folder is removed but the dialog is cancelled instead of saved', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'setSetting')
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-excluded')
+    await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Remove node_modules' }))
+    expect(spy).not.toHaveBeenCalled()
+    await userEvent.click(within(dialog).getByRole('button', { name: /^cancel$/i }))
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  // A path the daemon reported as no-longer-existing (server.js's
+  // staleExcludes -- exactly the shape of the leaked test-fixture-path
+  // incident) must be visibly marked, both on the row's summary and inside
+  // the management dialog, never silently dropped.
+  it('marks an excluded folder as stale when its path no longer exists, and lets the owner remove it', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient()
+    const base = await client.getSettings()
+    const stalePath = '/tmp/membridge-test-7RBk1s/projects/excluded-app'
+    vi.spyOn(client, 'getSettings').mockResolvedValue({
+      ...base,
+      privacy: { ...base.privacy, exclude: [...base.privacy.exclude, stalePath], excludeStale: [stalePath] },
+    })
+    const setSpy = vi.spyOn(client, 'setSetting')
+    renderWith(client, <SettingsPage />)
+    const summaryRow = await screen.findByTestId('setting-excluded')
+    expect(within(summaryRow).getByText(/1 no longer exist/i)).toBeInTheDocument()
+
+    await user.click(within(summaryRow).getByRole('button', { name: /edit/i }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(stalePath)).toBeInTheDocument()
+    // Exactly one entry is flagged -- the other (non-stale) rows must not
+    // carry the badge.
+    expect(within(dialog).getAllByText(/no longer exists/i)).toHaveLength(1)
+
+    await user.click(within(dialog).getByRole('button', { name: `Remove ${stalePath}` }))
+    await user.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    expect(setSpy).toHaveBeenCalledWith('exclude', base.privacy.exclude)
   })
 
   it('surfaces a failed edit-list save instead of silently closing the dialog', async () => {
@@ -374,7 +535,7 @@ describe('SettingsPage', () => {
       await userEvent.click(within(dialog).getByRole('button', { name: /browse folders/i }))
       expect(pickSpy).toHaveBeenCalledWith({ kind: 'folder', multiple: true })
       await waitFor(() => {
-        expect(within(dialog).getByRole('textbox')).toHaveValue('node_modules\ndist\n.git\n/Users/x/build')
+        expect(within(dialog).getByText('/Users/x/build')).toBeInTheDocument()
       })
 
       await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
@@ -389,7 +550,7 @@ describe('SettingsPage', () => {
       const dialog = await screen.findByRole('dialog')
 
       expect(within(dialog).queryByRole('button', { name: /browse/i })).toBeNull()
-      expect(within(dialog).getByRole('textbox')).toBeInTheDocument()
+      expect(within(dialog).getByRole('textbox', { name: /new excluded folder/i })).toBeInTheDocument()
     })
 
     it('leaves the excluded-folders list unchanged when the native picker is cancelled', async () => {

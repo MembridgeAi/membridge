@@ -184,13 +184,19 @@ export interface DeliveryChannel {
 
 export interface Settings {
   delivery: DeliveryChannel[]
-  // redactionBuiltIn is null, never 0, when the daemon payload carries no
-  // built-in-pattern count at all -- lib/redact.js has ~20 active patterns,
-  // but nothing in /api/settings reports a count yet (see mapSettings). 0
-  // would claim "no protection"; null renders as "unknown" in words instead.
+  // redactionBuiltIn is null only when the daemon payload predates the field
+  // entirely (an older daemon's /api/settings carries no redactionBuiltIn at
+  // all -- see mapSettings). A present daemon always reports the real
+  // lib/redact.js DEFAULT_PATTERNS.length, derived server-side so it cannot
+  // drift; 0 would claim "no protection", so null renders as "unknown" in
+  // words instead of ever being confused with a real zero.
   privacy: {
     endToEnd: boolean; plaintextShared: boolean; redactionBuiltIn: number | null; redactionCustom: number
     excludedPaths: number; redactExtra: string[]; exclude: string[]
+    // The subset of `exclude` whose path no longer exists on disk (Task 4a).
+    // Surfaced, never auto-removed -- the owner decides whether a stale
+    // entry (e.g. a leaked test fixture path) gets deleted.
+    excludeStale: string[]
   }
   daemon: { running: boolean; port: number | null; version: string; startAtLogin: boolean; intervalSec: number; updateAvailable: string | null }
   team: { id: string; name: string; role: Role; memberCount: number; inviteCode: string | null } | null
@@ -204,4 +210,19 @@ export interface Settings {
 export interface AccessMatrix {
   members: { id: string; name: string }[]
   rows: { projectPath: string; projectName: string; shared: boolean; access: Record<string, boolean> }[]
+}
+
+// POST /api/mcp/register's response (DataClient.registerMcp) -- one row per
+// AI tool lib/mcp-register.js's registerNow() attempted, mirroring
+// settingsMapper.ts's RawMcpRow (kept as its own type rather than imported
+// from there, to avoid a circular import back into this file). Only the
+// fields Settings' Re-register result actually renders are declared here.
+export type McpRowStatus = 'registered' | 'removed' | 'unchanged' | 'skipped' | 'failed'
+export interface McpRegisterRow {
+  agent: string
+  status: McpRowStatus
+  detail: string | null
+}
+export interface McpRegisterResult {
+  rows: McpRegisterRow[]
 }

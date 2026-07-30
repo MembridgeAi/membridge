@@ -16,6 +16,26 @@ process.env.MEMBRIDGE_CODEX_DIR = path.join(ROOT, 'codex-sessions');
 process.env.MEMBRIDGE_INTERVAL = '3600'; // daemon ticks once at boot, then stays quiet
 delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not leak into settings tests
 
+// Regression guard for a real incident: a prior run of this suite left a
+// fixture path (.../membridge-test-XXXXXX/projects/excluded-app -- exactly
+// this ROOT's own naming) sitting in the OWNER's REAL ~/.membridge/
+// config.json exclude list, on a machine where the suite is supposed to run
+// entirely inside MEMBRIDGE_HOME (set above, before any lib/ module is
+// required). The exact write path was never reproduced despite a genuine
+// investigation -- every config read/write in lib/util.js re-resolves
+// MEMBRIDGE_HOME per call (never cached), the env var is never unset
+// mid-suite, and every spawned child process either inherits the correctly-
+// scoped env or overrides MEMBRIDGE_HOME explicitly. Rather than patch one
+// unconfirmed hypothesis, this asserts the actual invariant directly: the
+// real config file (snapshotted BEFORE any fixture code runs) must be
+// byte-identical after the entire suite finishes. `null` (file absent) is a
+// valid snapshot value too -- the comparison is symmetric either way.
+const REAL_CONFIG_PATH = path.join(os.homedir(), '.membridge', 'config.json');
+function snapshotRealConfig() {
+  try { return fs.readFileSync(REAL_CONFIG_PATH, 'utf8'); } catch { return null; }
+}
+const realConfigBeforeSuite = snapshotRealConfig();
+
 const util = require('../lib/util');
 const { syncOnce, filterTrackedSessions, filterScratchpadResidue } = require('../lib/scan');
 const digest = require('../lib/digest');
@@ -22118,6 +22138,23 @@ const repoRoot = require('../lib/repo-root');
         assert.deepStrictEqual(body.exclude, ['/tmp/scratch-project']);
       });
 
+      // Task 4a: excludeStale flags exactly the entries that no longer
+      // exist on disk -- a real, existing folder must never be flagged, a
+      // genuinely missing one always must, and a glob (contains '*') is
+      // left out of the check entirely (fs.existsSync on a glob pattern
+      // would just report false for a perfectly valid rule).
+      await check('GET /api/settings excludeStale flags only exclude entries missing from disk, and skips globs', async () => {
+        const existingDir = path.join(ROOT, 'projects', 't17-still-here');
+        fs.mkdirSync(existingDir, { recursive: true });
+        const missingDir = path.join(ROOT, 'projects', 't17-long-gone');
+        const write = await httpPost(T17_PORT, '/api/settings', {
+          exclude: [existingDir, missingDir, '*/node_modules'],
+        });
+        assert.ok(!write.error, `write failed: ${JSON.stringify(write)}`);
+        const body = await httpGet(T17_PORT, '/api/settings');
+        assert.deepStrictEqual(body.excludeStale, [missingDir]);
+      });
+
       await check('GET /api/settings updateAvailable is cache-only and never triggers a network fetch', async () => {
         fs.writeFileSync(updateCheckLib.cachePath(), JSON.stringify({ latest: '99.0.0', checkedAt: Date.now() }));
         const body = await httpGet(T17_PORT, '/api/settings');
@@ -22163,6 +22200,34 @@ const repoRoot = require('../lib/repo-root');
           assert.strictEqual(on.recall.installed, true, 'a live recall hook must report installed:true');
         } finally {
           process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevClaudeSettings;
+        }
+      });
+
+      // Settings honesty: redactionBuiltIn is a real number lib/redact.js's
+      // DEFAULT_PATTERNS always had -- nothing in /api/settings exposed it,
+      // so the dashboard rendered "built-in count unknown" forever. Derived
+      // here from the SAME array the endpoint reads, never a copy, so a
+      // future pattern added/removed can't silently drift the two apart.
+      await check('GET /api/settings redactionBuiltIn matches lib/redact.js DEFAULT_PATTERNS.length exactly', async () => {
+        const body = await httpGet(T17_PORT, '/api/settings');
+        assert.strictEqual(body.redactionBuiltIn, redactLib.DEFAULT_PATTERNS.length);
+        assert.ok(body.redactionBuiltIn > 0, 'sanity: DEFAULT_PATTERNS must not be empty');
+      });
+
+      // Owner-triggered MCP re-registration: always available (Task), same
+      // registerNow() path `membridge mcp register` runs, as JSON. HOME_T17
+      // lives under ROOT (os.tmpdir()), so mcp-register.js's own
+      // isTestHarness guard must engage exactly as it does for every other
+      // real-agent-file write in this suite -- asserting that here doubles
+      // as proof the new endpoint never bypasses that guard.
+      await check('POST /api/mcp/register runs the real registerNow() path and reports a per-tool row for each agent', async () => {
+        const body = await httpPost(T17_PORT, '/api/mcp/register', {});
+        assert.ok(Array.isArray(body.rows) && body.rows.length > 0, `expected agent rows, got ${JSON.stringify(body)}`);
+        for (const row of body.rows) {
+          assert.ok(row.agent, 'row missing agent');
+          assert.ok(['registered', 'removed', 'unchanged', 'skipped', 'failed'].includes(row.status), `unexpected status ${row.status}`);
+          assert.strictEqual(row.status, 'skipped', 'the test-harness guard must engage for a MEMBRIDGE_HOME under os.tmpdir()');
+          assert.strictEqual(row.reason, 'test-harness');
         }
       });
 
@@ -22498,6 +22563,14 @@ const repoRoot = require('../lib/repo-root');
       assert.deepStrictEqual(notesStore.backfillProjects({ projects: 'nope' }, 'x'), []);
     });
   }
+
+  // See the REAL_CONFIG_PATH comment at the top of this file: this is the
+  // actual regression guard, run last so it observes everything the suite
+  // did, not just one code path's isolation.
+  check('the suite never wrote to the real (non-MEMBRIDGE_HOME) ~/.membridge/config.json', () => {
+    assert.strictEqual(snapshotRealConfig(), realConfigBeforeSuite,
+      'the real user config changed during this run -- MEMBRIDGE_HOME isolation leaked');
+  });
 
   // --- summary ---
   const failed = results.filter(([, e]) => e);

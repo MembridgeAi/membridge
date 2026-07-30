@@ -3,8 +3,8 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats,
-  Status, StreamEntry,
+  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role, Settings,
+  SkeletonStats, Status, StreamEntry,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, lastSharedAtByAuthor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -278,6 +278,13 @@ export class LocalDaemonClient implements DataClient {
 
   async setSetting(key: string, value: unknown): Promise<void> {
     await post('/api/settings', { [key]: value })
+  }
+
+  // Always available -- not gated on the mcp channel's current reported
+  // install state -- so the owner has a real way to force a fresh reconcile
+  // when a tool claims installed but is actually misbehaving.
+  async registerMcp(): Promise<McpRegisterResult> {
+    return post<McpRegisterResult>('/api/mcp/register')
   }
 
   // Task 17: respond BEFORE the daemon restarts -- the promise resolves once

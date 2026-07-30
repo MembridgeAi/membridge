@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
-  AccessMatrix, AuditEvent, FeedEntry, FeedFilters, FeedPage, Insights, Invite, LiveSession, Member, Project, Role, Settings,
-  SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AuditEvent, FeedEntry, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
+  Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 export interface FakeOptions {
@@ -207,6 +207,7 @@ export class FakeDataClient implements DataClient {
         endToEnd: true, plaintextShared: false, redactionBuiltIn: 18, redactionCustom: 2, excludedPaths: 3,
         redactExtra: ['sk-custom-[a-z0-9]+', 'ACME_[A-Z]+_KEY'],
         exclude: ['node_modules', 'dist', '.git'],
+        excludeStale: [],
       },
       daemon: { running: true, port: 7391, version: '0.1.7', startAtLogin: true, intervalSec: 300, updateAvailable: null },
       team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' },
@@ -221,6 +222,14 @@ export class FakeDataClient implements DataClient {
     })
   }
   setSetting() { return this.guard<void>(undefined) }
+  registerMcp() {
+    return this.guard<McpRegisterResult>({
+      rows: [
+        { agent: 'claude-code', status: 'registered', detail: null },
+        { agent: 'codex', status: 'unchanged', detail: 'already registered' },
+      ],
+    })
+  }
 
   restartDaemon() { return this.guard<void>(undefined) }
   checkForUpdates() { return this.guard({ current: '0.1.7', latest: '0.1.7', updateAvailable: null }) }

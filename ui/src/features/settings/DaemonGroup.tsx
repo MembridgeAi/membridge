@@ -2,6 +2,8 @@ import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
 import { useCheckForUpdates, useRestartDaemon, useSetSetting } from '../../data/queries'
 import type { Settings } from '../../data/types'
+import { useThemeMode } from '../../theme/useThemeMode'
+import type { ThemeMode } from '../../theme/theme'
 import { SettingRow } from './SettingRow'
 
 function errorMessage(error: unknown): string {
@@ -44,6 +46,7 @@ export function DaemonGroup({ daemon }: DaemonGroupProps) {
   const setSetting = useSetSetting()
   const restart = useRestartDaemon()
   const checkForUpdates = useCheckForUpdates()
+  const [themeMode, setThemeMode] = useThemeMode()
 
   const failure = setSetting.isError ? setSetting.error : restart.isError ? restart.error : checkForUpdates.isError ? checkForUpdates.error : null
 
@@ -87,6 +90,18 @@ export function DaemonGroup({ daemon }: DaemonGroupProps) {
         <button type="button" className="settings-btn" onClick={() => checkForUpdates.mutate()} disabled={checkForUpdates.isPending}>
           {checkForUpdates.isPending ? 'Checking…' : 'Check now'}
         </button>
+      </SettingRow>
+      <SettingRow label="Appearance" description="Follows your system setting unless you override it" testId="setting-appearance">
+        <select
+          className="settings-select"
+          aria-label="Appearance"
+          value={themeMode}
+          onChange={e => setThemeMode(e.target.value as ThemeMode)}
+        >
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
       </SettingRow>
     </>
   )

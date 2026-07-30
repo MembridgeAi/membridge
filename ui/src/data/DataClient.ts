@@ -1,6 +1,6 @@
 import type {
-  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats,
-  Status, StreamEntry,
+  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role, Settings,
+  SkeletonStats, Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -64,6 +64,11 @@ export interface DataClient {
 
   getSettings(): Promise<Settings>
   setSetting(key: string, value: unknown): Promise<void>
+  // Owner-triggered MCP re-registration (POST /api/mcp/register): always
+  // callable, regardless of the delivery channel's current reported install
+  // state -- the real fix for "it claims installed but is misbehaving".
+  // Resolves with the same per-tool rows `membridge mcp register` prints.
+  registerMcp(): Promise<McpRegisterResult>
 
   // Task 17/18: daemon- and machine-level controls the mockups show with no
   // backing method until now.

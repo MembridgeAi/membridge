@@ -270,6 +270,19 @@ export function useSetSetting() {
   })
 }
 
+// Re-register (Task: always-available MCP re-registration, not gated on
+// the channel's current reported install state). Invalidates settings so
+// the "installed"/"not registered" chip reflects whatever registerNow()
+// just found, same as every other write on this page.
+export function useRegisterMcp() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => c.registerMcp(),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+}
+
 export function useSetProjectAccessDefault() {
   const c = useDataClient()
   const qc = useQueryClient()

@@ -43,6 +43,13 @@ export interface RawSettingsPayload {
   // that absence as unknown, never as false -- see DeliveryChannel.installed.
   mcp?: RawMcpStatus
   recall?: RawRecallStatus
+  // Optional for the same older-daemon reason: absence maps to null
+  // (unknown), never 0 -- see Settings.privacy.redactionBuiltIn in types.ts.
+  redactionBuiltIn?: number
+  // The subset of `exclude` server.js's staleExcludes() found missing from
+  // disk. Optional for the same reason; absence maps to [] (nothing flagged
+  // stale), never "everything is stale".
+  excludeStale?: string[]
 }
 
 const MINUTE = 60_000
@@ -161,14 +168,14 @@ export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTe
     privacy: {
       endToEnd: status.encryption.enabled,
       plaintextShared: !status.encryption.plaintextOff,
-      // No field in /api/settings carries a built-in-pattern count -- see
-      // the Settings.privacy.redactionBuiltIn comment in types.ts. null, not
-      // 0: this is unknown, not "no protection".
-      redactionBuiltIn: null,
+      // Real, derived count from a daemon that reports it; null (never 0)
+      // only for the older-daemon case -- see the types.ts comment.
+      redactionBuiltIn: raw.redactionBuiltIn ?? null,
       redactionCustom: raw.redactExtra.length,
       excludedPaths: raw.exclude.length,
       redactExtra: raw.redactExtra,
       exclude: raw.exclude,
+      excludeStale: raw.excludeStale ?? [],
     },
     daemon: {
       running: status.running,

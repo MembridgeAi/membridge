@@ -6,6 +6,8 @@ import type { DeliveryChannel } from '../../data/types'
 import { ContextFilesDialog } from './ContextFilesDialog'
 import { DaemonGroup } from './DaemonGroup'
 import { EditListDialog } from './EditListDialog'
+import { ExcludedFoldersDialog } from './ExcludedFoldersDialog'
+import { McpRegisterControl } from './McpRegisterControl'
 import { SettingRow } from './SettingRow'
 import { TeamGroup } from './TeamGroup'
 import './settings.css'
@@ -43,33 +45,33 @@ function ChannelDetail({ detail }: { detail: string }) {
 // before any per-id branch: a channel the daemon has not actually checked
 // yet must say so in words -- never fall through to a channel's own
 // installed:false wording (e.g. "not registered"), which reads as a real
-// failure rather than "not checked".
+// failure rather than "not checked". mcp is the one exception carried
+// through this early return too: Re-register (McpRegisterControl) must stay
+// available even when the daemon has never reported a check, since running
+// it IS how a check happens.
 function DeliveryControl({ channel, onSetSetting, onChooseFiles }: DeliveryControlProps) {
   if (channel.installed === null) {
     return (
       <>
         <StateChip tone="muted" glyph="•">not checked yet</StateChip>
         <ChannelDetail detail={channel.detail} />
+        {channel.id === 'mcp' && <McpRegisterControl />}
       </>
     )
   }
 
   if (channel.id === 'mcp') {
-    if (channel.installed) {
-      return (
-        <>
-          <StateChip tone="ok" glyph="✓">installed</StateChip>
-          <ChannelDetail detail={channel.detail} />
-        </>
-      )
-    }
+    // Re-register (Task: always available, never gated on the reported
+    // install state -- the real fix for "it claims installed but is
+    // misbehaving") replaces the old Register button, which only ever
+    // rendered on !installed and had no daemon-side handler behind it.
     return (
       <>
-        <StateChip tone="warn" glyph="⚠">not registered</StateChip>
+        {channel.installed
+          ? <StateChip tone="ok" glyph="✓">installed</StateChip>
+          : <StateChip tone="warn" glyph="⚠">not registered</StateChip>}
         <ChannelDetail detail={channel.detail} />
-        <button type="button" className="settings-btn" onClick={() => onSetSetting('mcpRegistered', true)}>
-          Register
-        </button>
+        <McpRegisterControl />
       </>
     )
   }
@@ -213,6 +215,9 @@ export function SettingsPage() {
       </SettingRow>
       <SettingRow label="Excluded folders" description="Never watched, never synced" testId="setting-excluded">
         <span className="mono settings-metric">{pathsLabel(settings.privacy.excludedPaths)}</span>
+        {settings.privacy.excludeStale.length > 0 && (
+          <StateChip tone="warn" glyph="⚠">{`${settings.privacy.excludeStale.length} no longer exist`}</StateChip>
+        )}
         <button type="button" className="settings-btn" onClick={() => setActiveDialog('exclude')}>Edit</button>
       </SettingRow>
 
@@ -234,12 +239,9 @@ export function SettingsPage() {
         />
       )}
       {activeDialog === 'exclude' && (
-        <EditListDialog
-          titleId="exclude-dialog-title"
-          title="Edit excluded folders"
-          hint="One path or glob per line -- never watched, never synced."
-          settingKey="exclude"
-          initial={settings.privacy.exclude}
+        <ExcludedFoldersDialog
+          exclude={settings.privacy.exclude}
+          excludeStale={settings.privacy.excludeStale}
           onClose={() => setActiveDialog(null)}
         />
       )}
