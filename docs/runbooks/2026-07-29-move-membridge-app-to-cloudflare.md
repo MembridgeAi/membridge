@@ -78,6 +78,32 @@ existing.
 > Workers and Pages claim hostnames on this zone later — the entire point of the
 > move. GitHub Pages works fine behind Cloudflare's proxy.
 
+> **This actually happened, 2026-07-29.** Cloudflare's import did not merely
+> miss records — it invented wrong ones. The zone came up with the apex and
+> `www` both pointing at `91.195.240.94`, a **Sedo domain-parking IP**, and with
+> the `google-site-verification` TXT record absent entirely. Had the nameservers
+> been switched without checking, `membridge.app` would have started serving a
+> parking page as caches expired, and Search Console would have silently
+> de-verified.
+>
+> It was caught because the zone was queried directly at Cloudflare's own
+> nameservers *before* propagation reached anyone:
+>
+> ```bash
+> dig +noall +answer A membridge.app @camilo.ns.cloudflare.com
+> dig +noall +answer TXT membridge.app @camilo.ns.cloudflare.com
+> ```
+>
+> Do this. Public resolvers keep serving the old delegation for hours, which
+> means the site looks fine long after the new zone is live and wrong. Asking
+> Cloudflare's nameservers directly is the only way to see what is about to be
+> served.
+>
+> One ordering detail from the cleanup: a name cannot hold both an A record and
+> a CNAME, so the parking `www` A record must be **deleted before** the CNAME
+> can be added. Cloudflare rejects it with "a record with that host already
+> exists", which reads like a duplicate rather than a type conflict.
+
 ### 3. Set SSL mode to Full
 
 Cloudflare → **SSL/TLS → Overview → Full**.
