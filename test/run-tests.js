@@ -13813,6 +13813,50 @@ async function main() {
         'the day after the since bound was wrongly excluded');
     });
 
+    // A 60-day-old archived row — far outside the working cache (proj.teamEntries)
+    // — must be findable by search_memory (it reads cache + durable archive
+    // merged), but must NOT appear in get_recent_activity (which stays
+    // cache-only so its payload never grows unbounded). Link projMcp to a
+    // known projectId via .membridge/team.json, the same shape existing
+    // team-link tests write (see the notes-hook team.json fixture above).
+    {
+      const teamArchiveForMcp = require('../lib/team-archive');
+      const oldTs = new Date(Date.now() - 60 * 86400000).toISOString();
+      teamArchiveForMcp.appendRows('mcp-app-project-uuid', [{
+        // Stored RAW at rest, like proj.teamEntries — the planted secret here
+        // only gets scrubbed if this archive-sourced row passes through the
+        // same normalizeTeam redact closure as a cache row (constraint: the
+        // suite's sk-tamper-* discipline must cover the new archive path too).
+        author: 'Priya', ts: oldTs, source: 'Codex', session: 'p0',
+        ask: null, summary: null, goal: null,
+        decisions: 'chose libsodium sealed boxes over NaCl streams for epoch keys',
+        gotchas: 'legacy configs still embed token=sk-tamper-archive-555, rotate on sight',
+        headline: null, distilled: true,
+        files: ['lib/teamcrypto.js'], changes: null,
+      }]);
+      fs.writeFileSync(path.join(projMcp, '.membridge', 'team.json'),
+        JSON.stringify({ teamId: 'mcp-team-1', projectId: 'mcp-app-project-uuid', teamName: 'MCP Team' }));
+    }
+
+    const { data: sArchive } = await callJson('search_memory', { query: 'sealed boxes epoch' });
+    check('mcp: search reaches archived history older than the team cache', () => {
+      const hit = sArchive.results.find(r => /sealed boxes/.test(r.decisions || ''));
+      assert.ok(hit, '60-day-old archived decision not found');
+      assert.strictEqual(hit.author, 'Priya');
+    });
+    check('mcp: archive rows pass through the same redaction boundary as cache rows', () => {
+      assert.ok(!JSON.stringify(sArchive).includes('sk-tamper-archive-555'),
+        'secret planted in a raw-at-rest archive row leaked past normalizeTeam redaction');
+      const hit = sArchive.results.find(r => /sealed boxes/.test(r.decisions || ''));
+      assert.ok(hit && /\[redacted/.test(hit.gotchas || ''), 'archived gotchas field was not redacted');
+    });
+
+    const { data: recent3 } = await callJson('get_recent_activity', { limit: 50 });
+    check('mcp: recent activity does NOT read the archive (payload stays bounded)', () => {
+      assert.ok(!JSON.stringify(recent3).includes('sealed boxes'),
+        'archive rows leaked into get_recent_activity');
+    });
+
     // recall: the same Tier B "header + skeleton" body decide() would serve,
     // but with NO session gating (an MCP caller manages its own context) --
     // just freshness + a cached skeleton + the same floors. Never writes
