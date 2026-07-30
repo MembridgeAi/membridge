@@ -1,7 +1,9 @@
 // Pure functions that turn the daemon's real JSON payloads (lib/server.js)
 // into the UI's domain types (./types.ts) -- kept separate from
-// LocalDaemonClient.ts so every mapping decision is unit-testable without a live daemon.
-import type { LiveSession, Member, Project, Role, Settings, Status, StreamEntry, SyncState } from './types'
+// LocalDaemonClient.ts so every mapping decision is unit-testable without a
+// live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
+// to keep this file focused on feed/project/member mapping.
+import type { LiveSession, Member, Project, Role, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -50,19 +52,6 @@ export interface RawMemberRow {
 export interface RawTeamFeedEntry {
   author_id: string | null
   ts: string
-}
-
-export interface RawTeamRow {
-  team_id: string
-  team_name: string
-  role: Role
-  memberCount: number | null
-}
-
-export interface RawSettingsPayload {
-  intervalSec: number
-  hookInstalled: boolean
-  distill: { enabled: boolean }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,52 +237,3 @@ export function mapMember(row: RawMemberRow, projectCounts: Record<string, numbe
   }
 }
 
-// ---------------------------------------------------------------------------
-// Settings: /api/settings predates this screen's redesigned shape (delivery
-// channels, privacy counters, daemon control) -- it was built for the old
-// dashboard's API-key/advisor form. Fields with a real source are mapped;
-// fields with none are zeroed/nulled rather than invented (see Task 4 report
-// for the full list and why each one is unavailable today).
-// ---------------------------------------------------------------------------
-export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTeamRow | null): Settings {
-  return {
-    delivery: [
-      {
-        id: 'context-block', label: 'Context block',
-        description: 'A small skeleton written into CLAUDE.md, AGENTS.md and other context files your AI tools read at startup.',
-        installed: true, enabled: null,
-      },
-      {
-        id: 'summaries', label: 'Session summaries',
-        description: 'A Claude Code Stop-hook that distills each session into a summary as it ends.',
-        installed: raw.hookInstalled, enabled: raw.distill.enabled,
-      },
-      {
-        id: 'recall', label: 'Recall',
-        description: 'Surfaces a relevant past note the moment a matching file is opened.',
-        installed: false, enabled: null,
-      },
-      {
-        id: 'mcp', label: 'MCP server',
-        description: 'Lets any MCP-capable tool query team memory directly.',
-        installed: false, enabled: null,
-      },
-    ],
-    privacy: {
-      endToEnd: status.encryption.enabled,
-      plaintextShared: !status.encryption.plaintextOff,
-      redactionBuiltIn: 0,
-      redactionCustom: 0,
-      excludedPaths: 0,
-    },
-    daemon: {
-      running: status.running,
-      port: null,
-      version: status.version,
-      startAtLogin: false,
-      intervalSec: raw.intervalSec,
-      updateAvailable: null,
-    },
-    team: status.solo || !team ? null : { name: team.team_name, role: team.role, memberCount: team.memberCount ?? 0 },
-  }
-}

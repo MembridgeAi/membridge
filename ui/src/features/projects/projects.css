@@ -38,6 +38,19 @@
   border: 1px solid var(--line2);
   color: var(--text2);
 }
+.projects-btn-add {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #fff;
+  white-space: nowrap;
+}
+.projects-btn-add:hover {
+  background: var(--accent2);
+  border-color: var(--accent2);
+}
 
 .projects-error {
   margin: 12px 16px;

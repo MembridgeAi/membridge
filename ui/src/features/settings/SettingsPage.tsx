@@ -1,49 +1,21 @@
-import { Link } from 'wouter'
-import { ROUTES } from '../../app/routes'
+import { useState } from 'react'
 import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
-import { useSetSetting, useSettings, useStatus } from '../../data/queries'
-import type { DeliveryChannel, Role, Settings } from '../../data/types'
+import { useOpenConfigFile, useSetSetting, useSettings, useStatus } from '../../data/queries'
+import type { DeliveryChannel } from '../../data/types'
+import { ContextFilesDialog } from './ContextFilesDialog'
+import { DaemonGroup } from './DaemonGroup'
+import { EditListDialog } from './EditListDialog'
 import { SettingRow } from './SettingRow'
+import { TeamGroup } from './TeamGroup'
 import './settings.css'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
-const NOT_REPORTED = 'not reported'
-
 function pathsLabel(n: number): string {
   return n === 1 ? '1 path' : `${n} paths`
-}
-
-function memberCountLabel(n: number): string {
-  return n === 1 ? '1 member' : `${n} members`
-}
-
-function roleLabel(role: Role): string {
-  return role.charAt(0).toUpperCase() + role.slice(1)
-}
-
-// Settings.daemon.port carries the type's own null -- honor it directly.
-function daemonStatusDescription(daemon: Settings['daemon']): string {
-  const port = daemon.port !== null ? `port ${daemon.port}` : `port ${NOT_REPORTED}`
-  return `${port} · v${daemon.version}`
-}
-
-const INTERVAL_PRESETS = [
-  { value: 60, label: 'Every minute' },
-  { value: 300, label: 'Every 5 minutes' },
-  { value: 900, label: 'Every 15 minutes' },
-  { value: 1800, label: 'Every 30 minutes' },
-]
-
-// If the daemon's real interval doesn't match a preset, show it anyway
-// rather than silently rounding to the nearest option -- a <select> whose
-// value matches no <option> would visually pick one at random.
-function intervalOptions(current: number): { value: number; label: string }[] {
-  if (INTERVAL_PRESETS.some(p => p.value === current)) return INTERVAL_PRESETS
-  return [...INTERVAL_PRESETS, { value: current, label: `Every ${current}s` }]
 }
 
 type SetSettingFn = (key: string, value: unknown) => void
@@ -51,14 +23,16 @@ type SetSettingFn = (key: string, value: unknown) => void
 interface DeliveryControlProps {
   channel: DeliveryChannel
   onSetSetting: SetSettingFn
+  onChooseFiles: () => void
 }
 
 // One control per known DeliveryChannel.id (types.ts's closed union). Only
-// 'summaries' (the distill Stop-hook) and 'mcp' (registration) have a real
-// daemon-side action behind them today -- lib/server.js's saveSettings has no
-// handler for the others, so context-block/recall get status only, never a
-// button that would silently do nothing.
-function DeliveryControl({ channel, onSetSetting }: DeliveryControlProps) {
+// 'summaries' (the distill Stop-hook), 'mcp' (registration) and
+// 'context-block' (choose files, Task 18) have a real daemon-side action
+// behind them today -- lib/server.js's saveSettings has no handler for
+// 'recall', so it gets status only, never a button that would silently do
+// nothing.
+function DeliveryControl({ channel, onSetSetting, onChooseFiles }: DeliveryControlProps) {
   if (channel.id === 'mcp') {
     if (channel.installed) return <StateChip tone="ok" glyph="✓">installed</StateChip>
     return (
@@ -88,12 +62,25 @@ function DeliveryControl({ channel, onSetSetting }: DeliveryControlProps) {
     )
   }
 
-  // context-block, recall: status only. No daemon endpoint exists to "fix"
-  // either beyond what the summaries toggle above already covers.
+  if (channel.id === 'context-block') {
+    return (
+      <>
+        {channel.installed
+          ? <StateChip tone="ok" glyph="✓">installed</StateChip>
+          : <StateChip tone="warn" glyph="⚠">not installed</StateChip>}
+        <button type="button" className="settings-btn" onClick={onChooseFiles}>Choose files</button>
+      </>
+    )
+  }
+
+  // recall: status only. No daemon endpoint exists to "fix" it beyond what
+  // the summaries toggle above already covers.
   return channel.installed
     ? <StateChip tone="ok" glyph="✓">installed</StateChip>
     : <StateChip tone="warn" glyph="⚠">not installed</StateChip>
 }
+
+type ActiveDialog = 'contextFiles' | 'redaction' | 'exclude' | null
 
 /**
  * Settings: one page, four groups in a fixed order -- Memory delivery,
@@ -102,16 +89,17 @@ function DeliveryControl({ channel, onSetSetting }: DeliveryControlProps) {
  * key/model configuration of any kind -- that whole surface was cut (Global
  * Constraints, apps-interface-rebuild plan) and never existed in the mockup.
  *
- * Every control here calls a real DataClient method. Where the mockup shows
- * a control this build has no backing method for (Open config file, Restart,
- * Choose files, Edit redaction patterns, Edit excluded folders, Leave team,
- * Check for updates), it is omitted rather than shipped as a no-op -- see
- * the Task 14 report for the full list and why each one is missing.
+ * Every control here calls a real DataClient method (Task 17/18 finished
+ * wiring the ones that used to be omitted: Restart, Start at login, Check
+ * for updates, Leave team, Open config file, Choose files, Edit redaction
+ * patterns, Edit excluded folders).
  */
 export function SettingsPage() {
   const settingsQuery = useSettings()
   const statusQuery = useStatus()
   const setSetting = useSetSetting()
+  const openConfigFile = useOpenConfigFile()
+  const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null)
 
   const hasError = settingsQuery.isError || statusQuery.isError
   if (hasError) {
@@ -134,19 +122,29 @@ export function SettingsPage() {
   }
 
   const onSetSetting: SetSettingFn = (key, value) => setSetting.mutate({ key, value })
-  const isTeamAdmin = settings.team?.role === 'owner' || settings.team?.role === 'admin'
 
   return (
     <div className="settings-page">
       <div className="settings-header">
         <h1 className="settings-title">Settings</h1>
         <span className="mono settings-scope">this machine</span>
+        <div className="settings-header-right">
+          <button type="button" className="settings-btn" onClick={() => openConfigFile.mutate()} disabled={openConfigFile.isPending}>
+            Open config file
+          </button>
+        </div>
       </div>
+      {openConfigFile.isError && (
+        <p className="settings-error" role="alert">Couldn't open the config file. {errorMessage(openConfigFile.error)}</p>
+      )}
 
       <div className="settings-group-label">
         Memory delivery
         <span className="settings-group-hint">how agents on this machine receive project memory</span>
       </div>
+      {setSetting.isError && (
+        <p className="settings-error" role="alert">Couldn't save the change. {errorMessage(setSetting.error)}</p>
+      )}
       {settings.delivery.map(channel => (
         <SettingRow
           key={channel.id}
@@ -154,7 +152,7 @@ export function SettingsPage() {
           description={channel.description}
           testId={`setting-${channel.id}`}
         >
-          <DeliveryControl channel={channel} onSetSetting={onSetSetting} />
+          <DeliveryControl channel={channel} onSetSetting={onSetSetting} onChooseFiles={() => setActiveDialog('contextFiles')} />
         </SettingRow>
       ))}
 
@@ -174,56 +172,42 @@ export function SettingsPage() {
         testId="setting-redaction"
       >
         <span className="mono settings-metric">
-          {settings.privacy.redactionBuiltIn} built-in · {settings.privacy.redactionCustom} custom
+          {settings.privacy.redactionBuiltIn === null ? 'built-in count unknown' : `${settings.privacy.redactionBuiltIn} built-in`}
+          {' · '}{settings.privacy.redactionCustom} custom
         </span>
+        <button type="button" className="settings-btn" onClick={() => setActiveDialog('redaction')}>Edit</button>
       </SettingRow>
       <SettingRow label="Excluded folders" description="Never watched, never synced" testId="setting-excluded">
         <span className="mono settings-metric">{pathsLabel(settings.privacy.excludedPaths)}</span>
+        <button type="button" className="settings-btn" onClick={() => setActiveDialog('exclude')}>Edit</button>
       </SettingRow>
 
-      <div className="settings-group-label">Daemon</div>
-      <SettingRow label="Status" description={daemonStatusDescription(settings.daemon)} testId="setting-status">
-        {settings.daemon.running
-          ? <StateChip tone="ok" glyph="✓">running</StateChip>
-          : <StateChip tone="bad" glyph="✕">not running</StateChip>}
-      </SettingRow>
-      {/* Start at login: /api/settings has no field for this at all (Task 4)
-          -- rendering a toggle bound to a value the daemon cannot actually
-          read or write would look functional while doing nothing either way. */}
-      <SettingRow label="Start at login" testId="setting-start-at-login">
-        <span className="settings-unknown">{NOT_REPORTED}</span>
-      </SettingRow>
-      <SettingRow label="Sync interval" testId="setting-sync-interval">
-        <select
-          className="settings-select"
-          aria-label="Sync interval"
-          value={settings.daemon.intervalSec}
-          onChange={e => onSetSetting('intervalSec', Number(e.target.value))}
-        >
-          {intervalOptions(settings.daemon.intervalSec).map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
-      </SettingRow>
-      <SettingRow label="Updates" description={`v${settings.daemon.version}`} testId="setting-updates">
-        {settings.daemon.updateAvailable
-          ? <StateChip tone="warn" glyph="⚠">{`update available · v${settings.daemon.updateAvailable}`}</StateChip>
-          : <span className="settings-unknown">{NOT_REPORTED}</span>}
-      </SettingRow>
+      <DaemonGroup daemon={settings.daemon} />
 
-      {settings.team && (
-        <>
-          <div className="settings-group-label">Team</div>
-          <SettingRow
-            label={settings.team.name}
-            description={`You are the ${roleLabel(settings.team.role)} · ${memberCountLabel(settings.team.memberCount)}`}
-            testId="setting-team"
-          >
-            {isTeamAdmin && (
-              <Link href={ROUTES.members} className="settings-btn">Manage</Link>
-            )}
-          </SettingRow>
-        </>
+      {settings.team && <TeamGroup team={settings.team} />}
+
+      {activeDialog === 'contextFiles' && (
+        <ContextFilesDialog contextFiles={settings.contextFiles} onClose={() => setActiveDialog(null)} />
+      )}
+      {activeDialog === 'redaction' && (
+        <EditListDialog
+          titleId="redaction-dialog-title"
+          title="Edit redaction patterns"
+          hint="One regular expression per line, checked in addition to the built-in patterns."
+          settingKey="redactExtra"
+          initial={settings.privacy.redactExtra}
+          onClose={() => setActiveDialog(null)}
+        />
+      )}
+      {activeDialog === 'exclude' && (
+        <EditListDialog
+          titleId="exclude-dialog-title"
+          title="Edit excluded folders"
+          hint="One path or glob per line -- never watched, never synced."
+          settingKey="exclude"
+          initial={settings.privacy.exclude}
+          onClose={() => setActiveDialog(null)}
+        />
       )}
     </div>
   )

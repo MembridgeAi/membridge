@@ -74,4 +74,40 @@ describe('ProjectsPage', () => {
     rejectWrite(new Error('write failed'))
     await waitFor(() => expect(cell.checked).toBe(true)) // rollback once the write rejects
   })
+
+  // The self-revoke guard used to compare a member's id against a hardcoded
+  // two-letter placeholder -- a value the real daemon never sends (a real
+  // user id looks like 'usr_9f2a'), so the guard silently never activated in
+  // production. This drives the fixture with a REALISTIC id to prove the
+  // guard now reads settings.viewerId instead of that sentinel.
+  it('disables the viewer’s own access cell using the real viewerId, not a hardcoded placeholder', async () => {
+    const client = new FakeDataClient({ viewerId: 'usr_9f2a' })
+    renderWith(client, <ProjectsPage />)
+    const row = await screen.findByTestId('project-row-membridge')
+    const cell = within(row).getByRole('checkbox', { name: /Marco/i })
+    expect(cell).toBeDisabled()
+    expect(cell.getAttribute('data-self')).toBe('true')
+  })
+
+  it('adds a project through a real DataClient call', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'addProject')
+    renderWith(client, <ProjectsPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^add project$/i }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /folder path/i }), '/Users/x/new-project')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^add project$/i }))
+    expect(spy).toHaveBeenCalledWith('/Users/x/new-project')
+  })
+
+  it('surfaces a failed add-project instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'addProject').mockRejectedValue(new Error('not a directory'))
+    renderWith(client, <ProjectsPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^add project$/i }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /folder path/i }), '/not/a/dir')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^add project$/i }))
+    expect(await screen.findByText(/not a directory/i)).toBeInTheDocument()
+  })
 })

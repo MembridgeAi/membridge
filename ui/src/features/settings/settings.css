@@ -27,6 +27,12 @@
   color: var(--text3);
   font-size: 11px;
 }
+.settings-header-right {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
 
 .settings-group-label {
   padding: 12px 16px 6px;
@@ -93,6 +99,13 @@
 }
 .settings-btn:hover {
   background: var(--panel2);
+}
+.settings-btn-danger {
+  color: var(--red);
+  border-color: var(--red);
+}
+.settings-btn-danger:hover {
+  background: var(--red-dim);
 }
 
 .settings-select {

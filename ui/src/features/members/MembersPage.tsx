@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
+import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
   useInviteMember, useInvites, useMembers, useRemoveMember, useRevokeInvite,
@@ -6,7 +7,6 @@ import {
 } from '../../data/queries'
 import type { Member, Role } from '../../data/types'
 import { AuditList } from './AuditList'
-import { ConfirmDialog } from './ConfirmDialog'
 import { InviteRow } from './InviteRow'
 import { MemberRow } from './MemberRow'
 import './members.css'
@@ -32,6 +32,12 @@ type PendingAction = { kind: 'remove' | 'transfer'; member: Member }
  * Pending invites, isolated in their own component so `getInvites()` only
  * fires when this actually mounts. MembersPage below renders it (and
  * AuditList) only for an owner/admin viewer -- never for a member.
+ *
+ * Finding (Part B): `revokeInvite.mutate()` fired without ever reading
+ * `.isError` -- a rejected revoke looked identical to a successful one,
+ * since the invite just stayed in the list either way with no explanation.
+ * Now a rejection surfaces here the same way every other mutation on this
+ * page does: a `role="alert"` message naming what failed.
  */
 function InvitesSection() {
   const invitesQuery = useInvites()
@@ -40,6 +46,9 @@ function InvitesSection() {
   if (invitesQuery.isError || invites.length === 0) return null
   return (
     <div className="invites-section">
+      {revokeInvite.isError && (
+        <p className="invite-error" role="alert">Couldn't revoke the invite. {errorMessage(revokeInvite.error)}</p>
+      )}
       {invites.map(invite => (
         <InviteRow
           key={invite.id}
@@ -55,10 +64,11 @@ function InvitesSection() {
 /**
  * The team Members page: pending invites, member rows (role, project count,
  * what has actually arrived from them, and a key-changed warning), and —
- * owner/admin only — the audit trail. Matches team-v1b.html, with the
- * mockup's dead controls omitted rather than wired to nothing (see report):
- * "Copy invite link" has no backing method at all, and "Resend" on an
- * invite has no backing method distinct from minting a new invite.
+ * owner/admin only — the audit trail. Matches team-v1b.html. "Resend" on an
+ * invite is permanently omitted -- Task 17 confirmed no mail-delivery path
+ * exists anywhere in this codebase or backend for team invites, so there is
+ * nothing a "resend" could honestly do; "Copy invite link" is real, backed
+ * by `settings.team.inviteCode` (Task 17's GET /api/team extension).
  */
 export function MembersPage() {
   const client = useDataClient()
@@ -66,7 +76,16 @@ export function MembersPage() {
   const settingsQuery = useSettings()
   const membersQuery = useMembers()
 
+  // Two independent useSetMemberRole() instances, not one shared between
+  // both call sites: `setRole` backs the ConfirmDialog's "transfer
+  // ownership" flow (awaited, its failure already surfaces via
+  // pendingError below); `setRoleFromSelect` backs the inline role <select>
+  // on each row. Sharing one mutation object between them would mean a
+  // transfer failure and a plain role-change failure both flip the same
+  // `.isError`, so a transfer error could bleed into the row-select banner
+  // (or vice versa) depending on render timing.
   const setRole = useSetMemberRole()
+  const setRoleFromSelect = useSetMemberRole()
   const removeMember = useRemoveMember()
   const inviteMember = useInviteMember()
 
@@ -75,6 +94,7 @@ export function MembersPage() {
   const [inviteRole, setInviteRole] = useState<Role>('member')
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [pendingError, setPendingError] = useState<string | null>(null)
+  const [inviteCopyStatus, setInviteCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
 
   // Unknown (still loading, or failed) defaults to solo/no-role, same as
   // Shell.tsx -- a management control never flashes on before its data
@@ -87,6 +107,13 @@ export function MembersPage() {
   const ready = statusQuery.data !== undefined && settingsQuery.data !== undefined && membersQuery.data !== undefined
   const hasError = statusQuery.isError || settingsQuery.isError || membersQuery.isError
   const members = sortMembers(membersQuery.data ?? [])
+  const inviteCode = settingsQuery.data?.team?.inviteCode ?? null
+
+  useEffect(() => {
+    if (inviteCopyStatus === 'idle') return
+    const id = setTimeout(() => setInviteCopyStatus('idle'), 2000)
+    return () => clearTimeout(id)
+  }, [inviteCopyStatus])
 
   function requestRemove(member: Member) {
     setPendingError(null)
@@ -109,6 +136,17 @@ export function MembersPage() {
       setPendingError(null)
     } catch (err) {
       setPendingError(errorMessage(err))
+    }
+  }
+
+  async function handleCopyInvite() {
+    const code = settingsQuery.data?.team?.inviteCode
+    if (!code) return
+    try {
+      await navigator.clipboard.writeText(code)
+      setInviteCopyStatus('copied')
+    } catch {
+      setInviteCopyStatus('error')
     }
   }
 
@@ -140,6 +178,11 @@ export function MembersPage() {
         <span className="mono members-count">{members.length} active</span>
         {canManage && (
           <div className="members-header-actions">
+            {inviteCode && (
+              <button type="button" className="members-btn" onClick={handleCopyInvite}>
+                {inviteCopyStatus === 'copied' ? 'Copied' : inviteCopyStatus === 'error' ? "Couldn't copy" : 'Copy invite link'}
+              </button>
+            )}
             <button type="button" className="members-btn members-btn-primary" onClick={() => setShowInviteForm(v => !v)}>
               Invite by email
             </button>
@@ -183,6 +226,10 @@ export function MembersPage() {
         <div className="members-list">
           {canManage && <InvitesSection />}
 
+          {setRoleFromSelect.isError && (
+            <p className="members-error" role="alert">Couldn't change role. {errorMessage(setRoleFromSelect.error)}</p>
+          )}
+
           {!ready && <p className="members-empty-note">Loading…</p>}
           {ready && members.map(member => (
             <MemberRow
@@ -191,7 +238,7 @@ export function MembersPage() {
               isSelf={member.id === VIEWER_ID}
               canManage={canManage}
               viewerIsOwner={viewerIsOwner}
-              onSetRole={(memberId, nextRole) => setRole.mutate({ memberId, role: nextRole })}
+              onSetRole={(memberId, nextRole) => setRoleFromSelect.mutate({ memberId, role: nextRole })}
               onRequestRemove={requestRemove}
               onRequestTransfer={requestTransfer}
             />

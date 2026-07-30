@@ -18,7 +18,7 @@ describe('FakeDataClient', () => {
 
   it('drives the viewer role in getSettings().team.role from opts.role', async () => {
     const byDefault = new FakeDataClient()
-    expect((await byDefault.getSettings()).team).toEqual({ name: 'MemBridge HQ', role: 'owner', memberCount: 3 })
+    expect((await byDefault.getSettings()).team).toEqual({ id: 'team-1', name: 'MemBridge HQ', role: 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' })
     expect((await new FakeDataClient({ role: 'admin' }).getSettings()).team?.role).toBe('admin')
     expect((await new FakeDataClient({ role: 'member' }).getSettings()).team?.role).toBe('member')
   })

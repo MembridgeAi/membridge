@@ -7,17 +7,8 @@ import { useDataClient } from '../../data/DataClientProvider'
 import { useAccessMatrix, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
 import { AccessCell } from './AccessCell'
+import { AddProjectDialog } from './AddProjectDialog'
 import './projects.css'
-
-// The daemon has no endpoint today that tells the client which team-member
-// row is "you" (team_members_list returns every member's real id, with no
-// self flag) -- but every other DataClient method in this app already
-// reserves the literal id 'me' for the viewer (getMembers, getProjectAccess,
-// getLiveSessions, Project.memberIds). Matching that convention here is the
-// only way to mark a self column/cell at all; it degrades safely if a real
-// backend ever uses different ids -- self simply never gets flagged, so
-// those cells fall back to being treated like any other member's.
-const VIEWER_ID = 'me'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -42,11 +33,12 @@ interface ProjectTableRowProps {
   members: AccessMatrix['members']
   showMatrix: boolean
   showSelfColumn: boolean
+  viewerId: string | null
   onSync: () => void
   onToggleAccess: (memberId: string, canSee: boolean) => void
 }
 
-function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColumn, onSync, onToggleAccess }: ProjectTableRowProps) {
+function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColumn, viewerId, onSync, onToggleAccess }: ProjectTableRowProps) {
   return (
     <tr data-testid={`project-row-${project.name}`}>
       <td className="proj-name">
@@ -61,8 +53,8 @@ function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColu
           <AccessCell
             memberName={member.name}
             checked={matrixRow?.access[member.id] ?? false}
-            disabled={!project.shared || member.id === VIEWER_ID}
-            isSelf={member.id === VIEWER_ID}
+            disabled={!project.shared || member.id === viewerId}
+            isSelf={member.id === viewerId}
             onToggle={checked => onToggleAccess(member.id, checked)}
           />
         </td>
@@ -90,12 +82,19 @@ export function ProjectsPage() {
   const statusQuery = useStatus()
   const settingsQuery = useSettings()
   const [filter, setFilter] = useState('')
+  const [showAddProject, setShowAddProject] = useState(false)
 
   const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
   const showMatrix = !solo && client.capabilities.teamAdminSupported && isTeamAdmin
   const showSelfColumn = !solo && !showMatrix
+  // Task 18: the real viewer id (settings.viewerId, from GET /api/team),
+  // never a hardcoded two-letter placeholder -- a sentinel like that never
+  // matches a real user id, which silently disabled the self-revoke guard
+  // below in production (it always compared against a string the daemon
+  // never sends).
+  const viewerId = settingsQuery.data?.viewerId ?? null
 
   const matrixQuery = useAccessMatrix(showMatrix)
   const setAccess = useSetProjectAccess()
@@ -146,6 +145,9 @@ export function ProjectsPage() {
             onChange={e => setFilter(e.target.value)}
             aria-label="Filter projects"
           />
+          <button type="button" className="projects-btn-add" onClick={() => setShowAddProject(true)}>
+            Add project
+          </button>
         </div>
       </div>
 
@@ -164,7 +166,7 @@ export function ProjectsPage() {
               ))}
               {showSelfColumn && (
                 <th className="who" scope="col">
-                  <Avatar id={VIEWER_ID} name="You" size={19} />
+                  <Avatar id={viewerId ?? 'you'} name="You" size={19} />
                 </th>
               )}
               <th scope="col" aria-hidden="true" />
@@ -182,6 +184,7 @@ export function ProjectsPage() {
                 members={members}
                 showMatrix={showMatrix}
                 showSelfColumn={showSelfColumn}
+                viewerId={viewerId}
                 onSync={() => syncProject.mutate(project.path)}
                 onToggleAccess={(memberId, canSee) => setAccess.mutate({ projectPath: project.path, memberId, canSee })}
               />
@@ -202,6 +205,7 @@ export function ProjectsPage() {
           Changes apply immediately; every change is recorded in the team audit trail.
         </p>
       )}
+      {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} />}
     </div>
   )
 }

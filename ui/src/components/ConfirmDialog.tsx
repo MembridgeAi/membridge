@@ -10,10 +10,11 @@ interface ConfirmDialogProps {
 }
 
 /**
- * The one overlay in this page allowed a subtle shadow (see members.css
- * `.dialog`) — every resting surface elsewhere in this system stays flat.
- * Shared by the "remove member" and "transfer ownership" confirmations;
- * MembersPage renders a single instance, so only one is ever open.
+ * A confirm/cancel overlay, shared across every feature that needs one
+ * (Members: remove/transfer; Settings: leave team). The one place in this
+ * system allowed a subtle shadow (see components.css `.dialog`) — every
+ * resting surface elsewhere stays flat; the exception is reserved for true
+ * overlays. Each caller renders at most one instance at a time.
  */
 export function ConfirmDialog({ title, message, confirmLabel, destructive, pending, error, onConfirm, onCancel }: ConfirmDialogProps) {
   return (

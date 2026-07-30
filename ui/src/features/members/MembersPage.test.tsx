@@ -84,10 +84,40 @@ describe('MembersPage', () => {
     expect(spy).toHaveBeenCalledWith('sarah', 'admin')
   })
 
-  it('never renders "Copy invite link" or "Resend" -- neither has a backing DataClient method', async () => {
+  // "Resend" is permanently omitted -- Task 17 confirmed no mail-delivery
+  // path exists anywhere in this codebase or backend for team invites.
+  // "Copy invite link" IS real now (Task 18): backed by
+  // settings.team.inviteCode, GET /api/team's Task 17 extension.
+  it('never renders "Resend" -- no mail-delivery path exists to back it', async () => {
     renderApp({}, <MembersPage />)
     await screen.findByText('Sarah')
-    expect(screen.queryByRole('button', { name: /copy invite link/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /resend/i })).toBeNull()
+  })
+
+  it('copies the real invite code to the clipboard, not a placeholder', async () => {
+    const client = new FakeDataClient()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /copy invite link/i }))
+    expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+    expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
+  })
+
+  it('surfaces a failed role change instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'setMemberRole').mockRejectedValue(new Error('role change rejected'))
+    renderWith(client, <MembersPage />)
+    const sarahRow = await screen.findByTestId('member-row-sarah')
+    await userEvent.selectOptions(within(sarahRow).getByRole('combobox', { name: /role for sarah/i }), 'admin')
+    expect(await screen.findByText(/role change rejected/i)).toBeInTheDocument()
+  })
+
+  it('surfaces a failed invite revoke instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'revokeInvite').mockRejectedValue(new Error('revoke rejected'))
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    expect(await screen.findByText(/revoke rejected/i)).toBeInTheDocument()
   })
 })

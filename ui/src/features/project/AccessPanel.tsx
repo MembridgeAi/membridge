@@ -12,7 +12,9 @@ export interface AccessRow {
 
 interface AccessPanelProps {
   rows: AccessRow[]
+  defaultAccess: boolean
   onToggle: (memberId: string, canSee: boolean) => void
+  onToggleDefault: (next: boolean) => void
 }
 
 /**
@@ -20,12 +22,12 @@ interface AccessPanelProps {
  * name carries the member's name per Task 9), plus a consequence sentence
  * naming anyone currently hidden.
  *
- * "New members join with access" is rendered as plain text, not a Toggle:
- * project_access.can_see defaults true (api-access.js readAccess) and there
- * is no per-project endpoint to change that default, so a switch here would
- * be a dead control (no request it could honestly make).
+ * "New members join with access" is now a real Toggle (Task 17/18): backed
+ * by public.projects.default_access via POST /api/project/access-default,
+ * read back from the same GET /api/project/access response as the rows
+ * above (readAccess's defaultAccess field).
  */
-export function AccessPanel({ rows, onToggle }: AccessPanelProps) {
+export function AccessPanel({ rows, defaultAccess, onToggle, onToggleDefault }: AccessPanelProps) {
   const hidden = rows.filter(row => !row.canSee)
   return (
     <div className="panel">
@@ -49,7 +51,7 @@ export function AccessPanel({ rows, onToggle }: AccessPanelProps) {
       ))}
       <div className="access-default">
         <span className="access-default-label">New members join with access</span>
-        <span className="access-default-value">On</span>
+        <Toggle on={defaultAccess} onChange={onToggleDefault} label="New members join with access" />
       </div>
     </div>
   )

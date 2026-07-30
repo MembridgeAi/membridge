@@ -21,6 +21,11 @@ function watchingBody(tools: string[]): string {
  * what MemBridge will watch, and the one consent choice this screen asks for
  * -- session summaries. Nothing about teams (that upsell is the rail's
  * "Create a team" CTA, which only appears once setup is done).
+ *
+ * Part B finding: neither the toggle nor "Get started" ever read
+ * setSetting.isError -- a rejected write looked identical to a successful
+ * one (the toggle silently reverted next render, "Get started" silently did
+ * nothing). Both now surface a real failure via role="alert".
  */
 export function FirstRun() {
   const statusQuery = useStatus()
@@ -77,6 +82,9 @@ export function FirstRun() {
           onChange={next => setSetting.mutate({ key: 'distill', value: { enabled: next } })}
         />
       </SettingRow>
+      {setSetting.isError && (
+        <p className="settings-error" role="alert">Couldn't save the change. {errorMessage(setSetting.error)}</p>
+      )}
 
       <button type="button" className="first-run-btn" onClick={finish}>
         Get started

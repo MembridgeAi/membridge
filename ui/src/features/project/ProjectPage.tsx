@@ -3,8 +3,8 @@ import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
-  useCopyForAI, useMembers, useProjectAccess, useProjects, useProjectStream,
-  useSetProjectAccess, useSetProjectPaused, useSettings, useStatus, useSyncProject,
+  useCopyForAI, useMembers, useOpenMemoryFile, useProjectAccess, useProjects, useProjectStream,
+  useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useStatus, useSyncProject,
 } from '../../data/queries'
 import type { StreamEntry as StreamEntryData } from '../../data/types'
 import { SyncStateView } from '../../components/SyncState'
@@ -77,9 +77,11 @@ export function ProjectPage({ name }: ProjectPageProps) {
   const accessQuery = useProjectAccess(showAccessPanel && project ? project.path : null)
 
   const setAccess = useSetProjectAccess()
+  const setAccessDefault = useSetProjectAccessDefault()
   const setPaused = useSetProjectPaused()
   const syncProject = useSyncProject()
   const copyForAI = useCopyForAI()
+  const openMemory = useOpenMemoryFile()
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
 
   useEffect(() => {
@@ -92,7 +94,7 @@ export function ProjectPage({ name }: ProjectPageProps) {
     if (!accessQuery.data || !membersQuery.data) return []
     const membersById = new Map(membersQuery.data.map(m => [m.id, m]))
     const rows: AccessRow[] = []
-    for (const a of accessQuery.data) {
+    for (const a of accessQuery.data.members) {
       const member = membersById.get(a.memberId)
       if (member) rows.push({ id: member.id, name: member.name, role: member.role, canSee: a.canSee })
     }
@@ -181,10 +183,23 @@ export function ProjectPage({ name }: ProjectPageProps) {
           {showAccessPanel && accessRows.length > 0 && (
             <AccessPanel
               rows={accessRows}
+              defaultAccess={accessQuery.data?.defaultAccess ?? true}
               onToggle={(memberId, canSee) => setAccess.mutate({ projectPath: project.path, memberId, canSee })}
+              onToggleDefault={next => setAccessDefault.mutate({ projectPath: project.path, defaultAccess: next })}
             />
           )}
-          <MemoryPanel project={project} latestEntry={latestEntry} />
+          {setAccessDefault.isError && (
+            <p className="project-error" role="alert">Couldn't save the default. {errorMessage(setAccessDefault.error)}</p>
+          )}
+          <MemoryPanel
+            project={project}
+            latestEntry={latestEntry}
+            onOpenMemory={() => openMemory.mutate(project.path)}
+            openPending={openMemory.isPending}
+          />
+          {openMemory.isError && (
+            <p className="project-error" role="alert">Couldn't open memory.md. {errorMessage(openMemory.error)}</p>
+          )}
           {/* No onSync here: the header's own persistent "Sync now" button
               (above) is this page's one manual-sync trigger. A second
               embedded button in this row, calling the same mutation, would

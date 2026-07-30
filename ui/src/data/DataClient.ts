@@ -24,8 +24,11 @@ export interface DataClient {
   setProjectPaused(projectPath: string, paused: boolean): Promise<void>
   copyForAI(projectPath: string): Promise<string>
 
-  getProjectAccess(projectPath: string): Promise<{ memberId: string; canSee: boolean }[]>
+  getProjectAccess(projectPath: string): Promise<{ members: { memberId: string; canSee: boolean }[]; defaultAccess: boolean }>
   setProjectAccess(projectPath: string, memberId: string, canSee: boolean): Promise<void>
+  // "New members join with access" (Task 17: POST /api/project/access-default).
+  // Manager-only; a member's write attempt rejects.
+  setProjectAccessDefault(projectPath: string, defaultAccess: boolean): Promise<void>
   getAccessMatrix(): Promise<AccessMatrix>
 
   getMembers(): Promise<Member[]>
@@ -47,4 +50,13 @@ export interface DataClient {
 
   getSettings(): Promise<Settings>
   setSetting(key: string, value: unknown): Promise<void>
+
+  // Task 17/18: daemon- and machine-level controls the mockups show with no
+  // backing method until now.
+  restartDaemon(): Promise<void>
+  checkForUpdates(): Promise<{ current: string; latest: string | null; updateAvailable: string | null }>
+  openConfigFile(): Promise<void>
+  openMemoryFile(projectPath: string): Promise<void>
+  leaveTeam(teamId: string): Promise<void>
+  addProject(path: string): Promise<void>
 }

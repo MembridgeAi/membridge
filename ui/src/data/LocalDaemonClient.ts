@@ -4,10 +4,11 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry } from './types'
 import {
-  dedupeLiveSessions, lastSharedAtByAuthor, mapLiveSession, mapMember, mapProjectRow, mapSettings, mapStreamEntry,
+  dedupeLiveSessions, lastSharedAtByAuthor, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
   projectCountsByAuthor, syncStateOf,
-  type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSettingsPayload, type RawTeamFeedEntry, type RawTeamRow,
+  type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
+import { mapSettings, type RawSettingsPayload, type RawTeamMeta, type RawTeamRow } from './settingsMapper'
 import { skeletonStatsFrom, type RawSavingsPayload } from './skeletonStats'
 
 export { syncStateOf }
@@ -38,9 +39,13 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
 // UI never reads meaningfully stale feed data.
 const FEED_CACHE_TTL_MS = 5000
 
+async function teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
+  const data = await get<{ teams: RawTeamRow[]; viewerId: string | null; inviteCode: string | null }>('/api/team')
+  return { team: data.teams[0] || null, viewerId: data.viewerId ?? null, inviteCode: data.inviteCode ?? null }
+}
+
 async function firstTeam(): Promise<RawTeamRow | null> {
-  const data = await get<{ teams: RawTeamRow[] }>('/api/team')
-  return data.teams[0] || null
+  return (await teamMeta()).team
 }
 
 // The one remaining sentinel for a method with genuinely no daemon endpoint
@@ -133,15 +138,22 @@ export class LocalDaemonClient implements DataClient {
   // The real endpoint (lib/api-access.js readAccess, wired in Task 8) also
   // returns each member's name -- dropped here because DataClient's shape
   // predates that response and Task 9's UI already resolves names/roles via
-  // getMembers(), joined by memberId.
-  async getProjectAccess(projectPath: string): Promise<{ memberId: string; canSee: boolean }[]> {
-    const r = await get<{ members: { memberId: string; name: string; canSee: boolean }[] }>(
+  // getMembers(), joined by memberId. Task 17 added defaultAccess ("new
+  // members join with access") to the same response -- carried straight
+  // through, defaulting true to match the daemon's own default when a
+  // legacy caller's response predates the field.
+  async getProjectAccess(projectPath: string): Promise<{ members: { memberId: string; canSee: boolean }[]; defaultAccess: boolean }> {
+    const r = await get<{ members: { memberId: string; name: string; canSee: boolean }[]; defaultAccess?: boolean }>(
       `/api/project/access?path=${encodeURIComponent(projectPath)}`)
-    return r.members.map(m => ({ memberId: m.memberId, canSee: m.canSee }))
+    return { members: r.members.map(m => ({ memberId: m.memberId, canSee: m.canSee })), defaultAccess: r.defaultAccess ?? true }
   }
 
   async setProjectAccess(projectPath: string, memberId: string, canSee: boolean): Promise<void> {
     await post<{ ok: boolean }>('/api/project/access', { path: projectPath, memberId, canSee })
+  }
+
+  async setProjectAccessDefault(projectPath: string, defaultAccess: boolean): Promise<void> {
+    await post<{ ok: boolean; defaultAccess: boolean }>('/api/project/access-default', { path: projectPath, defaultAccess })
   }
 
   // GET /api/team/access-matrix (lib/api-access.js accessMatrix, wired in
@@ -225,15 +237,45 @@ export class LocalDaemonClient implements DataClient {
   }
 
   async getSettings(): Promise<Settings> {
-    const [raw, status, team] = await Promise.all([
+    const [raw, status, meta] = await Promise.all([
       get<RawSettingsPayload>('/api/settings'),
       get<Status>('/api/status'),
-      firstTeam(),
+      teamMeta(),
     ])
-    return mapSettings(raw, status, team)
+    return mapSettings(raw, status, meta.team, { viewerId: meta.viewerId, inviteCode: meta.inviteCode })
   }
 
   async setSetting(key: string, value: unknown): Promise<void> {
     await post('/api/settings', { [key]: value })
+  }
+
+  // Task 17: respond BEFORE the daemon restarts -- the promise resolves once
+  // the OLD process has flushed its response, which is all a caller can
+  // observe from here; the new process taking over is verified server-side.
+  async restartDaemon(): Promise<void> {
+    await post<{ ok: boolean; restarting: boolean }>('/api/daemon/restart')
+  }
+
+  // Forces a real network check (bypasses the 6h cache) -- the one place in
+  // this client that is allowed to be slow/flaky, matching the daemon's own
+  // "only /api/updates/check may hit the network" rule.
+  async checkForUpdates(): Promise<{ current: string; latest: string | null; updateAvailable: string | null }> {
+    return post<{ current: string; latest: string | null; updateAvailable: string | null }>('/api/updates/check')
+  }
+
+  async openConfigFile(): Promise<void> {
+    await post<{ ok: boolean }>('/api/open', { kind: 'config' })
+  }
+
+  async openMemoryFile(projectPath: string): Promise<void> {
+    await post<{ ok: boolean }>('/api/open', { kind: 'memory', path: projectPath })
+  }
+
+  async leaveTeam(teamId: string): Promise<void> {
+    await post<{ left: boolean }>('/api/team/leave', { teamId })
+  }
+
+  async addProject(path: string): Promise<void> {
+    await post<{ path?: string; error?: string }>('/api/projects/add', { path })
   }
 }

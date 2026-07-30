@@ -3,35 +3,7 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
-import type { Insights } from '../../data/types'
 import { InsightsPage } from './InsightsPage'
-
-// The shared FakeDataClient fixture (ui/src/data/FakeDataClient.ts, out of
-// this task's scope) phrases its "broken" problem as a machine diagnosis
-// ("...hook not installed since she joined") rather than the absence
-// framing the product requires ("Nothing has arrived from Sarah"). This
-// subclass -- local to this test file, touching nothing under ui/src/data/
-// -- overrides just the problems list so the phrasing rule itself can be
-// verified. See the task report for the fixture-drift flag.
-class AbsenceFixtureClient extends FakeDataClient {
-  async getInsights(window: 7 | 30 | 90): Promise<Insights> {
-    const base = await super.getInsights(window)
-    return {
-      ...base,
-      problems: [
-        {
-          id: 'p1', severity: 'broken', headline: 'Nothing has arrived from Sarah',
-          scale: 'joined 3 days ago · 0 entries shared',
-          action: { label: 'Send setup steps', kind: 'setup-steps' },
-        },
-        {
-          id: 'p2', severity: 'minor', headline: '2 sessions missing summaries',
-          scale: 'of 412 · both crashed mid-session', action: null,
-        },
-      ],
-    }
-  }
-}
 
 describe('InsightsPage', () => {
   it('renders exactly two skeleton lines', async () => {
@@ -53,8 +25,9 @@ describe('InsightsPage', () => {
     const broken = await screen.findByTestId('problems-broken')
     const minor = screen.getByTestId('problems-minor')
     // Denominators come straight from the API's `scale` line for either
-    // severity -- 47 of 47 for the broken problem, of 412 for the minor one.
-    expect(within(broken).getByText(/47 of 47/)).toBeInTheDocument()
+    // severity -- "joined 3 days ago" for the broken (absence-phrased)
+    // problem, "of 412" for the minor one.
+    expect(within(broken).getByText(/joined 3 days ago/)).toBeInTheDocument()
     expect(within(minor).getByText(/of 412/)).toBeInTheDocument()
   })
 
@@ -63,8 +36,13 @@ describe('InsightsPage', () => {
     expect(await screen.findByRole('button', { name: /send setup steps/i })).toBeInTheDocument()
   })
 
+  // Task 18 Part C: the default fixture used to phrase this as a machine
+  // diagnosis ("...hook not installed since she joined"), which this
+  // machine has no way to actually know -- it can only see that nothing has
+  // arrived. Fixed to match lib/api-insights.js's real silentTeammateProblems
+  // wording exactly ("Nothing has arrived from X").
   it('phrases a teammate problem as absence, never as a machine diagnosis', async () => {
-    renderWith(new AbsenceFixtureClient(), <InsightsPage />)
+    renderApp({}, <InsightsPage />)
     const broken = await screen.findByTestId('problems-broken')
     expect(within(broken).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
     expect(within(broken).getByText(/0 entries shared/)).toBeInTheDocument()

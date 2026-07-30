@@ -11,6 +11,11 @@ export interface FakeOptions {
   // "never synced yet" case (Task 7 Finding 2) without also going solo,
   // which would hide the "last team sync" stat entirely.
   teamLastSync?: string | null
+  // Overrides the id every fixture method uses for "the viewer" (default
+  // 'me'). Task 18: a real daemon never hands back the literal string 'me'
+  // -- tests that need to prove a guard reads the REAL viewerId, not a
+  // hardcoded sentinel, pass a realistic id here (e.g. 'usr_9f2a').
+  viewerId?: string
 }
 
 export class FakeDataClient implements DataClient {
@@ -22,6 +27,13 @@ export class FakeDataClient implements DataClient {
   private guard<T>(value: T): Promise<T> {
     if (this.opts.failWith) return Promise.reject(new Error(this.opts.failWith))
     return Promise.resolve(value)
+  }
+  // Every fixture that models "the viewer's own row" reads this instead of
+  // hardcoding 'me' -- so a test that passes viewerId: 'usr_9f2a' proves
+  // guards downstream key off the real DataClient value, not a sentinel
+  // string that happens to match a hardcoded default (Task 18 finding).
+  private get viewerId(): string {
+    return this.opts.viewerId ?? 'me'
   }
   getStatus() {
     return this.guard<Status>({
@@ -40,7 +52,7 @@ export class FakeDataClient implements DataClient {
         path: '/Users/x/membridge', name: 'membridge', exists: true, paused: false,
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
-        shared: !this.opts.solo, memberIds: this.opts.solo ? ['me'] : ['me', 'andrew', 'sarah'],
+        shared: !this.opts.solo, memberIds: this.opts.solo ? [this.viewerId] : [this.viewerId, 'andrew', 'sarah'],
         sessionsThisWeek: 31, dailyCounts: [3, 5, 2, 6, 4, 5, 6], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
         sync: { state: 'up-to-date' },
@@ -49,7 +61,7 @@ export class FakeDataClient implements DataClient {
         path: '/Users/x/sublease', name: 'sublease', exists: true, paused: false,
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
-        shared: false, memberIds: ['me'],
+        shared: false, memberIds: [this.viewerId],
         sessionsThisWeek: 4, dailyCounts: [1, 0, 1, 0, 1, 1, 0], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
         sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
@@ -59,7 +71,7 @@ export class FakeDataClient implements DataClient {
   getLiveSessions() {
     return this.guard<LiveSession[]>(this.opts.empty ? [] : [
       { id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:36:00Z', intent: 'make the summary hook fire on session boundaries, not only on stop' },
-      { id: 's2', author: 'You', authorId: 'me', tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up' },
+      { id: 's2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up' },
     ])
   }
   getProjectStream() {
@@ -72,15 +84,19 @@ export class FakeDataClient implements DataClient {
   setProjectPaused() { return this.guard<void>(undefined) }
   copyForAI() { return this.guard('digest text') }
   getProjectAccess() {
-    return this.guard([{ memberId: 'me', canSee: true }, { memberId: 'andrew', canSee: true }, { memberId: 'sarah', canSee: false }])
+    return this.guard({
+      members: [{ memberId: this.viewerId, canSee: true }, { memberId: 'andrew', canSee: true }, { memberId: 'sarah', canSee: false }],
+      defaultAccess: true,
+    })
   }
   setProjectAccess() { return this.guard<void>(undefined) }
+  setProjectAccessDefault() { return this.guard<void>(undefined) }
   getAccessMatrix() {
     return this.guard<AccessMatrix>({
-      members: [{ id: 'me', name: 'Marco' }, { id: 'andrew', name: 'Andrew' }, { id: 'sarah', name: 'Sarah' }],
+      members: [{ id: this.viewerId, name: 'Marco' }, { id: 'andrew', name: 'Andrew' }, { id: 'sarah', name: 'Sarah' }],
       rows: [
-        { projectPath: '/Users/x/membridge', projectName: 'membridge', shared: true, access: { me: true, andrew: true, sarah: true } },
-        { projectPath: '/Users/x/sublease', projectName: 'sublease', shared: false, access: { me: true, andrew: false, sarah: false } },
+        { projectPath: '/Users/x/membridge', projectName: 'membridge', shared: true, access: { [this.viewerId]: true, andrew: true, sarah: true } },
+        { projectPath: '/Users/x/sublease', projectName: 'sublease', shared: false, access: { [this.viewerId]: true, andrew: false, sarah: false } },
       ],
     })
   }
@@ -92,7 +108,7 @@ export class FakeDataClient implements DataClient {
   // dropped him.
   getMembers() {
     return this.guard<Member[]>([
-      { id: 'me', name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
+      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
       { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false },
       { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
     ])
@@ -125,10 +141,14 @@ export class FakeDataClient implements DataClient {
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },
       skeleton: this.skeletonStats(),
-      perPerson: [{ id: 'me', name: 'Marco', sessions: 214, shared: 205 }],
+      perPerson: [{ id: this.viewerId, name: 'Marco', sessions: 214, shared: 205 }],
       topProjects: [{ name: 'membridge', sessions: 184, people: 3 }],
       problems: [
-        { id: 'p1', severity: 'broken', headline: "Sarah's summaries never arrive", scale: '47 of 47 sessions · hook not installed since she joined', action: { label: 'Send setup steps', kind: 'setup-steps' } },
+        // Absence-phrased, matching lib/api-insights.js's silentTeammateProblems
+        // exactly ("Nothing has arrived from X" / never a diagnosis of their
+        // machine -- see Task 18 Part C). This machine cannot see why Sarah's
+        // daemon has gone quiet, only that nothing has arrived from her.
+        { id: 'p1', severity: 'broken', headline: 'Nothing has arrived from Sarah', scale: 'joined 3 days ago · 0 entries shared', action: { label: 'Send setup steps', kind: 'setup-steps' } },
         { id: 'p2', severity: 'minor', headline: '2 sessions missing summaries', scale: 'of 412 · both crashed mid-session', action: null },
       ],
       concentration: [{ projectName: 'billing-poc', onlyPerson: 'Andrew', detail: '41 sessions' }],
@@ -141,10 +161,29 @@ export class FakeDataClient implements DataClient {
         { id: 'context-block', label: 'Context block', description: 'A small skeleton written into CLAUDE.md, AGENTS.md, GEMINI.md', installed: true, enabled: null },
         { id: 'mcp', label: 'MCP server', description: 'Lets any MCP-capable tool query team memory directly', installed: false, enabled: null },
       ],
-      privacy: { endToEnd: true, plaintextShared: false, redactionBuiltIn: 18, redactionCustom: 2, excludedPaths: 3 },
+      privacy: {
+        endToEnd: true, plaintextShared: false, redactionBuiltIn: 18, redactionCustom: 2, excludedPaths: 3,
+        redactExtra: ['sk-custom-[a-z0-9]+', 'ACME_[A-Z]+_KEY'],
+        exclude: ['node_modules', 'dist', '.git'],
+      },
       daemon: { running: true, port: 7391, version: '0.1.7', startAtLogin: true, intervalSec: 300, updateAvailable: null },
-      team: this.opts.solo ? null : { name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: 3 },
+      team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' },
+      viewerId: this.viewerId,
+      contextFiles: {
+        targets: ['CLAUDE.md', 'AGENTS.md'],
+        extraTargets: { gemini: false, cursor: false, windsurf: false, copilot: false },
+        extraTargetFiles: {
+          gemini: 'GEMINI.md', cursor: '.cursor/rules/membridge.mdc', windsurf: '.windsurfrules', copilot: '.github/copilot-instructions.md',
+        },
+      },
     })
   }
   setSetting() { return this.guard<void>(undefined) }
+
+  restartDaemon() { return this.guard<void>(undefined) }
+  checkForUpdates() { return this.guard({ current: '0.1.7', latest: '0.1.7', updateAvailable: null }) }
+  openConfigFile() { return this.guard<void>(undefined) }
+  openMemoryFile() { return this.guard<void>(undefined) }
+  leaveTeam() { return this.guard<void>(undefined) }
+  addProject() { return this.guard<void>(undefined) }
 }

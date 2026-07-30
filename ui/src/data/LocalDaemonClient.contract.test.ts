@@ -58,6 +58,13 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getSkeletonStats: c => c.getSkeletonStats(),
   getSettings: c => c.getSettings(),
   setSetting: c => c.setSetting('k', 'v'),
+  setProjectAccessDefault: c => c.setProjectAccessDefault('/x', true),
+  restartDaemon: c => c.restartDaemon(),
+  checkForUpdates: c => c.checkForUpdates(),
+  openConfigFile: c => c.openConfigFile(),
+  openMemoryFile: c => c.openMemoryFile('/x'),
+  leaveTeam: c => c.leaveTeam('team-1'),
+  addProject: c => c.addProject('/x'),
 }
 
 const MISSING_ENDPOINT_SENTINEL = /has no daemon endpoint yet/

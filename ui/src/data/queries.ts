@@ -117,8 +117,9 @@ export function useSyncAll() {
 }
 
 type ProjectAccessRow = { memberId: string; canSee: boolean }
+type ProjectAccessData = { members: ProjectAccessRow[]; defaultAccess: boolean }
 type SetAccessVars = { projectPath: string; memberId: string; canSee: boolean }
-type SetAccessContext = { previousAccess?: ProjectAccessRow[]; previousMatrix?: AccessMatrix }
+type SetAccessContext = { previousAccess?: ProjectAccessData; previousMatrix?: AccessMatrix }
 
 // Optimistic: a toggle click must read back as flipped immediately (Task 9's
 // "toggling a member calls setProjectAccess" test), and the daemon has no
@@ -155,10 +156,12 @@ export function useSetProjectAccess() {
       await qc.cancelQueries({ queryKey: accessKey })
       await qc.cancelQueries({ queryKey: ['accessMatrix'] })
 
-      const previousAccess = qc.getQueryData<ProjectAccessRow[]>(accessKey)
+      const previousAccess = qc.getQueryData<ProjectAccessData>(accessKey)
       if (previousAccess) {
-        qc.setQueryData<ProjectAccessRow[]>(accessKey, previousAccess.map(row =>
-          row.memberId === vars.memberId ? { ...row, canSee: vars.canSee } : row))
+        qc.setQueryData<ProjectAccessData>(accessKey, {
+          ...previousAccess,
+          members: previousAccess.members.map(row => row.memberId === vars.memberId ? { ...row, canSee: vars.canSee } : row),
+        })
       }
 
       const previousMatrix = qc.getQueryData<AccessMatrix>(['accessMatrix'])
@@ -223,5 +226,62 @@ export function useSetSetting() {
   return useMutation({
     mutationFn: (vars: { key: string; value: unknown }) => c.setSetting(vars.key, vars.value),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+}
+
+export function useSetProjectAccessDefault() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (vars: { projectPath: string; defaultAccess: boolean }) => c.setProjectAccessDefault(vars.projectPath, vars.defaultAccess),
+    onSuccess: (_data, vars) => { qc.invalidateQueries({ queryKey: ['projectAccess', vars.projectPath] }) },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Task 17/18: daemon- and machine-level controls with no query cache of
+// their own to keep in sync (restart/open/leave), or that only need to
+// refresh `settings` once the write lands (checkForUpdates writes the
+// on-disk cache GET /api/settings reads).
+// ---------------------------------------------------------------------------
+export function useRestartDaemon() {
+  const c = useDataClient()
+  return useMutation({ mutationFn: () => c.restartDaemon() })
+}
+
+export function useCheckForUpdates() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => c.checkForUpdates(),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+}
+
+export function useOpenConfigFile() {
+  const c = useDataClient()
+  return useMutation({ mutationFn: () => c.openConfigFile() })
+}
+
+export function useOpenMemoryFile() {
+  const c = useDataClient()
+  return useMutation({ mutationFn: (projectPath: string) => c.openMemoryFile(projectPath) })
+}
+
+export function useLeaveTeam() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (teamId: string) => c.leaveTeam(teamId),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+}
+
+export function useAddProject() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (path: string) => c.addProject(path),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }) },
   })
 }

@@ -17,6 +17,8 @@ function relativeTime(at: string, now: number = Date.now()): string {
 interface MemoryPanelProps {
   project: Project
   latestEntry: StreamEntryData | null
+  onOpenMemory: () => void
+  openPending: boolean
 }
 
 /**
@@ -24,11 +26,11 @@ interface MemoryPanelProps {
  * paused / has ever captured a session (there is no separate "delivery
  * status" field on Project); last update from the most recent merged-stream
  * entry (author + tool, the closest honest proxy for "producing agent");
- * entry count from `sessionsTotal` (the local ledger's count). The
- * memory.md reference is plain text, not a link — there is no DataClient
- * method to open a local file, so an anchor here would be a dead control.
+ * entry count from `sessionsTotal` (the local ledger's count). memory.md is
+ * a real control now (Task 18): POST /api/open {kind:'memory'} reveals the
+ * file in the OS file manager -- see DataClient.openMemoryFile.
  */
-export function MemoryPanel({ project, latestEntry }: MemoryPanelProps) {
+export function MemoryPanel({ project, latestEntry, onOpenMemory, openPending }: MemoryPanelProps) {
   return (
     <div className="panel">
       <div className="section-label">Memory · this project</div>
@@ -52,7 +54,12 @@ export function MemoryPanel({ project, latestEntry }: MemoryPanelProps) {
       )}
       <div className="kv">
         <span className="kv-key">Entries</span>
-        <span className="mono kv-value">{project.sessionsTotal} · memory.md</span>
+        <span className="mono kv-value">
+          {project.sessionsTotal} ·{' '}
+          <button type="button" className="link-btn mono" onClick={onOpenMemory} disabled={openPending}>
+            memory.md
+          </button>
+        </span>
       </div>
     </div>
   )

@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderApp } from '../../test/renderApp'
+import { renderApp, renderWith } from '../../test/renderApp'
+import { FakeDataClient } from '../../data/FakeDataClient'
 import { ProjectPage } from './ProjectPage'
 
 describe('ProjectPage', () => {
@@ -27,5 +28,40 @@ describe('ProjectPage', () => {
     renderApp({ role: 'member' }, <ProjectPage name="membridge" />)
     await screen.findByText(/Hook ownership/)
     expect(screen.queryByText(/who sees this project/i)).toBeNull()
+  })
+
+  it('opens memory.md through a real DataClient call', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'openMemoryFile')
+    renderWith(client, <ProjectPage name="membridge" />)
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.md' }))
+    expect(spy).toHaveBeenCalledWith('/Users/x/membridge')
+  })
+
+  it('toggles "new members join with access" through a real DataClient call', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'setProjectAccessDefault')
+    renderWith(client, <ProjectPage name="membridge" />)
+    const toggle = await screen.findByRole('switch', { name: /new members join with access/i })
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(toggle)
+    expect(spy).toHaveBeenCalledWith('/Users/x/membridge', false)
+  })
+
+  it('surfaces a failed access-default write instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'setProjectAccessDefault').mockRejectedValue(new Error('default write rejected'))
+    renderWith(client, <ProjectPage name="membridge" />)
+    const toggle = await screen.findByRole('switch', { name: /new members join with access/i })
+    await userEvent.click(toggle)
+    expect(await screen.findByText(/default write rejected/i)).toBeInTheDocument()
+  })
+
+  it('surfaces a failed memory.md open instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'openMemoryFile').mockRejectedValue(new Error('open rejected'))
+    renderWith(client, <ProjectPage name="membridge" />)
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.md' }))
+    expect(await screen.findByText(/open rejected/i)).toBeInTheDocument()
   })
 })

@@ -126,9 +126,21 @@ export interface DeliveryChannel {
 
 export interface Settings {
   delivery: DeliveryChannel[]
-  privacy: { endToEnd: boolean; plaintextShared: boolean; redactionBuiltIn: number; redactionCustom: number; excludedPaths: number }
+  // redactionBuiltIn is null, never 0, when the daemon payload carries no
+  // built-in-pattern count at all -- lib/redact.js has ~20 active patterns,
+  // but nothing in /api/settings reports a count yet (see mapSettings). 0
+  // would claim "no protection"; null renders as "unknown" in words instead.
+  privacy: {
+    endToEnd: boolean; plaintextShared: boolean; redactionBuiltIn: number | null; redactionCustom: number
+    excludedPaths: number; redactExtra: string[]; exclude: string[]
+  }
   daemon: { running: boolean; port: number | null; version: string; startAtLogin: boolean; intervalSec: number; updateAvailable: string | null }
-  team: { name: string; role: Role; memberCount: number } | null
+  team: { id: string; name: string; role: Role; memberCount: number; inviteCode: string | null } | null
+  // creds.userId -- the same identity /api/feed already tags entries with as
+  // `self`. Null when signed out/solo. This is the ONLY honest source for
+  // "which row is me"; a literal 'me' string is never a real user id.
+  viewerId: string | null
+  contextFiles: { targets: string[]; extraTargets: Record<string, boolean>; extraTargetFiles: Record<string, string> }
 }
 
 export interface AccessMatrix {

@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   dedupeLiveSessions, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor, mapLiveSession, mapMember,
-  mapProjectRow, mapSettings, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
+  mapProjectRow, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
-import type { Status } from './types'
 
 const entry = (overrides: Partial<RawFeedEntry> = {}): RawFeedEntry => ({
   ts: '2026-07-29T20:00:00Z',
@@ -174,30 +173,5 @@ describe('lastSharedAtByAuthor', () => {
   })
   it('ignores rows with no author_id', () => {
     expect(lastSharedAtByAuthor([row({ author_id: null })])).toEqual({})
-  })
-})
-
-describe('mapSettings', () => {
-  const status: Status = {
-    running: true, version: '0.1.7', solo: false, setupDone: true, projectCount: 2,
-    lastSync: null, teamLastSync: null, tools: [],
-    encryption: { enabled: true, plaintextOff: true, paused: null, keyAlerts: 0 },
-    auth: { paused: null, detail: null, since: null },
-  }
-  const raw = { intervalSec: 300, hookInstalled: true, distill: { enabled: true } }
-
-  it('maps the summaries delivery channel from the real hook/distill config', () => {
-    const s = mapSettings(raw, status, null)
-    const summaries = s.delivery.find(d => d.id === 'summaries')
-    expect(summaries).toMatchObject({ installed: true, enabled: true })
-  })
-  it('is solo-null for team even when a team row is passed, if status says solo', () => {
-    const soloStatus: Status = { ...status, solo: true }
-    const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }
-    expect(mapSettings(raw, soloStatus, team).team).toBeNull()
-  })
-  it('surfaces the real team name, role and member count when not solo', () => {
-    const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }
-    expect(mapSettings(raw, status, team).team).toEqual({ name: 'Acme', role: 'owner', memberCount: 3 })
   })
 })
