@@ -14332,6 +14332,59 @@ async function main() {
       });
     }
 
+    // The guard has to hold at EVERY reader of proj.teamEntries, not just the
+    // search path. A review caught the first version covering one of six, and
+    // the miss that mattered most is this one: the injected block does not
+    // merely answer questions about a revoked project, it rewrites that
+    // teammate's activity into the CLAUDE.md/AGENTS.md files every agent reads
+    // at startup. util.teamRowsFor is the single chokepoint; this pins it at
+    // the surface with the worst consequence.
+    check('revocation: the injected context block carries nothing from a revoked project', () => {
+      const revoked = {
+        events: [],
+        teamAccessLost: '2026-07-30T00:00:00.000Z',
+        teamEntries: [{
+          author: 'RevokedTeammate', ts: new Date().toISOString(), source: 'Codex', session: 'r1',
+          ask: 'REVOKED-MARKER-ASK', summary: 'REVOKED-MARKER-SUMMARY',
+          headline: 'REVOKED-MARKER-HEADLINE', files: ['infra/revoked.tf'], distilled: true,
+        }],
+      };
+      const cfg = util.getConfig();
+      const rendered = String(digest.renderBlock(
+        ROOT, revoked, cfg, 'CLAUDE.md', digest.sessionGroups(ROOT, revoked, cfg)));
+      for (const marker of ['RevokedTeammate', 'REVOKED-MARKER-ASK', 'REVOKED-MARKER-SUMMARY', 'infra/revoked.tf']) {
+        assert.ok(!rendered.includes(marker),
+          `revoked teammate content "${marker}" was written into the injected context block`);
+      }
+      // Same fixture WITHOUT the flag must still render, or the assertion
+      // above would pass for the trivial reason that nothing renders at all.
+      const allowed = { ...revoked };
+      delete allowed.teamAccessLost;
+      const renderedOk = String(digest.renderBlock(
+        ROOT, allowed, cfg, 'CLAUDE.md', digest.sessionGroups(ROOT, allowed, cfg)));
+      assert.ok(renderedOk.includes('RevokedTeammate'),
+        'the fixture renders nothing even when allowed — the guard test proves nothing');
+    });
+
+    check('revocation: every reader of teamEntries goes through util.teamRowsFor', () => {
+      // A rule four files have to remember is a rule that gets forgotten. This
+      // fails the moment someone reintroduces a raw read.
+      const libDir = path.join(__dirname, '..', 'lib');
+      const offenders = [];
+      for (const f of fs.readdirSync(libDir).filter(n => n.endsWith('.js'))) {
+        // teamsync.js WRITES the field and clears it; util.js defines the
+        // helper. Every other file must read through the helper.
+        if (f === 'teamsync.js' || f === 'util.js') continue;
+        const src = fs.readFileSync(path.join(libDir, f), 'utf8');
+        for (const line of src.split('\n')) {
+          if (line.trim().startsWith('//') || line.trim().startsWith('*')) continue;
+          if (/\.teamEntries/.test(line) && !/teamRowsFor/.test(line)) offenders.push(`${f}: ${line.trim()}`);
+        }
+      }
+      assert.deepStrictEqual(offenders, [],
+        `raw proj.teamEntries read bypasses the revocation guard:\n${offenders.join('\n')}`);
+    });
+
     check('mcp: search results are ranked (score desc) and carry matched fields', () => {
       assert.ok(sDecide.results.every(r => typeof r.score === 'number' && Array.isArray(r.matched)));
       const scores = sDecide.results.map(r => r.score);
