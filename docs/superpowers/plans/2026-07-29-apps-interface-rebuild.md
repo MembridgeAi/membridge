@@ -444,11 +444,14 @@ import type {
   AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, Status, StreamEntry,
 } from './types'
 
-/** What the active transport can do. Screens hide what is unsupported. */
+/** What the active TRANSPORT supports — never what the current USER is allowed
+ *  to do. Conflating the two let a member see admin screens: a transport that
+ *  *can* carry admin calls is not permission to make them. Authorization is the
+ *  viewer's role, read from `Settings.team.role`, and is checked separately. */
 export interface Capabilities {
   daemonControl: boolean   // restart, start-at-login, interval
   localPaths: boolean      // show filesystem paths, open files
-  teamAdmin: boolean       // roles, invites, audit, access matrix
+  teamAdminSupported: boolean  // the transport exposes admin endpoints at all
 }
 
 export interface DataClient {
@@ -501,11 +504,8 @@ export interface FakeOptions {
 export class FakeDataClient implements DataClient {
   readonly capabilities: Capabilities
   constructor(private opts: FakeOptions = {}) {
-    this.capabilities = {
-      daemonControl: true,
-      localPaths: true,
-      teamAdmin: !opts.solo && opts.role !== 'member',
-    }
+    // Transport support only — the viewer's role decides authorization.
+    this.capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
   }
   private guard<T>(value: T): Promise<T> {
     if (this.opts.failWith) return Promise.reject(new Error(this.opts.failWith))
@@ -772,7 +772,7 @@ export function syncStateOf(p: { paused: boolean; lastSync: string | null; lastA
 }
 
 export class LocalDaemonClient implements DataClient {
-  readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdmin: true }
+  readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
   getStatus() { return get<Status>('/api/status') }
   // ...remaining methods: one fetch each, mapping per Step 1. Keep this file
   // under 300 lines by putting pure mapping functions in `mappers.ts` if needed.
@@ -1077,7 +1077,13 @@ export function renderApp(opts: FakeOptions = {}, ui?: React.ReactNode) {
 
 - [ ] **Step 4: Implement `Shell.tsx` and `App.tsx`**
 
-Shell: fixed-width left rail (`170px`, `background: var(--panel)`, `border-right: 1px solid var(--line)`), logo, team switcher (only when `status.solo === false`), nav groups — top: Today / Feed / Projects; `Team` group (only when `capabilities.teamAdmin && !solo`): Members / Insights; `You` group: Settings — and a footer with the current user and a green dot when `status.running`. Active nav item: `border-left: 2px solid var(--accent)`, `background: var(--accent-dim)`, no other decoration. Solo renders the dashed "Create a team" invitation in place of the Team group.
+Shell: fixed-width left rail (`170px`, `background: var(--panel)`, `border-right: 1px solid var(--line)`), logo, team switcher (only when `status.solo === false`), nav groups — top: Today / Feed / Projects; `Team` group: Members / Insights, shown only when **`!solo` AND `capabilities.teamAdminSupported` AND the viewer's role from `Settings.team.role` is `owner` or `admin`**; `You` group: Settings — and a footer with the current user and a green dot when `status.running`. Active nav item: `border-left: 2px solid var(--accent)`, `background: var(--accent-dim)`, no other decoration. Solo renders the dashed "Create a team" invitation in place of the Team group.
+
+**Until `/api/status` and `/api/settings` resolve, render NEITHER the team group
+nor the solo "Create a team" invitation.** Defaulting either way flashes a
+control the user may not be entitled to; the rail's other items are enough while
+loading. When `getStatus()` rejects, the shell degrades to this same
+neither-branch state and surfaces the failure in the main region, not silently.
 
 App: `wouter` `<Switch>` over `ROUTES`, rendering `<Placeholder>` for routes whose feature task has not landed yet.
 
