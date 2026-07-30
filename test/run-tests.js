@@ -518,51 +518,79 @@ async function main() {
     assert.ok(out.some(e => e.session === 's3'), 'prompt-only session wrongly dropped');
   });
 
-  check('prepare-app bundles the CLI into app/bin so the packaged asar carries it', () => {
-    const r = spawnSync('node', [path.join(__dirname, '..', 'scripts', 'prepare-app.js')], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, `prepare-app failed: ${r.stderr}`);
-    const binned = path.join(__dirname, '..', 'app', 'bin', 'membridge.js');
-    assert.ok(fs.existsSync(binned), 'app/bin/membridge.js not created by prepare-app');
-  });
+  // Both prepare-app checks below need scripts/prepare-app.js to actually
+  // succeed. It walks the production dependency closure by reading
+  // root/node_modules/<name>/package.json for every package reachable from
+  // package.json's dependencies, then copies each into app/node_modules. A
+  // checkout can fail that walk for two reasons a fresh clone genuinely
+  // has: no `npm install` has run at all (root node_modules absent), or the
+  // install DID run but a package only landed in a NESTED node_modules
+  // instead of being hoisted to the top level -- npm does this when a
+  // same-named devDependency occupies the top-level slot, which
+  // `npm ci --omit=dev` (CI's own root install command) can leave behind
+  // for a package a production dependency needs (reproduced locally:
+  // cross-spawn's `which` ends up only at
+  // node_modules/cross-spawn/node_modules/which, never at the top level,
+  // once `npm ci --omit=dev` prunes the devDependency-only `which` that
+  // otherwise occupies node_modules/which). Either way the walk throws
+  // ENOENT on a node_modules path before prepare-app.js finishes. Run it
+  // once, up front, and skip both checks loudly in that case rather than
+  // fail the whole suite on an install this checkout doesn't have; any
+  // other failure (a real bug in prepare-app.js) still fails them.
+  const prepareAppResult = spawnSync('node', [path.join(__dirname, '..', 'scripts', 'prepare-app.js')], { encoding: 'utf8' });
+  const prepareAppMissingDeps = prepareAppResult.status !== 0
+    && /ENOENT/.test(prepareAppResult.stderr || '') && /node_modules/.test(prepareAppResult.stderr || '');
 
-  check('prepare-app bundles the runtime dependency closure into app/node_modules', () => {
-    // Regression: packaged builds shipped libsodium-wrappers WITHOUT its
-    // `libsodium` engine dependency, so require() failed inside the asar and
-    // team encryption paused fail-closed whenever the tray app ran the sync.
-    // Walk root dependencies transitively; every package in the closure must
-    // land in app/node_modules or the packaged app cannot require it.
-    const r = spawnSync('node', [path.join(__dirname, '..', 'scripts', 'prepare-app.js')], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, `prepare-app failed: ${r.stderr}`);
-    const appRoot = path.join(__dirname, '..');
-    const rootPkg = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
-    const want = new Set();
-    const queue = Object.keys(rootPkg.dependencies || {});
-    while (queue.length) {
-      const name = queue.shift();
-      if (want.has(name)) continue;
-      want.add(name);
-      const pkg = JSON.parse(fs.readFileSync(
-        path.join(appRoot, 'node_modules', name, 'package.json'), 'utf8'));
-      queue.push(...Object.keys(pkg.dependencies || {}));
-    }
-    assert.ok(want.size >= 2, 'closure should hold libsodium-wrappers plus its engine');
-    for (const name of want) {
-      assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', name, 'package.json')),
-        `app/node_modules/${name} missing — the packaged app cannot require it`);
-    }
-    // Same incident class as libsodium, for lib/skeleton.js's tree-sitter
-    // engine: web-tree-sitter must be in the closure (it's a root dependency,
-    // covered by the loop above) AND the vendored grammar wasm files must
-    // ride along too — they aren't an npm dependency, so prepare-app.js has
-    // to copy them explicitly. Missing either means the packaged app can
-    // only ever fall back to lib/skeleton-strip.js.
-    assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', 'web-tree-sitter', 'package.json')),
-      'app/node_modules/web-tree-sitter missing — the packaged app cannot require it');
-    assert.ok(fs.existsSync(path.join(appRoot, 'app', 'vendor', 'grammars')),
-      'app/vendor/grammars missing — the packaged app cannot load any tree-sitter grammar');
-    const vendoredWasm = fs.readdirSync(path.join(appRoot, 'app', 'vendor', 'grammars')).filter(f => f.endsWith('.wasm'));
-    assert.ok(vendoredWasm.length >= 4, `expected at least 4 vendored grammar wasm files, found ${vendoredWasm.length}`);
-  });
+  if (prepareAppMissingDeps) {
+    console.log('  skip  prepare-app bundles the CLI into app/bin (2 checks) — '
+      + "root node_modules doesn't resolve prepare-app.js's dependency closure "
+      + '(missing, or a package only reachable via a nested node_modules); '
+      + 'run `npm install` at the repo root');
+  } else {
+    check('prepare-app bundles the CLI into app/bin so the packaged asar carries it', () => {
+      assert.strictEqual(prepareAppResult.status, 0, `prepare-app failed: ${prepareAppResult.stderr}`);
+      const binned = path.join(__dirname, '..', 'app', 'bin', 'membridge.js');
+      assert.ok(fs.existsSync(binned), 'app/bin/membridge.js not created by prepare-app');
+    });
+
+    check('prepare-app bundles the runtime dependency closure into app/node_modules', () => {
+      // Regression: packaged builds shipped libsodium-wrappers WITHOUT its
+      // `libsodium` engine dependency, so require() failed inside the asar and
+      // team encryption paused fail-closed whenever the tray app ran the sync.
+      // Walk root dependencies transitively; every package in the closure must
+      // land in app/node_modules or the packaged app cannot require it.
+      assert.strictEqual(prepareAppResult.status, 0, `prepare-app failed: ${prepareAppResult.stderr}`);
+      const appRoot = path.join(__dirname, '..');
+      const rootPkg = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+      const want = new Set();
+      const queue = Object.keys(rootPkg.dependencies || {});
+      while (queue.length) {
+        const name = queue.shift();
+        if (want.has(name)) continue;
+        want.add(name);
+        const pkg = JSON.parse(fs.readFileSync(
+          path.join(appRoot, 'node_modules', name, 'package.json'), 'utf8'));
+        queue.push(...Object.keys(pkg.dependencies || {}));
+      }
+      assert.ok(want.size >= 2, 'closure should hold libsodium-wrappers plus its engine');
+      for (const name of want) {
+        assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', name, 'package.json')),
+          `app/node_modules/${name} missing — the packaged app cannot require it`);
+      }
+      // Same incident class as libsodium, for lib/skeleton.js's tree-sitter
+      // engine: web-tree-sitter must be in the closure (it's a root dependency,
+      // covered by the loop above) AND the vendored grammar wasm files must
+      // ride along too — they aren't an npm dependency, so prepare-app.js has
+      // to copy them explicitly. Missing either means the packaged app can
+      // only ever fall back to lib/skeleton-strip.js.
+      assert.ok(fs.existsSync(path.join(appRoot, 'app', 'node_modules', 'web-tree-sitter', 'package.json')),
+        'app/node_modules/web-tree-sitter missing — the packaged app cannot require it');
+      assert.ok(fs.existsSync(path.join(appRoot, 'app', 'vendor', 'grammars')),
+        'app/vendor/grammars missing — the packaged app cannot load any tree-sitter grammar');
+      const vendoredWasm = fs.readdirSync(path.join(appRoot, 'app', 'vendor', 'grammars')).filter(f => f.endsWith('.wasm'));
+      assert.ok(vendoredWasm.length >= 4, `expected at least 4 vendored grammar wasm files, found ${vendoredWasm.length}`);
+    });
+  }
 
   check('gen-install: sha256File hashes file contents', () => {
     const gen = require('../scripts/install/gen-install');

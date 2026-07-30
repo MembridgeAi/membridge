@@ -6,9 +6,17 @@ import { FakeDataClient } from '../../data/FakeDataClient'
 import { ProjectPage } from './ProjectPage'
 
 describe('ProjectPage', () => {
-  it('states the consequence of revoking a member by name', async () => {
+  it('states the consequence of revoking a member by name, honestly', async () => {
     renderApp({}, <ProjectPage name="membridge" />)
-    expect(await screen.findByText(/Sarah can't see this project's memory or activity/)).toBeInTheDocument()
+    const note = await screen.findByText(/won't get anything new from this project/)
+    expect(note).toHaveTextContent('Sarah')
+    // The honesty gap this covers: revocation is real and immediate on the
+    // server, but a member's local tools read a durable on-disk archive
+    // that never consults the backend, so entries already synced before
+    // the toggle stay readable there. The note must say that plainly and
+    // must NOT claim existing data on their machine is gone.
+    expect(note).toHaveTextContent(/already synced to their machine may still be there until it next checks in/)
+    expect(note.textContent).not.toMatch(/removed|deleted|purged|erased|retroactive/i)
   })
 
   it('leads each stream entry with the outcome and shows the ask as intent', async () => {

@@ -22,6 +22,17 @@ interface AccessPanelProps {
  * name carries the member's name per Task 9), plus a consequence sentence
  * naming anyone currently hidden.
  *
+ * That consequence sentence used to say a toggled-off member "can't see
+ * this project's memory or activity" -- true for the server (migration 025
+ * covers memory_entries RLS, project_stats, and team_feed), but false as a
+ * blanket claim: searchMemory on their own machine reads local state plus a
+ * durable on-disk archive and never consults the backend, so entries
+ * already synced before the toggle stay readable by their local tools until
+ * that archive ages out or is overwritten. Toggling this off is real and
+ * effective for anything NEW; it does not reach back and erase what already
+ * landed on their disk. Say that plainly instead of implying a completeness
+ * this control never had.
+ *
  * "New members join with access" is now a real Toggle (Task 17/18): backed
  * by public.projects.default_access via POST /api/project/access-default,
  * read back from the same GET /api/project/access response as the rows
@@ -46,7 +57,7 @@ export function AccessPanel({ rows, defaultAccess, onToggle, onToggleDefault }: 
       ))}
       {hidden.map(row => (
         <p className="access-note" key={row.id}>
-          {row.name} can't see this project's memory or activity.
+          {row.name} won't get anything new from this project. Anything already synced to their machine may still be there until it next checks in.
         </p>
       ))}
       <div className="access-default">
