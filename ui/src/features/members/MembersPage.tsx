@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
-  useInviteMember, useInvites, useMembers, useRemoveMember, useRevokeInvite,
+  useCreateInviteLink, useInviteMember, useInvites, useMembers, useRemoveMember, useRevokeInvite,
   useSetMemberRole, useSettings, useStatus,
 } from '../../data/queries'
 import type { Member, Role } from '../../data/types'
@@ -22,6 +22,18 @@ function errorMessage(error: unknown): string {
 }
 
 type PendingAction = { kind: 'remove' | 'transfer'; member: Member }
+
+// 'revealed' is the clipboard-unavailable-or-denied fallback: the value is
+// shown in the page for the user to select and copy by hand. It must NEVER
+// read as 'copied' -- a failed clipboard write that still claims success
+// would leave someone pasting nothing into their teammate's invite prompt.
+// `kind` tracks which of the two controls (mint-a-link vs copy-the-standing-
+// code) produced the current status, so "Copied"/the revealed value renders
+// next to the button that earned it, not the other one.
+type InviteCopyState =
+  | { status: 'idle' }
+  | { status: 'copied'; kind: 'link' | 'code' }
+  | { status: 'revealed'; kind: 'link' | 'code'; value: string }
 
 /**
  * Pending invites, isolated in their own component so `getInvites()` only
@@ -62,15 +74,24 @@ function InvitesSection() {
  * owner/admin only — the audit trail. Matches team-v1b.html. "Resend" on an
  * invite is permanently omitted -- Task 17 confirmed no mail-delivery path
  * exists anywhere in this codebase or backend for team invites, so there is
- * nothing a "resend" could honestly do. "Copy invite code" is real, backed
- * by `settings.team.inviteCode` (Task 17's GET /api/team extension) -- it is
- * labelled "code", not "link", because it copies the standing invite CODE
- * (`teams[0].invite_code`, lib/server.js's teamPayload), not a URL: the
- * hosted /join/<token> page (web/app/join/[token]/page.js) only exists behind
- * `teamsync.webUrl(config)`, which is empty in the shipped lib/backend.json,
- * so building a "link" here would 404 for the default install. The daemon's
- * own join path (`POST /api/team/join { inviteCode }`) accepts this same
- * code, matching what the button promises.
+ * nothing a "resend" could honestly do.
+ *
+ * "Copy invite link" (Fix 1) mints a fresh onboarding-invite token
+ * (`POST /api/team/invite`, DataClient.createInviteLink) and copies
+ * `${settings.webUrl}/#${token}` -- the exact shape cloudflare/join's hosted
+ * page reads via `location.hash`, and the exact construction
+ * cloudflare/ops-dashboard's own JOIN_BASE + token already uses. This used to
+ * be labelled "Copy invite code" and copy `settings.team.inviteCode` (the
+ * standing, never-rotated per-team code) instead, because
+ * `teamsync.webUrl(config)` was empty in the shipped lib/backend.json --
+ * building a link would have 404'd. lib/backend.json now bakes a real
+ * webUrl, so the default install mints a real link. When no webUrl is
+ * configured at all (a self-hosted build shipping an empty backend.json),
+ * the control degrades to sharing the standing code instead of a broken URL
+ * -- still labelled honestly ("Copy invite code" in that case) -- and a
+ * "Copy code instead" secondary action stays available whenever both a
+ * webUrl and a standing code exist, since the code still works with
+ * `membridge join <code>` even when no one has a browser handy.
  */
 export function MembersPage() {
   const client = useDataClient()
@@ -90,17 +111,15 @@ export function MembersPage() {
   const setRoleFromSelect = useSetMemberRole()
   const removeMember = useRemoveMember()
   const inviteMember = useInviteMember()
+  const createInviteLink = useCreateInviteLink()
 
   const [showInviteForm, setShowInviteForm] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState<Role>('member')
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [pendingError, setPendingError] = useState<string | null>(null)
-  // 'revealed' is the clipboard-unavailable-or-denied fallback: the code is
-  // shown in the page for the user to select and copy by hand. It must NEVER
-  // read as 'copied' -- a failed clipboard write that still claims success
-  // would leave someone pasting nothing into their teammate's invite prompt.
-  const [inviteCopyStatus, setInviteCopyStatus] = useState<'idle' | 'copied' | 'revealed'>('idle')
+  const [inviteCopy, setInviteCopy] = useState<InviteCopyState>({ status: 'idle' })
+  const [mintError, setMintError] = useState<string | null>(null)
 
   // Unknown (still loading, or failed) defaults to solo/no-role, same as
   // Shell.tsx -- a management control never flashes on before its data
@@ -119,15 +138,21 @@ export function MembersPage() {
   const hasError = statusQuery.isError || settingsQuery.isError || membersQuery.isError
   const members = sortMembers(membersQuery.data ?? [])
   const inviteCode = settingsQuery.data?.team?.inviteCode ?? null
+  const webUrl = settingsQuery.data?.webUrl ?? null
+  const teamId = settingsQuery.data?.team?.id ?? null
+  // A real link can only be minted once both the hosted join page (webUrl)
+  // and a team to mint it for are known; otherwise the primary action
+  // degrades to sharing the standing code instead.
+  const canMintLink = !!(webUrl && teamId)
 
-  // Only the 'copied' confirmation auto-dismisses -- a revealed code stays on
-  // screen until the viewer copies it themselves; hiding it after 2s would
-  // defeat the whole point of revealing it.
+  // Only the 'copied' confirmation auto-dismisses -- a revealed value stays
+  // on screen until the viewer copies it themselves; hiding it after 2s
+  // would defeat the whole point of revealing it.
   useEffect(() => {
-    if (inviteCopyStatus !== 'copied') return
-    const id = setTimeout(() => setInviteCopyStatus('idle'), 2000)
+    if (inviteCopy.status !== 'copied') return
+    const id = setTimeout(() => setInviteCopy({ status: 'idle' }), 2000)
     return () => clearTimeout(id)
-  }, [inviteCopyStatus])
+  }, [inviteCopy.status])
 
   function requestRemove(member: Member) {
     setPendingError(null)
@@ -156,19 +181,42 @@ export function MembersPage() {
   // Clipboard failure must not claim success: a browser with no clipboard
   // API (navigator.clipboard absent -- non-HTTPS context, older WebView) or a
   // denied/failed write both fall through to 'revealed', never 'copied'.
-  async function handleCopyInvite() {
-    const code = settingsQuery.data?.team?.inviteCode
-    if (!code) return
+  async function copyInviteValue(value: string, kind: 'link' | 'code') {
     if (!navigator.clipboard) {
-      setInviteCopyStatus('revealed')
+      setInviteCopy({ status: 'revealed', kind, value })
       return
     }
     try {
-      await navigator.clipboard.writeText(code)
-      setInviteCopyStatus('copied')
+      await navigator.clipboard.writeText(value)
+      setInviteCopy({ status: 'copied', kind })
     } catch {
-      setInviteCopyStatus('revealed')
+      setInviteCopy({ status: 'revealed', kind, value })
     }
+  }
+
+  // Primary action: mint a fresh onboarding-invite token and copy the real
+  // join link (`${webUrl}/#${token}`). Degrades to sharing the standing code
+  // when no hosted join page is configured (webUrl null) -- this never
+  // produces a broken/incomplete URL, and never silently does nothing.
+  async function handleCopyInvite() {
+    setMintError(null)
+    if (webUrl && teamId) {
+      try {
+        const { token } = await createInviteLink.mutateAsync(teamId)
+        await copyInviteValue(`${webUrl}/#${token}`, 'link')
+      } catch (err) {
+        setMintError(errorMessage(err))
+      }
+      return
+    }
+    if (inviteCode) await copyInviteValue(inviteCode, 'code')
+  }
+
+  // Secondary action, only ever offered alongside the primary link button:
+  // the standing code still works with `membridge join <code>` when a link
+  // isn't convenient to share (no browser handy, reading it aloud, etc).
+  async function handleCopyCode() {
+    if (inviteCode) await copyInviteValue(inviteCode, 'code')
   }
 
   async function handleInviteSubmit(e: FormEvent) {
@@ -199,14 +247,28 @@ export function MembersPage() {
         <span className="mono members-count">{members.length} active</span>
         {canManage && (
           <div className="members-header-actions">
-            {inviteCode && (
+            {(canMintLink || inviteCode) && (
               <span className="invite-copy">
-                <button type="button" className="members-btn" onClick={handleCopyInvite}>
-                  {inviteCopyStatus === 'copied' ? 'Copied' : 'Copy invite code'}
+                <button type="button" className="members-btn" onClick={handleCopyInvite} disabled={createInviteLink.isPending}>
+                  {inviteCopy.status === 'copied' && inviteCopy.kind === (canMintLink ? 'link' : 'code')
+                    ? 'Copied'
+                    : canMintLink ? 'Copy invite link' : 'Copy invite code'}
                 </button>
-                {inviteCopyStatus === 'revealed' && (
+                {/* Secondary, cheap escape hatch to the raw code -- only shown
+                    when the primary button is minting a link, so there is
+                    never a redundant second button doing the same thing the
+                    primary one already does in the degraded (no webUrl) case. */}
+                {canMintLink && inviteCode && (
+                  <button type="button" className="members-btn" onClick={handleCopyCode}>
+                    {inviteCopy.status === 'copied' && inviteCopy.kind === 'code' ? 'Copied' : 'Copy code instead'}
+                  </button>
+                )}
+                {mintError && (
+                  <p className="invite-error" role="alert">Couldn't create an invite link. {mintError}</p>
+                )}
+                {inviteCopy.status === 'revealed' && (
                   <span className="mono invite-code-reveal" role="status">
-                    Couldn't copy automatically — copy this code: {inviteCode}
+                    Couldn't copy automatically — copy this {inviteCopy.kind}: {inviteCopy.value}
                   </span>
                 )}
               </span>
@@ -286,7 +348,15 @@ export function MembersPage() {
             ? `Remove ${pendingAction.member.name} from the team?`
             : `Transfer ownership to ${pendingAction.member.name}?`}
           message={pendingAction.kind === 'remove'
-            ? `Removing ${pendingAction.member.name} revokes their access to every shared project immediately.`
+            // Server-side this is real and immediate (migration 025) -- but
+            // it only stops anything NEW from reaching their machine. Their
+            // local tools read a durable on-disk archive that never
+            // consults the backend, so entries already synced before now
+            // may still be there until it next checks in. Say that plainly
+            // here too, since a confirm dialog is the moment the admin
+            // forms their expectation -- see AccessPanel.tsx's comment for
+            // the full mechanism.
+            ? `Removing ${pendingAction.member.name} cuts off new access to every shared project. Anything already synced to their machine may still be there until it next checks in.`
             : `${pendingAction.member.name} becomes the team owner immediately. This can't be undone from here.`}
           confirmLabel={pendingAction.kind === 'remove' ? 'Remove from team' : 'Transfer ownership'}
           destructive={pendingAction.kind === 'remove'}

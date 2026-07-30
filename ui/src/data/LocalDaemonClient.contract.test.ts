@@ -55,6 +55,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getMembers: c => c.getMembers(),
   getInvites: c => c.getInvites(),
   inviteMember: c => c.inviteMember('a@b.com', 'member'),
+  createInviteLink: c => c.createInviteLink('team-1'),
   revokeInvite: c => c.revokeInvite('i1'),
   setMemberRole: c => c.setMemberRole('m1', 'member'),
   removeMember: c => c.removeMember('m1'),

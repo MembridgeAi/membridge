@@ -135,14 +135,17 @@ export interface RawTeamRow {
 
 // GET /api/team's top-level fields beyond `teams` (Task 17) -- viewerId is
 // creds.userId (null when signed out/solo), inviteCode is teams[0]'s current
-// invite_code (null when solo or between teams). Both are read fresh on
-// every /api/team call, never cached or derived client-side.
+// invite_code (null when solo or between teams). webUrl is teamsync.webUrl(config),
+// independent of team/solo state (Fix 1: the hosted join page's base URL,
+// null when no webUrl is configured). All three are read fresh on every
+// /api/team call, never cached or derived client-side.
 export interface RawTeamMeta {
   viewerId: string | null
   inviteCode: string | null
+  webUrl: string | null
 }
 
-const EMPTY_TEAM_META: RawTeamMeta = { viewerId: null, inviteCode: null }
+const EMPTY_TEAM_META: RawTeamMeta = { viewerId: null, inviteCode: null, webUrl: null }
 
 // Settings: /api/settings predates this screen's redesigned shape (delivery
 // channels, privacy counters, daemon control) -- it was built for the old
@@ -189,6 +192,7 @@ export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTe
       ? null
       : { id: team.team_id, name: team.team_name, role: team.role, memberCount: team.memberCount ?? 0, inviteCode: teamMeta.inviteCode },
     viewerId: teamMeta.viewerId,
+    webUrl: teamMeta.webUrl,
     contextFiles: { targets: raw.targets, extraTargets: raw.extraTargets, extraTargetFiles: raw.extraTargetFiles },
   }
 }

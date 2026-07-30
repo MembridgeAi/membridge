@@ -6,12 +6,20 @@ import { FakeDataClient } from '../../data/FakeDataClient'
 import { MembersPage } from './MembersPage'
 
 describe('MembersPage', () => {
-  it('confirms before removing a member and says what removal does', async () => {
+  it('confirms before removing a member and says what removal does, honestly', async () => {
     renderApp({}, <MembersPage />)
     await userEvent.click(await screen.findByRole('button', { name: /more actions for Sarah/i }))
     await userEvent.click(screen.getByRole('menuitem', { name: /remove from team/i }))
     const dialog = await screen.findByRole('dialog')
-    expect(dialog).toHaveTextContent(/revokes .*access to every shared project/i)
+    expect(dialog).toHaveTextContent('Sarah')
+    expect(dialog).toHaveTextContent(/cuts off new access to every shared project/i)
+    // This is the moment the admin forms their expectation, so it must
+    // carry the same honesty as the project access panel's toggle-off note:
+    // real and immediate for anything NEW, but their local tools read a
+    // durable on-disk archive the backend never reaches, so entries already
+    // synced before now may still be there until it next checks in.
+    expect(dialog).toHaveTextContent(/already synced to their machine may still be there until it next checks in/i)
+    expect(dialog.textContent).not.toMatch(/removed|deleted|purged|erased|retroactive/i)
   })
 
   it('says plainly when a member has shared nothing, without guessing why', async () => {
@@ -106,56 +114,96 @@ describe('MembersPage', () => {
 
   // "Resend" is permanently omitted -- Task 17 confirmed no mail-delivery
   // path exists anywhere in this codebase or backend for team invites.
-  // "Copy invite code" IS real now (Task 18): backed by
-  // settings.team.inviteCode, GET /api/team's Task 17 extension. Labelled
-  // "code" rather than "link" -- see MembersPage.tsx's comment for why a
-  // "link" would be a fabricated, 404-ing URL for the default install.
   it('never renders "Resend" -- no mail-delivery path exists to back it', async () => {
     renderApp({}, <MembersPage />)
     await screen.findByText('Sarah')
     expect(screen.queryByRole('button', { name: /resend/i })).toBeNull()
   })
 
-  it('copies the real invite code to the clipboard, not a placeholder', async () => {
+  // Fix 1: "Copy invite link" mints a real onboarding-invite token
+  // (DataClient.createInviteLink, POST /api/team/invite) and copies
+  // `${webUrl}/#${token}` -- the exact shape cloudflare/join's hosted page
+  // reads via location.hash, and exactly what cloudflare/ops-dashboard's own
+  // JOIN_BASE + token construction produces. FakeDataClient's default webUrl
+  // ('https://join.membridge.me') matches the real shipped lib/backend.json.
+  it('mints an invite and copies the real join link, matching <webUrl>/#<token>', async () => {
     const client = new FakeDataClient()
+    const mintSpy = vi.spyOn(client, 'createInviteLink')
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /copy invite code/i }))
-    expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    expect(mintSpy).toHaveBeenCalledWith('team-1')
+    expect(writeText).toHaveBeenCalledWith('https://join.membridge.me/#tok_9f2aQ7')
     expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
   })
 
   // Clipboard failure must not read as success -- a rejected (or denied)
-  // write falls back to revealing the code on the page so the viewer can
+  // write falls back to revealing the value on the page so the viewer can
   // select and copy it by hand, instead of showing a false "Copied".
-  it('reveals the code for manual copying when the clipboard write fails, never claiming Copied', async () => {
+  it('reveals the link for manual copying when the clipboard write fails, never claiming Copied', async () => {
     const client = new FakeDataClient()
     const writeText = vi.fn().mockRejectedValue(new Error('denied'))
     Object.assign(navigator, { clipboard: { writeText } })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /copy invite code/i }))
-    expect(await screen.findByText(/copy this code: INV-7F3K9Q/i)).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    expect(await screen.findByText(/copy this link: https:\/\/join\.membridge\.me\/#tok_9f2aQ7/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^copied$/i })).toBeNull()
   })
 
-  it('reveals the code for manual copying when no clipboard API exists at all', async () => {
+  it('reveals the link for manual copying when no clipboard API exists at all', async () => {
     const client = new FakeDataClient()
     Object.assign(navigator, { clipboard: undefined })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /copy invite code/i }))
-    expect(await screen.findByText(/copy this code: INV-7F3K9Q/i)).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    expect(await screen.findByText(/copy this link: https:\/\/join\.membridge\.me\/#tok_9f2aQ7/i)).toBeInTheDocument()
   })
 
-  it('renders no invite-copy control at all when the team has no invite code', async () => {
+  // Degrade path: a build with no hosted join page configured (self-hosted,
+  // empty lib/backend.json -- modeled here as Settings.webUrl: null) must not
+  // produce a broken/incomplete URL. It falls back to the standing code, and
+  // the label changes to match what is actually being copied.
+  it('falls back to copying the standing invite code when no webUrl is configured', async () => {
+    const client = new FakeDataClient({ webUrl: null })
+    const mintSpy = vi.spyOn(client, 'createInviteLink')
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite code$/i }))
+    expect(mintSpy).not.toHaveBeenCalled()
+    expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+    expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
+  })
+
+  // Cheap secondary escape hatch to the raw code, kept alongside the primary
+  // link button -- the code still works with `membridge join <code>` when a
+  // link isn't convenient (no browser handy, reading it aloud, etc).
+  it('keeps a secondary "Copy code instead" action for the standing code alongside the link', async () => {
     const client = new FakeDataClient()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy code instead$/i }))
+    expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+  })
+
+  it('surfaces a failed invite-link mint instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'createInviteLink').mockRejectedValue(new Error('mint rejected'))
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    expect(await screen.findByText(/mint rejected/i)).toBeInTheDocument()
+  })
+
+  it('renders no invite-copy control at all when there is nothing to mint or copy', async () => {
+    const client = new FakeDataClient({ webUrl: null })
     vi.spyOn(client, 'getSettings').mockImplementation(async () => {
-      const settings = await new FakeDataClient().getSettings()
+      const settings = await new FakeDataClient({ webUrl: null }).getSettings()
       return { ...settings, team: settings.team && { ...settings.team, inviteCode: null } }
     })
     renderWith(client, <MembersPage />)
     await screen.findByText('Sarah')
-    expect(screen.queryByRole('button', { name: /copy invite/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /copy invite|copy code/i })).toBeNull()
   })
 
   it('surfaces a failed role change instead of looking like nothing happened', async () => {

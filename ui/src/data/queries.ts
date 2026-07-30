@@ -252,6 +252,17 @@ export function useInviteMember() {
   })
 }
 
+// Mints a fresh onboarding-invite token for a team (DataClient.createInviteLink,
+// POST /api/team/invite). No cache to invalidate: unlike useInviteMember (which
+// feeds the pending-invites list), a minted link is used-and-copied on the
+// spot, not tracked in any list this UI reads back.
+export function useCreateInviteLink() {
+  const c = useDataClient()
+  return useMutation({
+    mutationFn: (teamId: string) => c.createInviteLink(teamId),
+  })
+}
+
 export function useRevokeInvite() {
   const c = useDataClient()
   const qc = useQueryClient()

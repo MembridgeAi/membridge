@@ -27,6 +27,11 @@ export interface FakeOptions {
   // [] (the "user cancelled" case) so a test must opt in to a real
   // selection rather than getting one by accident.
   pickPathsResult?: string[]
+  // Settings.webUrl override. Defaults to the real shipped lib/backend.json
+  // value so a plain fixture exercises the actual "Copy invite link" path;
+  // pass null to exercise the no-hosted-join-page degrade path (falls back
+  // to sharing the standing invite code).
+  webUrl?: string | null
 }
 
 export class FakeDataClient implements DataClient {
@@ -156,6 +161,7 @@ export class FakeDataClient implements DataClient {
   }
   getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
   inviteMember() { return this.guard<void>(undefined) }
+  createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }
   revokeInvite() { return this.guard<void>(undefined) }
   setMemberRole() { return this.guard<void>(undefined) }
   removeMember() { return this.guard<void>(undefined) }
@@ -223,6 +229,7 @@ export class FakeDataClient implements DataClient {
       daemon: { running: true, port: 7391, version: '0.1.7', startAtLogin: true, intervalSec: 300, updateAvailable: null },
       team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' },
       viewerId: this.viewerId,
+      webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
       contextFiles: {
         targets: ['CLAUDE.md', 'AGENTS.md'],
         extraTargets: { gemini: false, cursor: false, windsurf: false, copilot: false },

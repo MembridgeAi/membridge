@@ -89,8 +89,14 @@ export class LocalDaemonClient implements DataClient {
 
   private teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
     return this.requestCache.get('team', async () => {
-      const data = await get<{ teams: RawTeamRow[]; viewerId: string | null; inviteCode: string | null }>('/api/team')
-      return { team: data.teams[0] || null, viewerId: data.viewerId ?? null, inviteCode: data.inviteCode ?? null }
+      const data = await get<{ teams: RawTeamRow[]; viewerId: string | null; inviteCode: string | null; webUrl?: string | null }>('/api/team')
+      return {
+        team: data.teams[0] || null, viewerId: data.viewerId ?? null, inviteCode: data.inviteCode ?? null,
+        // Optional on the wire: an older daemon's /api/team predates webUrl
+        // entirely (Task 17 shipped viewerId/inviteCode first) -- absence maps
+        // to null (no hosted join page known), never a fabricated default.
+        webUrl: data.webUrl ?? null,
+      }
     })
   }
 
@@ -232,6 +238,16 @@ export class LocalDaemonClient implements DataClient {
       'inviteMember has no daemon endpoint yet -- POST /api/team/invite creates a generic link and accepts no email or role.'));
   }
 
+  // POST /api/team/invite (lib/teamsync.js createInvite) also returns
+  // expires_at/max_uses/url, but url is the legacy /join/<token> path shape
+  // (teamsync.inviteUrl -- the CLI/web/app/settings consumer), not the
+  // hash-based shape the Members-page UI needs, so only the token is taken
+  // here; the caller builds `${webUrl}/#${token}` itself.
+  async createInviteLink(teamId: string): Promise<{ token: string }> {
+    const inv = await post<{ token: string }>('/api/team/invite', { teamId })
+    return { token: inv.token }
+  }
+
   revokeInvite(inviteId: string): Promise<void> {
     return post<void>('/api/team/revoke-invite', { token: inviteId })
   }
@@ -288,7 +304,7 @@ export class LocalDaemonClient implements DataClient {
       this.getStatus(),
       this.teamMeta(),
     ])
-    return mapSettings(raw, status, meta.team, { viewerId: meta.viewerId, inviteCode: meta.inviteCode })
+    return mapSettings(raw, status, meta.team, { viewerId: meta.viewerId, inviteCode: meta.inviteCode, webUrl: meta.webUrl })
   }
 
   async setSetting(key: string, value: unknown): Promise<void> {

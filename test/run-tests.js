@@ -3956,6 +3956,34 @@ async function main() {
     }
   });
 
+  // Fix 1 (invite links): lib/backend.json now bakes a real webUrl so the
+  // Members-page "Copy invite link" control has something to build a link
+  // from by default -- this pins the exact value and the same
+  // env > config > baked priority chain the url/anonKey pair already has.
+  check('team: webUrl resolves env > config > baked default, and the baked default is the real hosted join page', () => {
+    const savedWebUrl = process.env.MEMBRIDGE_TEAM_WEB_URL;
+    const restore = () => {
+      if (savedWebUrl === undefined) delete process.env.MEMBRIDGE_TEAM_WEB_URL;
+      else process.env.MEMBRIDGE_TEAM_WEB_URL = savedWebUrl;
+    };
+    delete process.env.MEMBRIDGE_TEAM_WEB_URL;
+    try {
+      assert.strictEqual(teamsync.webUrl(util.getConfig()), 'https://join.membridge.me',
+        'baked lib/backend.json webUrl must be the live hosted join page');
+      assert.strictEqual(teamsync.webUrl({ team: { webUrl: 'https://selfhost.example/join' } }),
+        'https://selfhost.example/join', 'a config override beats the baked default');
+    } finally {
+      restore();
+    }
+    process.env.MEMBRIDGE_TEAM_WEB_URL = 'https://env-override.example/';
+    try {
+      assert.strictEqual(teamsync.webUrl(util.getConfig()), 'https://env-override.example',
+        'an env override beats both config and the baked default, trailing slash stripped');
+    } finally {
+      restore();
+    }
+  });
+
   check('team: oauthAuthorizeUrl targets the backend with the redirect encoded', () => {
     const u = teamsync.oauthAuthorizeUrl(util.getConfig(), 'http://127.0.0.1:7437/team/oauth/callback');
     assert.ok(u.startsWith(`http://127.0.0.1:${P(45)}/auth/v1/authorize?provider=github`), u);
@@ -4417,7 +4445,12 @@ async function main() {
     const inv1 = await teamsync.createInvite(util.getConfig(), team.team_id, {});
     check('invites: owner mints a short URL-safe token; URL parsing round-trips', () => {
       assert.ok(/^[A-Za-z0-9_-]{8,}$/.test(inv1.token), `token was ${inv1.token}`);
-      assert.strictEqual(inv1.url, null, 'no web app configured, url must be null');
+      // lib/backend.json now bakes a real webUrl (join.membridge.me), so every
+      // build mints a real link by default -- inviteUrl() builds the legacy
+      // /join/<token> path shape (this CLI/web/app/settings consumer;
+      // unrelated to the Members-page UI's hash-based `<webUrl>/#<token>`
+      // link, minted separately via GET /api/team's plain webUrl field).
+      assert.strictEqual(inv1.url, `https://join.membridge.me/join/${inv1.token}`, 'baked webUrl produces a real default url');
       assert.strictEqual(teamsync.parseInviteToken(`https://app.membridge.dev/join/${inv1.token}`), inv1.token);
       assert.strictEqual(teamsync.parseInviteToken(`  ${inv1.token}  `), inv1.token);
       process.env.MEMBRIDGE_TEAM_WEB_URL = 'https://app.membridge.dev/';
@@ -16910,6 +16943,21 @@ async function main() {
     assert.strictEqual(projectResolve.resolveRoot(path.join(child, 'src', 'a.js'), trackedChild), child);
   });
 
+  check('project-resolve: isProtectedDir marks the real OS home, exported for scan.js to share', () => {
+    // scan.js's isTrackedProject used to reimplement this check inline with no
+    // home guard at all -- exporting it here is what let the two definitions
+    // be made identical instead of merely similar.
+    assert.strictEqual(projectResolve.isProtectedDir(os.homedir()), true);
+    assert.strictEqual(projectResolve.isProtectedDir('/gate/real-project'), false);
+    // resolveRoot walking a file directly under home must never resolve to
+    // home itself, even when home is (wrongly) already in the tracked set --
+    // the same "must not self-perpetuate" property isTrackedProject's test
+    // pins on the scan.js side.
+    const home = os.homedir();
+    const tracked = new Set([require('../lib/util').normPath(home)]);
+    assert.strictEqual(projectResolve.resolveRoot(path.join(home, 'notes.txt'), tracked), null);
+  });
+
   check('project-resolve: sessionDominantRoot resolves relative edits against their project', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-sdr-'));
     const repo = path.join(base, 'repo');
@@ -16987,6 +17035,84 @@ async function main() {
     ];
     const kept = filterTrackedSessions(events, new Set(), { hasMembridge: d => util.normPath(d) === util.normPath(M) });
     assert.strictEqual(kept.length, 1, '.membridge marker keeps the session');
+  });
+
+  // Home/parent-directory over-collection fix (2026-07-30). Real bug on a live
+  // install: ~/.membridge is the daemon's OWN global config dir, which always
+  // exists once MemBridge has ever run there, so the unguarded .membridge
+  // check in isTrackedProject's old inline hasMembridge said "tracked" for
+  // the user's home directory itself. project-resolve.js's defaultHasMembridge
+  // already excluded home for its own (different) callers; scan.js's copy
+  // never got the same guard. isProtectedDir (project-resolve.js, now shared
+  // by both) closes that gap.
+  check('isTrackedProject: the home directory is never tracked, even with a .membridge marker present', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    // hasMembridge: () => true simulates exactly the real bug -- a genuine
+    // ~/.membridge sitting directly under the real OS home. The home
+    // directory must be refused regardless of what the marker check says.
+    assert.strictEqual(isTrackedProject(os.homedir(), new Set(), { hasMembridge: () => true }), false,
+      'home dir stays untracked even when the .membridge-marker check says yes');
+  });
+
+  check('isTrackedProject: an already-tracked home-directory key is not self-perpetuating', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    // Models a live install where this bug already minted state.projects[home]
+    // before the fix landed: roots.has(home) is true, same as the persisted
+    // state the fix must not delete. isProtectedDir must still win, so the
+    // existing bad key stops accumulating new sessions instead of
+    // re-qualifying itself forever.
+    const tracked = new Set([util.normPath(os.homedir())]);
+    assert.strictEqual(isTrackedProject(os.homedir(), tracked, { hasMembridge: () => false }), false,
+      'an existing home-directory key must not keep re-qualifying new sessions');
+  });
+
+  check('gate: a session whose cwd is the home directory produces no project', () => {
+    const home = os.homedir();
+    const tracked = new Set([util.normPath(home)]); // even pre-tracked (the live-bug shape)
+    const events = [
+      { kind: 'prompt', project: home, session: 's1', ts: '2026-07-10T10:00:00.000Z', text: 'random home-dir chat' },
+      { kind: 'edit', project: home, session: 's1', ts: '2026-07-10T10:01:00.000Z', file: path.join(home, 'notes.txt') },
+      { kind: 'summary', project: home, session: 's1', ts: '2026-07-10T10:02:00.000Z', text: 'did' },
+    ];
+    projectResolve.rehomeEvents(events, tracked, { resolveRoot: () => null });
+    const kept = filterTrackedSessions(events, tracked, { hasMembridge: () => true });
+    assert.deepStrictEqual(kept, [], 'no session rooted at the home directory ever survives the gate');
+  });
+
+  // /Users/marco/Documents/AI containing the real, separately-tracked
+  // Sublease project is the live shape of this: a parent that merely holds
+  // real projects must not become one itself just because a child qualifies.
+  // hasMembridge only ever checks the exact directory passed to it (never an
+  // ancestor or a descendant), so this was already structurally safe -- this
+  // pins that guarantee down as a regression test, the same way
+  // foldWorktreeProjects' "never mints, only folds into an existing project"
+  // comment is pinned nearby.
+  check('gate: a non-repo directory that merely contains a tracked project does not become one', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    const parent = '/gate/parent-of-projects';
+    const child = path.join(parent, 'Sublease');
+    const tracked = new Set([util.normPath(child)]); // only the child is tracked
+    assert.strictEqual(isTrackedProject(parent, tracked, { hasMembridge: () => false }), false,
+      'containing a tracked child does not make the parent tracked');
+    const events = [
+      { kind: 'prompt', project: parent, session: 's1', ts: '2026-07-10T10:00:00.000Z', text: 'browsing around the folder' },
+      { kind: 'edit', project: parent, session: 's1', ts: '2026-07-10T10:01:00.000Z', file: path.join(parent, 'scratch.txt') },
+    ];
+    // No edit lands inside Sublease itself, so there is no tracked ancestor to rehome onto.
+    projectResolve.rehomeEvents(events, tracked, { resolveRoot: () => null });
+    const kept = filterTrackedSessions(events, tracked, { hasMembridge: () => false });
+    assert.deepStrictEqual(kept, [], 'the parent never qualifies merely for containing a tracked child');
+  });
+
+  check('isTrackedProject: a genuine project root keeps tracking normally after the home-dir fix', () => {
+    const { isTrackedProject } = require('../lib/scan');
+    const proj = '/gate/real-project';
+    assert.strictEqual(
+      isTrackedProject(proj, new Set(), { hasMembridge: d => util.normPath(d) === util.normPath(proj) }),
+      true, 'a real .membridge-marked project is still tracked');
+    const tracked = new Set([util.normPath(proj)]);
+    assert.strictEqual(isTrackedProject(proj, tracked, { hasMembridge: () => false }), true,
+      'an existing tracked key still tracks');
   });
 
   // Adoption: the dashboard's discovered list and the ingestion gate must agree

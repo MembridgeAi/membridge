@@ -48,6 +48,16 @@ export interface DataClient {
   getMembers(): Promise<Member[]>
   getInvites(): Promise<Invite[]>
   inviteMember(email: string, role: Role): Promise<void>
+  // Mints a fresh onboarding-invite token for `teamId` (POST /api/team/invite)
+  // -- a DIFFERENT mechanism from the standing, never-rotated `team.inviteCode`
+  // (Settings.team): each call produces a new one-time token that the hosted
+  // join page (cloudflare/join, redeeming via redeem_onboarding_invite) can
+  // exchange for team membership. Callers build the shareable link themselves
+  // as `${settings.webUrl}/#${token}` -- matching exactly how
+  // cloudflare/ops-dashboard's own JOIN_BASE + token construction works --
+  // since settings.webUrl is null on a build with no hosted join page
+  // configured (self-hosted, empty lib/backend.json).
+  createInviteLink(teamId: string): Promise<{ token: string }>
   revokeInvite(inviteId: string): Promise<void>
   setMemberRole(memberId: string, role: Role): Promise<void>
   removeMember(memberId: string): Promise<void>

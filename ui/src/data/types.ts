@@ -220,6 +220,13 @@ export interface Settings {
   // `self`. Null when signed out/solo. This is the ONLY honest source for
   // "which row is me"; a literal 'me' string is never a real user id.
   viewerId: string | null
+  // Base URL of the hosted onboarding-invite landing page (teamsync.webUrl,
+  // GET /api/team's plain webUrl field -- lib/backend.json's baked default is
+  // https://join.membridge.me). Null on a build with no hosted join page
+  // configured (a self-hosted install shipping an empty lib/backend.json), in
+  // which case the Members page falls back to sharing the standing invite
+  // code instead of minting a link nothing can redeem.
+  webUrl: string | null
   contextFiles: { targets: string[]; extraTargets: Record<string, boolean>; extraTargetFiles: Record<string, string> }
 }
 

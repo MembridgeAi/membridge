@@ -28,7 +28,7 @@ describe('mapSettings', () => {
   })
   it('surfaces the real team name, role, member count and invite code when not solo', () => {
     const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }
-    expect(mapSettings(raw, status, team, { viewerId: 'usr_1', inviteCode: 'INV-1' }).team)
+    expect(mapSettings(raw, status, team, { viewerId: 'usr_1', inviteCode: 'INV-1', webUrl: null }).team)
       .toEqual({ id: 't1', name: 'Acme', role: 'owner', memberCount: 3, inviteCode: 'INV-1' })
   })
   it('surfaces the real daemon port, start-at-login and update fields instead of "not reported"', () => {
@@ -47,12 +47,17 @@ describe('mapSettings', () => {
     expect(s.privacy.redactionBuiltIn).toBeNull()
   })
   it('carries the real viewerId through regardless of team/solo state', () => {
-    const s = mapSettings(raw, status, null, { viewerId: 'usr_9f2a', inviteCode: null })
+    const s = mapSettings(raw, status, null, { viewerId: 'usr_9f2a', inviteCode: null, webUrl: null })
     expect(s.viewerId).toBe('usr_9f2a')
   })
-  it('is null for viewerId and inviteCode when no team meta is supplied', () => {
+  it('is null for viewerId, inviteCode and webUrl when no team meta is supplied', () => {
     const s = mapSettings(raw, status, null)
     expect(s.viewerId).toBeNull()
+    expect(s.webUrl).toBeNull()
+  })
+  it('carries the real webUrl through regardless of team/solo state, independent of inviteCode', () => {
+    const s = mapSettings(raw, status, null, { viewerId: null, inviteCode: null, webUrl: 'https://join.membridge.me' })
+    expect(s.webUrl).toBe('https://join.membridge.me')
   })
   it('carries context-file targets and extraTargets straight through', () => {
     const s = mapSettings(raw, status, null)

@@ -1,5 +1,7 @@
 {
   "$comment": "Baked-in MemBridge team-sync backend, shipped with the app so end users never configure anything — they just `membridge signup`. OPERATOR (one-time): create ONE Supabase project, run supabase/schema.sql in its SQL editor, then paste the Project URL and the anon public key below. Both are safe to commit and ship publicly — the anon key is designed to live in client apps, and row-level security is what actually protects the data. Leave empty to disable team sync in a build.",
   "url": "https://mefgbiecvoszjorwzkfz.supabase.co",
-  "anonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lZmdiaWVjdm9zempvcnd6a2Z6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM4NzU5OTQsImV4cCI6MjA5OTQ1MTk5NH0.WTM_iCm3qNtoov8QPB6BloAfKB7WLrVD01CTeTcH7wA"
+  "anonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lZmdiaWVjdm9zempvcnd6a2Z6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM4NzU5OTQsImV4cCI6MjA5OTQ1MTk5NH0.WTM_iCm3qNtoov8QPB6BloAfKB7WLrVD01CTeTcH7wA",
+  "webUrl": "https://join.membridge.me",
+  "$comment_webUrl": "Hosted onboarding-invite landing page (cloudflare/join), the JOIN_BASE the ops dashboard already points at. The runbook (docs/runbooks/2026-07-29-move-membridge-app-to-cloudflare.md §2) plans moving this to join.membridge.app once that zone is on Cloudflare -- when that happens, join.membridge.me must keep answering forever, since every invite already sent points at it."
 }
