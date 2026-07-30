@@ -25,7 +25,7 @@ export interface Project {
   tools: string[]
   shared: boolean
   memberIds: string[]
-  sessionsLast7Days: number
+  sessionsThisWeek: number
   dailyCounts: number[]     // exactly 7 entries, oldest first
   latestSummary: { text: string; author: string; at: string } | null
   sync: SyncState
