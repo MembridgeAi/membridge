@@ -1416,6 +1416,20 @@ async function main() {
       assert.strictEqual(before, JSON.stringify(projectsPayload().map(p => p.targets)),
         'repeat calls must be stable');
     });
+    // apps-interface-rebuild Task 4, Step 1b: the new UI's Today page needs a
+    // 7-day sparkline per project and its week-scoped session count on the
+    // SAME /api/projects response it already polls -- fetching /api/project
+    // per project would be N requests (spec §7: one request per screen).
+    check('projectsPayload carries a 7-day session series for the sparkline', () => {
+      const rows = projectsPayload();
+      assert.ok(rows.length, 'fixture projects expected');
+      rows.forEach(p => {
+        assert.ok(Array.isArray(p.dailyCounts) && p.dailyCounts.length === 7, `${p.name} dailyCounts`);
+        assert.ok(p.dailyCounts.every(n => Number.isInteger(n) && n >= 0), `${p.name} counts are non-negative ints`);
+        assert.strictEqual(typeof p.sessionsThisWeek, 'number', `${p.name} sessionsThisWeek`);
+        assert.ok(p.sessionsThisWeek <= p.sessionsTotal, `${p.name}: week count cannot exceed lifetime`);
+      });
+    });
     // Solo drives the whole header: it suppresses the encryption badge and
     // turns "Synced" into "Local only". It must be decided from the LOCAL
     // team.json links only — /api/status is polled every few seconds, so a
