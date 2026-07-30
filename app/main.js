@@ -99,10 +99,11 @@ function ago(date) {
 
 const dashboardUrl = () => `http://127.0.0.1:${util.getConfig().dashboardPort}`;
 
-// The desktop window opens the rebuilt UI at /app. The legacy dashboard is
-// still served at / and stays reachable — nothing is deleted — so reverting
-// this line is the whole rollback if the new UI turns out to be wrong.
-const windowUrl = () => `${dashboardUrl()}/app/`;
+// The rebuilt UI is the default now (lib/server.js serves it at / directly;
+// the legacy lib/dashboard/* renderer this used to point past is deleted).
+// /app still resolves too -- lib/server.js redirects it to / -- but there is
+// no reason for the desktop window to take the extra hop itself.
+const windowUrl = () => dashboardUrl();
 
 function openDashboard() {
   if (win && !win.isDestroyed()) {

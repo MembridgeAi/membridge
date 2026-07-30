@@ -32,11 +32,12 @@ const SettingsPage = lazy(() => import('../features/settings/SettingsPage').then
  *  First-run takes over the whole app, regardless of path, while
  *  status.setupDone is false -- an explicit false is required (undefined,
  *  still loading, must not flash the takeover before status confirms it). */
-/** The app is served under a prefix (/app/ in the desktop build, / in tests),
- *  so the router needs that prefix as its base or NOTHING matches and every
- *  screen falls through to the catch-all. Vite bakes the deploy prefix into
- *  BASE_URL, so this tracks the build rather than a second hardcoded copy.
- *  Trailing slash stripped: wouter wants '/app', BASE_URL gives '/app/'. */
+/** The app is served at / in both the desktop build and tests (Vite's `base`
+ *  is '/', same as jsdom's default test location), so this now normally
+ *  resolves to an empty base -- but it still tracks BASE_URL rather than
+ *  hardcoding '', so a future deploy-under-a-prefix needs no second change
+ *  here. Trailing slash stripped: wouter wants '' / '/app', BASE_URL gives
+ *  '/' / '/app/'. */
 const routerBase = () => import.meta.env.BASE_URL.replace(/\/$/, '')
 
 export function App() {

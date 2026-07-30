@@ -89,3 +89,49 @@ Record here once every box above is checked, by whom, and on what commit:
 
 Only after this line is filled in should a follow-up change delete
 `lib/dashboard/*` and `web/`, and switch `/` to serve `ui/dist` directly.
+
+## Cutover note (2026-07-30) — owner-authorized early cutover
+
+The owner explicitly authorized this cutover ("Retire old dashboard") before
+every box above was checked. The full packaged-app, both-platforms walkthrough
+this checklist describes was **not** run. Recording plainly what was and
+wasn't verified, so the gap is visible rather than implied by a checked box
+that was never earned:
+
+**Verified for real, this session:**
+- `node test/run-tests.js` — full root suite green (1184/1185; the one
+  non-pass is this suite's own summary line, not a failing check) on macOS,
+  via `node bin/membridge.js` / a throwaway daemon — **not** the packaged app.
+- `cd ui && npx vitest run` — full UI suite green (345/345) on macOS.
+- `cd ui && npm run build` — exit 0; `ui/dist/index.html` now references
+  root-relative `/assets/*` paths (base changed from `/app/` to `/`).
+- A throwaway daemon started from this worktree: confirmed `GET /` serves the
+  new UI shell, `GET /app` and `GET /app/<path>` 302-redirect to the
+  equivalent root path, a missing asset 404s (never masked as the shell), and
+  the three path-traversal cases (raw `../`, encoded `..%2f`, encoded `%5c`)
+  behave as intended — all via `curl`/the test suite's own HTTP checks, not
+  by opening the packaged Electron app.
+
+**NOT verified — genuinely open risk:**
+- **Not run on Windows at all.** No Windows CI leg has ever actually
+  executed for this repo, and nobody has opened this build on Windows. Every
+  Windows-specific concern this checklist calls out (path separators through
+  `resolveAppAsset`, `scrollbar-gutter`, `Ctrl` vs `Cmd` in shortcut hints)
+  is unverified. This is the single largest residual risk of this cutover.
+- **Not run as the packaged app** on macOS either — no `electron-builder`
+  build, no installed-app smoke test. `scripts/prepare-app.js` was not
+  re-run against the new UI build as part of this change (do that, then
+  rebuild + reinstall the app per the project's own
+  "recompile after big changes" convention, before relying on this in the
+  installed app).
+- **None of the "Screens to exercise" / "States to exercise" sections were
+  walked through by a human** against real or seeded data — light/dark
+  theme, solo vs team mode, a member-role account, a behind project, a
+  broken member. The automated suites above cover the server-side contracts
+  those states depend on (role gates return 403, `/api/feed` shapes,
+  sync-state derivation), but not a visual/manual pass.
+
+**What changed:** `lib/dashboard/*`, `lib/dashboard.js`, `lib/dashboard-team.js`,
+and `web/` are deleted (git history is the rollback). `lib/server.js` serves
+`ui/dist` at `/`; `/app` and `/app/<path>` redirect to the equivalent root
+path. `app/main.js`'s `windowUrl()` now points at the daemon root directly.

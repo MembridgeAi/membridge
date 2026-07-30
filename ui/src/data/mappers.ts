@@ -104,7 +104,7 @@ export function syncStateOf(
 
 // ---------------------------------------------------------------------------
 // Feed-entry helpers, shared by Project.latestSummary, LiveSession and
-// StreamEntry. Mirrors lib/dashboard/client.js's pxGlanceFor/pxHasSummary
+// StreamEntry. Mirrors the retired legacy dashboard's pxGlanceFor/pxHasSummary
 // exactly: a headline wins, a distilled summary is the fallback, and absence
 // of both means "no summary yet" -- the WIP/live signal, not a time window.
 // ---------------------------------------------------------------------------

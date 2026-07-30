@@ -14,7 +14,7 @@ export interface Capabilities {
   // The Electron bridge (app/preload.js's window.membridge) is present, so
   // pickPaths() can open a real native Finder/Explorer dialog. False when
   // this UI is loaded in a plain browser tab (the daemon serves the same
-  // /app/ bundle there too) -- callers must fall back to manual path entry
+  // bundle there too, at /) -- callers must fall back to manual path entry
   // rather than rendering a picker button that silently does nothing.
   filePicker: boolean
 }

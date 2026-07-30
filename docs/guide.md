@@ -62,16 +62,18 @@ join in one command.
 
 ## The dashboard
 
-The app is four views: Projects, Activity, Team, and Settings.
+The app has six screens: Today, Feed, Projects (plus each project's own
+page), Members, Insights, and Settings.
 
-**Projects** lists what MemBridge Beta is watching, local-only or shared, with a
-week of stats per project. **Activity** is the feed above: one card per
-person, project, and day, opening with the summary of what got done and
-marking sessions that are still running. Filter by person, project, or tool.
+**Today** is the landing screen: live session intent rows and per-project
+metrics at a glance. **Feed** is the merged activity stream — one entry per
+session, leading with the outcome and the original prompt underneath as an
+`Intent` line. Filter by person, project, or tool. **Projects** lists what
+MemBridge Beta is watching, local-only or shared, with a week of stats per
+project.
 
-Open a project and you get the merged stream: your sessions and your
-teammates', interleaved and grouped by day. Each entry leads with the
-outcome; the original prompt sits underneath as an `Intent` line.
+Open a project and you get its own merged stream: your sessions and your
+teammates', interleaved, plus an access panel for who can see it.
 
 <img src="screenshots/project-page.png" alt="A project page: your and your teammates' sessions in one stream, each entry leading with what got done" width="100%">
 
@@ -79,13 +81,11 @@ The **Copy for AI** button on a project page puts a trimmed, redacted digest
 on your clipboard, for pasting into ChatGPT, claude.ai, or any web AI that
 can't see your disk.
 
-**Team** handles members, roles, and invites. Teammates who haven't
-installed anything can follow along in the hosted web workspace
-([`web/`](../web/README.md), Next.js + Supabase): invite links open at
-`/join/<token>`, and the feed, project stats, and member management work
-from any browser.
+**Members** handles roles, invites, and the audit trail; **Insights** rolls
+up team-wide savings and severity tiers. Both are team-only — a solo install
+never shows them.
 
-<img src="screenshots/team.png" alt="The Team view: members, roles, and the join code" width="100%">
+<img src="screenshots/team.png" alt="The Members view: teammates, roles, and the join code" width="100%">
 
 ## How it works
 
@@ -395,11 +395,11 @@ Code map: [`lib/scan.js`](../lib/scan.js) (adapters → events → sync),
 [`lib/feed.js`](../lib/feed.js) (merge local + team activity),
 [`lib/advisor.js`](../lib/advisor.js) (BYOK roadmaps),
 [`lib/teamsync.js`](../lib/teamsync.js) (team sync against Supabase),
-[`lib/server.js`](../lib/server.js) (local HTTP API),
-[`lib/dashboard.js`](../lib/dashboard.js) +
-[`lib/dashboard-team.js`](../lib/dashboard-team.js) (the web UI, no build step),
-[`bin/membridge.js`](../bin/membridge.js) (CLI),
-[`web/`](../web/README.md) (hosted team workspace, Next.js).
+[`lib/server.js`](../lib/server.js) (local HTTP API, serves `ui/dist` at `/`),
+[`ui/`](../ui) (the web UI itself — React + Vite; `cd ui && npm run dev` for a
+hot-reloading copy against a running daemon, `npm run build` for the static
+bundle `lib/server.js` serves),
+[`bin/membridge.js`](../bin/membridge.js) (CLI).
 The working plan is [PLAN.md](../PLAN.md); recent changes are in
 [CHANGELOG.md](../CHANGELOG.md).
 

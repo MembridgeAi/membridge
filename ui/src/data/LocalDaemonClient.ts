@@ -19,7 +19,7 @@ export { syncStateOf }
 
 // app/preload.js's contextBridge.exposeInMainWorld('membridge', ...) is the
 // only thing that ever sets this -- a plain browser tab (the daemon serves
-// this same UI at /app/ over vanilla http) never has it, since there is no
+// this same UI at / over vanilla http) never has it, since there is no
 // Electron main process on the other end to answer the IPC call.
 declare global {
   interface Window {
@@ -240,9 +240,9 @@ export class LocalDaemonClient implements DataClient {
 
   // POST /api/team/invite (lib/teamsync.js createInvite) also returns
   // expires_at/max_uses/url, but url is the legacy /join/<token> path shape
-  // (teamsync.inviteUrl -- the CLI/web/app/settings consumer), not the
-  // hash-based shape the Members-page UI needs, so only the token is taken
-  // here; the caller builds `${webUrl}/#${token}` itself.
+  // (teamsync.inviteUrl -- the CLI/app/settings consumer), not the hash-based
+  // shape the Members-page UI needs, so only the token is taken here; the
+  // caller builds `${webUrl}/#${token}` itself.
   async createInviteLink(teamId: string): Promise<{ token: string }> {
     const inv = await post<{ token: string }>('/api/team/invite', { teamId })
     return { token: inv.token }

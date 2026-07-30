@@ -28,7 +28,7 @@ interface ContextFilesDialogProps {
  * app's Electron bridge is present (capabilities.filePicker) -- picked paths
  * are merged into the textarea, not written straight to disk, so the reader
  * can still edit or remove a line before Save. In a plain browser tab (the
- * daemon serves this same UI at /app/ over vanilla http, with no Electron
+ * daemon serves this same UI at / over vanilla http, with no Electron
  * process behind it) there is no bridge to call, so the Browse button is
  * left out entirely and the textarea's typed-path entry is the only path in.
  */

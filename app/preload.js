@@ -1,7 +1,7 @@
 'use strict';
 // Loaded into the dashboard BrowserWindow via webPreferences.preload (see
 // openDashboard() in main.js). That window renders a normal web page fetched
-// over http://127.0.0.1:<port>/app/ -- contextIsolation stays on and
+// over http://127.0.0.1:<port>/ -- contextIsolation stays on and
 // nodeIntegration stays off, so this is the ONLY door between the page and
 // Node/Electron. It exposes exactly one narrow capability (opening a native
 // Finder/Explorer picker) and nothing else: no arbitrary fs access, no
