@@ -30,3 +30,15 @@ jobs:
       # ordinary dependencies now, and CI must fail if they ever stop being.
       - run: npm ci --omit=dev --no-audit --no-fund
       - run: node test/run-tests.js
+      # The React UI (ui/) is its own npm workspace with its own devDeps
+      # (vite, vitest, @testing-library) that the build and tests need, so
+      # this installs full (not --omit=dev), unlike the root step above.
+      # `working-directory:` is used instead of `cd ui &&` because the latter
+      # is a POSIX-only chain that breaks in cmd.exe/PowerShell — the whole
+      # point of running this leg on windows-latest.
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - run: npx vitest run
+        working-directory: ui
