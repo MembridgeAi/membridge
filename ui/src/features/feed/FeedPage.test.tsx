@@ -7,9 +7,13 @@ import { FEED_PAGE_SIZE } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import { FeedPage, dayLabel, groupByDay } from './FeedPage'
 
+// session defaults to null (not a shared string) so two default-built
+// entries never accidentally collapse into each other via
+// collapseSessionCheckpoints -- a null session falls back to its own entry
+// id as the group key, matching mappers.ts's own fallback rule.
 const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
   id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z',
-  live: false, outcome: 'done', intent: null, files: [], project: 'membridge', projectPath: '/Users/x/membridge',
+  live: false, outcome: 'done', intent: null, files: [], session: null, project: 'membridge', projectPath: '/Users/x/membridge',
   ...overrides,
 })
 
@@ -132,5 +136,56 @@ describe('FeedPage', () => {
       { limit: FEED_PAGE_SIZE, before: '2026-07-20T00:00:00Z' },
     )
     expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull()
+  })
+
+  // BUG 2: the Stop hook re-summarizes a WORKING session every few edits, so
+  // /api/feed can carry several checkpoint rows for the same session --
+  // uncollapsed, the Feed read as the same long summary repeated several
+  // times in a row. These three tests pin the fix at the real component,
+  // not just at the mapper unit level.
+  it('collapses several checkpoint entries of the same session into one row showing the newest text', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getFeed').mockResolvedValueOnce({
+      entries: [
+        entry({ id: 'c3', session: 's1', at: '2026-07-29T20:10:00Z', outcome: 'third checkpoint of the session' }),
+        entry({ id: 'c2', session: 's1', at: '2026-07-29T20:05:00Z', outcome: 'second checkpoint of the session' }),
+        entry({ id: 'c1', session: 's1', at: '2026-07-29T20:00:00Z', outcome: 'first checkpoint of the session' }),
+      ],
+      nextBefore: null,
+    })
+    renderWith(client, <FeedPage />)
+
+    expect(await screen.findByText('third checkpoint of the session')).toBeInTheDocument()
+    expect(screen.queryByText('second checkpoint of the session')).toBeNull()
+    expect(screen.queryByText('first checkpoint of the session')).toBeNull()
+  })
+
+  it('keeps two distinct sessions with byte-identical outcome text as two separate rows', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getFeed').mockResolvedValueOnce({
+      entries: [
+        entry({ id: 'x1', session: 's1', authorId: 'andrew', author: 'Andrew', at: '2026-07-29T20:10:00Z', outcome: 'identical summary text' }),
+        entry({ id: 'x2', session: 's2', authorId: 'andrew', author: 'Andrew', at: '2026-07-29T20:05:00Z', outcome: 'identical summary text' }),
+      ],
+      nextBefore: null,
+    })
+    renderWith(client, <FeedPage />)
+
+    expect(await screen.findAllByText('identical summary text')).toHaveLength(2)
+  })
+
+  it('keeps the collapsed rows newest-first', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getFeed').mockResolvedValueOnce({
+      entries: [
+        entry({ id: 'older', session: 's-old', at: '2026-07-29T18:00:00Z', outcome: 'older session outcome' }),
+        entry({ id: 'newer', session: 's-new', at: '2026-07-29T21:00:00Z', outcome: 'newer session outcome' }),
+      ],
+      nextBefore: null,
+    })
+    renderWith(client, <FeedPage />)
+
+    const rows = await screen.findAllByText(/session outcome/)
+    expect(rows.map(r => r.textContent)).toEqual(['newer session outcome', 'older session outcome'])
   })
 })

@@ -23,8 +23,6 @@ type Invoker = (client: DataClient) => Promise<unknown>
 // DataClient method forces a conscious choice here, via the Record below
 // failing to type-check until it's accounted for.
 const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
-  // GET /api/team/insights does not exist yet -- Task 12 is adding it now.
-  'getInsights',
   // POST /api/team/invite only mints a generic, role-less link and cannot
   // list issued invites -- no endpoint accepts email/role, and none lists
   // pending invites. Structurally blocked, not merely unwired.
@@ -93,8 +91,12 @@ describe('LocalDaemonClient contract: methods not explicitly exempted must attem
   // The exemption list itself is the thing that let Finding 1 hide -- pin it
   // down so a future "oh, just add it to the exemption list" edit has to
   // touch a line that says, in as many words, that this is not one of them.
-  it('does not exempt getAccessMatrix or getAudit -- both endpoints already exist', () => {
+  // getInsights joined this pin after the same shape of bug: it kept its
+  // "Task 12" stub message after GET /api/team/insights actually shipped
+  // (98546a1), and no test caught it because FakeDataClient always answers.
+  it('does not exempt getAccessMatrix, getAudit, or getInsights -- all three endpoints already exist', () => {
     expect(LEGITIMATELY_UNBACKED.has('getAccessMatrix')).toBe(false)
     expect(LEGITIMATELY_UNBACKED.has('getAudit')).toBe(false)
+    expect(LEGITIMATELY_UNBACKED.has('getInsights')).toBe(false)
   })
 })

@@ -133,6 +133,7 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     outcome: outcomeOf(e),
     intent: intentOf(e),
     files: e.files,
+    session: e.session,
   }
 }
 
@@ -142,6 +143,41 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
 // stream needs and a single-project stream -- StreamEntry -- doesn't.
 export function mapFeedEntry(e: RawFeedEntry): FeedEntry {
   return { ...mapStreamEntry(e), project: e.project, projectPath: e.projectPath }
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint collapsing: the Stop hook re-summarizes a WORKING session every
+// few edits (lib/digest.js re-asks; lib/memorydb.js keeps every checkpoint
+// line), so one session can land several rows on a single /api/feed page --
+// only the newest reflects where that session actually stands. Left
+// uncollapsed, the Feed (and a project's own stream, which renders the same
+// entries through the same EntryRow) read as the same long summary repeated
+// several times in a row. Grouping keys strictly on session id so two
+// DIFFERENT sessions that happen to render byte-identical text never merge
+// -- this codebase has a prior bug (groupLiveSessions' author+project key)
+// where a non-session-scoped key silently merged unrelated sessions into one
+// card, and this collapse must not repeat it. A session-less row (`session:
+// null`, the rare bare-plumbing entry) keys off its own entry id instead, so
+// it is treated as its own one-off group and never merges with any other
+// row, session-less or not.
+// ---------------------------------------------------------------------------
+function checkpointGroupKey(e: Pick<StreamEntry, 'id' | 'session'>): string {
+  return e.session || `entry:${e.id}`
+}
+
+// Collapses every entry sharing a session id down to that session's single
+// newest row (by `at`); older checkpoints of the same session are dropped,
+// never merged or concatenated. Output is re-sorted newest-first by the
+// surviving rows' `at` -- callers (Feed, the project stream) then bucket
+// that into day groups exactly as they already do.
+export function collapseSessionCheckpoints<T extends StreamEntry>(entries: T[]): T[] {
+  const newestByKey = new Map<string, T>()
+  for (const e of entries) {
+    const key = checkpointGroupKey(e)
+    const current = newestByKey.get(key)
+    if (!current || e.at > current.at) newestByKey.set(key, e)
+  }
+  return [...newestByKey.values()].sort((a, b) => b.at.localeCompare(a.at))
 }
 
 // Builds the /api/feed query string for the Feed screen's filtered, paged

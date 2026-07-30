@@ -13,6 +13,7 @@ const entry = (overrides: Partial<StreamEntry> = {}): StreamEntry => ({
   outcome: 'Hook ownership now decided by durability, not who ran last.',
   intent: 'make the summary hook fire on session boundaries',
   files: ['lib/hooks.js'],
+  session: 's1',
   ...overrides,
 })
 

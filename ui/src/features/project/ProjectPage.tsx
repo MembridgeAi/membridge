@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
 import { useDataClient } from '../../data/DataClientProvider'
+import { collapseSessionCheckpoints } from '../../data/mappers'
 import {
   useCopyForAI, useMembers, useOpenMemoryFile, useProjectAccess, useProjects, useProjectStream,
   useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useStatus, useSyncProject,
@@ -101,7 +102,10 @@ export function ProjectPage({ name }: ProjectPageProps) {
     return rows
   }, [accessQuery.data, membersQuery.data])
 
-  const streamEntries = streamQuery.data ?? []
+  // Same reasoning as FeedPage: the Stop hook re-summarizes a session every
+  // few edits, so this project's stream can carry several checkpoint rows
+  // for one session -- collapse to each session's newest before grouping.
+  const streamEntries = collapseSessionCheckpoints(streamQuery.data ?? [])
   const dayGroups = groupByDay(streamEntries)
   const latestEntry = dayGroups[0]?.entries[0] ?? null
 

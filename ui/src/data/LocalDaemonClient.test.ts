@@ -213,3 +213,54 @@ describe('LocalDaemonClient.getSkeletonStats', () => {
     expect(stats).toEqual({ available: false })
   })
 })
+
+// Finding: getInsights used to reject with the "Task 12" stub message even
+// after GET /api/team/insights shipped (lib/api-insights.js, wired in
+// lib/server.js since 98546a1) -- no test caught it because every other
+// InsightsPage test drives FakeDataClient, which always answers. This test
+// drives a REAL LocalDaemonClient against a realistic daemon response (every
+// field lib/api-insights.js's insightsPayload actually returns) and checks
+// the result end to end: the right URL is requested, and every field lands
+// in the typed Insights result unmapped-but-verified, not just "didn't
+// throw".
+describe('LocalDaemonClient.getInsights', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const rawInsights = {
+    window: 30,
+    sessions: { count: 412, deltaPct: 18 },
+    membersSyncing: { ok: 2, total: 3 },
+    entriesShared: { count: 187, delta: 31 },
+    skeleton: { available: true, repeatOpens: 1204, answeredFirst: 818 },
+    perPerson: [{ id: 'me', name: 'Marco', sessions: 214, shared: 205 }],
+    topProjects: [{ name: 'membridge', sessions: 184, people: 3 }],
+    problems: [
+      { id: 'silent:sarah', severity: 'broken', headline: 'Nothing has arrived from Sarah', scale: '1 of 2 teammates · joined 3d ago · 0 entries shared', action: null },
+    ],
+    concentration: [{ projectName: 'billing-poc', onlyPerson: 'Andrew', detail: 'only Andrew has worked on this project in the last 30d' }],
+    byTool: [{ tool: 'Claude Code', sessions: 268 }],
+  }
+
+  function stubInsights(body: unknown) {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('requests the window-scoped endpoint and returns every field verbatim', async () => {
+    const fetchMock = stubInsights(rawInsights)
+    const insights = await new LocalDaemonClient().getInsights(30)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/team/insights?window=30', expect.anything())
+    expect(insights).toEqual(rawInsights)
+  })
+
+  it('passes a different window straight through to the query string', async () => {
+    const fetchMock = stubInsights({ ...rawInsights, window: 7 })
+    await new LocalDaemonClient().getInsights(7)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/team/insights?window=7', expect.anything())
+  })
+})

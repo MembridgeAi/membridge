@@ -68,6 +68,14 @@ export interface StreamEntry {
   outcome: string
   intent: string | null
   files: string[]
+  // The raw session id this checkpoint belongs to (RawFeedEntry.session,
+  // untouched) -- carried through so a feed/stream can collapse several
+  // checkpoint summaries of the SAME session (mappers.ts
+  // collapseSessionCheckpoints) without ever merging entries from two
+  // DIFFERENT sessions that happen to render identical text. null for the
+  // rare session-less row (bare plumbing); such a row is never merged with
+  // anything, including another session-less row.
+  session: string | null
 }
 
 // The Feed screen's entries are the same StreamEntry shape plus the project

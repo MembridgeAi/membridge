@@ -64,4 +64,19 @@ describe('ProjectPage', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'memory.md' }))
     expect(await screen.findByText(/open rejected/i)).toBeInTheDocument()
   })
+
+  // BUG 2, project-page half: the stream shares EntryRow with the Feed, and
+  // shares the same checkpoint-collapsing gap -- a session's several Stop
+  // hook checkpoints must collapse to its newest, same as the Feed.
+  it('collapses several checkpoint entries of the same session into one row showing the newest text', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjectStream').mockResolvedValue([
+      { id: 'c2', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:05:00Z', live: false, outcome: 'second checkpoint', intent: null, files: [], session: 's1' },
+      { id: 'c1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z', live: false, outcome: 'first checkpoint', intent: null, files: [], session: 's1' },
+    ])
+    renderWith(client, <ProjectPage name="membridge" />)
+
+    expect(await screen.findByText('second checkpoint')).toBeInTheDocument()
+    expect(screen.queryByText('first checkpoint')).toBeNull()
+  })
 })

@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor,
-  mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor,
-  streamEntryId,
+  collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf,
+  lastSharedAtByAuthor, latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
+  memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
-import type { LiveSession } from './types'
+import type { LiveSession, StreamEntry } from './types'
 
 const entry = (overrides: Partial<RawFeedEntry> = {}): RawFeedEntry => ({
   ts: '2026-07-29T20:00:00Z',
@@ -81,6 +81,57 @@ describe('streamEntryId and mapStreamEntry', () => {
   it('marks live true exactly when there is no summary yet', () => {
     expect(mapStreamEntry(entry()).live).toBe(true)
     expect(mapStreamEntry(entry({ headline: 'done' })).live).toBe(false)
+  })
+  it('carries the raw session id through untouched, for checkpoint collapsing', () => {
+    expect(mapStreamEntry(entry({ session: 's1' })).session).toBe('s1')
+    expect(mapStreamEntry(entry({ session: null })).session).toBeNull()
+  })
+})
+
+// BUG 2: the daemon's Stop hook re-summarizes a WORKING session every few
+// edits, so a feed/stream page can carry several checkpoint rows for one
+// session -- only the newest should render. These tests cover the pure
+// grouping logic; FeedPage.test.tsx and ProjectPage.test.tsx cover the same
+// fix wired into the real screens.
+describe('collapseSessionCheckpoints', () => {
+  const stream = (overrides: Partial<StreamEntry> = {}): StreamEntry => ({
+    id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z',
+    live: false, outcome: 'a checkpoint', intent: null, files: [], session: 's1', ...overrides,
+  })
+
+  it('collapses several checkpoints of the same session into just the newest one', () => {
+    const older = stream({ id: 'e1', at: '2026-07-29T18:00:00Z', outcome: 'first checkpoint' })
+    const newer = stream({ id: 'e2', at: '2026-07-29T19:00:00Z', outcome: 'second checkpoint' })
+    const newest = stream({ id: 'e3', at: '2026-07-29T20:00:00Z', outcome: 'latest checkpoint' })
+
+    const out = collapseSessionCheckpoints([newest, newer, older])
+
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ id: 'e3', outcome: 'latest checkpoint' })
+  })
+
+  it('never merges two distinct sessions, even when their outcome text is byte-identical', () => {
+    const a = stream({ id: 'a1', session: 's1', outcome: 'same text', at: '2026-07-29T19:00:00Z' })
+    const b = stream({ id: 'b1', session: 's2', outcome: 'same text', at: '2026-07-29T19:05:00Z' })
+
+    const out = collapseSessionCheckpoints([b, a])
+
+    expect(out).toHaveLength(2)
+    expect(out.map(e => e.session).sort()).toEqual(['s1', 's2'])
+  })
+
+  it('never merges two session-less rows into each other', () => {
+    const a = stream({ id: 'a1', session: null, at: '2026-07-29T19:00:00Z' })
+    const b = stream({ id: 'b1', session: null, at: '2026-07-29T19:05:00Z' })
+
+    expect(collapseSessionCheckpoints([b, a])).toHaveLength(2)
+  })
+
+  it('orders the collapsed result newest-first regardless of input order', () => {
+    const older = stream({ id: 'e1', session: 's1', at: '2026-07-29T18:00:00Z' })
+    const newer = stream({ id: 'e2', session: 's2', at: '2026-07-29T20:00:00Z' })
+
+    expect(collapseSessionCheckpoints([older, newer]).map(e => e.id)).toEqual(['e2', 'e1'])
   })
 })
 

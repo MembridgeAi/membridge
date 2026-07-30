@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { EntryRow } from '../../components/EntryRow'
+import { collapseSessionCheckpoints } from '../../data/mappers'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import './feed.css'
@@ -77,8 +78,13 @@ export function FeedPage() {
   const membersQuery = useMembers(!solo)
   const feedQuery = useFeed({ author: author || null, project: project || null, source: source || null })
 
+  // dedupeById first (the /api/feed page-boundary overlap noted above), then
+  // collapseSessionCheckpoints -- the daemon's Stop hook re-summarizes a
+  // session every few edits, so several of these deduped rows can still be
+  // the SAME session's successive checkpoints; only the newest one should
+  // read as "this session's current state".
   const entries = useMemo(
-    () => dedupeById(feedQuery.data?.pages.flatMap(p => p.entries) ?? []),
+    () => collapseSessionCheckpoints(dedupeById(feedQuery.data?.pages.flatMap(p => p.entries) ?? [])),
     [feedQuery.data],
   )
   const dayGroups = groupByDay(entries)

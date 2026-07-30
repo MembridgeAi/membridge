@@ -45,13 +45,6 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
 // meaningfully stale data.
 const REQUEST_CACHE_TTL_MS = 5000
 
-// The one remaining sentinel for a method with genuinely no daemon endpoint
-// to call yet. getAccessMatrix and getAudit used to reject through this too
-// -- both endpoints have since shipped (see the comments on those methods
-// below), so this is down to its single legitimate caller, getInsights.
-const missingEndpoint = (method: string, endpoint: string, task: string): Error =>
-  new Error(`${method} has no daemon endpoint yet -- ${endpoint} does not exist until ${task} lands.`)
-
 export class LocalDaemonClient implements DataClient {
   readonly capabilities: Capabilities = { daemonControl: true, localPaths: true, teamAdminSupported: true }
 
@@ -237,8 +230,14 @@ export class LocalDaemonClient implements DataClient {
     return r.events
   }
 
-  getInsights(_window: 7 | 30 | 90): Promise<Insights> {
-    return Promise.reject(missingEndpoint('getInsights', 'GET /api/team/insights', 'Task 12'))
+  // GET /api/team/insights (lib/api-insights.js insightsPayload, wired in
+  // lib/server.js since 98546a1) already returns exactly this shape -- every
+  // field name matches Insights verbatim, right down to `skeleton`, which
+  // the daemon folds with its own copy of this same rule (lib/api-insights.js
+  // skeletonStatsFrom mirrors ./skeletonStats.ts) -- so, like getAccessMatrix
+  // above, there is nothing here to map or drop.
+  getInsights(window: 7 | 30 | 90): Promise<Insights> {
+    return get<Insights>(`/api/team/insights?window=${window}`)
   }
 
   async getSkeletonStats(): Promise<SkeletonStats> {
