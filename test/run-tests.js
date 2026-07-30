@@ -10714,6 +10714,69 @@ async function main() {
     }
   }
 
+  // Fix wave (review of the retention rework), FIX 2: `stopped: 'archive-full'`
+  // must be provisional, not permanent the way `done: true` correctly always
+  // is -- otherwise raising the cap (or any future compaction that frees
+  // rows) can never resume a walk that already stopped for this reason. Uses
+  // an injected, tiny cap (teamArchive.MAX_ARCHIVE_ROWS's getter/setter — see
+  // lib/team-archive.js) so this never has to build a real 50,000-row
+  // archive just to reach it.
+  {
+    const mockResume = createMockSupabase();
+    const MOCK_PORT_RESUME = P(69);
+    await new Promise(r => mockResume.server.listen(MOCK_PORT_RESUME, '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = 'http://127.0.0.1:' + MOCK_PORT_RESUME;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    const teamArchiveResume = require('../lib/team-archive');
+    const savedCap = teamArchiveResume.MAX_ARCHIVE_ROWS;
+    try {
+      const projResume = path.join(ROOT, 'projects', 'backfill-resume-app');
+      fs.mkdirSync(projResume, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'resumer@test.dev', 'pw-resume', 'Resumer');
+      const teamResume = await teamsync.createTeam(util.getConfig(), 'ResumeTeam');
+      const linkResume = await teamsync.linkProject(util.getConfig(), projResume, teamResume.team_id, 'ResumeTeam');
+      const credsResume = await teamsync.getAccessToken(util.getConfig());
+      teamArchiveResume.MAX_ARCHIVE_ROWS = 5; // tiny injected cap -- fast to fill, unlike the real 50,000
+      teamArchiveResume.appendRows(linkResume.projectId, Array.from({ length: 5 }, (_, i) => ({
+        author: 'Forward', ts: new Date(Date.UTC(2020, 0, 1) + i * 60000).toISOString(),
+        source: 'Claude Code', summary: `forward row ${i}`,
+      })), { source: 'forward' });
+      // Genuine older history the backward walker would fetch, once resumed.
+      for (let i = 0; i < 3; i++) {
+        mockResume.entries.push({
+          project_id: linkResume.projectId, author_id: 'user-resume-teammate', author_name: 'Teammate',
+          ts: new Date(Date.UTC(2019, 0, 1) + i * 60000).toISOString(), source: 'Claude Code', session: `sResume${i}`,
+          ask: null, summary: `deep history row ${i}`, distilled: false, files: [], changes: null,
+          goal: null, decisions: null, gotchas: null, headline: null,
+          id: i + 1, created_at: new Date(Date.UTC(2019, 0, 1) + i * 60000).toISOString(),
+        });
+      }
+      const projResumeState = { teamEntries: [], teamPullTs: new Date().toISOString() };
+      await check('teamsync: backfillArchivePage FIX 2 -- a cap raise resumes a walk previously stopped as archive-full', async () => {
+        const before = await teamsync.backfillArchivePage(util.getConfig(), credsResume, projResumeState, linkResume, null);
+        assert.strictEqual(before, 0, 'fixture setup: the tiny injected cap did not stop the walk');
+        let arc = teamArchiveResume.loadArchive(linkResume.projectId);
+        assert.strictEqual(arc.backfill.stopped, 'archive-full', 'fixture setup: walk did not record archive-full');
+        assert.strictEqual(arc.backfill.done, false, 'fixture setup: a cap-stopped walk must not claim done');
+        // Cap raised — e.g. a config change, or a future compaction that
+        // frees rows. Nothing else about the project changes.
+        teamArchiveResume.MAX_ARCHIVE_ROWS = 100;
+        const after = await teamsync.backfillArchivePage(util.getConfig(), credsResume, projResumeState, linkResume, null);
+        assert.strictEqual(after, 3, 'a cap raise did not resume the stopped walk (it returned 0 again)');
+        arc = teamArchiveResume.loadArchive(linkResume.projectId);
+        assert.strictEqual(arc.rows.length, 8, 'resumed walk did not append the fetched deep history rows');
+        assert.ok(arc.rows.some(r => r.summary === 'deep history row 0'), 'resumed walk missed the fetched history');
+        assert.strictEqual(arc.backfill.done, true, 'a short page (3 rows < PULL_LIMIT) should have flipped done');
+        assert.strictEqual(arc.backfill.stopped, null, 'resumed walk did not clear the stale archive-full reason');
+      });
+    } finally {
+      teamArchiveResume.MAX_ARCHIVE_ROWS = savedCap;
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockResume.server.close(r));
+    }
+  }
+
   // Task 6 (per-session prompt sharing): POST /api/share-session persists the
   // per-session flag into proj.sharedSessions (authoritative for future
   // normal pushes) and calls teamsync.reshareSession to retroactively
@@ -14423,6 +14486,65 @@ async function main() {
       assert.strictEqual(arc.backfill.beforeId, null);
     });
 
+    // Fix wave, FIX 3: appendLines used to append blindly, with no check on
+    // how the file currently ends. A crash mid-append leaves a final line
+    // with no trailing newline; the NEXT append then glues its first row
+    // directly onto that fragment, the combined text fails to parse as
+    // JSON, and the whole line -- BOTH the old fragment and the brand-new
+    // row that had nothing wrong with it -- is silently dropped by readRows'
+    // per-line try/catch.
+    check('team-archive: FIX 3 -- an append after a crash that left no trailing newline does not glue onto the previous line', () => {
+      const pid = 'arc-no-trailing-newline';
+      const p = teamArchive.archivePath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      // A complete, valid row but with NO trailing '\n' -- exactly what an
+      // appendFileSync interrupted right after its last byte would leave.
+      fs.writeFileSync(p, JSON.stringify({ author: 'A', ts: '2026-05-01T00:00:00.000Z', source: 'Codex', summary: 'row A' }));
+      teamArchive.appendRows(pid, [{ author: 'B', ts: '2026-05-02T00:00:00.000Z', source: 'Codex', summary: 'row B' }]);
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 2, 'a missing trailing newline glued the new row onto the old one, losing both');
+      assert.ok(arc.rows.some(r => r.summary === 'row A'), 'pre-existing row A lost to the glue');
+      assert.ok(arc.rows.some(r => r.summary === 'row B'), 'newly appended row B lost to the glue');
+    });
+
+    // Fix wave, FIX 4: syncTeams runs from both the CLI and the daemon tick,
+    // so two SEPARATE PROCESSES can be mid-append to the same rows file at
+    // once; fs.appendFileSync loops multiple write() calls for a
+    // realistically sized backfill page, and those can interleave between
+    // processes even though each individual write is atomic. A short-lived
+    // "<id>.lock" around the actual append closes that window. These two
+    // checks prove the mechanism directly (mutual exclusion + no permanent
+    // wedge) rather than trying to force a genuine OS-level race.
+    check('team-archive: FIX 4 -- a concurrent append is skipped (not interleaved) while another process holds a fresh lock', () => {
+      const pid = 'arc-lock-fresh';
+      teamArchive.appendRows(pid, [{ author: 'A', ts: '2026-06-01T00:00:00.000Z', source: 'Codex', summary: 'first' }]);
+      const lockFile = teamArchive.lockPath(pid);
+      fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+      fs.writeFileSync(lockFile, String(process.pid)); // simulates another live process mid-append
+      teamArchive.appendRows(pid, [{ author: 'B', ts: '2026-06-02T00:00:00.000Z', source: 'Codex', summary: 'second' }]);
+      let arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 1, 'append proceeded even though a live lock was held');
+      assert.strictEqual(arc.rows[0].summary, 'first', 'existing content was disturbed while locked');
+      fs.unlinkSync(lockFile);
+      teamArchive.appendRows(pid, [{ author: 'B', ts: '2026-06-02T00:00:00.000Z', source: 'Codex', summary: 'second' }]);
+      arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 2, 'append after the lock was released did not land');
+    });
+
+    check('team-archive: FIX 4 -- a stale lock (crashed process) is treated as abandoned, not a permanent wedge', () => {
+      const pid = 'arc-lock-stale';
+      teamArchive.appendRows(pid, [{ author: 'A', ts: '2026-06-01T00:00:00.000Z', source: 'Codex', summary: 'first' }]);
+      const lockFile = teamArchive.lockPath(pid);
+      fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+      fs.writeFileSync(lockFile, '12345');
+      const old = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes -- well past the stale threshold
+      fs.utimesSync(lockFile, old, old);
+      teamArchive.appendRows(pid, [{ author: 'B', ts: '2026-06-02T00:00:00.000Z', source: 'Codex', summary: 'second' }]);
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 2, 'a stale lock permanently wedged the archive');
+      assert.ok(!fs.existsSync(lockFile), 'stale lock was not cleaned up after being reclaimed');
+    });
+
     check('team-archive: the cap keeps the newest rows on a forward append', () => {
       const pid = 'arc-cap-forward';
       const cap = teamArchive.MAX_ARCHIVE_ROWS;
@@ -14565,6 +14687,32 @@ async function main() {
       assert.strictEqual(arc2.backfill.beforeId, 77, 'backfill state lost on the first post-migration write');
     });
 
+    // Fix wave, FIX 1: writeAtomic (tmp+rename, no fsync) can have its rename
+    // journaled before the data blocks actually hit disk, so a crash right
+    // after an fs.unlinkSync of the legacy file could leave a zero-length
+    // .ndjson beside a .meta.json claiming the full row count -- an archive
+    // that believes it holds everything and so is never re-fetched. Migration
+    // must rename the legacy file rather than delete it, so a crash between
+    // "new format written" and "legacy retired" always leaves something to
+    // recover from.
+    check('team-archive: FIX 1 -- migration renames the legacy file instead of deleting it (a crash right after must leave something to recover)', () => {
+      const pid = 'arc-legacy-durable';
+      const p = teamArchive.legacyPath(pid);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify({
+        version: 1, projectId: pid, backfill: { done: false, beforeId: 3 },
+        rows: [{ author: 'A', ts: '2026-02-01T00:00:00.000Z', source: 'Codex', summary: 'durable row' }],
+      }));
+      teamArchive.loadArchive(pid); // triggers ensureMigrated -> migrateLegacy
+      assert.ok(!fs.existsSync(p), 'legacy file still sitting at its original path after migration');
+      assert.ok(fs.existsSync(`${p}.migrated`),
+        'legacy file was deleted instead of renamed -- a crash between unlink and the rename above would leave nothing to recover');
+      // pruneArchive sweeps the whole "<id>." prefix, so the renamed
+      // leftover is still cleaned up for free once the project goes away.
+      teamArchive.pruneArchive(pid);
+      assert.ok(!fs.existsSync(`${p}.migrated`), 'pruneArchive did not sweep the renamed legacy leftover');
+    });
+
     check('team-archive: pruneArchive removes both files for a removed project and leaves others untouched', () => {
       const pidGone = 'arc-prune-gone';
       const pidStay = 'arc-prune-stay';
@@ -14593,6 +14741,109 @@ async function main() {
       assert.ok(teamsync.unlinkProject(projUnlinkArc), 'unlinkProject reported no team.json to remove');
       assert.ok(!fs.existsSync(teamArchive.archivePath(pidUnlinkArc)), 'unlinkProject did not prune the archive rows file');
       assert.ok(!fs.existsSync(teamArchive.metaPath(pidUnlinkArc)), 'unlinkProject did not prune the archive sidecar');
+    });
+  }
+
+  // --- 14d. MCP archive read cache (fix wave, FIX 5) ---
+  // teamArchive.loadArchive reads + JSON.parses the ENTIRE rows file, and
+  // used to be called fresh on every search_memory for every linked
+  // project — at the 50,000-row cap that measured ~4s per project, unusable
+  // for a tool an agent calls repeatedly in one session. mcp.js now
+  // memoizes the parsed-AND-NORMALIZED (post-redaction) entries inside this
+  // long-lived process, invalidated by the rows file's mtime/size or a
+  // redaction-config change. searchMemory is exercised directly (it is
+  // documented as "a pure function of on-disk state, independently
+  // testable without a transport" -- see lib/mcp.js's own module comment),
+  // so these checks don't need the JSON-RPC transport the section above
+  // uses for tool-registration coverage.
+  {
+    const teamArchiveForCache = require('../lib/team-archive');
+    const cachePid = 'mcp-cache-project-uuid';
+    const projCache = path.join(ROOT, 'projects', 'mcp-cache-app');
+    fs.mkdirSync(path.join(projCache, '.membridge'), { recursive: true });
+    {
+      const state = util.loadState();
+      state.projects[projCache] = { events: [], teamEntries: [] };
+      util.saveState(state);
+    }
+    fs.writeFileSync(path.join(projCache, '.membridge', 'team.json'),
+      JSON.stringify({ teamId: 'mcp-cache-team', projectId: cachePid, teamName: 'MCP Cache Team' }));
+    teamArchiveForCache.appendRows(cachePid, [{
+      author: 'CacheTeammate', ts: new Date(Date.now() - 5 * 86400000).toISOString(),
+      source: 'Codex', session: 'cache-1', ask: null, summary: null, goal: null,
+      decisions: 'archive cache token archivecacheval1', gotchas: null, headline: null,
+      distilled: true, files: [], changes: null,
+    }]);
+
+    const sBeforeMutate = mcpMod.searchMemory({ query: 'archivecacheval1' });
+    check('mcp: FIX 5 -- search_memory finds a freshly appended archive row before any mutation (fixture sanity check)', () => {
+      assert.ok(sBeforeMutate.results.some(r => (r.decisions || '').includes('archivecacheval1')),
+        'fixture setup: planted archive row not found on the first search');
+    });
+
+    // Mutate the archive's bytes on disk DIRECTLY (bypassing appendRows), as
+    // an equal-length swap so the file size is unchanged, then pin mtime
+    // back to exactly what it was before the mutation -- simulating "the
+    // cache's stat-based key sees no change" without needing to add a
+    // read-counting hook to the module.
+    const arcFile = teamArchiveForCache.archivePath(cachePid);
+    const statBefore = fs.statSync(arcFile);
+    const raw = fs.readFileSync(arcFile, 'utf8');
+    const mutated = raw.replace('archivecacheval1', 'archivecacheval2'); // same length swap
+    assert.strictEqual(mutated.length, raw.length, 'test fixture bug: the swap changed the byte length');
+    fs.writeFileSync(arcFile, mutated);
+    // Pass fractional SECONDS (numbers), not Date objects: Date only carries
+    // millisecond precision, but APFS (and similar) timestamps carry more --
+    // a Date-based utimesSync silently truncates the sub-millisecond
+    // fraction, so the "pinned" mtime would come back measurably different
+    // and this test would flake on exactly the precision the cache itself
+    // keys on.
+    fs.utimesSync(arcFile, statBefore.atimeMs / 1000, statBefore.mtimeMs / 1000);
+    const statAfter = fs.statSync(arcFile);
+    assert.strictEqual(statAfter.mtimeMs, statBefore.mtimeMs, 'test fixture bug: mtime moved despite utimesSync');
+    assert.strictEqual(statAfter.size, statBefore.size, 'test fixture bug: size changed despite an equal-length swap');
+
+    const sAfterMutate = mcpMod.searchMemory({ query: 'archivecacheval2' });
+    check('mcp: FIX 5 -- a second search is served from cache: a same-mtime, same-size on-disk mutation is invisible', () => {
+      assert.strictEqual(sAfterMutate.results.length, 0,
+        'search saw the new on-disk content -- the archive read was not cached');
+    });
+    const sStillOld = mcpMod.searchMemory({ query: 'archivecacheval1' });
+    check('mcp: FIX 5 -- the cached search still serves the version it read at cache-warm time', () => {
+      assert.ok(sStillOld.results.some(r => (r.decisions || '').includes('archivecacheval1')),
+        'cached entries were dropped instead of reused');
+    });
+
+    // Now genuinely invalidate: append through the real appendRows path
+    // (which actually advances mtime/size) and confirm the cache picks up
+    // the change -- the cache tracks real writes, it does not just wedge.
+    teamArchiveForCache.appendRows(cachePid, [{
+      author: 'CacheTeammate', ts: new Date(Date.now() - 4 * 86400000).toISOString(),
+      source: 'Codex', session: 'cache-2', ask: null, summary: null, goal: null,
+      decisions: 'archive cache token archivecacheval3', gotchas: null, headline: null,
+      distilled: true, files: [], changes: null,
+    }]);
+    const sAfterRealAppend = mcpMod.searchMemory({ query: 'archivecacheval3' });
+    check('mcp: FIX 5 -- a genuine archive write (mtime/size actually changed) invalidates the cache', () => {
+      assert.ok(sAfterRealAppend.results.some(r => (r.decisions || '').includes('archivecacheval3')),
+        'a real append after the cache was warm never became visible to search');
+    });
+
+    check('mcp: FIX 5 -- the archive entry cache is bounded, not unbounded as more projects are searched', () => {
+      for (let i = 0; i < 25; i++) {
+        const pid = `mcp-cache-bound-${i}`;
+        teamArchiveForCache.appendRows(pid, [{ author: 'X', ts: '2026-01-01T00:00:00.000Z', source: 'Codex', summary: `bound row ${i}` }]);
+        const projBound = path.join(ROOT, 'projects', `mcp-cache-bound-app-${i}`);
+        fs.mkdirSync(path.join(projBound, '.membridge'), { recursive: true });
+        const stateBound = util.loadState();
+        stateBound.projects[projBound] = { events: [], teamEntries: [] };
+        util.saveState(stateBound);
+        fs.writeFileSync(path.join(projBound, '.membridge', 'team.json'),
+          JSON.stringify({ teamId: `mcp-cache-bound-team-${i}`, projectId: pid, teamName: `BoundTeam${i}` }));
+        mcpMod.searchMemory({ query: `bound row ${i}` });
+      }
+      const size = mcpMod._archiveCacheSizeForTests();
+      assert.ok(size <= 20, `archive cache grew unbounded: ${size} entries cached after 25 distinct projects were searched`);
     });
   }
 
