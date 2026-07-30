@@ -40,6 +40,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getProjects: c => c.getProjects(),
   getLiveSessions: c => c.getLiveSessions(),
   getProjectStream: c => c.getProjectStream('/x'),
+  getFeed: c => c.getFeed({ author: null, project: null, source: null }, { limit: 10, before: null }),
   syncProject: c => c.syncProject('/x'),
   syncAll: c => c.syncAll(),
   setProjectPaused: c => c.setProjectPaused('/x', true),

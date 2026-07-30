@@ -53,6 +53,31 @@ export interface StreamEntry {
   files: string[]
 }
 
+// The Feed screen's entries are the same StreamEntry shape plus the project
+// they belong to -- ProjectPage doesn't need this (the project is already
+// the page you're on), which is why it isn't on StreamEntry itself.
+export interface FeedEntry extends StreamEntry {
+  project: string
+  projectPath: string | null
+}
+
+// `/api/feed` query params (server.js: author/project/source/before/limit).
+// null means "no filter" -- never an empty string, so a filter's absence and
+// a filter matching nothing can't be confused.
+export interface FeedFilters {
+  author: string | null
+  project: string | null
+  source: string | null
+}
+
+// feedPayload's own pagination cursor (lib/feed.js buildFeed): the ts of the
+// last entry on this page, to pass back as `before` for the next one, or
+// null when there is nothing older left.
+export interface FeedPage {
+  entries: FeedEntry[]
+  nextBefore: string | null
+}
+
 /** Only what one machine can actually observe about a teammate.
  *  `team_members_list` (supabase/migrations/002_team_v2.sql:267) returns just
  *  user_id, display_name, role, joined_at. A teammate's paused daemon or expired

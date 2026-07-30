@@ -3,7 +3,7 @@
 // LocalDaemonClient.ts so every mapping decision is unit-testable without a
 // live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
 // to keep this file focused on feed/project/member mapping.
-import type { LiveSession, Member, Project, Role, StreamEntry, SyncState } from './types'
+import type { FeedEntry, FeedFilters, LiveSession, Member, Project, Role, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -39,6 +39,15 @@ export interface RawFeedEntry {
   files: string[]
   goal: string | null
   headline: string | null
+}
+
+// feedPayload's response shape (server.js:539 feedPayload -> lib/feed.js
+// buildFeed): only the two fields the Feed screen actually reads -- the
+// entry page and the pagination cursor. The payload carries more (teamStatus
+// flags, suggestions, etc.) that no UI consumer needs yet.
+export interface RawFeedPayload {
+  entries: RawFeedEntry[]
+  nextBefore: string | null
 }
 
 export interface RawMemberRow {
@@ -105,6 +114,30 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     intent: intentOf(e),
     files: e.files,
   }
+}
+
+// The Feed screen's entry: everything mapStreamEntry already carries, plus
+// which project it belongs to (server.js's `project` display name and its
+// `projectPath`, for the "project name (mono)" column a cross-project
+// stream needs and a single-project stream -- StreamEntry -- doesn't.
+export function mapFeedEntry(e: RawFeedEntry): FeedEntry {
+  return { ...mapStreamEntry(e), project: e.project, projectPath: e.projectPath }
+}
+
+// Builds the /api/feed query string for the Feed screen's filtered, paged
+// requests (server.js:1569 -- author/project/source/before/limit are the
+// only params it reads). A filter of `null` is omitted entirely rather than
+// sent as an empty string, matching how feedPayload treats a missing param
+// as "no filter" (server.js:1570's `q()` also collapses '' to null on the
+// way in, but the client side owns not sending it in the first place).
+export function feedQueryString(filters: FeedFilters, opts: { limit: number; before: string | null }): string {
+  const params = new URLSearchParams()
+  params.set('limit', String(opts.limit))
+  if (filters.author) params.set('author', filters.author)
+  if (filters.project) params.set('project', filters.project)
+  if (filters.source) params.set('source', filters.source)
+  if (opts.before) params.set('before', opts.before)
+  return params.toString()
 }
 
 // Live sessions are entries with no summary yet, deduped to the newest entry

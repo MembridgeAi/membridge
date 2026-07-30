@@ -1,5 +1,6 @@
 import type {
-  AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats,
+  Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -19,6 +20,13 @@ export interface DataClient {
   getProjects(): Promise<Project[]>
   getLiveSessions(): Promise<LiveSession[]>
   getProjectStream(projectPath: string): Promise<StreamEntry[]>
+  // The Feed screen: every session across every project the viewer can see,
+  // newest first. Filtering is server-side (author/project/source all
+  // forward straight to /api/feed's query params) so paging stays correct
+  // -- a client-side filter over an already-paged slice would silently
+  // shrink each page instead of asking the daemon for more. `before` pages
+  // backwards using the cursor the previous call returned as `nextBefore`.
+  getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }): Promise<FeedPage>
   syncProject(projectPath: string): Promise<void>
   syncAll(): Promise<void>
   setProjectPaused(projectPath: string, paused: boolean): Promise<void>

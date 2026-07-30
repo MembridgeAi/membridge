@@ -247,6 +247,75 @@
   color: var(--text2);
 }
 
+/* EntryRow — a merged-stream row, shared by the Feed (cross-project) and
+ * the project page (single-project). A 3-column grid (avatar / who+tool[+
+ * project]+time / meta), outcome+intent+files sharing the who cell's left
+ * edge (grid-column: 2). The avatar cell is always rendered, even with
+ * nothing inside it (EntryRow's showAvatar=false, solo mode) -- an empty
+ * cell collapses to the gap width instead of reflowing the other two
+ * columns' grid-column assignments. */
+.entry-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 10px;
+  padding: 9px 16px;
+  align-items: start;
+  border-bottom: 1px solid var(--line);
+}
+.entry-row-avatar-cell {
+  display: flex;
+  align-items: center;
+}
+.entry-row-who-cell {
+  min-width: 0;
+}
+.entry-row-who {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.entry-row-tool {
+  margin-left: 6px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.entry-row-meta {
+  padding-top: 2px;
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.entry-row-meta .live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 3px;
+  border-radius: var(--r);
+  background: var(--green);
+}
+.entry-row-outcome {
+  grid-column: 2;
+  margin-top: 2px;
+  color: var(--text);
+}
+.entry-row-intent {
+  grid-column: 2;
+  margin-top: 2px;
+  color: var(--text3);
+  font-size: 11px;
+}
+.entry-row-intent-label {
+  margin-right: 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.entry-row-files {
+  grid-column: 2;
+  margin-top: 3px;
+  color: var(--text3);
+  font-size: 10px;
+}
+
 /* Placeholder — for routes not yet built. */
 .placeholder {
   padding: 24px 12px;

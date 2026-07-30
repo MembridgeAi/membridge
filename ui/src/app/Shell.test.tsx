@@ -8,6 +8,12 @@ import { App } from './App'
 import { renderApp } from '../test/renderApp'
 
 describe('Shell', () => {
+  it('renders the brand mark with an accessible name, not hidden from assistive tech', async () => {
+    renderApp({ solo: true })
+    await screen.findByRole('link', { name: 'Today' })
+    expect(screen.getByRole('img', { name: 'MemBridge' })).toBeInTheDocument()
+  })
+
   it('shows the team switcher and team navigation for an owner on a team', async () => {
     renderApp({ solo: false })
     expect(await screen.findByRole('link', { name: 'Members' })).toBeInTheDocument()

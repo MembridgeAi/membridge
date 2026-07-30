@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link, useLocation, useRoute } from 'wouter'
+import logoMark from '../assets/membridge-mark.svg'
 import { useDataClient } from '../data/DataClientProvider'
 import { useSettings, useStatus } from '../data/queries'
 import { ROUTES } from './routes'
@@ -60,9 +61,19 @@ export function Shell({ children }: ShellProps) {
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary">
+        {/* Single brand mark for both themes (membridge-mark-blue.svg) rather
+            than swapping white/dark variants per theme: its brand-blue
+            stroke (#3E63F0, the same family as --accent/--accent2) already
+            reads clearly against both the dark-navy panel (dark theme) and
+            the white panel (light theme) -- the identical contrast the
+            active-nav-item text already relies on against this same
+            background. One asset, no theme-conditional logic.
+            The name is carried by the <img>'s accessible name, not the
+            decorative square this replaces -- the adjacent text is hidden
+            from assistive tech so the two don't double-announce. */}
         <div className="logo">
-          <span className="logo-mark" aria-hidden="true" />
-          MemBridge
+          <img src={logoMark} alt="MemBridge" className="logo-mark" />
+          <span aria-hidden="true">MemBridge</span>
         </div>
 
         {!solo && settings?.team && (

@@ -7,10 +7,10 @@ import {
   useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useStatus, useSyncProject,
 } from '../../data/queries'
 import type { StreamEntry as StreamEntryData } from '../../data/types'
+import { EntryRow } from '../../components/EntryRow'
 import { SyncStateView } from '../../components/SyncState'
 import { AccessPanel, type AccessRow } from './AccessPanel'
 import { MemoryPanel, SyncPanel } from './SidePanels'
-import { StreamEntry } from './StreamEntry'
 import './project.css'
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -174,7 +174,7 @@ export function ProjectPage({ name }: ProjectPageProps) {
           {dayGroups.map(group => (
             <div key={group.day}>
               <div className="project-day">{group.day}</div>
-              {group.entries.map(entry => <StreamEntry key={entry.id} entry={entry} />)}
+              {group.entries.map(entry => <EntryRow key={entry.id} entry={entry} />)}
             </div>
           ))}
         </div>

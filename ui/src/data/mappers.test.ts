@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dedupeLiveSessions, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor, mapLiveSession, mapMember,
-  mapProjectRow, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
+  dedupeLiveSessions, feedQueryString, hasSummary, intentOf, lastSharedAtByAuthor, latestSummaryFor, mapFeedEntry,
+  mapLiveSession, mapMember, mapProjectRow, mapStreamEntry, memberIdsFor, outcomeOf, projectCountsByAuthor, streamEntryId,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 
@@ -67,6 +67,28 @@ describe('streamEntryId and mapStreamEntry', () => {
   it('marks live true exactly when there is no summary yet', () => {
     expect(mapStreamEntry(entry()).live).toBe(true)
     expect(mapStreamEntry(entry({ headline: 'done' })).live).toBe(false)
+  })
+})
+
+describe('mapFeedEntry', () => {
+  it('carries the project name and path alongside every StreamEntry field', () => {
+    const e = mapFeedEntry(entry({ project: 'sublease', projectPath: '/Users/x/sublease', headline: 'done' }))
+    expect(e).toMatchObject({ project: 'sublease', projectPath: '/Users/x/sublease', outcome: 'done', live: false })
+  })
+})
+
+describe('feedQueryString', () => {
+  it('always sets limit and omits any filter that is null', () => {
+    expect(feedQueryString({ author: null, project: null, source: null }, { limit: 30, before: null }))
+      .toBe('limit=30')
+  })
+  it('includes only the filters that are set, plus before when paging', () => {
+    const qs = feedQueryString({ author: 'andrew', project: '/Users/x/membridge', source: null }, { limit: 30, before: '2026-07-28T00:00:00Z' })
+    const params = new URLSearchParams(qs)
+    expect(params.get('author')).toBe('andrew')
+    expect(params.get('project')).toBe('/Users/x/membridge')
+    expect(params.get('source')).toBeNull()
+    expect(params.get('before')).toBe('2026-07-28T00:00:00Z')
   })
 })
 

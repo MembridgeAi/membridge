@@ -1,5 +1,8 @@
 import type { DataClient, Capabilities } from './DataClient'
-import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry } from './types'
+import type {
+  AccessMatrix, AuditEvent, FeedEntry, FeedFilters, FeedPage, Insights, Invite, LiveSession, Member, Project, Role, Settings,
+  SkeletonStats, Status, StreamEntry,
+} from './types'
 
 export interface FakeOptions {
   solo?: boolean
@@ -78,6 +81,31 @@ export class FakeDataClient implements DataClient {
     return this.guard<StreamEntry[]>([
       { id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z', live: true, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'] },
     ])
+  }
+  // Feed fixture: 5 entries across 2 projects, 2 named authors + "you", 2
+  // tools, spanning 2 UTC calendar days -- enough to exercise day-grouping,
+  // every filter, and (via a caller-supplied `before`) backward paging
+  // without a live daemon.
+  private feedFixture(): FeedEntry[] {
+    return [
+      { id: 'f1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:36:00Z', live: true, outcome: '', intent: 'make the summary hook fire on session boundaries, not only on stop', files: [], project: 'membridge', projectPath: '/Users/x/membridge' },
+      { id: 'f2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-29T19:00:00Z', live: false, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], project: 'membridge', projectPath: '/Users/x/membridge' },
+      { id: 'f3', author: 'Sarah', authorId: 'sarah', tool: 'Claude Code', at: '2026-07-29T10:00:00Z', live: false, outcome: 'Listing flow validates addresses before payment.', intent: 'validate the address before charging the card', files: ['lib/listing.js'], project: 'sublease', projectPath: '/Users/x/sublease' },
+      { id: 'f4', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-28T22:00:00Z', live: false, outcome: 'Ports fixed and pushed.', intent: 'fix the port collision in the test suite', files: ['test/run-tests.js'], project: 'membridge', projectPath: '/Users/x/membridge' },
+      { id: 'f5', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-28T18:00:00Z', live: false, outcome: 'Landing page deployed.', intent: null, files: [], project: 'sublease', projectPath: '/Users/x/sublease' },
+    ]
+  }
+  getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }) {
+    if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null })
+    let entries = this.feedFixture()
+      .filter(e => !filters.author || e.authorId === filters.author)
+      .filter(e => !filters.project || e.projectPath === filters.project)
+      .filter(e => !filters.source || e.tool === filters.source)
+      .sort((a, b) => b.at.localeCompare(a.at))
+    if (opts.before) entries = entries.filter(e => e.at <= opts.before!)
+    const page = entries.slice(0, opts.limit)
+    const nextBefore = entries.length > opts.limit ? page[page.length - 1].at : null
+    return this.guard<FeedPage>({ entries: page, nextBefore })
   }
   syncProject() { return this.guard<void>(undefined) }
   syncAll() { return this.guard<void>(undefined) }
