@@ -12445,6 +12445,126 @@ async function main() {
       assert.ok(!JSON.stringify(sDecide).includes('sk-tamper-mcp'), 'secret leaked');
     });
 
+    // ===== The revocation probe must fail safe =====
+    // visibleProjectIds is the ONLY input to a destructive decision (drop
+    // teamEntries, prune the durable archive), so every answer it cannot
+    // stand behind has to be null. Acting on a wrong "nothing is visible"
+    // wipes every archive on the machine; missing one revocation does not.
+    {
+      const cfg = util.getConfig();
+      const fakeCreds = { userId: 'u1', accessToken: 't' };
+
+      await check('teamsync: a probe that throws is inconclusive (null), never "nothing visible"', async () => {
+        // No backend listening on this port -- rest() rejects.
+        const out = await teamsync.visibleProjectIds(
+          { ...cfg, team: { url: 'http://127.0.0.1:1', anonKey: 'x' } }, fakeCreds, 'team-1');
+        assert.strictEqual(out, null, 'a failed probe must not read as "you may see nothing"');
+      });
+
+      await check('teamsync: a missing teamId is inconclusive, not empty', async () => {
+        assert.strictEqual(await teamsync.visibleProjectIds(cfg, fakeCreds, null), null);
+      });
+    }
+
+    // ===== Revocation must reach the MCP read path =====
+    // Access control is enforced server-side (025_enforce_project_access.sql),
+    // but search_memory never makes a network call — it reads teamEntries and
+    // the durable archive straight off disk, so RLS cannot reach it. Without
+    // this guard a revoked member keeps answering questions about the project
+    // indefinitely, and the archive is capped by row count rather than age so
+    // it never rolls over on its own.
+    {
+      const stBefore = util.loadState();
+      const revKey = Object.keys(stBefore.projects).find(k => path.resolve(k) === path.resolve(projMcp));
+      stBefore.projects[revKey].teamAccessLost = '2026-07-30T00:00:00.000Z';
+      util.saveState(stBefore);
+
+      const { data: revoked } = await callJson('search_memory', { query: 'vault rotation' });
+      const { data: revokedRecent } = await callJson('get_recent_activity', { limit: 50 });
+
+      check('mcp: a revoked project serves no teammate rows through search_memory', () => {
+        assert.ok(!revoked.results.some(r => r.author === 'Priya'),
+          'search_memory still served a teammate row from a project this machine may no longer read');
+        assert.ok(!JSON.stringify(revoked).includes('vault.tf'),
+          'revoked teammate file paths still reachable through search');
+      });
+
+      check('mcp: a revoked project serves no teammate rows through get_recent_activity either', () => {
+        assert.ok(!revokedRecent.entries.some(e => e.author === 'Priya'),
+          'get_recent_activity still served a revoked teammate row');
+      });
+
+      check('mcp: revocation hides only TEAM rows — the user keeps their own local work', () => {
+        const mine = revokedRecent.entries.filter(e => e.author !== 'Priya');
+        assert.ok(mine.length > 0,
+          'the local entries were dropped too — revocation must not delete the user\'s own memory');
+      });
+
+      // Restore for every later assertion in this block, which assumes the
+      // teammate fixtures are readable.
+      const stAfter = util.loadState();
+      delete stAfter.projects[revKey].teamAccessLost;
+      util.saveState(stAfter);
+      const { data: restored } = await callJson('search_memory', { query: 'vault rotation' });
+      check('mcp: clearing the flag restores teammate rows (access regained)', () => {
+        assert.ok(restored.results.some(r => r.author === 'Priya'),
+          'teammate rows did not come back after access was restored');
+      });
+    }
+
+    // The guard has to hold at EVERY reader of proj.teamEntries, not just the
+    // search path. A review caught the first version covering one of six, and
+    // the miss that mattered most is this one: the injected block does not
+    // merely answer questions about a revoked project, it rewrites that
+    // teammate's activity into the CLAUDE.md/AGENTS.md files every agent reads
+    // at startup. util.teamRowsFor is the single chokepoint; this pins it at
+    // the surface with the worst consequence.
+    check('revocation: the injected context block carries nothing from a revoked project', () => {
+      const revoked = {
+        events: [],
+        teamAccessLost: '2026-07-30T00:00:00.000Z',
+        teamEntries: [{
+          author: 'RevokedTeammate', ts: new Date().toISOString(), source: 'Codex', session: 'r1',
+          ask: 'REVOKED-MARKER-ASK', summary: 'REVOKED-MARKER-SUMMARY',
+          headline: 'REVOKED-MARKER-HEADLINE', files: ['infra/revoked.tf'], distilled: true,
+        }],
+      };
+      const cfg = util.getConfig();
+      const rendered = String(digest.renderBlock(
+        ROOT, revoked, cfg, 'CLAUDE.md', digest.sessionGroups(ROOT, revoked, cfg)));
+      for (const marker of ['RevokedTeammate', 'REVOKED-MARKER-ASK', 'REVOKED-MARKER-SUMMARY', 'infra/revoked.tf']) {
+        assert.ok(!rendered.includes(marker),
+          `revoked teammate content "${marker}" was written into the injected context block`);
+      }
+      // Same fixture WITHOUT the flag must still render, or the assertion
+      // above would pass for the trivial reason that nothing renders at all.
+      const allowed = { ...revoked };
+      delete allowed.teamAccessLost;
+      const renderedOk = String(digest.renderBlock(
+        ROOT, allowed, cfg, 'CLAUDE.md', digest.sessionGroups(ROOT, allowed, cfg)));
+      assert.ok(renderedOk.includes('RevokedTeammate'),
+        'the fixture renders nothing even when allowed — the guard test proves nothing');
+    });
+
+    check('revocation: every reader of teamEntries goes through util.teamRowsFor', () => {
+      // A rule four files have to remember is a rule that gets forgotten. This
+      // fails the moment someone reintroduces a raw read.
+      const libDir = path.join(__dirname, '..', 'lib');
+      const offenders = [];
+      for (const f of fs.readdirSync(libDir).filter(n => n.endsWith('.js'))) {
+        // teamsync.js WRITES the field and clears it; util.js defines the
+        // helper. Every other file must read through the helper.
+        if (f === 'teamsync.js' || f === 'util.js') continue;
+        const src = fs.readFileSync(path.join(libDir, f), 'utf8');
+        for (const line of src.split('\n')) {
+          if (line.trim().startsWith('//') || line.trim().startsWith('*')) continue;
+          if (/\.teamEntries/.test(line) && !/teamRowsFor/.test(line)) offenders.push(`${f}: ${line.trim()}`);
+        }
+      }
+      assert.deepStrictEqual(offenders, [],
+        `raw proj.teamEntries read bypasses the revocation guard:\n${offenders.join('\n')}`);
+    });
+
     check('mcp: search results are ranked (score desc) and carry matched fields', () => {
       assert.ok(sDecide.results.every(r => typeof r.score === 'number' && Array.isArray(r.matched)));
       const scores = sDecide.results.map(r => r.score);
@@ -12998,6 +13118,36 @@ async function main() {
       assert.strictEqual(arc.rows.length, cap, 'forward append did not re-enforce the cap');
       assert.strictEqual(arc.rows[arc.rows.length - 1].summary, 'newest');
       assert.ok(!arc.rows.some(r => r.summary === 'row0'), 'oldest row was not trimmed');
+    });
+
+    // A held append lock is the NORMAL case, not an exotic failure: the CLI
+    // (`membridge team sync`) and the daemon tick both call syncTeams. Before
+    // this, appendRows reported the merged in-memory count regardless, so the
+    // backfill cursor advanced past rows that were never written to disk and
+    // the walk could even flip done:true having dropped a whole page.
+    check('team-archive: a skipped append reports null instead of claiming the rows landed', () => {
+      const pid = 'arc-lockskip';
+      const rows = [{ author: 'A', ts: '2026-02-01T00:00:00.000Z', source: 'Codex', summary: 'first' }];
+      assert.strictEqual(teamArchive.appendRows(pid, rows), 1, 'baseline append should land');
+
+      // Simulate the other process holding the lock for the whole append.
+      const lock = path.join(util.homeDir(), 'team-archive', 'arc-lockskip.lock');
+      fs.mkdirSync(path.dirname(lock), { recursive: true });
+      fs.writeFileSync(lock, '');
+      let out;
+      try {
+        out = teamArchive.appendRows(pid, [
+          { author: 'B', ts: '2026-02-02T00:00:00.000Z', source: 'Codex', summary: 'blocked' },
+        ]);
+      } finally {
+        fs.unlinkSync(lock);
+      }
+      assert.strictEqual(out, null, 'a skipped append must not report a row count');
+
+      const arc = teamArchive.loadArchive(pid);
+      assert.strictEqual(arc.rows.length, 1, 'the blocked row must not appear on disk');
+      assert.strictEqual(arc.rowCount === undefined ? 1 : arc.rowCount, 1,
+        'rowCount must not count a row the file does not contain');
     });
 
     check('team-archive: setBackfill round-trips and survives appends', () => {
@@ -16359,6 +16509,41 @@ async function main() {
       }, { fetchImpl: () => { called = true; return Promise.resolve({}); } });
       assert.strictEqual(sent, false);
       assert.strictEqual(called, false);
+    });
+
+    // Regression: fetch resolves for 4xx/5xx and only rejects on transport
+    // failure, so an unchecked `await fetchImpl(...)` reported every refused
+    // POST as a successful send. This is the only success signal a
+    // fire-and-forget diagnostic has — if it lies, a collector rejecting every
+    // install looks identical to one accepting them.
+    await check('counters: an HTTP error is reported as a failed send, not a success', async () => {
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: () => Promise.resolve({ ok: false, status: 500 }),
+        now: 20_000_000,
+      });
+      assert.strictEqual(sent, false, 'a 500 must not be reported as sent');
+    });
+
+    await check('counters: a 2xx is still reported as sent', async () => {
+      const sent = await counters.emitCounters({ projects: {} }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: () => Promise.resolve({ ok: true, status: 204 }),
+        now: 30_000_000,
+      });
+      assert.strictEqual(sent, true, 'a 204 is the worker\'s success response');
+    });
+
+    // The retry-suppression contract is deliberate and separate from the
+    // return value: a refused send must still record the attempt, or a down
+    // collector gets hammered by every install on the next 60s tick.
+    await check('counters: a refused send still records the attempt (no retry storm)', async () => {
+      const before = util.loadState().countersLastSent || null;
+      await counters.emitCounters({ projects: {} }, { countersUrl: 'http://127.0.0.1:1/x' }, {
+        fetchImpl: () => Promise.resolve({ ok: false, status: 503 }),
+        now: 40_000_000,
+      });
+      const after = util.loadState().countersLastSent;
+      assert.ok(after, 'countersLastSent must be written even when the POST was refused');
+      assert.notDeepStrictEqual(after, before, 'the attempt was not recorded');
     });
 
     await check('counters: the payload carries no path, project name or account', async () => {
