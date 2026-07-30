@@ -2,12 +2,13 @@
 // through the pure functions in ./mappers.ts. Kept thin on purpose -- see
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
-import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, Status, StreamEntry } from './types'
+import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry } from './types'
 import {
   dedupeLiveSessions, lastSharedAtByAuthor, mapLiveSession, mapMember, mapProjectRow, mapSettings, mapStreamEntry,
   projectCountsByAuthor, syncStateOf,
   type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSettingsPayload, type RawTeamFeedEntry, type RawTeamRow,
 } from './mappers'
+import { skeletonStatsFrom, type RawSavingsPayload } from './skeletonStats'
 
 export { syncStateOf }
 
@@ -193,6 +194,11 @@ export class LocalDaemonClient implements DataClient {
 
   getInsights(_window: 7 | 30 | 90): Promise<Insights> {
     return Promise.reject(missingEndpoint('getInsights', 'GET /api/team/insights'))
+  }
+
+  async getSkeletonStats(): Promise<SkeletonStats> {
+    const raw = await get<RawSavingsPayload>('/api/savings')
+    return skeletonStatsFrom(raw)
   }
 
   async getSettings(): Promise<Settings> {

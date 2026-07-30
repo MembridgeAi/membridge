@@ -1,5 +1,5 @@
 import type { DataClient, Capabilities } from './DataClient'
-import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, Status, StreamEntry } from './types'
+import type { AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry } from './types'
 
 export interface FakeOptions {
   solo?: boolean
@@ -7,6 +7,10 @@ export interface FakeOptions {
   skeletonAvailable?: boolean
   empty?: boolean
   failWith?: string
+  // Overrides the default team-mode fixture value. Lets a test exercise the
+  // "never synced yet" case (Task 7 Finding 2) without also going solo,
+  // which would hide the "last team sync" stat entirely.
+  teamLastSync?: string | null
 }
 
 export class FakeDataClient implements DataClient {
@@ -23,7 +27,8 @@ export class FakeDataClient implements DataClient {
     return this.guard<Status>({
       running: true, version: '0.1.7', solo: !!this.opts.solo, setupDone: true,
       projectCount: this.opts.empty ? 0 : 3, lastSync: '2026-07-29T21:00:00Z',
-      teamLastSync: this.opts.solo ? null : '2026-07-29T21:00:00Z', tools: ['Claude Code', 'Codex'],
+      teamLastSync: this.opts.solo ? null : (this.opts.teamLastSync !== undefined ? this.opts.teamLastSync : '2026-07-29T21:00:00Z'),
+      tools: ['Claude Code', 'Codex'],
       encryption: { enabled: true, plaintextOff: true, paused: null, keyAlerts: 0 },
       auth: { paused: null, detail: null, since: null },
     })
@@ -95,13 +100,24 @@ export class FakeDataClient implements DataClient {
       { id: 'a1', at: '2026-07-29T14:02:00Z', actorName: 'Andrew', action: 'unshared', objectType: 'project', objectLabel: 'billing-poc', detail: null },
     ])
   }
+  // Shared by getInsights() and getSkeletonStats() -- both read the same
+  // underlying /api/savings ledger in the real daemon, so the fixture must
+  // not drift into two different answers for the same skeletonAvailable flag.
+  private skeletonStats(): SkeletonStats {
+    return this.opts.skeletonAvailable === false
+      ? { available: false }
+      : { available: true, repeatOpens: 1204, answeredFirst: 818 }
+  }
+  getSkeletonStats() {
+    return this.guard<SkeletonStats>(this.skeletonStats())
+  }
   getInsights(window: 7 | 30 | 90) {
     return this.guard<Insights>({
       window,
       sessions: { count: 412, deltaPct: 18 },
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },
-      skeleton: this.opts.skeletonAvailable === false ? { available: false } : { available: true, repeatOpens: 1204, answeredFirst: 818 },
+      skeleton: this.skeletonStats(),
       perPerson: [{ id: 'me', name: 'Marco', sessions: 214, shared: 205 }],
       topProjects: [{ name: 'membridge', sessions: 184, people: 3 }],
       problems: [

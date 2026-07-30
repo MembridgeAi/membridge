@@ -53,6 +53,22 @@ describe('FakeDataClient', () => {
     expect(i.skeleton).toEqual({ available: false })
   })
 
+  it('getSkeletonStats matches getInsights().skeleton for the same option, both available and unavailable', async () => {
+    const available = new FakeDataClient()
+    expect(await available.getSkeletonStats()).toEqual({ available: true, repeatOpens: 1204, answeredFirst: 818 })
+    expect(await available.getSkeletonStats()).toEqual((await available.getInsights(30)).skeleton)
+
+    const unavailable = new FakeDataClient({ skeletonAvailable: false })
+    expect(await unavailable.getSkeletonStats()).toEqual({ available: false })
+  })
+
+  it('defaults teamLastSync in team mode but allows overriding it to null for the "never synced" case', async () => {
+    expect((await new FakeDataClient().getStatus()).teamLastSync).toBe('2026-07-29T21:00:00Z')
+    expect((await new FakeDataClient({ teamLastSync: null }).getStatus()).teamLastSync).toBeNull()
+    // solo always wins regardless of teamLastSync
+    expect((await new FakeDataClient({ solo: true, teamLastSync: '2026-07-29T21:00:00Z' }).getStatus()).teamLastSync).toBeNull()
+  })
+
   it('rejects every call when configured to fail', async () => {
     await expect(new FakeDataClient({ failWith: 'boom' }).getStatus()).rejects.toThrow('boom')
   })

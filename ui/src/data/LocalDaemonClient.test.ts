@@ -98,3 +98,37 @@ describe('syncStateOf', () => {
     expect(syncStateOf({ paused: false, lastSync: null, lastActivity: null })).toEqual({ state: 'up-to-date' })
   })
 })
+
+// Task 7 Finding 3: Today's solo stat must read the real ledger, not a
+// session-count proxy. getSkeletonStats() hits /api/savings directly and
+// folds the response through mappers.skeletonStatsFrom (tested on its own
+// in mappers.test.ts) -- this just proves the endpoint and the fold are
+// actually wired together.
+describe('LocalDaemonClient.getSkeletonStats', () => {
+  function stubSavings(body: unknown) {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads /api/savings and folds totals into repeatOpens/answeredFirst', async () => {
+    stubSavings({
+      totals: {
+        reads: { first: 900, sameSession: 700, crossSession: 504 },
+        avoided: { tokens: 50000, serves: 818, tierA: 400, tierB: 418, partialWins: 0, netNegatives: 0 },
+      },
+    })
+    const stats = await new LocalDaemonClient().getSkeletonStats()
+    expect(stats).toEqual({ available: true, repeatOpens: 1204, answeredFirst: 818 })
+  })
+
+  it('is unavailable when the ledger has no reads/avoided yet', async () => {
+    stubSavings({ totals: {} })
+    const stats = await new LocalDaemonClient().getSkeletonStats()
+    expect(stats).toEqual({ available: false })
+  })
+})

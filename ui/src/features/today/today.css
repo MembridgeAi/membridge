@@ -39,9 +39,6 @@
   background: transparent;
   color: var(--text2);
 }
-.today-btn-ghost:hover {
-  background: var(--panel2);
-}
 .today-btn-primary {
   background: var(--accent);
   border-color: var(--accent);

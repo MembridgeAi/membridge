@@ -62,6 +62,11 @@ export function useInsights(window: 7 | 30 | 90) {
   return useQuery({ queryKey: ['insights', window], queryFn: () => c.getInsights(window) })
 }
 
+export function useSkeletonStats() {
+  const c = useDataClient()
+  return useQuery({ queryKey: ['skeletonStats'], queryFn: () => c.getSkeletonStats() })
+}
+
 export function useSettings() {
   const c = useDataClient()
   return useQuery({ queryKey: ['settings'], queryFn: () => c.getSettings() })

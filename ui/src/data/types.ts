@@ -86,6 +86,13 @@ export interface AuditEvent {
   detail: string | null
 }
 
+// The "how well the skeleton is working" figures (spec §3.5), and Today's
+// solo effectiveness stat (Task 7 Finding 3) -- the SAME union in both
+// places, because both read the identical /api/savings ledger. `available:
+// false` is a real state (the ledger has nothing yet), never collapsed into
+// a zero.
+export type SkeletonStats = { available: false } | { available: true; repeatOpens: number; answeredFirst: number }
+
 export type Severity = 'broken' | 'minor'
 
 export interface Problem {
@@ -101,7 +108,7 @@ export interface Insights {
   sessions: { count: number; deltaPct: number | null }
   membersSyncing: { ok: number; total: number }
   entriesShared: { count: number; delta: number | null }
-  skeleton: { available: false } | { available: true; repeatOpens: number; answeredFirst: number }
+  skeleton: SkeletonStats
   perPerson: { id: string; name: string; sessions: number; shared: number }[]
   topProjects: { name: string; sessions: number; people: number }[]
   problems: Problem[]

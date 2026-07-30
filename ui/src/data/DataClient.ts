@@ -1,5 +1,5 @@
 import type {
-  AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, Status, StreamEntry,
+  AccessMatrix, AuditEvent, Insights, Invite, LiveSession, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -37,6 +37,13 @@ export interface DataClient {
   getAudit(limit?: number): Promise<AuditEvent[]>
 
   getInsights(window: 7 | 30 | 90): Promise<Insights>
+
+  // Today's "repeat opens answered by memory" solo stat (Task 7 Finding 3):
+  // the real /api/savings ledger, not a session-count proxy. Same union as
+  // Insights.skeleton, read independently so Today never has to wait on the
+  // full Insights payload (getInsights covers a team-only screen) just to
+  // show its one solo number.
+  getSkeletonStats(): Promise<SkeletonStats>
 
   getSettings(): Promise<Settings>
   setSetting(key: string, value: unknown): Promise<void>
