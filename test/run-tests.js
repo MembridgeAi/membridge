@@ -22647,6 +22647,27 @@ const repoRoot = require('../lib/repo-root');
         'the window-open handler must allowlist http(s) before shell.openExternal');
     });
 
+    check('app window-open: a same-origin session link opens a real window, everything else keeps today\'s behavior', () => {
+      // Session detail spec: middle/cmd-clicking a feed row must open the
+      // session in a NEW window in the Electron shell. The handler's ONE
+      // carve-out is strict origin equality against the local dashboard url;
+      // the new window carries the same locked-down webPreferences as the
+      // main one, and any other http(s) url still goes to the default
+      // browser (non-http stays denied).
+      const handler = appSrc.slice(appSrc.indexOf('setWindowOpenHandler'),
+        appSrc.indexOf('setWindowOpenHandler') + 1400);
+      assert.ok(/origin\s*===\s*safeOrigin\(windowUrl\(\)\)\.origin/.test(handler),
+        'the carve-out must be strict origin EQUALITY against the bound dashboard url');
+      assert.ok(/action:\s*'allow'/.test(handler), 'a same-origin popup must be allowed as a real window');
+      const override = handler.slice(handler.indexOf('overrideBrowserWindowOptions'));
+      assert.ok(/contextIsolation:\s*true/.test(override) && /nodeIntegration:\s*false/.test(override),
+        'the new window must keep contextIsolation on and nodeIntegration off');
+      assert.ok(/preload/.test(override), 'the new window must load the same preload bridge');
+      assert.ok(/shell\.openExternal\(url\)/.test(handler),
+        'every other http(s) url must still go to the default browser');
+      assert.ok(/action:\s*'deny'/.test(handler), 'the handler must still deny by default');
+    });
+
     check('app tray: launch opens a window on non-mac, and click handlers are non-mac only', () => {
       // Win/Linux were tray-only (Win11 hides new tray icons: launch showed
       // NOTHING), while on macOS a registered click handler opened the

@@ -354,6 +354,71 @@
 .entry-row-outcome-empty {
   color: var(--text3);
 }
+/* Task 6: a row with a session is a real <a> (middle/cmd-click must work).
+ * Same grid, same height -- the link resets are the only differences, plus
+ * position: relative so the affordance and the hover preview can anchor
+ * without adding grid tracks (the row's anatomy stays byte-identical). */
+.entry-row-link {
+  position: relative;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  /* Room for the affordance chevron without moving the meta column. */
+  padding-right: 28px;
+}
+
+.entry-row-affordance {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text3);
+  font-size: var(--fs-lg);
+  pointer-events: none;
+}
+.entry-row-link:hover .entry-row-affordance {
+  color: var(--text2);
+}
+
+/* Hover preview (spec Level 1.5): pointer devices only -- the (hover: hover)
+ * gate is the device sniff, in CSS where it belongs. Touch and keyboard
+ * users never see it; the session page carries all of its content. It is
+ * absolutely positioned so an open preview never changes the row's height
+ * (locked: nothing expands inside the feed). */
+.entry-row-preview {
+  display: none;
+}
+@media (hover: hover) {
+  .entry-row-preview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    position: absolute;
+    left: 42px;
+    top: calc(100% - 6px);
+    z-index: 30;
+    max-width: 440px;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--panel2);
+    border: 1px solid var(--line2);
+    border-radius: var(--r);
+    pointer-events: none;
+  }
+}
+.entry-row-preview-outcome {
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+}
+.entry-row-preview-why {
+  color: var(--text2);
+  font-size: var(--fs-sm);
+}
+.entry-row-preview-diffstat {
+  color: var(--text3);
+  font-size: var(--fs-xs);
+}
+
 .entry-row-intent {
   grid-column: 2;
   margin-top: 3px;

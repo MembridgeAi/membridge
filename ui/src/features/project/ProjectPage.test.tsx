@@ -104,4 +104,15 @@ describe('ProjectPage', () => {
     expect(await screen.findByText('second checkpoint')).toBeInTheDocument()
     expect(screen.queryByText('first checkpoint')).toBeNull()
   })
+
+  // Task 6: ProjectPage renders the SAME EntryRow the Feed does, so its rows
+  // inherit the session link with no ProjectPage.tsx change at all.
+  it('stream rows inherit the session link from EntryRow', async () => {
+    renderWith(new FakeDataClient(), <ProjectPage slug="membridge" />)
+    const outcome = await screen.findByText(/Hook ownership now decided by durability/)
+    const row = outcome.closest('.entry-row')
+    expect(row).not.toBeNull()
+    expect(row!.tagName).toBe('A')
+    expect(row!.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-e1')}`)
+  })
 })

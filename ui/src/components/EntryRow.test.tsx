@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { EntryRow } from './EntryRow'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { EntryRow, HOVER_PREVIEW_DELAY_MS } from './EntryRow'
+import { sessionHref } from '../app/routes'
 import type { StreamEntry } from '../data/types'
 
 const entry = (overrides: Partial<StreamEntry> = {}): StreamEntry => ({
@@ -98,5 +99,90 @@ describe('EntryRow', () => {
   it('omits the Intent line entirely when no ask/goal was ever captured', () => {
     render(<EntryRow entry={entry({ intent: null })} />)
     expect(screen.queryByText('Intent')).toBeNull()
+  })
+})
+
+describe('EntryRow as a session link (Task 6)', () => {
+  it('a row with a session renders a real <a> whose href comes from ROUTES', () => {
+    render(<EntryRow entry={entry({ session: 's1' })} />)
+    const link = screen.getByRole('link')
+    expect(link.getAttribute('href')).toBe(sessionHref('s1'))
+    // The anatomy lives INSIDE the link -- the whole row is the target.
+    expect(link.textContent).toContain('Hook ownership now decided by durability')
+  })
+
+  it('a session-less row (bare plumbing) renders no link and keeps today\'s markup', () => {
+    const { container } = render(<EntryRow entry={entry({ session: null })} />)
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(container.querySelector('div.entry-row')).not.toBeNull()
+    expect(screen.getByText(/Hook ownership now decided by durability/)).toBeInTheDocument()
+  })
+})
+
+describe('EntryRow hover preview (Task 6)', () => {
+  const rich = () => entry({
+    session: 's1',
+    summaryFull: 'The full unclipped outcome, every sentence of it.',
+    decisions: 'Durability beats recency.\nSecond line stays out of the preview.',
+    files: ['lib/hooks.js', 'test/run-tests.js'],
+    changes: [
+      { file: 'lib/hooks.js', status: 'edited', add: 41, del: 12, note: null, dep: false },
+      { file: 'test/run-tests.js', status: 'edited', add: 88, del: 2, note: null, dep: false },
+    ],
+  })
+
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  function hoverRow(): HTMLElement {
+    const row = screen.getByRole('link')
+    fireEvent.mouseEnter(row)
+    return row
+  }
+
+  it('appears only after the delay, aria-hidden, with outcome + first decisions line + diffstat', () => {
+    render(<EntryRow entry={rich()} />)
+    hoverRow()
+    expect(document.querySelector('.entry-row-preview')).toBeNull()
+    act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
+    const preview = document.querySelector('.entry-row-preview')!
+    expect(preview).not.toBeNull()
+    expect(preview.getAttribute('aria-hidden')).toBe('true')
+    expect(preview.textContent).toContain('The full unclipped outcome, every sentence of it.')
+    expect(preview.textContent).toContain('Durability beats recency.')
+    expect(preview.textContent).not.toContain('Second line stays out of the preview')
+    expect(preview.textContent).toContain('2 files')
+    expect(preview.textContent).toContain('+129')
+    expect(preview.textContent).toContain('-14')
+  })
+
+  it('never appears on keyboard focus -- the route is the keyboard path', () => {
+    render(<EntryRow entry={rich()} />)
+    fireEvent.focus(screen.getByRole('link'))
+    act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS * 2) })
+    expect(document.querySelector('.entry-row-preview')).toBeNull()
+  })
+
+  it('dismisses on pointer-leave and on Escape', () => {
+    render(<EntryRow entry={rich()} />)
+    const row = hoverRow()
+    act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
+    expect(document.querySelector('.entry-row-preview')).not.toBeNull()
+    fireEvent.mouseLeave(row)
+    expect(document.querySelector('.entry-row-preview')).toBeNull()
+
+    hoverRow()
+    act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
+    expect(document.querySelector('.entry-row-preview')).not.toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.querySelector('.entry-row-preview')).toBeNull()
+  })
+
+  it('nothing in the preview is focusable', () => {
+    render(<EntryRow entry={rich()} />)
+    hoverRow()
+    act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
+    const preview = document.querySelector('.entry-row-preview')!
+    expect(preview.querySelectorAll('a, button, input, [tabindex]')).toHaveLength(0)
   })
 })

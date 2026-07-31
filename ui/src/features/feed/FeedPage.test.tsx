@@ -83,6 +83,18 @@ describe('FeedPage', () => {
     expect(await screen.findByLabelText('Live')).toBeInTheDocument()
   })
 
+  // Task 6: a feed row with a session is a real <a> to the session route --
+  // middle-click and cmd-click must work, so it cannot be a click handler on
+  // a div.
+  it('a row with a session renders as a link to /sessions/:id built from ROUTES', async () => {
+    renderApp({}, <FeedPage />)
+    const outcome = await screen.findByText(/Hook ownership now decided by durability/)
+    const row = outcome.closest('.entry-row')
+    expect(row).not.toBeNull()
+    expect(row!.tagName).toBe('A')
+    expect(row!.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-f2')}`)
+  })
+
   // Fix 16: an infinite query refetches EVERY loaded page on window
   // refocus by default -- for a reader three "Show more" clicks deep, one
   // alt-tab refired all their pages at once and fought their scroll

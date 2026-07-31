@@ -227,8 +227,32 @@ function openDashboard() {
   // nothing external ever renders inside the app window. http(s) ONLY: the
   // dashboard renders teammate-authored synced content, so a crafted link
   // must not be able to reach file:, other apps' custom protocols, etc.
+  //
+  // ONE carve-out (session detail page spec): a middle/cmd-clicked feed row
+  // targets the LOCAL dashboard origin, and handing that to the default
+  // browser would strip the preload bridge and read as "the app kicked me
+  // out". A same-origin url gets a real new BrowserWindow with the SAME
+  // webPreferences as the main window (preload + contextIsolation on,
+  // nodeIntegration off). Origin equality against the bound dashboard url —
+  // never a substring/port-loose match — so every other http(s) url still
+  // goes to shell.openExternal and non-http schemes stay denied outright.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:$/i.test(safeOrigin(url).protocol)) shell.openExternal(url);
+    const { origin, protocol } = safeOrigin(url);
+    if (!/^https?:$/i.test(protocol || '')) return { action: 'deny' };
+    if (origin && origin === safeOrigin(windowUrl()).origin) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          autoHideMenuBar: true,
+          webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+          },
+        },
+      };
+    }
+    shell.openExternal(url);
     return { action: 'deny' };
   });
   // And the window itself must never leave the local dashboard: preload.js
