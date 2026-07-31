@@ -77,4 +77,4 @@ development docs.
 
 ---
 
-<p align="center"><sub><code>source-available · free core, zero runtime dependencies · <a href="https://membridge.app">membridge.app</a></code></sub></p>
+<p align="center"><sub><code>source-available · free core, four runtime dependencies · <a href="https://membridge.app">membridge.app</a></code></sub></p>

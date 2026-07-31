@@ -39,7 +39,8 @@ curl -fsSL https://membridge.app/install.sh | sh
 
 This installs `MemBridge Beta.app` to `/Applications` and the `membridge` CLI to
 `/usr/local/bin` (that step may ask for your password once), verifies the
-download's SHA-256, and launches without a Gatekeeper warning. Want to read
+download's SHA-256, and launches without a Gatekeeper warning (the app is
+signed and notarized with Apple). Want to read
 it first? `curl -fsSL https://membridge.app/install.sh -o install.sh`.
 
 On Intel Macs, Linux, Windows, or servers, use the CLI instead:
@@ -176,7 +177,39 @@ same redacted digest entries you see in `.membridge/memory.md`. Timestamps,
 tool names, redacted asks, relative file paths. Never file contents, never
 unshared projects. Row-level security limits every row to your team.
 
-The daemon binds to `127.0.0.1` only. There is no telemetry. The only files
+The daemon binds to `127.0.0.1` only. Three things do call home, and it is
+worth being precise about each:
+
+- **Anonymous usage counters** ([`lib/counters.js`](../lib/counters.js)).
+  The daemon sends a small set of product-health counters to a stats
+  endpoint (a Cloudflare Worker, deliberately separate from the database
+  that holds team data): a heartbeat, whether recall is serving, whether
+  your checkouts are worktrees, whether hook registration succeeded, and
+  which of the built-in MCP tools have been used. Every value is drawn
+  from a fixed allowlist; paths, repo names, file names, content, and
+  account data structurally cannot ride along. Sent at most once per day,
+  or when one of those states changes.
+- **A one-time failure diagnostic** ([`lib/diagnostics.js`](../lib/diagnostics.js)).
+  If recall goes net negative on tokens for a project, recall is paused
+  for that project and one anonymous payload is sent so the failure mode
+  can be studied across installs: version, token counters, an acceptance
+  ratio, and per-language counts of cached files. No code, no file names,
+  no project names.
+- **An update check** ([`lib/update-check.js`](../lib/update-check.js)).
+  At most every 6 hours, MemBridge Beta asks GitHub's public releases API
+  for the latest version tag. A plain unauthenticated GET; nothing about
+  you or your install is sent beyond the request itself.
+
+The first two are keyed by an `install_id`: a random UUID generated once
+on your machine, fed by nothing machine- or person-identifying. Both obey
+the same two switches, and either one turns them both off: set
+`"diagnostics": { "enabled": false }` in `~/.membridge/config.json`, or set
+`MEMBRIDGE_NO_DIAGNOSTICS=1` in the environment. The update check has no
+dedicated off switch; the automatic check runs only when the desktop app
+launches, and every other check happens when you ask for one (the "Check
+for updates" menu item, `membridge update`).
+
+The only files
 MemBridge Beta writes are the context files (inside its own markers) and its own
 state in `~/.membridge`; transcripts are read incrementally and never
 modified.
@@ -328,6 +361,7 @@ Settings covers the common options. Under the hood it's
   "maxPrompts": 8,
   "maxFiles": 10,
   "distill": { "enabled": true, "minEdits": 1, "checkpointEvery": 12 },
+  "diagnostics": { "enabled": true },    // anonymous counters + failure diagnostics (see Team sync and privacy)
   "adapters": {
     "claude-code": { "enabled": true },
     "codex": { "enabled": true },
@@ -335,6 +369,14 @@ Settings covers the common options. Under the hood it's
   }
 }
 ```
+
+Telemetry switches: `"diagnostics": { "enabled": false }` turns off both
+the anonymous usage counters and the failure diagnostics described in
+[Team sync and privacy](#team-sync-and-privacy); setting
+`MEMBRIDGE_NO_DIAGNOSTICS=1` in the environment does the same. Two more
+keys exist for self-hosters: `countersUrl` and `diagnosticsUrl` override
+the endpoints baked into a build, and setting either to an empty string
+(`""`) is a deliberate opt-out for that endpoint alone.
 
 To pause a single project, click Pause in the dashboard, or drop an empty
 `.membridge-off` file in its root.
@@ -412,7 +454,6 @@ Next up, in rough order:
 - LLM-powered summaries (optional API key)
 - Import ChatGPT / claude.ai data exports
 - First-class adapters for Gemini CLI, Cursor, opencode, Copilot CLI
-- Signed + notarized macOS builds
 
 ## License
 
