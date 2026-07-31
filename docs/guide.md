@@ -46,9 +46,9 @@ On Intel Macs, Linux, Windows, or servers, use the CLI instead:
 
 ```sh
 npm install -g @membridgeai/membridge
-membridge-beta scan       # read-only: see which AI tools and projects it found
-membridge-beta start      # run the background daemon
-membridge-beta dashboard  # open the dashboard at http://127.0.0.1:7437
+membridge scan       # read-only: see which AI tools and projects it found
+membridge start      # run the background daemon
+membridge dashboard  # open the dashboard at http://127.0.0.1:7437
 ```
 
 That's the zero-setup core: your own tools start seeing each other's work,
@@ -57,7 +57,7 @@ and the dashboard fills with your sessions. No account needed for any of it.
 To add your team: click **Invite** in the header (sign up, create the team,
 share the invite link), have teammates join and install, then share a project
 from its page. Commit the resulting `.membridge/team.json` so teammates'
-clones connect too. Terminal folks: `membridge-beta join <link>` does signup and
+clones connect too. Terminal folks: `membridge join <link>` does signup and
 join in one command.
 
 ## The dashboard
@@ -129,7 +129,7 @@ Files recently modified by AI tools: src/cart.js, test/cart.test.js
 ```
 
 Only the content between the markers is ever rewritten. The **Remove block**
-button (or `membridge-beta remove`) strips it cleanly and restores your file
+button (or `membridge remove`) strips it cleanly and restores your file
 byte-for-byte.
 
 Each project also gets a structured memory database in `.membridge/`:
@@ -143,7 +143,7 @@ or commit it to share AI context with your whole team.
 A summary harvested from the agent's last chat message is decent; a summary
 the agent writes on purpose is better. The app asks once, on first run,
 whether to turn this on (Settings toggles it any time; CLI:
-`membridge-beta setup-hooks` / `remove-hooks`).
+`membridge setup-hooks` / `remove-hooks`).
 
 Enabled, it registers a [Stop hook](https://docs.claude.com/en/docs/claude-code/hooks)
 in `~/.claude/settings.json`. When a Claude Code session that edited files
@@ -220,7 +220,7 @@ nothing. To run your own:
 2. Grab the Project URL and `anon` key from Settings → API (both are safe to
    publish; row-level security protects the data).
 3. Bake them into `lib/backend.json` before building, or point an install at
-   them: `membridge-beta team setup --url https://<ref>.supabase.co --anon-key <key>`
+   them: `membridge team setup --url https://<ref>.supabase.co --anon-key <key>`
 </details>
 
 ## Roadmaps (optional, bring your own key)
@@ -245,21 +245,21 @@ boxes and terminal-first teammates aren't second-class:
 
 | Command | What it does |
 | --- | --- |
-| `membridge-beta start` / `stop` / `status` | Manage the background daemon |
-| `membridge-beta dashboard` | Open the web UI at `http://127.0.0.1:7437` |
-| `membridge-beta sync [--dry-run] [--project <path>]` | One sync pass right now |
-| `membridge-beta scan` | Read-only report of discovered tools and projects |
-| `membridge-beta remove [--project <path>]` | Strip injected memory blocks |
-| `membridge-beta enable-autostart` / `disable-autostart` | Run at login |
-| `membridge-beta setup-hooks` / `remove-hooks` | Session summary hook |
-| `membridge-beta signup` / `login` / `logout` | Team account |
-| `membridge-beta join <link-or-code>` | Accept an invite (creates the account if needed) |
-| `membridge-beta team create` / `invite` / `revoke-invite` | Create a team, manage invites |
-| `membridge-beta team link` / `unlink` / `list` | Share or stop sharing a project |
-| `membridge-beta team setup` | Point at a self-hosted backend |
-| `membridge-beta mcp` | Read-only MCP server over stdio |
+| `membridge start` / `stop` / `status` | Manage the background daemon |
+| `membridge dashboard` | Open the web UI at `http://127.0.0.1:7437` |
+| `membridge sync [--dry-run] [--project <path>]` | One sync pass right now |
+| `membridge scan` | Read-only report of discovered tools and projects |
+| `membridge remove [--project <path>]` | Strip injected memory blocks |
+| `membridge enable-autostart` / `disable-autostart` | Run at login |
+| `membridge setup-hooks` / `remove-hooks` | Session summary hook |
+| `membridge signup` / `login` / `logout` | Team account |
+| `membridge join <link-or-code>` | Accept an invite (creates the account if needed) |
+| `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
+| `membridge team link` / `unlink` / `list` | Share or stop sharing a project |
+| `membridge team setup` | Point at a self-hosted backend |
+| `membridge mcp` | Read-only MCP server over stdio |
 
-`membridge-beta mcp` exposes the shared memory as read-only MCP tools —
+`membridge mcp` exposes the shared memory as read-only MCP tools —
 `list_projects`, `get_project_memory`, `get_recent_activity`,
 `search_memory`, `why`, and `recall` — for Claude Desktop, Cursor, and
 other MCP clients. `search_memory` is relevance-ranked, not a plain keyword

@@ -13273,6 +13273,41 @@ async function main() {
     });
   }
 
+  // Regression guard for a real setup-path defect: docs/guide.md's entire CLI
+  // table -- including `membridge-beta mcp`, the exact line an MCP evaluation
+  // follows -- told the reader to run `membridge-beta <cmd>`, while the only
+  // bin package.json has ever declared is `membridge`. Every command in that
+  // table was `command not found` on a fresh `npm install -g`, so the first
+  // thing a new user typed failed. The docs are the install instructions, so a
+  // binary name they invent is as broken as a missing dependency; assert the
+  // user-facing docs only ever name a binary the package actually installs.
+  //
+  // The pattern matches a COMMAND INVOCATION only: line start, a backtick, a
+  // table pipe or whitespace, then a lowercase `membridge...` token followed
+  // by a subcommand word. Deliberately case-sensitive and delimiter-anchored so
+  // the prose product name ("MemBridge Beta is..."), the npm package
+  // (`@membridgeai/membridge`), the state dir (`~/.membridge`), the host
+  // (`membridge.app/install.sh`) and the opt-out file (`.membridge-off`) are
+  // all left alone -- none of those are things a user types as a command.
+  {
+    const repoRoot = path.join(__dirname, '..');
+    const declaredBins = Object.keys(require(path.join(repoRoot, 'package.json')).bin || {});
+    const userFacingDocs = ['README.md', path.join('docs', 'guide.md')];
+    check('docs: every CLI invocation in the user-facing docs names a binary package.json declares', () => {
+      assert.ok(declaredBins.includes('membridge'), 'package.json must declare the `membridge` bin');
+      for (const rel of userFacingDocs) {
+        const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+        const invoked = new Set();
+        for (const m of text.matchAll(/(?:^|[`|\s])(membridge[a-z0-9-]*)\s+[a-z]/gm)) invoked.add(m[1]);
+        assert.ok(invoked.size > 0, `${rel} shows no CLI invocation at all — the pattern has gone stale`);
+        for (const name of invoked) {
+          assert.ok(declaredBins.includes(name),
+            `${rel} tells the user to run \`${name} ...\`, but package.json declares only: ${declaredBins.join(', ')}`);
+        }
+      }
+    });
+  }
+
   // --- 14b. search engine (lib/search.js): pure ranked scoring ---
   {
     const search = require('../lib/search');
