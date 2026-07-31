@@ -22608,6 +22608,155 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // --- packaging pipeline + shell P2 regressions (2026-07-31) ---
+  // Same source-shape style as the block above; each assertion proven
+  // non-vacuous by reverting the fix and watching the check fail.
+  {
+    const appSrc = read(path.join(__dirname, '..', 'app', 'main.js'));
+    const prepSrc = read(path.join(__dirname, '..', 'scripts', 'prepare-app.js'));
+    const rootPkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
+    const appPkg = JSON.parse(read(path.join(__dirname, '..', 'app', 'package.json')));
+
+    check('app package.json metadata agrees with the root package and prepare-app syncs it', () => {
+      // electron-builder stamps license/author/description from
+      // app/package.json into the bundle; the committed file said MIT and
+      // named a single author while the root says FSL-1.1-ALv2 and both.
+      for (const field of ['license', 'author', 'description']) {
+        assert.strictEqual(appPkg[field], rootPkg[field],
+          `app/package.json ${field} drifted from root — the bundle would be stamped wrong`);
+        assert.ok(new RegExp(`${field}:\\s*rootPkg\\.${field}`).test(prepSrc),
+          `prepare-app.js must sync ${field} from root so it can never drift again`);
+      }
+    });
+
+    check('app package.json declares the runtime dependencies, synced from root', () => {
+      // With zero deps declared, electron-builder's own module collection
+      // resolves against the ROOT tree instead of the closure prepare-app
+      // stages — identical today, silently wrong the day they diverge.
+      assert.deepStrictEqual(appPkg.dependencies, rootPkg.dependencies,
+        'app/package.json dependencies must mirror the root runtime deps');
+      assert.ok(/dependencies:\s*rootPkg\.dependencies/.test(prepSrc),
+        'prepare-app.js must sync the dependencies block from root');
+    });
+
+    check('prepare-app closure walk follows optionalDependencies and tolerates absent optionals', () => {
+      // The old walk followed only `dependencies`: a platform-specific
+      // optional would vanish from the asar and require() failed only in the
+      // packaged app. An optional that is not installed is legitimately
+      // absent and must be skipped, not fatal.
+      const { collectClosure } = require('../scripts/prepare-app.js');
+      const repoRoot = path.join(__dirname, '..');
+      const c = collectClosure(repoRoot, {
+        dependencies: {},
+        optionalDependencies: { 'membridge-test-not-a-real-package': '*' },
+      });
+      assert.deepStrictEqual([...c.bundled.keys()], [], 'nothing should bundle');
+      assert.deepStrictEqual(c.skippedOptional, ['membridge-test-not-a-real-package'],
+        'a missing optional must be skipped, never fatal');
+      // A missing HARD dependency still aborts loudly, with the ENOENT +
+      // node_modules wording the skip detector at the top of this file greps.
+      assert.throws(
+        () => collectClosure(repoRoot, { dependencies: { 'membridge-test-not-a-real-package': '*' } }),
+        e => /ENOENT/.test(e.message) && /node_modules/.test(e.message));
+    });
+
+    check('prepare-app resolves packages require-style, not only at the top level', () => {
+      // npm does not guarantee hoisting: `npm ci --omit=dev` leaves
+      // cross-spawn's `which` only at cross-spawn/node_modules/which, and the
+      // top-level slot can hold a WRONG (dev-hoisted) major — this checkout
+      // really had which@5 (ESM-only) hoisted over cross-spawn's ^2.
+      const { resolvePkgDir } = require('../scripts/prepare-app.js');
+      const fx = path.join(ROOT, 'resolve-fixture');
+      const nested = path.join(fx, 'node_modules', 'dep-a', 'node_modules', 'dep-b');
+      fs.mkdirSync(nested, { recursive: true });
+      fs.writeFileSync(path.join(nested, 'package.json'), '{"name":"dep-b","version":"1.0.0"}');
+      const from = path.join(fx, 'node_modules', 'dep-a');
+      assert.strictEqual(resolvePkgDir('dep-b', from, fx), nested,
+        'a nested-only package must resolve from its dependent, like require() does');
+      assert.strictEqual(resolvePkgDir('dep-b', fx, fx), null,
+        'resolution from the root must not see the nested copy (and must stop at the root, not walk to /)');
+    });
+
+    check('prepare-app: missing vendor/grammars is fatal behind its own escape hatch', () => {
+      // A warning scrolled past in CI and shipped an app that could only ever
+      // fall back to lib/skeleton-strip.js. Same convention as the ui-dist
+      // gate: fatal by default, an explicit env var to package without.
+      const { grammarsGate, GRAMMARS_ALLOW_ENV } = require('../scripts/prepare-app.js');
+      assert.strictEqual(grammarsGate({ exists: true, allowMissing: false }), null);
+      const g = grammarsGate({ exists: false, allowMissing: false });
+      assert.strictEqual(g.fatal, true, 'missing grammars must be fatal, not a warning');
+      assert.ok(/fetch-grammars/.test(g.message), 'the fix command must be named');
+      assert.ok(g.message.includes(GRAMMARS_ALLOW_ENV), 'the escape hatch must be discoverable');
+      assert.strictEqual(grammarsGate({ exists: false, allowMissing: true }).fatal, false);
+      assert.ok(prepSrc.includes('process.env[GRAMMARS_ALLOW_ENV]'),
+        'prepare-app must actually consult the escape hatch env var');
+    });
+
+    check('prepare-app stages into a temp dir and destroys nothing before staging succeeds', () => {
+      // The old shape rmSync\'d each target FIRST: any mid-run failure left
+      // app/ gutted, and this very suite spawns the script on every run.
+      const mkdtempAt = prepSrc.indexOf('fs.mkdtempSync');
+      assert.ok(mkdtempAt !== -1, 'staging must go through a mkdtemp temp dir');
+      const firstRm = prepSrc.indexOf('fs.rmSync');
+      assert.ok(firstRm > mkdtempAt,
+        'no rmSync may run before the staging dir even exists — app/ must survive an aborted run');
+      assert.ok(/fs\.rmSync\(dest[\s\S]{0,200}fs\.renameSync/.test(prepSrc),
+        'targets must be replaced by swap (rm then rename of the staged copy), not rebuilt in place');
+    });
+
+    check('ui-dist gate escape message names the real 503 route, not the retired /app', () => {
+      // lib/server.js serves the not-built 503 from / (serveAppRequest);
+      // /app is only a redirect. The old message sent people to look at the
+      // wrong route.
+      const { uiDistGate } = require('../scripts/lib/ui-dist-gate');
+      const msg = uiDistGate({ exists: false, allowMissing: true }).message;
+      assert.ok(/503 at \//.test(msg), 'the escape message must say where the 503 is served');
+      assert.ok(!msg.includes('503 at /app'), 'the /app route is retired — the 503 lives at /');
+    });
+
+    check('app update check: lib resolution happens inside the fail-silent try', () => {
+      // lib(\'update-check\') sat OUTSIDE the try: a resolution failure was an
+      // unhandled rejection taking the app down instead of the documented
+      // fail-silent update check.
+      const start = appSrc.indexOf('async function checkForUpdate');
+      assert.ok(start !== -1, 'checkForUpdate not found');
+      const tryAt = appSrc.indexOf('try {', start);
+      const libAt = appSrc.indexOf("lib('update-check')", start);
+      assert.ok(tryAt !== -1 && libAt !== -1, 'try block or update-check resolution not found');
+      assert.ok(libAt > tryAt, "lib('update-check') must resolve inside the try, not before it");
+    });
+
+    check('app window: load failures show a retry page and the url prefers the bound port', () => {
+      // A dead/binding dashboard server used to surface as Chrome\'s raw
+      // ERR_CONNECTION_REFUSED page; and the window url echoed the CONFIG
+      // port, not the one the server actually bound.
+      assert.ok(/did-fail-load/.test(appSrc), 'a did-fail-load handler must be registered');
+      const h = appSrc.slice(appSrc.indexOf('did-fail-load'));
+      assert.ok(/errorCode === -3/.test(h), 'ERR_ABORTED (a superseded load) must not trigger the error page');
+      assert.ok(/isMainFrame/.test(h), 'subframe failures must not clobber a live dashboard');
+      assert.ok(/data:text\/html/.test(h) && /Retry/.test(h),
+        'the inline error page must exist and carry a Retry link');
+      assert.ok(/boundPort\(\)\s*\|\|/.test(appSrc),
+        'dashboardUrl must prefer boundPort() from lib/server, falling back to the config port');
+    });
+
+    check('app tray: a failed or paused sync is visible in the menu and pause survives relaunch', () => {
+      // runSync swallows errors by design; until now the only trace was the
+      // log file, and pause was in-memory only — a relaunch silently resumed.
+      const runStart = appSrc.indexOf('async function runSync');
+      const runBody = appSrc.slice(runStart, appSrc.indexOf('\nfunction tick', runStart));
+      assert.ok(/lastSyncFailed = true/.test(runBody) && /lastSyncFailed = false/.test(runBody),
+        'runSync must record failure AND clear it on the next success');
+      assert.ok(/Last sync failed/.test(appSrc), 'the menu must carry a last-sync-failed row');
+      assert.ok(/Paused — syncing is off/.test(appSrc), 'the menu must carry a paused indicator row');
+      assert.ok(/syncPaused/.test(appSrc) && /saveUserConfig/.test(appSrc),
+        'the pause flag must persist to config via the shared saveUserConfig path');
+      const restoreAt = appSrc.indexOf('paused = loadPersistedPaused()');
+      assert.ok(restoreAt !== -1 && restoreAt < appSrc.indexOf('setInterval(tick'),
+        'the persisted pause must be restored before the first sync tick');
+    });
+  }
+
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
   // file: these are the actual regression guards, run last so they observe
   // everything the suite did, not just one code path's isolation.

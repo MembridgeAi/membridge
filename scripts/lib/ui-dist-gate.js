@@ -35,7 +35,7 @@ function uiDistGate({ exists, allowMissing }) {
     return {
       fatal: false,
       message: `ui/dist missing — packaging without a UI because ${ALLOW_ENV} is set. `
-        + 'The packaged app will serve a 503 at /app.',
+        + 'The packaged app will serve a 503 at / (the dashboard root).',
     };
   }
   return {

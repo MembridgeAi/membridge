@@ -18,7 +18,7 @@ function lib(m) {
 const util = lib('util');
 const { syncOnce } = lib('scan');
 const notesStore = lib('teammate-notes-store');
-const { startServer } = lib('server');
+const { startServer, boundPort } = lib('server');
 const teamsync = lib('teamsync');
 const hooks = lib('hooks');
 const autostart = lib('autostart');
@@ -28,7 +28,28 @@ let tray = null;
 let win = null;
 let paused = false;
 let lastSync = null;
+let lastSyncFailed = false;
 let syncBusy = false;
+
+// Pause survives a relaunch: the flag lives in config.json next to everything
+// else the daemon persists, via the same loadUserConfig/saveUserConfig
+// read-modify-write every other config writer uses (atomic rename, 0600).
+// Best-effort both ways — a config problem must never take down a tray click
+// or the launch path, so the in-memory flag always still flips.
+function persistPaused(value) {
+  try {
+    const raw = util.loadUserConfig();
+    raw.syncPaused = value;
+    util.saveUserConfig(raw);
+  } catch {}
+}
+function loadPersistedPaused() {
+  try {
+    return !!util.loadUserConfig().syncPaused;
+  } catch {
+    return false;
+  }
+}
 
 function readPid() {
   try {
@@ -103,7 +124,12 @@ async function runSync() {
     // tray app -- the normal install -- never built an index at all).
     notesStore.afterTeamPull(teamResult.changed);
     lastSync = new Date();
+    lastSyncFailed = false;
   } catch (err) {
+    // Still swallowed (a sync error must never take the app down), but no
+    // longer invisible: the tray menu shows a failure row until a sync
+    // succeeds again.
+    lastSyncFailed = true;
     util.log(`tray app sync error: ${err.stack || err}`);
   } finally {
     syncBusy = false;
@@ -123,7 +149,12 @@ function ago(date) {
   return `${Math.round(s / 3600)}h ago`;
 }
 
-const dashboardUrl = () => `http://127.0.0.1:${util.getConfig().dashboardPort}`;
+// Prefer the port the dashboard server ACTUALLY bound (lib/server.js records
+// it from the listening socket — startServer here and boundPort come from the
+// same module instance, so the app sees it directly). config.dashboardPort is
+// only the requested port; it stays as the fallback for the moment before the
+// async listen completes.
+const dashboardUrl = () => `http://127.0.0.1:${boundPort() || util.getConfig().dashboardPort}`;
 
 // The rebuilt UI is the default now (lib/server.js serves it at / directly;
 // the legacy lib/dashboard/* renderer this used to point past is deleted).
@@ -168,6 +199,29 @@ function openDashboard() {
     },
   });
   win.loadURL(windowUrl());
+  // If the dashboard server isn't reachable (crashed, still binding, port
+  // fight lost), Chrome's raw ERR_CONNECTION_REFUSED page is what the user
+  // saw — no product name, no way back. Replace it with a minimal inline
+  // page carrying a working Retry link. errorCode -3 is ERR_ABORTED (a load
+  // superseded by another navigation, not a failure), and subframe failures
+  // must not clobber a dashboard that is otherwise up.
+  win.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return;
+    const target = windowUrl();
+    const port = new URL(target).port || '80';
+    // The Retry link navigates back to the dashboard origin, which the
+    // will-navigate allowlist below already permits; everything else on this
+    // data: page is inert.
+    const html = '<!doctype html><meta charset="utf-8"><title>MemBridge</title>'
+      + '<body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#111;color:#eee">'
+      + '<div style="text-align:center;max-width:26em">'
+      + '<h1 style="font-size:1.2em">Dashboard not reachable</h1>'
+      + `<p>MemBridge couldn't load its dashboard on port ${port}. `
+      + 'The local server may still be starting up.</p>'
+      + `<p><a href="${target}" style="color:#7ab7ff">Retry</a></p>`
+      + '</div></body>';
+    win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  });
   // Anything the dashboard opens as a popup (the GitHub sign-in round trip)
   // goes to the default browser — GitHub is already signed in there, and
   // nothing external ever renders inside the app window. http(s) ONLY: the
@@ -220,8 +274,11 @@ ipcMain.handle(PICK_PATHS_CHANNEL, async (event, options) => {
 //  - manual ("Check for updates…" menu item): always reports a result, forces
 //    a fresh network check, and ignores the once-per-version guard.
 async function checkForUpdate({ manual = false } = {}) {
-  const updateCheck = lib('update-check');
   try {
+    // Inside the try on purpose: lib() resolution can itself throw (a
+    // broken/partial install), and out here that was an unhandled rejection
+    // taking the app down instead of the documented fail-silent.
+    const updateCheck = lib('update-check');
     const r = await updateCheck.check({ current: app.getVersion(), force: manual });
     if (!r.updateAvailable) {
       if (manual) {
@@ -348,6 +405,15 @@ function updateMenu() {
       !!teamsync.loadCredentials(),
     );
   } catch {}
+  // The icon itself has one state, so the menu carries the health signal:
+  // paused wins (a paused app failing its last sync is not news), then a
+  // failed last sync — errors are swallowed in runSync by design, and until
+  // this row they were invisible outside the log file.
+  const indicator = paused
+    ? { label: 'Paused — syncing is off', enabled: false }
+    : lastSyncFailed
+      ? { label: '⚠ Last sync failed — see membridge.log', enabled: false }
+      : null;
   const menu = Menu.buildFromTemplate([
     { label: paused ? 'MemBridge — paused' : 'MemBridge — running', enabled: false },
     {
@@ -356,6 +422,7 @@ function updateMenu() {
         : `${projects} project(s) · last sync ${ago(lastSync)}`,
       enabled: false,
     },
+    ...(indicator ? [indicator] : []),
     { type: 'separator' },
     { label: 'Open dashboard', click: openDashboard },
     {
@@ -370,6 +437,7 @@ function updateMenu() {
       checked: paused,
       click: item => {
         paused = item.checked;
+        persistPaused(paused); // a relaunch stays paused
         updateMenu();
       },
     },
@@ -413,6 +481,9 @@ if (loginArg) {
     util.ensureConfig();
     takeOverDaemon();
     const config = util.getConfig();
+    // Restore a persisted pause BEFORE the first tick, or a relaunch of a
+    // paused app would run one sync pass the user had switched off.
+    paused = loadPersistedPaused();
     startServer(config.dashboardPort);
 
     const iconName = process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png';
