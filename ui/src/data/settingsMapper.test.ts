@@ -145,4 +145,19 @@ describe('mapSettings', () => {
       expect(recall?.installed).toBe(false)
     })
   })
+
+  // Force-update hooks (lib/hooks.js's hooksVersionStatus): the three honest
+  // states -- current / outdated / unknown -- must pass through unmodified,
+  // and an older daemon with no field at all must read as unknown for BOTH
+  // hooks, never a fabricated 'current' that would hide a real update.
+  describe('hooksVersion', () => {
+    it('is unknown for both hooks when an older daemon reports no hooksVersion field at all', () => {
+      const s = mapSettings(raw, status, null)
+      expect(s.hooksVersion).toEqual({ stop: 'unknown', recall: 'unknown' })
+    })
+    it('carries the real per-hook state straight through when the daemon reports it', () => {
+      const s = mapSettings({ ...raw, hooksVersion: { stop: 'outdated', recall: 'current' } }, status, null)
+      expect(s.hooksVersion).toEqual({ stop: 'outdated', recall: 'current' })
+    })
+  })
 })

@@ -138,6 +138,75 @@ describe('SettingsPage', () => {
     expect(await within(row).findByText(/daemon unreachable/i)).toBeInTheDocument()
   })
 
+  // Force-update hooks: the three honest hooksVersion states must each
+  // render their own words, never collapse into one another. The control
+  // lives on the "summaries" (Stop hook) row and covers the recall hook too.
+  describe('Update hooks', () => {
+    it('renders "up to date" for both hooks when hooksVersion reports current', async () => {
+      renderApp({}, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      expect(within(row).getByText(/stop hook: up to date/i)).toBeInTheDocument()
+      expect(within(row).getByText(/recall hook: up to date/i)).toBeInTheDocument()
+    })
+
+    it('renders "outdated — update available" honestly, distinct from up to date', async () => {
+      const client = new FakeDataClient({ hooksVersion: { stop: 'outdated', recall: 'current' } })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      expect(within(row).getByText(/stop hook: outdated — update available/i)).toBeInTheDocument()
+      expect(within(row).getByText(/recall hook: up to date/i)).toBeInTheDocument()
+    })
+
+    it('renders "unknown" when the daemon genuinely cannot tell', async () => {
+      const client = new FakeDataClient({ hooksVersion: { stop: 'unknown', recall: 'unknown' } })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      expect(within(row).getByText(/stop hook: unknown/i)).toBeInTheDocument()
+      expect(within(row).getByText(/recall hook: unknown/i)).toBeInTheDocument()
+    })
+
+    it('calls the real updateHooks method and reports the per-hook result', async () => {
+      const user = userEvent.setup()
+      const client = new FakeDataClient({ hooksVersion: { stop: 'outdated', recall: 'outdated' } })
+      const updateSpy = vi.spyOn(client, 'updateHooks')
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      await user.click(within(row).getByRole('button', { name: /update hooks/i }))
+      expect(updateSpy).toHaveBeenCalled()
+      expect(await within(row).findByText(/stop: rewritten to the current version/i)).toBeInTheDocument()
+      expect(within(row).getByText(/recall: rewritten to the current version/i)).toBeInTheDocument()
+    })
+
+    // A per-hook failure must surface visibly, never read as a silent
+    // success -- the same non-negotiable as the MCP Re-register result above.
+    it('surfaces a per-hook failure instead of a silent success', async () => {
+      const user = userEvent.setup()
+      const client = new FakeDataClient({
+        hooksUpdateResult: {
+          stop: { ok: false, detail: 'settings.json is not valid JSON — fix or remove it first' },
+          recall: { ok: true, detail: 'already up to date' },
+        },
+      })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      await user.click(within(row).getByRole('button', { name: /update hooks/i }))
+      const failChip = await within(row).findByText(/stop: settings\.json is not valid json/i)
+      expect(failChip).toBeInTheDocument()
+      expect(failChip.className).toMatch(/chip-bad/)
+      expect(within(row).getByText(/recall: already up to date/i)).toBeInTheDocument()
+    })
+
+    it('surfaces a rejected updateHooks call instead of failing silently', async () => {
+      const user = userEvent.setup()
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'updateHooks').mockRejectedValue(new Error('daemon unreachable'))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      await user.click(within(row).getByRole('button', { name: /update hooks/i }))
+      expect(await within(row).findByText(/daemon unreachable/i)).toBeInTheDocument()
+    })
+  })
+
   // Settings.daemon.port is genuinely null coming off the real daemon when no
   // server has bound yet (Task 4/17) -- the fake fixture supplies a real
   // port, so this proves the UI reads it honestly rather than guessing.
@@ -212,10 +281,7 @@ describe('SettingsPage', () => {
     const base = await client.getSettings()
     vi.spyOn(client, 'getSettings').mockResolvedValue({
       ...base,
-      delivery: [
-        ...base.delivery,
-        { id: 'summaries', label: 'Session summaries', description: 'Distills each session.', installed: true, enabled: false, detail: '' },
-      ],
+      delivery: base.delivery.map(c => c.id === 'summaries' ? { ...c, enabled: false } : c),
     })
     const setSpy = vi.spyOn(client, 'setSetting')
     renderWith(client, <SettingsPage />)

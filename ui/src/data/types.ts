@@ -204,8 +204,36 @@ export interface DeliveryChannel {
   detail: string
 }
 
+// Force-update hooks (lib/hooks.js's hooksVersionStatus/forceUpdateHooks):
+// 'current' -- the registered hook is stamped with today's build.
+// 'outdated' -- registered, but stamped with an older build (or never
+//   stamped at all, i.e. it predates this feature) -- an update is real.
+// 'unknown' -- nothing owned is registered to compare, or settings.json
+//   could not be read. Never guessed as either of the other two.
+export type HookVintage = 'current' | 'outdated' | 'unknown'
+export interface HooksVersionStatus {
+  stop: HookVintage
+  recall: HookVintage
+}
+// POST /api/hooks/update's response (DataClient.updateHooks) -- one outcome
+// per hook, so a Stop-hook failure can never hide behind a successful recall
+// result. `detail` is always a human-readable sentence, on success and on
+// failure alike (never a bare boolean with nothing to say why).
+export interface HookUpdateOutcome {
+  ok: boolean
+  detail: string
+}
+export interface HookUpdateResult {
+  stop: HookUpdateOutcome
+  recall: HookUpdateOutcome
+}
+
 export interface Settings {
   delivery: DeliveryChannel[]
+  // Independent of delivery[].installed above (which only answers "is it
+  // there at all") -- this answers "is what's there the current build".
+  // Only meaningful once a hook is actually installed; see HookVintage.
+  hooksVersion: HooksVersionStatus
   // redactionBuiltIn is null only when the daemon payload predates the field
   // entirely (an older daemon's /api/settings carries no redactionBuiltIn at
   // all -- see mapSettings). A present daemon always reports the real

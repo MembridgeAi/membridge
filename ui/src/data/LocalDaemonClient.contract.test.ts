@@ -65,6 +65,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getSettings: c => c.getSettings(),
   setSetting: c => c.setSetting('k', 'v'),
   registerMcp: c => c.registerMcp(),
+  updateHooks: c => c.updateHooks(),
   setProjectAccessDefault: c => c.setProjectAccessDefault('/x', true),
   restartDaemon: c => c.restartDaemon(),
   checkForUpdates: c => c.checkForUpdates(),

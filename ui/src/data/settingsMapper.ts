@@ -1,7 +1,7 @@
 // Settings-specific mapping, split out of mappers.ts (Task 18) to keep that
 // file focused on feed/project/member mapping -- Settings' raw shape and
 // fold logic is a large, self-contained unit of its own.
-import type { DeliveryChannel, Role, Settings, Status } from './types'
+import type { DeliveryChannel, HooksVersionStatus, Role, Settings, Status } from './types'
 
 // One row per AI tool mcp-register.js attempted -- see lib/mcp-register.js's
 // `row()` for the full shape; only the fields this page actually renders are
@@ -43,6 +43,12 @@ export interface RawSettingsPayload {
   // that absence as unknown, never as false -- see DeliveryChannel.installed.
   mcp?: RawMcpStatus
   recall?: RawRecallStatus
+  // Force-update hooks (lib/hooks.js's hooksVersionStatus). Optional for the
+  // same older-daemon reason as mcp/recall above; absence maps to both
+  // 'unknown' below -- HookVintage already HAS an honest "can't tell" state,
+  // so there is no separate null layer to add here the way redactionBuiltIn
+  // needed one.
+  hooksVersion?: HooksVersionStatus
   // Optional for the same older-daemon reason: absence maps to null
   // (unknown), never 0 -- see Settings.privacy.redactionBuiltIn in types.ts.
   redactionBuiltIn?: number
@@ -168,6 +174,10 @@ export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTe
       recallChannel(raw.recall),
       mcpChannel(raw.mcp),
     ],
+    // Absence (an older daemon) reads as 'unknown' for both -- never a
+    // fabricated 'current', which would tell the owner an update is
+    // unnecessary when this daemon genuinely cannot say.
+    hooksVersion: raw.hooksVersion ?? { stop: 'unknown', recall: 'unknown' },
     privacy: {
       endToEnd: status.encryption.enabled,
       plaintextShared: !status.encryption.plaintextOff,

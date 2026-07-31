@@ -294,6 +294,20 @@ export function useRegisterMcp() {
   })
 }
 
+// Force-update the Stop and recall hooks to the current build (POST
+// /api/hooks/update), always available regardless of the reported
+// hooksVersion state -- same "not gated" shape as useRegisterMcp above.
+// Invalidates settings so the vintage chips reflect what forceUpdateHooks()
+// just found, on success or on a per-hook failure alike.
+export function useUpdateHooks() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => c.updateHooks(),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+  })
+}
+
 export function useSetProjectAccessDefault() {
   const c = useDataClient()
   const qc = useQueryClient()

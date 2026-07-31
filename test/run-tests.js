@@ -7682,6 +7682,76 @@ async function main() {
     assert.ok(!claude.includes('append a line to'), 'CLAUDE.md got the Codex fallback instruction');
   });
 
+  // The standing MCP-usage nudge (same lever as the self-report instruction
+  // above): renderBlock only ever prints it for a target whose OWN agent has
+  // a live MCP registration -- digest.TARGET_MCP_AGENT / mcpLiveFor.
+  check('digest: the MCP-usage line appears only when the target\'s own agent is actually registered', () => {
+    const cfg = util.getConfig();
+    const proj = { events: [] };
+    const registeredClaude = [{ agent: 'claude-code', status: 'registered', detail: null }];
+    const unchangedClaude = [{ agent: 'claude-code', status: 'unchanged', detail: 'already registered' }];
+    const skippedClaude = [{ agent: 'claude-code', status: 'skipped', detail: 'not installed' }];
+    const registeredCodex = [{ agent: 'codex', status: 'registered', detail: null }];
+    const MCP_LINE = 'search_memory';
+
+    const withClaude = digest.renderBlock('/repo', proj, cfg, 'CLAUDE.md', [], registeredClaude);
+    assert.ok(withClaude.includes(MCP_LINE), 'MCP line missing when claude-code is registered');
+    assert.strictEqual((withClaude.match(/search_memory/g) || []).length, 1, 'MCP line appeared more than once');
+
+    const withUnchanged = digest.renderBlock('/repo', proj, cfg, 'CLAUDE.md', [], unchangedClaude);
+    assert.ok(withUnchanged.includes(MCP_LINE), '"unchanged" (already registered, nothing to do) must still count as live');
+
+    const withoutRows = digest.renderBlock('/repo', proj, cfg, 'CLAUDE.md', [], undefined);
+    assert.ok(!withoutRows.includes(MCP_LINE), 'MCP line appeared with no registration data at all -- every pre-existing caller omits this argument');
+    assert.ok(withoutRows.includes('Shared AI memory (MemBridge)'), 'the block must still render correctly without the MCP line');
+
+    const withSkipped = digest.renderBlock('/repo', proj, cfg, 'CLAUDE.md', [], skippedClaude);
+    assert.ok(!withSkipped.includes(MCP_LINE), 'MCP line appeared for an agent mcp-register.js could not actually reach (status skipped)');
+
+    // CLAUDE.md maps to the claude-code agent; a codex-only registration must
+    // not turn the line on for it, and vice versa for AGENTS.md/codex.
+    const claudeWithCodexOnly = digest.renderBlock('/repo', proj, cfg, 'CLAUDE.md', [], registeredCodex);
+    assert.ok(!claudeWithCodexOnly.includes(MCP_LINE), 'CLAUDE.md got the line from a codex-only registration');
+    const agentsWithCodex = digest.renderBlock('/repo', proj, cfg, 'AGENTS.md', [], registeredCodex);
+    assert.ok(agentsWithCodex.includes(MCP_LINE), 'AGENTS.md did not get the line from a live codex registration');
+    const agentsWithClaudeOnly = digest.renderBlock('/repo', proj, cfg, 'AGENTS.md', [], registeredClaude);
+    assert.ok(!agentsWithClaudeOnly.includes(MCP_LINE), 'AGENTS.md got the line from a claude-code-only registration');
+
+    assert.ok(withClaude.startsWith(digest.BEGIN) && withClaude.trim().endsWith(digest.END), 'block markers lost once the MCP line is present');
+  });
+
+  // The wiring half: lib/scan.js actually reads mcp-register.js's recorded
+  // rows and threads them into renderBlock for every dirty project -- not
+  // just something renderBlock can do if handed the right argument by hand.
+  check('scan: syncOnce reads the recorded MCP registration and injects the line per-target, from real state', () => {
+    const repo = path.join(ROOT, 'mcp-line-project');
+    fs.mkdirSync(repo, { recursive: true });
+    const before = util.loadState();
+    util.saveState({
+      ...before,
+      projects: { ...(before.projects || {}), [repo]: { events: [], dirty: true } },
+      mcpRegistration: {
+        mode: 'register', at: new Date().toISOString(), version: '0.0.0', fingerprint: 'test-fp',
+        rows: [
+          { agent: 'claude-code', status: 'registered', detail: null },
+          { agent: 'codex', status: 'skipped', detail: 'not installed' },
+        ],
+      },
+    });
+    try {
+      syncOnce({ project: repo });
+      const claudeMd = read(path.join(repo, 'CLAUDE.md'));
+      const agentsMd = read(path.join(repo, 'AGENTS.md'));
+      assert.ok(claudeMd.includes('search_memory'), 'CLAUDE.md missing the MCP line for a registered claude-code agent');
+      assert.strictEqual((claudeMd.match(/search_memory/g) || []).length, 1, 'MCP line duplicated in CLAUDE.md');
+      assert.ok(!agentsMd.includes('search_memory'), 'AGENTS.md got the MCP line from a codex agent mcp-register.js reported as skipped');
+    } finally {
+      const cleaned = util.loadState();
+      delete cleaned.mcpRegistration;
+      util.saveState(cleaned);
+    }
+  });
+
   // setup-hooks / remove-hooks: surgical merge into a user's settings.json.
   const claudeSettings = path.join(ROOT, 'claude-settings.json');
   const seedSettings = {
@@ -8070,6 +8140,191 @@ async function main() {
       process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
   });
+
+  // ---- Hook vintage / force-update (the "force update the hook to the
+  // newest version" feature) ----
+  //
+  // hookFingerprint() stamps `v=<membridgeVersion>` onto every owned hook
+  // object as `membridgeFingerprint`, mirroring lib/mcp-register.js's
+  // registrationFingerprint but embedded IN the artifact (settings.json)
+  // rather than cached separately, so a hook's vintage is knowable from the
+  // file alone. reconcileStopHook/reconcileRecallHook now require BOTH the
+  // command AND the fingerprint to match before calling an entry "current" --
+  // a command-only comparison would never notice a version bump at a FIXED
+  // install path (global npm install, app bundle replaced in place).
+  check('hooks: an entry with the current command but no stamped fingerprint (pre-feature install) is reported outdated and rewritten', () => {
+    const f = path.join(ROOT, 'claude-settings-vintage-outdated.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] }],
+        PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] }],
+      },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const before = hooks.hooksVersionStatus();
+      assert.strictEqual(before.stop, 'outdated', `an unstamped Stop hook must read outdated, got ${before.stop}`);
+      assert.strictEqual(before.recall, 'outdated', `an unstamped recall hook must read outdated, got ${before.recall}`);
+
+      const rStop = hooks.reconcileStopHook();
+      assert.strictEqual(rStop.wrote, true, 'a fingerprint-only mismatch must still trigger a rewrite');
+      assert.strictEqual(rStop.upgraded, 1);
+      const rRecall = hooks.reconcileRecallHook();
+      assert.strictEqual(rRecall.wrote, true, 'a fingerprint-only mismatch must still trigger a rewrite');
+      assert.strictEqual(rRecall.upgraded, 1);
+
+      const after = JSON.parse(read(f));
+      assert.strictEqual(after.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'command changed when it should not have');
+      assert.strictEqual(after.hooks.Stop[0].hooks[0].membridgeFingerprint, hooks.hookFingerprint(), 'Stop hook not stamped with the current fingerprint');
+      assert.strictEqual(after.hooks.Stop[0].hooks[0].timeout, 10, 'sibling fields lost while stamping');
+      assert.strictEqual(after.hooks.PreToolUse[0].hooks[0].membridgeFingerprint, hooks.hookFingerprint(), 'recall hook not stamped with the current fingerprint');
+
+      const status = hooks.hooksVersionStatus();
+      assert.strictEqual(status.stop, 'current', 'still reported outdated after the rewrite');
+      assert.strictEqual(status.recall, 'current', 'still reported outdated after the rewrite');
+
+      // Idempotent: a second reconcile against the now-stamped entry is a no-op.
+      assert.strictEqual(hooks.reconcileStopHook().wrote, false, 'reconcile is not idempotent once stamped');
+      assert.strictEqual(hooks.reconcileRecallHook().wrote, false, 'reconcile is not idempotent once stamped');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('hooks: a hook already carrying the current command and fingerprint is left completely alone', () => {
+    const f = path.join(ROOT, 'claude-settings-vintage-current.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10, membridgeFingerprint: hooks.hookFingerprint() }] }],
+        PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5, membridgeFingerprint: hooks.hookFingerprint() }] }],
+      },
+      // The append auto-approve rule is reconciled alongside the Stop hook
+      // (upsertAllowRule) -- omitting it here would make reconcileStopHook
+      // write on its account even though the hook itself is untouched, which
+      // would prove nothing about fingerprint idempotency specifically.
+      permissions: { allow: [hooks.appendAllowRule()] },
+    }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const status = hooks.hooksVersionStatus();
+      assert.strictEqual(status.stop, 'current');
+      assert.strictEqual(status.recall, 'current');
+      const before = read(f);
+      const rStop = hooks.reconcileStopHook();
+      assert.strictEqual(rStop.wrote, false, 'an already-current Stop hook was rewritten');
+      assert.strictEqual(rStop.current, true);
+      const rRecall = hooks.reconcileRecallHook();
+      assert.strictEqual(rRecall.wrote, false, 'an already-current recall hook was rewritten');
+      assert.strictEqual(rRecall.current, true);
+      assert.strictEqual(read(f), before, 'the file was touched even though nothing needed to change');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('hooks: hooksVersionStatus reads unknown, never outdated, when nothing owned is registered', () => {
+    const f = path.join(ROOT, 'claude-settings-vintage-none.json');
+    fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [], PreToolUse: [] } }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const status = hooks.hooksVersionStatus();
+      assert.strictEqual(status.stop, 'unknown', 'nothing installed must read unknown, not outdated');
+      assert.strictEqual(status.recall, 'unknown', 'nothing installed must read unknown, not outdated');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('hooks: hooksVersionStatus reads unknown when settings.json cannot be parsed', () => {
+    const f = path.join(ROOT, 'claude-settings-vintage-broken.json');
+    fs.writeFileSync(f, '{not json');
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const status = hooks.hooksVersionStatus();
+      assert.strictEqual(status.stop, 'unknown');
+      assert.strictEqual(status.recall, 'unknown');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('hooks: forceUpdateHooks leaves a foreign hook untouched and reports success for both of ours', () => {
+    const f = path.join(ROOT, 'claude-settings-force-update-foreign.json');
+    const userStop = { hooks: [{ type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mylint.js' }] };
+    const userPre = { matcher: 'Write', hooks: [{ type: 'command', command: 'node /Users/marco/Documents/Membridge/scripts/mylint.js' }] };
+    fs.writeFileSync(f, JSON.stringify({ hooks: { Stop: [userStop], PreToolUse: [userPre] } }, null, 2));
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const result = hooks.forceUpdateHooks();
+      assert.strictEqual(result.stop.ok, true, `stop reconcile failed: ${result.stop.detail}`);
+      assert.strictEqual(result.recall.ok, true, `recall reconcile failed: ${result.recall.detail}`);
+      const after = JSON.parse(read(f));
+      assert.deepStrictEqual(after.hooks.Stop[0], userStop, "force-update rewrote a foreign Stop hook that was never ours");
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], userPre, "force-update rewrote a foreign PreToolUse hook that was never ours");
+      // Our own entries were appended alongside, current and stamped.
+      assert.strictEqual(after.hooks.Stop[1].hooks[0].membridgeFingerprint, hooks.hookFingerprint());
+      assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].membridgeFingerprint, hooks.hookFingerprint());
+      // Calling it again is a true no-op — force-update converges, it does
+      // not blindly rewrite every time.
+      const before2 = read(f);
+      const result2 = hooks.forceUpdateHooks();
+      assert.strictEqual(result2.stop.ok, true);
+      assert.strictEqual(result2.recall.ok, true);
+      assert.strictEqual(read(f), before2, 'a second force-update rewrote an already-current file');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+  check('hooks: forceUpdateHooks does not clobber a durable foreign MemBridge install when we are the transient one', () => {
+    const durableDir = path.join(ROOT, 'force-update-durable', 'lib');
+    fs.mkdirSync(durableDir, { recursive: true });
+    const durableScript = path.join(durableDir, 'membridge-hook.js');
+    fs.writeFileSync(durableScript, '// stand-in for a real durable install\n');
+    const durableCmd = `"${process.execPath}" "${durableScript}"`;
+    const transientDir = path.join(ROOT, 'npm-cache-2', '_npx', 'z9y8', 'lib');
+    fs.mkdirSync(transientDir, { recursive: true });
+    const tmpScript = path.join(transientDir, 'membridge-hook.js');
+    fs.writeFileSync(tmpScript, '// stand-in for an npx-cache copy\n');
+
+    const f = path.join(ROOT, 'claude-settings-force-update-durable.json');
+    fs.writeFileSync(f, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: durableCmd, timeout: 10 }] }] },
+    }, null, 2));
+    const prevSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    const prevSelf = process.env.MEMBRIDGE_HOOK_SCRIPT;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    process.env.MEMBRIDGE_HOOK_SCRIPT = tmpScript; // pretend this process IS the throwaway install
+    try {
+      const result = hooks.forceUpdateHooks();
+      assert.strictEqual(result.stop.ok, true, 'yielding is a deliberate no-op, not a failure');
+      assert.ok(/durable/.test(result.stop.detail), `detail did not explain the yield: ${result.stop.detail}`);
+      const after = JSON.parse(read(f));
+      assert.strictEqual(after.hooks.Stop[0].hooks[0].command, durableCmd, "force-update overwrote the durable install's command");
+      assert.strictEqual(after.hooks.Stop[0].hooks[0].membridgeFingerprint, undefined, "force-update stamped a fingerprint onto a hook it does not own the install of");
+    } finally {
+      if (prevSettings === undefined) delete process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+      else process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevSettings;
+      if (prevSelf === undefined) delete process.env.MEMBRIDGE_HOOK_SCRIPT;
+      else process.env.MEMBRIDGE_HOOK_SCRIPT = prevSelf;
+    }
+  });
+  check('hooks: forceUpdateHooks surfaces a real failure per hook instead of silently claiming success', () => {
+    const f = path.join(ROOT, 'claude-settings-force-update-broken.json');
+    fs.writeFileSync(f, '{not json');
+    const prev = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+    process.env.MEMBRIDGE_CLAUDE_SETTINGS = f;
+    try {
+      const result = hooks.forceUpdateHooks();
+      assert.strictEqual(result.stop.ok, false, 'an unparseable settings.json must fail loudly, not report ok');
+      assert.ok(result.stop.detail && result.stop.detail.length > 0, 'stop failure carries no explanation');
+      assert.strictEqual(result.recall.ok, false);
+      assert.ok(result.recall.detail && result.recall.detail.length > 0, 'recall failure carries no explanation');
+    } finally {
+      process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
+    }
+  });
+
   check('distill: isHookInstalled is false when the hook executable does not resolve', () => {
     const deadFile = path.join(ROOT, 'claude-settings-dead.json');
     fs.writeFileSync(deadFile, JSON.stringify({
@@ -21423,6 +21678,89 @@ const repoRoot = require('../lib/repo-root');
           assert.ok(['registered', 'removed', 'unchanged', 'skipped', 'failed'].includes(row.status), `unexpected status ${row.status}`);
           assert.strictEqual(row.status, 'skipped', 'the test-harness guard must engage for a MEMBRIDGE_HOME under os.tmpdir()');
           assert.strictEqual(row.reason, 'test-harness');
+        }
+      });
+
+      // GET /api/settings's hooksVersion field (force-update feature): per
+      // hook, 'current' | 'outdated' | 'unknown', read fresh from
+      // settings.json every call -- see lib/hooks.js's hooksVersionStatus.
+      await check('GET /api/settings hooksVersion reports current/outdated/unknown honestly', async () => {
+        const claudeSettingsFile = path.join(HOME_T17, 'claude-settings-hooksversion.json');
+        fs.mkdirSync(path.dirname(claudeSettingsFile), { recursive: true });
+        const prevClaudeSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+        process.env.MEMBRIDGE_CLAUDE_SETTINGS = claudeSettingsFile;
+        try {
+          fs.writeFileSync(claudeSettingsFile, JSON.stringify({ hooks: {} }, null, 2));
+          const none = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(none.hooksVersion.stop, 'unknown', 'nothing installed must read unknown');
+          assert.strictEqual(none.hooksVersion.recall, 'unknown');
+
+          fs.writeFileSync(claudeSettingsFile, JSON.stringify({
+            hooks: {
+              Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] }],
+              PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] }],
+            },
+          }, null, 2));
+          const outdated = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(outdated.hooksVersion.stop, 'outdated', 'an unstamped hook must read outdated, not current');
+          assert.strictEqual(outdated.hooksVersion.recall, 'outdated');
+
+          fs.writeFileSync(claudeSettingsFile, JSON.stringify({
+            hooks: {
+              Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10, membridgeFingerprint: hooks.hookFingerprint() }] }],
+              PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5, membridgeFingerprint: hooks.hookFingerprint() }] }],
+            },
+          }, null, 2));
+          const current = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(current.hooksVersion.stop, 'current');
+          assert.strictEqual(current.hooksVersion.recall, 'current');
+        } finally {
+          process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevClaudeSettings;
+        }
+      });
+
+      // POST /api/hooks/update: the owner-triggered force-update action --
+      // rewrites both hooks to current and reports per-hook success. A
+      // FAILURE (e.g. an unreadable settings.json) must surface visibly, not
+      // read as a blanket ok:true.
+      await check('POST /api/hooks/update force-rewrites both hooks and reports per-hook success', async () => {
+        const claudeSettingsFile = path.join(HOME_T17, 'claude-settings-force-update.json');
+        const prevClaudeSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+        process.env.MEMBRIDGE_CLAUDE_SETTINGS = claudeSettingsFile;
+        try {
+          fs.writeFileSync(claudeSettingsFile, JSON.stringify({
+            hooks: {
+              Stop: [{ hooks: [{ type: 'command', command: hooks.hookCommand(), timeout: 10 }] }],
+              PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: hooks.recallCommand(), timeout: 5 }] }],
+            },
+          }, null, 2));
+          const body = await httpPost(T17_PORT, '/api/hooks/update', {});
+          assert.strictEqual(body.stop.ok, true, `stop update failed: ${body.stop.detail}`);
+          assert.strictEqual(body.recall.ok, true, `recall update failed: ${body.recall.detail}`);
+          const after = JSON.parse(read(claudeSettingsFile));
+          assert.strictEqual(after.hooks.Stop[0].hooks[0].membridgeFingerprint, hooks.hookFingerprint(), 'Stop hook not force-updated to current');
+          assert.strictEqual(after.hooks.PreToolUse[0].hooks[0].membridgeFingerprint, hooks.hookFingerprint(), 'recall hook not force-updated to current');
+
+          const statusAfter = await httpGet(T17_PORT, '/api/settings');
+          assert.strictEqual(statusAfter.hooksVersion.stop, 'current');
+          assert.strictEqual(statusAfter.hooksVersion.recall, 'current');
+        } finally {
+          process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevClaudeSettings;
+        }
+      });
+      await check('POST /api/hooks/update reports failure visibly when settings.json cannot be read', async () => {
+        const claudeSettingsFile = path.join(HOME_T17, 'claude-settings-force-update-broken.json');
+        const prevClaudeSettings = process.env.MEMBRIDGE_CLAUDE_SETTINGS;
+        process.env.MEMBRIDGE_CLAUDE_SETTINGS = claudeSettingsFile;
+        try {
+          fs.writeFileSync(claudeSettingsFile, '{not json');
+          const body = await httpPost(T17_PORT, '/api/hooks/update', {});
+          assert.strictEqual(body.stop.ok, false, 'a malformed settings.json must not be reported as a successful update');
+          assert.ok(body.stop.detail, 'stop failure carries no explanation');
+          assert.strictEqual(body.recall.ok, false);
+          assert.ok(body.recall.detail, 'recall failure carries no explanation');
+        } finally {
+          process.env.MEMBRIDGE_CLAUDE_SETTINGS = prevClaudeSettings;
         }
       });
 

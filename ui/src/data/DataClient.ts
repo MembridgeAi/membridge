@@ -1,6 +1,6 @@
 import type {
-  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role, Settings,
-  SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AuditEvent, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
+  Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -79,6 +79,13 @@ export interface DataClient {
   // state -- the real fix for "it claims installed but is misbehaving".
   // Resolves with the same per-tool rows `membridge mcp register` prints.
   registerMcp(): Promise<McpRegisterResult>
+
+  // Owner-triggered force-update (POST /api/hooks/update): rewrites the Stop
+  // and recall hooks to the current build regardless of Settings.hooksVersion's
+  // current reading -- the way to actually get from 'outdated'/'unknown' to
+  // 'current'. Always callable, same "not gated on the reported state" shape
+  // as registerMcp above.
+  updateHooks(): Promise<HookUpdateResult>
 
   // Task 17/18: daemon- and machine-level controls the mockups show with no
   // backing method until now.

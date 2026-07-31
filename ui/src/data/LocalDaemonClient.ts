@@ -3,8 +3,8 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AuditEvent, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role, Settings,
-  SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AuditEvent, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
+  Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -317,6 +317,14 @@ export class LocalDaemonClient implements DataClient {
   // when a tool claims installed but is actually misbehaving.
   async registerMcp(): Promise<McpRegisterResult> {
     return post<McpRegisterResult>('/api/mcp/register')
+  }
+
+  // Same "always available" shape as registerMcp above, for the Stop and
+  // recall hooks: force-rewrites both to the current build and reports each
+  // one's own ok/detail (lib/hooks.js's forceUpdateHooks), regardless of what
+  // Settings.hooksVersion currently reads.
+  async updateHooks(): Promise<HookUpdateResult> {
+    return post<HookUpdateResult>('/api/hooks/update')
   }
 
   // Task 17: respond BEFORE the daemon restarts -- the promise resolves once

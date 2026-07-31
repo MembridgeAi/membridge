@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
 import { useOpenConfigFile, useSetSetting, useSettings, useStatus } from '../../data/queries'
-import type { DeliveryChannel } from '../../data/types'
+import type { DeliveryChannel, HooksVersionStatus } from '../../data/types'
 import { ContextFilesDialog } from './ContextFilesDialog'
 import { DaemonGroup } from './DaemonGroup'
 import { EditListDialog } from './EditListDialog'
@@ -10,6 +10,7 @@ import { ExcludedFoldersDialog } from './ExcludedFoldersDialog'
 import { McpRegisterControl } from './McpRegisterControl'
 import { SettingRow } from './SettingRow'
 import { TeamGroup } from './TeamGroup'
+import { UpdateHooksControl } from './UpdateHooksControl'
 import './settings.css'
 
 function errorMessage(error: unknown): string {
@@ -26,6 +27,7 @@ interface DeliveryControlProps {
   channel: DeliveryChannel
   onSetSetting: SetSettingFn
   onChooseFiles: () => void
+  hooksVersion: HooksVersionStatus
 }
 
 // A channel's dynamic specifics (which tools, when last checked) -- '' when
@@ -49,13 +51,14 @@ function ChannelDetail({ detail }: { detail: string }) {
 // through this early return too: Re-register (McpRegisterControl) must stay
 // available even when the daemon has never reported a check, since running
 // it IS how a check happens.
-function DeliveryControl({ channel, onSetSetting, onChooseFiles }: DeliveryControlProps) {
+function DeliveryControl({ channel, onSetSetting, onChooseFiles, hooksVersion }: DeliveryControlProps) {
   if (channel.installed === null) {
     return (
       <>
         <StateChip tone="muted" glyph="•">not checked yet</StateChip>
         <ChannelDetail detail={channel.detail} />
         {channel.id === 'mcp' && <McpRegisterControl />}
+        {channel.id === 'summaries' && <UpdateHooksControl hooksVersion={hooksVersion} />}
       </>
     )
   }
@@ -89,6 +92,9 @@ function DeliveryControl({ channel, onSetSetting, onChooseFiles }: DeliveryContr
             onChange={next => onSetSetting('distill', { enabled: next })}
           />
         )}
+        {/* Force-update: covers BOTH the Stop hook (this row) and the recall
+            hook (its own row below) in one action -- see UpdateHooksControl. */}
+        <UpdateHooksControl hooksVersion={hooksVersion} />
       </>
     )
   }
@@ -188,7 +194,12 @@ export function SettingsPage() {
           description={channel.description}
           testId={`setting-${channel.id}`}
         >
-          <DeliveryControl channel={channel} onSetSetting={onSetSetting} onChooseFiles={() => setActiveDialog('contextFiles')} />
+          <DeliveryControl
+            channel={channel}
+            onSetSetting={onSetSetting}
+            onChooseFiles={() => setActiveDialog('contextFiles')}
+            hooksVersion={settings.hooksVersion}
+          />
         </SettingRow>
       ))}
 

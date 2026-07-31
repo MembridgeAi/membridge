@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
-  AccessMatrix, AssistsStats, AuditEvent, FeedEntry, FeedFilters, FeedPage, Insights, Invite, LiveSession, McpRegisterResult, Member, Project,
-  Role, Settings, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AssistsStats, AuditEvent, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights, Invite, LiveSession,
+  McpRegisterResult, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 export interface FakeOptions {
@@ -32,6 +32,15 @@ export interface FakeOptions {
   // pass null to exercise the no-hosted-join-page degrade path (falls back
   // to sharing the standing invite code).
   webUrl?: string | null
+  // Settings.hooksVersion override. Defaults to both 'current' (the quiet,
+  // nothing-to-do case); pass 'outdated'/'unknown' to exercise the
+  // Update-hooks control's other two chip states.
+  hooksVersion?: HooksVersionStatus
+  // updateHooks()'s result. Defaults to both hooks succeeding. Override
+  // per-hook -- e.g. { stop: { ok: false, detail: '...' }, recall: { ok: true, detail: '...' } }
+  // -- to exercise the UI's failure-surfacing path (a real per-hook failure,
+  // not a request-level rejection, which failWith above already covers).
+  hooksUpdateResult?: HookUpdateResult
 }
 
 export class FakeDataClient implements DataClient {
@@ -217,9 +226,15 @@ export class FakeDataClient implements DataClient {
     return this.guard<Settings>({
       delivery: [
         { id: 'context-block', label: 'Context block', description: 'A small skeleton written into CLAUDE.md, AGENTS.md, GEMINI.md', installed: true, enabled: null, detail: '' },
+        {
+          id: 'summaries', label: 'Session summaries',
+          description: 'A Claude Code Stop-hook that distills each session into a summary as it ends.',
+          installed: true, enabled: true, detail: '',
+        },
         { id: 'recall', label: 'Recall', description: 'Surfaces a relevant past note the moment a matching file is opened.', installed: true, enabled: null, detail: 'Installed as a Claude Code hook.' },
         { id: 'mcp', label: 'MCP server', description: 'Lets any MCP-capable tool query team memory directly', installed: false, enabled: null, detail: '' },
       ],
+      hooksVersion: this.opts.hooksVersion ?? { stop: 'current', recall: 'current' },
       privacy: {
         endToEnd: true, plaintextShared: false, redactionBuiltIn: 18, redactionCustom: 2, excludedPaths: 3,
         redactExtra: ['sk-custom-[a-z0-9]+', 'ACME_[A-Z]+_KEY'],
@@ -246,6 +261,12 @@ export class FakeDataClient implements DataClient {
         { agent: 'claude-code', status: 'registered', detail: null },
         { agent: 'codex', status: 'unchanged', detail: 'already registered' },
       ],
+    })
+  }
+  updateHooks() {
+    return this.guard<HookUpdateResult>(this.opts.hooksUpdateResult ?? {
+      stop: { ok: true, detail: 'rewritten to the current version' },
+      recall: { ok: true, detail: 'rewritten to the current version' },
     })
   }
 
