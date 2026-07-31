@@ -24,7 +24,7 @@ function createMockSupabase() {
   // rejectColumns is the general form — any column name added here provokes the
   // PostgREST "schema cache" error until the POST body no longer carries it, so
   // the client's drop-and-retry loop can be exercised across multiple columns.
-  const flags = { rejectSummary: false, rejectColumns: new Set() };
+  const flags = { rejectSummary: false, rejectColumns: new Set(), failEntryInserts: false };
 
   const uuid = () => crypto.randomUUID();
   const shortToken = () => crypto.randomBytes(8).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x').slice(0, 10);
@@ -242,6 +242,30 @@ function createMockSupabase() {
           return json(res, 400, { message: `Could not find the '${col}' column of 'memory_entries' in the schema cache` });
         }
       }
+      // An upsert is ONE statement, and Postgres refuses to update the same
+      // row twice within it: two payload rows sharing the on_conflict key
+      // abort the whole batch with SQLSTATE 21000, whatever `Prefer` says
+      // (that only governs conflicts with rows ALREADY in the table). The
+      // row-at-a-time loop below silently tolerated such a batch, which is
+      // why a self-conflicting push looked fine here while failing in
+      // production. Only upserts (on_conflict present) can raise this.
+      if (url.searchParams.has('on_conflict')) {
+        const seen = new Set();
+        for (const r of rows) {
+          const k = [r.project_id, r.author_id, r.ts, r.source].join(' ');
+          if (seen.has(k)) {
+            return json(res, 400, {
+              code: '21000',
+              message: 'ON CONFLICT DO UPDATE command cannot affect row a second time',
+            });
+          }
+          seen.add(k);
+        }
+      }
+      // Blunt "the insert failed" knob, independent of the schema-drift and
+      // duplicate-key paths above: lets a test prove what survives a push
+      // that simply does not land.
+      if (flags.failEntryInserts) return json(res, 500, { message: 'insert failed' });
       const merge = /merge-duplicates/.test(prefer || '');
       for (const r of rows) {
         if (r.author_id !== userId || !isMember(projectTeam(r.project_id), userId)) {
