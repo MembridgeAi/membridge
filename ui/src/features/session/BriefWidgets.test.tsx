@@ -1,0 +1,96 @@
+import { describe, it, expect } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import { BriefWidgets } from './BriefWidgets'
+import type { Session } from '../../data/types'
+
+const session = (overrides: Partial<Session> = {}): Session => ({
+  session: 's1', project: 'membridge', projectPath: '/x/membridge',
+  author: 'Andrew', authorId: 'andrew', source: 'Claude Code',
+  startedAt: '2026-07-29T19:00:00Z', endedAt: '2026-07-29T20:30:00Z', live: false,
+  summary: 'done', summaryFull: 'done', goal: null, headline: null,
+  decisions: 'Durability beats recency because a crashed run must not steal the hook.',
+  gotchas: 'settings.json rewrites drop unknown keys, so merge before writing.',
+  files: ['lib/hooks.js', 'test/run-tests.js'],
+  changes: [
+    { file: 'lib/hooks.js', status: 'edited', add: 41, del: 12, note: 'ownership gate', dep: false },
+    { file: 'test/run-tests.js', status: 'edited', add: 88, del: 2, note: null, dep: false },
+  ],
+  checkpoints: [
+    { ts: '2026-07-29T19:40:00Z', text: 'Gate extracted; stop path green.' },
+    { ts: '2026-07-29T20:30:00Z', text: 'Hook ownership decided by durability.' },
+  ],
+  prompts: [],
+  ...overrides,
+})
+
+function widgetTitles(): string[] {
+  return [...document.querySelectorAll('details.session-widget summary .session-widget-title')]
+    .map(el => el.textContent || '')
+}
+
+describe('BriefWidgets (Task 4)', () => {
+  it('renders the five widgets in the locked fixed order', () => {
+    render(<BriefWidgets session={session()} />)
+    expect(widgetTitles()).toEqual(['Why', 'Watch out', 'Key files', 'Changes', 'Checkpoints'])
+  })
+
+  it('Why and Watch out are open by default; the other three are closed', () => {
+    render(<BriefWidgets session={session()} />)
+    const details = [...document.querySelectorAll('details.session-widget')] as HTMLDetailsElement[]
+    expect(details.map(d => d.open)).toEqual([true, true, false, false, false])
+  })
+
+  it('a widget with no captured content is ABSENT from the DOM -- no placeholder row', () => {
+    render(<BriefWidgets session={session({ decisions: null, gotchas: null, checkpoints: [] })} />)
+    expect(screen.queryByText('Why')).toBeNull()
+    expect(screen.queryByText('Watch out')).toBeNull()
+    expect(screen.queryByText('Checkpoints')).toBeNull()
+    expect(screen.queryByText(/not captured/i)).toBeNull()
+    expect(widgetTitles()).toEqual(['Key files', 'Changes'])
+  })
+
+  it('Key files renders only changes entries carrying a note; no noted entry means no widget', () => {
+    render(<BriefWidgets session={session()} />)
+    const keyFiles = screen.getByText('Key files').closest('details')!
+    expect(keyFiles.textContent).toContain('lib/hooks.js')
+    expect(keyFiles.textContent).toContain('ownership gate')
+    expect(keyFiles.textContent).not.toContain('test/run-tests.js')
+
+    document.body.innerHTML = ''
+    render(<BriefWidgets session={session({
+      changes: [{ file: 'a.js', status: 'edited', add: 1, del: 1, note: null, dep: false }],
+    })} />)
+    expect(screen.queryByText('Key files')).toBeNull()
+    // ...while the Changes widget still renders for the same session.
+    expect(screen.queryByText('Changes')).not.toBeNull()
+  })
+
+  it('Changes renders +add -del per file', () => {
+    render(<BriefWidgets session={session()} />)
+    const changes = screen.getByText('Changes').closest('details')!
+    expect(changes.textContent).toContain('lib/hooks.js')
+    expect(changes.textContent).toContain('+41')
+    expect(changes.textContent).toContain('-12')
+    expect(changes.textContent).toContain('test/run-tests.js')
+    expect(changes.textContent).toContain('+88')
+    expect(changes.textContent).toContain('-2')
+  })
+
+  it('Checkpoints renders the trail oldest-first', () => {
+    render(<BriefWidgets session={session()} />)
+    const checkpoints = screen.getByText('Checkpoints').closest('details')!
+    const texts = [...checkpoints.querySelectorAll('.session-checkpoint-text')].map(el => el.textContent)
+    expect(texts).toEqual(['Gate extracted; stop path green.', 'Hook ownership decided by durability.'])
+  })
+
+  it('a closed widget summary row carries a one-line truncated peek', () => {
+    render(<BriefWidgets session={session()} />)
+    const changes = screen.getByText('Changes').closest('details')!
+    const peek = changes.querySelector('summary .session-widget-peek')
+    expect(peek).not.toBeNull()
+    expect(peek!.textContent).toMatch(/lib\/hooks\.js/)
+    // Open widgets carry no peek -- there is nothing to preview.
+    const why = screen.getByText('Why').closest('details')!
+    expect(why.querySelector('summary .session-widget-peek')).toBeNull()
+  })
+})

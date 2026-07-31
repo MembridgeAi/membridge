@@ -4,6 +4,8 @@ import { ROUTES } from '../../app/routes'
 import { relativeAgo } from '../../data/relativeTime'
 import { useSession } from '../../data/queries'
 import type { Session } from '../../data/types'
+import { BriefWidgets } from './BriefWidgets'
+import './session.css'
 
 // ---------------------------------------------------------------------------
 // Pure header helpers, exported for tests.
@@ -131,6 +133,7 @@ export function SessionPage({ sessionId }: SessionPageProps) {
         </div>
       )}
       <MetaRow s={s} />
+      <BriefWidgets session={s} />
     </div>
   )
 }

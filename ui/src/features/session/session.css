@@ -1,0 +1,244 @@
+/* Session detail page — imported once from SessionPage.tsx (per-feature CSS,
+ * same precedent as project.css/feed.css). All colors/type/spacing via
+ * styles/tokens.css variables — no hex, no inline style objects. */
+
+.session-page {
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-4);
+  max-width: 720px;
+}
+
+/* --- header block ------------------------------------------------------- */
+
+.session-eyebrow {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.session-header {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.session-intent {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-md);
+  color: var(--text2);
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+.session-intent-label {
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text3);
+  flex: none;
+}
+
+.session-meta {
+  margin-top: var(--sp-3);
+  padding-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text2);
+}
+
+.session-meta-author {
+  font-weight: var(--fw-medium);
+  color: var(--text);
+}
+
+.session-meta-tool {
+  padding: 1px 7px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  color: var(--text2);
+}
+
+.session-meta-project,
+.session-meta-times {
+  font-family: var(--mono);
+  color: var(--text3);
+}
+
+.session-meta-prompts {
+  color: var(--text3);
+}
+
+/* --- error / gone states ------------------------------------------------ */
+
+.session-error {
+  color: var(--red);
+  font-size: var(--fs-base);
+}
+
+.session-gone {
+  color: var(--text2);
+  font-size: var(--fs-lg);
+}
+
+.session-gone-link {
+  color: var(--accent2);
+  font-size: var(--fs-base);
+  text-decoration: none;
+}
+.session-gone-link:hover {
+  text-decoration: underline;
+}
+
+/* --- brief widgets ------------------------------------------------------ */
+
+.session-widgets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
+.session-widget {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+.session-widget-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  list-style: none;
+}
+.session-widget-summary::-webkit-details-marker {
+  display: none;
+}
+.session-widget-summary::before {
+  content: '›';
+  color: var(--text3);
+  flex: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .session-widget-summary::before {
+    transition: transform var(--dur-fast) var(--ease-out);
+  }
+}
+.session-widget[open] > .session-widget-summary::before {
+  transform: rotate(90deg);
+}
+
+.session-widget-title {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text2);
+  flex: none;
+}
+
+/* The closed widget's one-line preview: truncated, never wrapping — the
+ * reader judges whether opening is worth it without the row growing. */
+.session-widget-peek {
+  font-size: var(--fs-sm);
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.session-widget-body {
+  padding: 0 var(--sp-3) var(--sp-3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--sp-2);
+}
+
+.session-widget-text {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: var(--lh-base);
+  color: var(--text);
+}
+
+.session-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.session-keyfile,
+.session-change {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.session-keyfile-name,
+.session-change-name {
+  font-family: var(--mono);
+  color: var(--text);
+  flex: none;
+}
+
+.session-keyfile-note {
+  color: var(--text2);
+}
+
+.session-change-status {
+  color: var(--text3);
+  font-size: var(--fs-xs);
+}
+
+.session-change-dep .session-change-name {
+  color: var(--text3);
+}
+
+.session-change-counts {
+  font-family: var(--mono);
+  margin-left: auto;
+}
+.session-change-add {
+  color: var(--green);
+}
+.session-change-del {
+  color: var(--red);
+}
+
+.session-checkpoints {
+  counter-reset: checkpoint;
+}
+.session-checkpoint {
+  display: flex;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text2);
+}
+.session-checkpoint::before {
+  counter-increment: checkpoint;
+  content: counter(checkpoint);
+  font-family: var(--mono);
+  color: var(--text3);
+  flex: none;
+}
