@@ -48,6 +48,12 @@
     "mac": {
       "target": [
         {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
           "target": "zip",
           "arch": [
             "arm64"
@@ -56,7 +62,11 @@
       ],
       "artifactName": "MemBridge-${version}-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
-      "icon": "app/assets/icon.png"
+      "icon": "app/assets/icon.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
       "target": [

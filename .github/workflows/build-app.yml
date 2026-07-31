@@ -1,7 +1,8 @@
 # Builds the MemBridge tray app for macOS (menu bar) and Windows (system tray)
 # on their native runners. Runs on every push to master (fresh artifact per
 # push), on manual dispatch, and on every published release; release builds are
-# attached to the release as downloadable zips.
+# attached to the release as a signed+notarized mac dmg and zip, and a
+# windows zip.
 name: Build app
 
 on:
@@ -99,10 +100,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: membridge-mac
-          path: dist/*.zip
+          # Both targets: the dmg is what membridge.app links, the zip is what
+          # install.sh fetches.
+          path: |
+            dist/*.zip
+            dist/*.dmg
       - name: Attach to release
         if: github.event_name == 'release'
-        run: gh release upload "$TAG" dist/*.zip --clobber
+        run: gh release upload "$TAG" dist/*.zip dist/*.dmg --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}

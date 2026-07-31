@@ -674,10 +674,41 @@ async function main() {
     // arm64 pinned inside the target object (electron-builder has no valid
     // top-level mac.arch), so the emitted asset is deterministically
     // MemBridge-<version>-arm64.zip and the install.sh URL resolves.
-    assert.deepStrictEqual(pkg.build.mac.target, [{ target: 'zip', arch: ['arm64'] }],
-      'mac target should be a single arm64-pinned zip');
+    // Other targets (the dmg the website links to) may sit alongside it; what
+    // the installer needs is that exactly one zip exists and it is arm64-pinned.
+    const zipTargets = pkg.build.mac.target.filter(t => t.target === 'zip');
+    assert.deepStrictEqual(zipTargets, [{ target: 'zip', arch: ['arm64'] }],
+      'mac targets must contain exactly one arm64-pinned zip');
     assert.strictEqual(pkg.build.mac.artifactName, 'MemBridge-${version}-${arch}.${ext}',
       'artifactName must be deterministic so install.sh can build the release URL');
+  });
+
+  check('build config emits an arm64 dmg, which is what the website download button links to', () => {
+    // membridge.app links MemBridge-arm64.dmg. build.mac was zip-only, so no
+    // dmg has ever been produced by CI and the button could only ever have
+    // worked off a hand-uploaded file.
+    const pkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
+    const dmg = pkg.build.mac.target.filter(t => t.target === 'dmg');
+    assert.deepStrictEqual(dmg, [{ target: 'dmg', arch: ['arm64'] }],
+      'mac targets must contain exactly one arm64-pinned dmg');
+  });
+
+  check('build config hardens the mac runtime and leaves notarization enabled', () => {
+    // Gatekeeper rejects a notarized build that was not signed under the
+    // hardened runtime, and the hardened runtime breaks Electron without these
+    // entitlements.
+    const pkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
+    assert.strictEqual(pkg.build.mac.hardenedRuntime, true, 'notarization requires the hardened runtime');
+    const ent = pkg.build.mac.entitlements;
+    assert.ok(ent, 'hardened runtime without entitlements will not launch');
+    assert.strictEqual(pkg.build.mac.entitlementsInherit, ent, 'child processes need the same entitlements');
+    assert.ok(fs.existsSync(path.join(__dirname, '..', ent)), `entitlements file missing: ${ent}`);
+    // The signing config drafted on PR #6 carried "notarize": false, which
+    // silently disables the notarization the mac job now has credentials for.
+    // Left UNSET, electron-builder notarizes exactly when the APPLE_API_*
+    // trio is present -- which is also what lets a fork build without it.
+    assert.notStrictEqual(pkg.build.mac.notarize, false,
+      'notarize:false disables notarization outright; leave it unset so credentials decide');
   });
   check('C1: the npm tarball ships vendor/grammars, not just the packaged Electron app', () => {
     // CRITICAL (final whole-branch review, C1): package.json's "files"
