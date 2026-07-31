@@ -3,8 +3,23 @@
 // (electron-builder two-package layout packages only what's inside app/).
 const fs = require('fs');
 const path = require('path');
+const { uiDistGate, ALLOW_ENV } = require('./lib/ui-dist-gate');
 
 const root = path.join(__dirname, '..');
+
+// Checked FIRST, before any of the copies below mutate app/: an aborted
+// packaging run that leaves app/ half-refreshed is worse than one that never
+// touched it. See scripts/lib/ui-dist-gate.js for why this is fatal.
+const uiDistSrc = path.join(root, 'ui', 'dist');
+const uiGate = uiDistGate({
+  exists: fs.existsSync(uiDistSrc),
+  allowMissing: !!process.env[ALLOW_ENV],
+});
+if (uiGate && uiGate.fatal) {
+  console.error(uiGate.message);
+  process.exit(1);
+}
+
 const dest = path.join(root, 'app', 'lib');
 fs.rmSync(dest, { recursive: true, force: true });
 fs.cpSync(path.join(root, 'lib'), dest, { recursive: true });
@@ -64,19 +79,16 @@ if (fs.existsSync(vendorSrc)) {
 // Copies the built React UI (ui/dist, a Vite build) into app/ui/dist so
 // lib/server.js's UI_DIST_ROOT — path.join(__dirname, '..', 'ui', 'dist'),
 // resolved from wherever lib/ itself ends up — finds it inside the packaged
-// asar too, at the mirrored app/ui/dist. Same tolerance as vendor/grammars
-// above: a missing build warns rather than failing the whole packaging step,
-// because `npm run build` in ui/ is a separate step that may not have run
-// yet; the packaged app then serves lib/server.js's own 503 at /app instead
-// of crashing.
-const uiDistSrc = path.join(root, 'ui', 'dist');
+// asar too, at the mirrored app/ui/dist. UNLIKE vendor/grammars above, a
+// missing build is fatal and was already rejected at the top of this file;
+// reaching here with no ui/dist means the escape hatch was set on purpose.
 const uiDistDest = path.join(root, 'app', 'ui', 'dist');
 fs.rmSync(path.join(root, 'app', 'ui'), { recursive: true, force: true });
-if (fs.existsSync(uiDistSrc)) {
+if (uiGate) {
+  console.warn(uiGate.message);
+} else {
   fs.cpSync(uiDistSrc, uiDistDest, { recursive: true });
   console.log('app/ui/dist refreshed from ui/dist/');
-} else {
-  console.warn('ui/dist missing — packaged app will serve a 503 at /app until `cd ui && npm run build` runs');
 }
 
 const appPkgPath = path.join(root, 'app', 'package.json');

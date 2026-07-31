@@ -24,6 +24,17 @@ jobs:
           node-version: 22
       # A plain install now brings the MCP SDK + zod with it. Mirrors ci.yml.
       - run: npm install
+      # The React UI is a separate npm workspace and the ONLY UI the app has --
+      # the legacy dashboard was deleted in 0.2.0. Without these two steps
+      # prepare-app.js packaged a UI-less app and v0.2.0 shipped a window whose
+      # entire contents were "UI not built". Mirrors ci.yml, including
+      # `working-directory:` over `cd ui &&` (POSIX-only, breaks the Windows
+      # leg) and the build running BEFORE the root suite, whose /app
+      # static-serving checks need a real ui/dist.
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
       - run: node test/run-tests.js
       - run: npm run dist:mac
         env:
@@ -47,6 +58,12 @@ jobs:
         with:
           node-version: 22
       - run: npm install
+      # Same as the mac job: ui/ is the only UI the app has. `working-directory:`
+      # rather than `cd ui &&` matters most here -- this leg is cmd.exe.
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
       - run: node test/run-tests.js
       - run: npm run dist:win
       - uses: actions/upload-artifact@v4

@@ -518,6 +518,41 @@ async function main() {
     assert.ok(out.some(e => e.session === 's3'), 'prompt-only session wrongly dropped');
   });
 
+  // --- packaging refuses to ship an app with no UI ---
+  // v0.2.0 shipped an app whose entire window read "UI not built. Run: cd ui
+  // && npm run build". Three things had to line up: build-app.yml never built
+  // ui/ (ci.yml did, build-app.yml didn't), prepare-app.js only warned about
+  // the missing ui/dist and packaged anyway, and the legacy dashboard that
+  // used to sit behind /app as a fallback was deleted in 0.2.0. The workflow
+  // gap is fixed separately; this is the backstop that makes it unable to
+  // regress silently. The gate is a pure function so both branches are
+  // exercised without deleting the real ui/dist out from under the suite.
+  check('ui-dist gate: a built ui/dist is not a finding at all', () => {
+    const { uiDistGate } = require('../scripts/lib/ui-dist-gate');
+    assert.strictEqual(uiDistGate({ exists: true, allowMissing: false }), null);
+    assert.strictEqual(uiDistGate({ exists: true, allowMissing: true }), null);
+  });
+
+  check('ui-dist gate: a missing ui/dist is FATAL and names the exact fix command', () => {
+    const { uiDistGate, ALLOW_ENV } = require('../scripts/lib/ui-dist-gate');
+    const g = uiDistGate({ exists: false, allowMissing: false });
+    assert.ok(g, 'missing ui/dist must produce a finding');
+    assert.strictEqual(g.fatal, true, 'missing ui/dist must be fatal, not a warning');
+    // The message has to be actionable on its own: the 0.2.0 warning scrolled
+    // past in a CI log and nobody acted on it. Cross-platform form (--prefix,
+    // not `cd ui &&`) because the Windows packaging leg is real.
+    assert.ok(/npm --prefix ui ci/.test(g.message), `fix command missing: ${g.message}`);
+    assert.ok(/npm --prefix ui run build/.test(g.message), `build command missing: ${g.message}`);
+    assert.ok(g.message.includes(ALLOW_ENV), 'escape hatch must be discoverable from the error');
+  });
+
+  check('ui-dist gate: the documented escape hatch downgrades fatal to a warning', () => {
+    const { uiDistGate } = require('../scripts/lib/ui-dist-gate');
+    const g = uiDistGate({ exists: false, allowMissing: true });
+    assert.ok(g, 'the escape hatch still reports what it let through');
+    assert.strictEqual(g.fatal, false, 'escape hatch must not fail the build');
+  });
+
   // Both prepare-app checks below need scripts/prepare-app.js to actually
   // succeed. It walks the production dependency closure by reading
   // root/node_modules/<name>/package.json for every package reachable from
@@ -537,7 +572,14 @@ async function main() {
   // once, up front, and skip both checks loudly in that case rather than
   // fail the whole suite on an install this checkout doesn't have; any
   // other failure (a real bug in prepare-app.js) still fails them.
-  const prepareAppResult = spawnSync('node', [path.join(__dirname, '..', 'scripts', 'prepare-app.js')], { encoding: 'utf8' });
+  // MEMBRIDGE_ALLOW_MISSING_UI is set for this spawn ONLY so these two checks
+  // keep testing what they are about -- app/bin and the app/node_modules
+  // closure -- instead of turning into a second ui/dist check that fails with
+  // an unrelated message on a checkout that hasn't run the ui build. The
+  // fatal path itself is covered by the ui-dist gate checks above, and the
+  // "prepare-app copies the built UI" check below covers the wiring.
+  const prepareAppResult = spawnSync('node', [path.join(__dirname, '..', 'scripts', 'prepare-app.js')],
+    { encoding: 'utf8', env: { ...process.env, MEMBRIDGE_ALLOW_MISSING_UI: '1' } });
   const prepareAppMissingDeps = prepareAppResult.status !== 0
     && /ENOENT/.test(prepareAppResult.stderr || '') && /node_modules/.test(prepareAppResult.stderr || '');
 
@@ -551,6 +593,19 @@ async function main() {
       assert.strictEqual(prepareAppResult.status, 0, `prepare-app failed: ${prepareAppResult.stderr}`);
       const binned = path.join(__dirname, '..', 'app', 'bin', 'membridge.js');
       assert.ok(fs.existsSync(binned), 'app/bin/membridge.js not created by prepare-app');
+    });
+
+    check('prepare-app copies the built React UI into app/ui/dist', () => {
+      // The other half of the 0.2.0 blank-window bug: lib/server.js resolves
+      // UI_DIST_ROOT as <lib>/../ui/dist, so the packaged asar only serves the
+      // app when prepare-app.js has mirrored ui/dist to app/ui/dist. Skipped
+      // rather than failed when the checkout has no ui build, since that is
+      // what the gate above is for and ci.yml builds ui/ before this suite.
+      assert.strictEqual(prepareAppResult.status, 0, `prepare-app failed: ${prepareAppResult.stderr}`);
+      const built = path.join(__dirname, '..', 'ui', 'dist', 'index.html');
+      if (!fs.existsSync(built)) return; // no local ui build; ui-dist gate checks cover the rest
+      const mirrored = path.join(__dirname, '..', 'app', 'ui', 'dist', 'index.html');
+      assert.ok(fs.existsSync(mirrored), 'app/ui/dist/index.html not created by prepare-app');
     });
 
     check('prepare-app bundles the runtime dependency closure into app/node_modules', () => {
