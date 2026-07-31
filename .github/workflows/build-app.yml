@@ -111,6 +111,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
+      # membridge.app links releases/latest/download/MemBridge-arm64.dmg -- an
+      # UNVERSIONED name, while electron-builder only ever emits versioned ones
+      # (MemBridge-0.2.0-arm64.dmg). The unversioned aliases were hand-uploaded
+      # to v0.1.2 and to nothing since, so v0.2.0 became "latest" without them
+      # and that button is 404ing right now. Re-uploading the alias on EVERY
+      # release is what stops the next release breaking it again.
+      - name: Attach unversioned download alias to release
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(dist/*-arm64.dmg)
+          # Fail loudly rather than alias whichever file sorted first: a silent
+          # wrong pick would publish a download button pointing at the wrong
+          # artifact, which is the failure this step exists to prevent.
+          if [ ${#built[@]} -ne 1 ]; then
+            echo "expected exactly one arm64 dmg in dist/, found ${#built[@]}: ${built[*]-none}" >&2
+            exit 1
+          fi
+          # Staged OUTSIDE dist/ so the globs above can never sweep the alias
+          # up and publish the same bytes twice under two names. mktemp rather
+          # than $RUNNER_TEMP to keep this identical to the windows job, where
+          # $RUNNER_TEMP is a backslash path that Git Bash mangles.
+          stage=$(mktemp -d)
+          cp "${built[0]}" "$stage/MemBridge-arm64.dmg"
+          gh release upload "$TAG" "$stage/MemBridge-arm64.dmg" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
 
   windows:
     runs-on: windows-latest
@@ -137,6 +166,26 @@ jobs:
         # Git Bash on the Windows runner, so the glob + $TAG match the mac job.
         shell: bash
         run: gh release upload "$TAG" dist/*.zip --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+      # The other half of the 404: membridge.app links
+      # releases/latest/download/MemBridge-win.zip. Same reasoning as the mac
+      # alias above.
+      - name: Attach unversioned download alias to release
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(dist/*.zip)
+          if [ ${#built[@]} -ne 1 ]; then
+            echo "expected exactly one zip in dist/, found ${#built[@]}: ${built[*]-none}" >&2
+            exit 1
+          fi
+          stage=$(mktemp -d)
+          cp "${built[0]}" "$stage/MemBridge-win.zip"
+          gh release upload "$TAG" "$stage/MemBridge-win.zip" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
