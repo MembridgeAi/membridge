@@ -19331,6 +19331,333 @@ const repoRoot = require('../lib/repo-root');
     }
     assert.strictEqual(read(f), body, 'the user settings file was destroyed');
   });
+  // ---- audit fix: "read failure reads as missing" data-destruction bug ----
+  //
+  // lib/util.js's loadUserConfig()/loadState() and lib/ledger-store.js's
+  // readLedger() used to catch ANY read failure -- not just a genuinely
+  // absent file -- and return an empty default. config.json holds team
+  // credentials, the advisor API key and custom redact rules; ledger.json is
+  // the one file in a project whose dedupe evidence has no other source once
+  // lost (see its own header comment). Every real caller is a read-modify-
+  // write (toggleProject/saveSettings for config, scan.js's syncOnce for
+  // state, updateLedger for the ledger): load, mutate, save. A transient
+  // read failure (an AV lock, EMFILE, a momentary EIO) on a file that is very
+  // much present made the mutate step start from {} and the save step
+  // overwrite everything the read failure hid.
+  //
+  // Same fix as hooks.js's readSettings above, applied to all three: ONLY
+  // ENOENT means "absent, safe to default"; every other read failure refuses
+  // (throws) rather than defaulting. A corrupt-but-present file (valid read,
+  // invalid JSON, or valid JSON of the wrong shape) gets the SAME refusal --
+  // resetting it to an empty object destroys data exactly as surely as
+  // misreading a permissions error does, so "the file is there but I can't
+  // make sense of it" is not treated as "the file is not there".
+  check('util: loadUserConfig refuses an existing-but-unreadable config, never "missing" (config-destruction bug)', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-locked');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const cfgFile = path.join(home, 'config.json');
+      const original = {
+        team: { url: 'https://real-team.supabase.co', anonKey: 'REAL-ANON-KEY' },
+        advisor: { apiKey: 'sk-real-advisor-key', model: 'claude-haiku-4-5' },
+        redact: ['CUSTOMER-\\d+'],
+      };
+      const body = JSON.stringify(original, null, 2);
+      fs.writeFileSync(cfgFile, body);
+      fs.chmodSync(cfgFile, 0o000);
+      try {
+        let denied = false;
+        try { fs.readFileSync(cfgFile, 'utf8'); } catch { denied = true; }
+        if (process.getuid() !== 0 && denied) {
+          assert.throws(() => util.loadUserConfig(), /refusing to touch/i,
+            'an unreadable config.json must never read as empty-and-writable');
+          // The real caller shape (server.js's toggleProject/saveSettings):
+          // load -> mutate -> save. The throw above must stop this chain
+          // before saveUserConfig ever runs -- a rename only needs the
+          // DIRECTORY writable, so nothing else would stop it overwriting a
+          // locked config.json wholesale.
+          assert.throws(() => {
+            const raw = util.loadUserConfig();
+            util.saveUserConfig({ ...raw, exclude: ['/some/project'] });
+          }, /refusing to touch/i, 'a read-modify-write caller must not reach the save');
+        }
+      } finally {
+        fs.chmodSync(cfgFile, 0o600);
+      }
+      assert.strictEqual(fs.readFileSync(cfgFile, 'utf8'), body,
+        'the team credentials, advisor key and redact rules must survive byte-for-byte');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: loadUserConfig still returns {} for a genuinely missing config (ENOENT stays safe)', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-missing');
+    process.env.MEMBRIDGE_HOME = home; // fresh dir, config.json never written
+    try {
+      assert.deepStrictEqual(util.loadUserConfig(), {});
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: loadUserConfig refuses a corrupt (invalid or wrong-shape) config rather than silently resetting it', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-corrupt');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const cfgFile = path.join(home, 'config.json');
+      fs.writeFileSync(cfgFile, '{ "team": { "url": "https://real.supabase.co", "anonKey": "REAL" }, oops');
+      assert.throws(() => util.loadUserConfig(), /refusing to touch/i,
+        'invalid JSON must not silently reset to {} -- that destroys data as surely as a read failure would');
+      fs.writeFileSync(cfgFile, JSON.stringify(['not', 'an', 'object']));
+      assert.throws(() => util.loadUserConfig(), /refusing to touch/i,
+        'valid JSON of the wrong shape (an array) must also refuse, not silently become {}');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: loadState refuses an existing-but-unreadable state.json, never resets to fresh (same destruction bug)', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-state-locked');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const stateFile = path.join(home, 'state.json');
+      const original = {
+        version: util.STATE_VERSION,
+        files: {},
+        projects: {
+          '/real/project': {
+            events: [{ kind: 'edit', ts: '2026-07-01T00:00:00.000Z', session: 'sess-1', file: 'x.js' }],
+            lastSync: '2026-07-01T00:00:00.000Z',
+          },
+        },
+        catchup: { ...util.DEFAULT_CATCHUP },
+        feedback: { ...util.DEFAULT_FEEDBACK },
+      };
+      fs.writeFileSync(stateFile, JSON.stringify(original, null, 2));
+      fs.chmodSync(stateFile, 0o000);
+      try {
+        let denied = false;
+        try { fs.readFileSync(stateFile, 'utf8'); } catch { denied = true; }
+        if (process.getuid() !== 0 && denied) {
+          assert.throws(() => util.loadState(), /refusing to touch/i,
+            'an unreadable state.json must never read as fresh-and-writable');
+          // The real read-modify-write shape (lib/scan.js's syncOnce and
+          // friends): load -> mutate -> save. The throw must stop this
+          // before saveState ever runs.
+          assert.throws(() => {
+            const st = util.loadState();
+            util.saveState({ ...st, hooksInstalledVersion: 'x' });
+          }, /refusing to touch/i, 'a read-modify-write caller must not reach the save');
+        }
+      } finally {
+        fs.chmodSync(stateFile, 0o600);
+      }
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), original,
+        'every tracked project\'s event history must survive byte-for-byte');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: loadState still returns a fresh state for a genuinely missing state.json (ENOENT stays safe)', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-state-missing');
+    process.env.MEMBRIDGE_HOME = home; // fresh dir, state.json never written
+    try {
+      assert.deepStrictEqual(util.loadState(), {
+        version: util.STATE_VERSION, files: {}, projects: {},
+        catchup: { ...util.DEFAULT_CATCHUP }, feedback: { ...util.DEFAULT_FEEDBACK },
+      });
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: loadState refuses a corrupt (invalid or wrong-shape) state.json rather than silently resetting it', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-state-corrupt');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const stateFile = path.join(home, 'state.json');
+      fs.writeFileSync(stateFile, '{ "version": 2, "projects": { oops');
+      assert.throws(() => util.loadState(), /refusing to touch/i,
+        'invalid JSON must not silently reset to a fresh state -- that discards every tracked project\'s history');
+      fs.writeFileSync(stateFile, JSON.stringify(null));
+      assert.throws(() => util.loadState(), /refusing to touch/i,
+        'valid JSON of the wrong shape (null) must also refuse, not silently become a fresh state');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: saveUserConfig stages into a temp file in the same directory and renames into place', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-atomic-stage');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const realRename = fs.renameSync;
+      let renamedFrom = null;
+      fs.renameSync = (from, to) => { renamedFrom = from; return realRename(from, to); };
+      try {
+        util.saveUserConfig({ team: { url: '', anonKey: '' } });
+      } finally {
+        fs.renameSync = realRename;
+      }
+      assert.ok(renamedFrom && renamedFrom.includes('.tmp'),
+        'saveUserConfig must stage into a temp file, never write config.json in place');
+      assert.strictEqual(path.dirname(renamedFrom), home,
+        'the temp file must sit in the target directory so the rename is atomic');
+      const strays = fs.readdirSync(home).filter(n => n.includes('.config.json.') && n.endsWith('.tmp'));
+      assert.deepStrictEqual(strays, [], 'temp files must not be left behind after a successful write');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('util: saveUserConfig preserves the 0600 mode on an atomic rewrite', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-atomic-mode');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      util.saveUserConfig({ a: 1 });
+      const cfgFile = path.join(home, 'config.json');
+      assert.strictEqual(fs.statSync(cfgFile).mode & 0o777, 0o600);
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  // The end-to-end pair, mirroring the hooks.js writeSettings proof above:
+  // atomic writes are what make the reader's refusal load-bearing (a rename
+  // needs only the directory writable), and here we prove the OTHER half --
+  // a write that itself fails partway through (process killed between
+  // staging the temp file and the rename) must never touch the real file.
+  check('util: saveUserConfig is atomic -- a simulated crash mid-write (failed rename) leaves the original config intact', () => {
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-atomic-crash');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const cfgFile = path.join(home, 'config.json');
+      const original = { team: { url: 'https://real.supabase.co', anonKey: 'ORIGINAL-KEY' }, advisor: { apiKey: 'sk-original' } };
+      util.saveUserConfig(original);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(cfgFile, 'utf8')), original);
+
+      const realRename = fs.renameSync;
+      fs.renameSync = () => { throw new Error('simulated crash mid-write'); };
+      try {
+        assert.throws(() => util.saveUserConfig({ team: { url: 'https://evil.example', anonKey: 'HIJACKED' } }),
+          /simulated crash mid-write/);
+      } finally {
+        fs.renameSync = realRename;
+      }
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(cfgFile, 'utf8')), original,
+        'a crash between staging and rename must leave the last good config.json untouched');
+      const strays = fs.readdirSync(home).filter(n => n.includes('.config.json.') && n.endsWith('.tmp'));
+      assert.deepStrictEqual(strays, [], 'a failed write must clean up its own temp file');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  // The actual production callers named in the audit: toggleProject and
+  // saveSettings both do load -> mutate -> save against config.json.
+  // toggleProject is the smaller of the two and exercises the identical
+  // shape -- proving IT refuses on an unreadable config is direct evidence
+  // the fix reaches the real caller, not just the raw util functions.
+  check('server: toggleProject (a real read-modify-write caller) refuses rather than silently wiping an unreadable config.json', () => {
+    const { toggleProject } = require('../lib/server');
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    const home = path.join(ROOT, 'util-config-caller-locked');
+    process.env.MEMBRIDGE_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      const cfgFile = path.join(home, 'config.json');
+      const original = {
+        team: { url: 'https://real-team.supabase.co', anonKey: 'REAL-ANON-KEY' },
+        advisor: { apiKey: 'sk-real-advisor-key' },
+        redact: ['CUSTOMER-\\d+'],
+      };
+      fs.writeFileSync(cfgFile, JSON.stringify(original, null, 2));
+      fs.chmodSync(cfgFile, 0o000);
+      try {
+        let denied = false;
+        try { fs.readFileSync(cfgFile, 'utf8'); } catch { denied = true; }
+        if (process.getuid() !== 0 && denied) {
+          assert.throws(() => toggleProject('/some/project'), /refusing to touch/i,
+            'toggleProject must surface the read failure, not silently write { exclude: [...] } over the whole file');
+        }
+      } finally {
+        fs.chmodSync(cfgFile, 0o600);
+      }
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(cfgFile, 'utf8')), original,
+        'team credentials, advisor key and redact rules must survive toggleProject hitting an unreadable config');
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+  });
+
+  check('ledger-store: readLedger refuses an existing-but-unreadable ledger.json, never "missing" (irreplaceable dedupe evidence)', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-locked-proj');
+    fs.mkdirSync(path.join(proj, memorydb.DIR_NAME), { recursive: true });
+    const u = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 999, output_tokens: 10 };
+    const original = store.buildProjectLedger([
+      { kind: 'usage', ts: 't1', session: 'a', messageId: 'm1', model: 'claude-opus-4-6', usage: u },
+      { kind: 'read', ts: 't1', session: 'a', file: '/r/x.js' },
+    ]);
+    const ledgerFile = store.writeLedger(proj, original);
+    fs.chmodSync(ledgerFile, 0o000);
+    try {
+      let denied = false;
+      try { fs.readFileSync(ledgerFile, 'utf8'); } catch { denied = true; }
+      if (process.getuid() !== 0 && denied) {
+        assert.throws(() => store.readLedger(proj), /refusing to touch/i,
+          'an unreadable ledger.json must never read as missing');
+        // updateLedger IS the production read-modify-write (every sync tick,
+        // every project). It must refuse too, rather than folding this
+        // pass's window onto an empty previous ledger and overwriting the
+        // accumulated dedupe evidence -- writeLedger's atomic rename only
+        // needs the directory writable, nothing else stops it.
+        assert.throws(() => store.updateLedger(proj, [], util.getConfig()), /refusing to touch/i,
+          'updateLedger must refuse rather than silently rebuild from an empty fold');
+      }
+    } finally {
+      fs.chmodSync(ledgerFile, 0o600);
+    }
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledgerFile, 'utf8')), original,
+      'the accumulated ledger -- dedupe evidence with no other source once lost -- must survive byte-for-byte');
+  });
+
+  check('ledger-store: readLedger still returns null for a genuinely missing ledger.json (ENOENT stays safe)', () => {
+    const store = require('../lib/ledger-store');
+    assert.strictEqual(store.readLedger(path.join(ROOT, 'ledger-missing-proj')), null);
+  });
+
+  check('ledger-store: readLedger refuses a corrupt (invalid or wrong-shape) ledger.json rather than silently resetting it', () => {
+    const store = require('../lib/ledger-store');
+    const proj = path.join(ROOT, 'ledger-corrupt-proj');
+    fs.mkdirSync(path.join(proj, memorydb.DIR_NAME), { recursive: true });
+    const ledgerFile = path.join(proj, memorydb.DIR_NAME, 'ledger.json');
+    fs.writeFileSync(ledgerFile, '{ "avoided": { "tokens": 999999 }, oops');
+    assert.throws(() => store.readLedger(proj), /refusing to touch/i,
+      'invalid JSON must not silently reset -- that discards dedupe evidence with no other source');
+    fs.writeFileSync(ledgerFile, JSON.stringify([1, 2, 3]));
+    assert.throws(() => store.readLedger(proj), /refusing to touch/i,
+      'valid JSON of the wrong shape (an array) must also refuse, not silently reset');
+  });
+
   // ---- teammate notes: SessionStart delivery (spec §3.1, delivery points 4 and 5) ----
   //
   // POSTCOMPACT IS NOT A DELIVERY CHANNEL, and the checks below pin that.
