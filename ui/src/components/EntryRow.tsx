@@ -13,11 +13,11 @@ function relativeTime(at: string, now: number = Date.now()): string {
   return `${Math.floor(ms / DAY)}d ago`
 }
 
-// Pinned to UTC so the same instant renders the same clock time everywhere
-// (same reasoning as SyncStateView's shortDate) -- the daemon's timestamps
-// are UTC ISO strings.
+// The viewer's own wall clock (no timeZone option, so the browser's resolved
+// zone wins) -- same reasoning as SyncStateView's shortStamp. Pinned to UTC,
+// a 7pm session read "2:00 AM" to the person who had just run it.
 function clockTime(at: string): string {
-  return new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })
+  return new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
 interface EntryRowProps {

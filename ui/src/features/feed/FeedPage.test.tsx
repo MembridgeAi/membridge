@@ -17,13 +17,27 @@ const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
   ...overrides,
 })
 
+// The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ),
+// so "20:00Z" is 13:00 the same day and "02:00Z" is 19:00 the PREVIOUS day
+// locally. The evening-in-the-west cases below are the regression: they used
+// to render tomorrow's date, because grouping keyed on the UTC calendar day.
 describe('dayLabel', () => {
   const NOW = new Date('2026-07-29T23:00:00Z')
-  it('prefixes TODAY, uppercase, for the current UTC calendar day', () => {
+  it('prefixes TODAY, uppercase, for the current local calendar day', () => {
     expect(dayLabel('2026-07-29T10:00:00Z', NOW)).toBe('TODAY · WED JUL 29')
   })
   it('renders a plain uppercase weekday/month/day for any other day', () => {
     expect(dayLabel('2026-07-28T10:00:00Z', NOW)).toBe('TUE JUL 28')
+  })
+  it('still says TODAY in the evening, when UTC has already rolled to tomorrow', () => {
+    // 02:00Z Jul 30 is 19:00 Jul 29 in Los Angeles. Keying on UTC labelled
+    // this "TODAY · THU JUL 30" -- tomorrow's date, all evening.
+    expect(dayLabel('2026-07-30T02:00:00Z', new Date('2026-07-30T02:30:00Z'))).toBe('TODAY · WED JUL 29')
+  })
+  it('does not say TODAY for last night, when the UTC day happens to match', () => {
+    // Both instants are Jul 29 in UTC, but locally the entry is Jul 28 21:00
+    // and "now" is Jul 29 09:00 -- a different day to the person reading it.
+    expect(dayLabel('2026-07-29T04:00:00Z', new Date('2026-07-29T16:00:00Z'))).toBe('TUE JUL 28')
   })
 })
 
@@ -37,6 +51,18 @@ describe('groupByDay', () => {
     ], NOW)
     expect(groups.map(g => g.day)).toEqual(['TODAY · WED JUL 29', 'TUE JUL 28'])
     expect(groups[0].entries.map(e => e.id)).toEqual(['b', 'c'])
+  })
+
+  it('keeps one local day together even when the entries straddle UTC midnight', () => {
+    // 16:00 and 19:00 on Jul 29 locally -- one afternoon, one group. Keyed
+    // on UTC these split across two headings, "JUL 29" and "JUL 30".
+    const NOW = new Date('2026-07-30T03:00:00Z')
+    const groups = groupByDay([
+      entry({ id: 'evening', at: '2026-07-30T02:00:00Z' }),
+      entry({ id: 'afternoon', at: '2026-07-29T23:00:00Z' }),
+    ], NOW)
+    expect(groups.map(g => g.day)).toEqual(['TODAY · WED JUL 29'])
+    expect(groups[0].entries.map(e => e.id)).toEqual(['evening', 'afternoon'])
   })
 })
 

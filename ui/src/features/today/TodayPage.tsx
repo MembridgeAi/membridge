@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
+import { weekdayMonthDay } from '../../data/localTime'
 import { groupLiveSessions } from '../../data/mappers'
 import { useLiveSessions, useProjects, useSkeletonStats, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
 import type { LiveSession, Project, SkeletonStats } from '../../data/types'
@@ -11,16 +12,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-// UTC fields, never local -- the same reasoning as SyncStateView's shortDate
-// (components/SyncState.tsx): the daemon's timestamps are UTC, and a
-// local-time render could put the header on a different calendar day than
-// the data it is describing. No comma, matching the mockup's "Tue Jul 29" --
+// Local fields, never UTC -- the same fix as SyncStateView's shortStamp
+// (components/SyncState.tsx). Reading UTC fields put tomorrow's date in the
+// header of a page literally titled "Today" for every user west of
+// Greenwich after 17:00. No comma, matching the mockup's "Tue Jul 29" --
 // toLocaleDateString's weekday-included form always inserts one ("Tue, Jul 29").
 export function todayDateLabel(now: Date = new Date()): string {
-  return `${WEEKDAYS[now.getUTCDay()]} ${MONTHS[now.getUTCMonth()]} ${now.getUTCDate()}`
+  return weekdayMonthDay(now)
 }
 
 const MINUTE = 60_000

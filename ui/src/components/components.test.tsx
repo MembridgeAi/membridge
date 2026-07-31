@@ -28,12 +28,16 @@ describe('SyncStateView', () => {
   // Regression: a bare date cannot tell "minutes ago" from "dead since
   // midnight" -- both printed today's date under a warning glyph, which is
   // what made a 12-second lag read as an outage.
-  it('renders a same-day sync as a time, not today\'s date', () => {
+  //
+  // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ),
+  // so 19:51:48Z renders as 12:51 -- the viewer's own clock, not UTC's.
+  it('renders a same-day sync as a time, not today\'s date, in the viewer\'s zone', () => {
     vi.useFakeTimers()
     try {
       vi.setSystemTime(new Date('2026-07-30T19:53:00Z'))
       render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-30T19:51:48Z' }} onSync={() => {}} />)
-      expect(screen.getByText(/behind · 19:51/)).toBeInTheDocument()
+      expect(screen.getByText(/behind · 12:51/)).toBeInTheDocument()
+      expect(screen.queryByText(/19:51/)).toBeNull()
       expect(screen.queryByText(/Jul 30/)).toBeNull()
     } finally {
       vi.useRealTimers()
@@ -46,6 +50,35 @@ describe('SyncStateView', () => {
       vi.setSystemTime(new Date('2026-07-30T19:53:00Z'))
       render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-29T23:59:00Z' }} onSync={() => {}} />)
       expect(screen.getByText(/behind · Jul 29/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The same/different-day branch must compare LOCAL days. These two cases
+  // are the ones a UTC comparison gets backwards.
+  it('treats an evening sync as same-day even after UTC has rolled over', () => {
+    vi.useFakeTimers()
+    try {
+      // Locally both are Jul 29 (15:00 and 21:00); in UTC they are Jul 29
+      // and Jul 30, so a UTC comparison would print a date here.
+      vi.setSystemTime(new Date('2026-07-30T04:00:00Z'))
+      render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-29T22:00:00Z' }} onSync={() => {}} />)
+      expect(screen.getByText(/behind · 15:00/)).toBeInTheDocument()
+      expect(screen.queryByText(/Jul 29/)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('treats last night as a different day even when the UTC day matches', () => {
+    vi.useFakeTimers()
+    try {
+      // Both are Jul 29 in UTC; locally the sync was Jul 28 21:00 and "now"
+      // is Jul 29 09:00 -- yesterday to the person reading it.
+      vi.setSystemTime(new Date('2026-07-29T16:00:00Z'))
+      render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-29T04:00:00Z' }} onSync={() => {}} />)
+      expect(screen.getByText(/behind · Jul 28/)).toBeInTheDocument()
     } finally {
       vi.useRealTimers()
     }

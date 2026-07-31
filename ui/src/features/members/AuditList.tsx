@@ -1,16 +1,16 @@
+import { monthDay } from '../../data/localTime'
 import { useAudit } from '../../data/queries'
 import type { AuditEvent } from '../../data/types'
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-// UTC fields -- same reasoning as ProjectPage's dayLabel: the daemon's
-// timestamps are UTC, so a local-time render could misplace an event by a
-// day depending on where the app runs.
+// Local fields -- same fix as ProjectPage's dayLabel. An audit trail stamped
+// in UTC dated an evening action to the next day and put its clock time
+// hours off, which is exactly the wrong property for the one log people
+// consult to reconstruct who did what, when.
 function timeLabel(iso: string): string {
   const d = new Date(iso)
-  const hh = String(d.getUTCHours()).padStart(2, '0')
-  const mm = String(d.getUTCMinutes()).padStart(2, '0')
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${hh}:${mm}`
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${monthDay(d)} ${hh}:${mm}`
 }
 
 function describe(event: AuditEvent): string {

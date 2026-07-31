@@ -1,28 +1,24 @@
 import { useMemo, useState } from 'react'
 import { EntryRow } from '../../components/EntryRow'
+import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import './feed.css'
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
-// UTC fields, never local -- the daemon's timestamps are UTC, and a
-// local-time render could sort an entry into the wrong calendar day
-// depending on where the app runs (same reasoning as ProjectPage's
-// dayLabel and TodayPage's todayDateLabel). Uppercase per spec's exact
-// example: "TODAY · TUE JUL 29".
+// Local calendar fields, never UTC -- the daemon's timestamps are UTC, but
+// the reader is not, and grouping by the UTC day filed every evening session
+// west of Greenwich under TOMORROW's date (same fix as ProjectPage's dayLabel
+// and TodayPage's todayDateLabel). Uppercase per spec's exact example:
+// "TODAY · TUE JUL 29".
 export function dayLabel(iso: string, now: Date = new Date()): string {
   const d = new Date(iso)
-  const isToday = d.getUTCFullYear() === now.getUTCFullYear()
-    && d.getUTCMonth() === now.getUTCMonth() && d.getUTCDate() === now.getUTCDate()
-  const weekday = `${WEEKDAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`.toUpperCase()
-  return isToday ? `TODAY · ${weekday}` : weekday
+  const weekday = weekdayMonthDay(d).toUpperCase()
+  return isSameLocalDay(d, now) ? `TODAY · ${weekday}` : weekday
 }
 
 interface DayGroup {

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
 import { useDataClient } from '../../data/DataClientProvider'
+import { weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
 import {
   useCopyForAI, useMembers, useOpenMemoryFile, useProjectAccess, useProjects, useProjectStream,
@@ -14,20 +15,17 @@ import { AccessPanel, type AccessRow } from './AccessPanel'
 import { MemoryPanel, SyncPanel } from './SidePanels'
 import './project.css'
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const COPY_CONFIRMATION_MS = 2000
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
-// UTC fields -- same reasoning as TodayPage's todayDateLabel: the daemon's
-// timestamps are UTC, so a local-time render could sort an entry into the
-// wrong calendar day depending on where the app runs.
+// Local fields -- same fix as TodayPage's todayDateLabel: the daemon's
+// timestamps are UTC, but grouping on the UTC day sorted an evening session
+// into tomorrow for anyone west of Greenwich.
 function dayLabel(iso: string): string {
-  const d = new Date(iso)
-  return `${WEEKDAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`
+  return weekdayMonthDay(new Date(iso))
 }
 
 interface DayGroup {

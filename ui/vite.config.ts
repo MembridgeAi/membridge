@@ -14,5 +14,15 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     globals: true,
     passWithNoTests: true,
+    // Pin the suite's timezone. The UI renders every timestamp in the
+    // VIEWER's local zone, so these assertions are only meaningful against a
+    // known zone -- unpinned, the ambient TZ leaks into the workers and the
+    // same suite passes in London and fails in California, which is exactly
+    // the class of bug this guards. Vitest applies `env` inside each worker
+    // before any test module (or setup file) is imported, and Node re-reads
+    // the zone when process.env.TZ is assigned, so Date/Intl resolve to this
+    // zone everywhere. Deliberately NOT 'UTC': a UTC-pinned suite cannot
+    // tell local-day logic from UTC-day logic, so the bug would still hide.
+    env: { TZ: 'America/Los_Angeles' },
   },
 })

@@ -169,16 +169,17 @@ describe('TodayPage', () => {
     expect(screen.queryByText(/copy for ai/i)).toBeNull()
   })
 
-  // FINDING 5: the header date is built from UTC fields with no comma.
+  // FINDING 5: the header date is the viewer's local calendar day, no comma.
+  // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ).
   describe('todayDateLabel', () => {
-    it('formats weekday/month/day from UTC fields with no comma', () => {
+    it('formats weekday/month/day from local fields with no comma', () => {
       expect(todayDateLabel(new Date('2026-07-29T23:30:00Z'))).toBe('Wed Jul 29')
     })
-    it('uses the UTC calendar day even when local fields would read a different one', () => {
-      // 23:30 UTC is still late evening in every western timezone -- picking
-      // a date 30 minutes before UTC midnight is what would flip to the
-      // NEXT day locally in zones east of UTC, proving this reads UTC.
-      expect(todayDateLabel(new Date('2026-07-30T23:30:00Z'))).toBe('Thu Jul 30')
+    it('still reads today in the evening, when UTC has already rolled over', () => {
+      // 02:00Z Jul 30 is 19:00 Jul 29 in Los Angeles. Reading UTC fields put
+      // TOMORROW's date in the header every evening west of Greenwich --
+      // the first thing anyone opening the app after 17:00 noticed.
+      expect(todayDateLabel(new Date('2026-07-30T02:00:00Z'))).toBe('Wed Jul 29')
     })
   })
 

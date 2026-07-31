@@ -1,24 +1,27 @@
+import { isSameLocalDay } from '../data/localTime'
 import type { SyncState } from '../data/types'
 import { StateChip } from './StateChip'
 
-// Pin to UTC so the rendered stamp is identical no matter the machine's local
-// timezone. The daemon's timestamps are UTC ISO strings; formatting them in
-// the viewer's local zone would let "Jul 23" become "Jul 22" or "Jul 24"
-// depending on where the app runs, including in CI.
+// Rendered in the VIEWER's zone (no timeZone option -- the browser's own
+// resolved zone). The daemon's timestamps are UTC ISO strings, and pinning
+// the render to UTC meant a Pacific user saw "Jul 24" on a sync that, by
+// their clock, happened on the evening of Jul 23. Tests get determinism by
+// pinning the suite's zone (vite.config.ts, test.env.TZ), not by making
+// every user read UTC.
 //
 // Same-day lag renders as a time, not a date. A bare date cannot distinguish
 // "synced two minutes ago" from "synced at 00:01 and dead ever since" -- both
 // print today's date, and the warning colour made the harmless one look like
 // an outage. Anything older than today keeps the date, which is the useful
-// unit at that distance.
+// unit at that distance. "Today" is the viewer's local day, so an evening
+// sync stops reading as yesterday once UTC rolls over.
 const shortStamp = (iso: string | null, now: Date = new Date()) => {
   if (!iso) return 'never'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return 'never'
-  const sameUtcDay = d.toISOString().slice(0, 10) === now.toISOString().slice(0, 10)
-  return sameUtcDay
-    ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' })
-    : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+  return isSameLocalDay(d, now)
+    ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+    : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
 export function SyncStateView({ state, onSync }: { state: SyncState; onSync?: () => void }) {
