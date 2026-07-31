@@ -22513,6 +22513,101 @@ const repoRoot = require('../lib/repo-root');
     });
   }
 
+  // --- app shell + installer regressions (2026-07-31) ---
+  // Source-shape checks in the style of "the tray app loop calls afterTeamPull"
+  // above: the Electron main process can't run inside this suite, and the
+  // installer only runs on a real Mac, so pin the exact source properties each
+  // fix depends on. Every assertion here was proven non-vacuous by mutating
+  // the source (reverting the fix) and watching the check fail.
+  {
+    const appSrc = read(path.join(__dirname, '..', 'app', 'main.js'));
+    const tmpl = read(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
+
+    check('app update flow: /bin/sh spawn is darwin-gated and has an async error fallback', () => {
+      // On win32 there is no /bin/sh, and spawn's missing-executable failure
+      // arrives as an async 'error' EVENT that a try/catch never sees — the
+      // unguarded spawn was an uncaught exception, not an update.
+      const start = appSrc.indexOf('async function checkForUpdate');
+      const spawnAt = appSrc.indexOf("spawn('/bin/sh'", start);
+      assert.ok(start !== -1 && spawnAt !== -1, 'checkForUpdate or its /bin/sh spawn not found');
+      assert.ok(/process\.platform\s*!==\s*'darwin'/.test(appSrc.slice(start, spawnAt)),
+        'the update spawn must be reachable only on darwin (non-mac opens the releases page)');
+      assert.ok(/\.on\(\s*'error'/.test(appSrc.slice(spawnAt, spawnAt + 600)),
+        "the darwin spawn needs an 'error' listener falling back to the releases page");
+    });
+
+    check('app ready path: sync machinery starts before the consent dialog is awaited', () => {
+      // The awaited first-run dialog used to run first, so no hook install and
+      // no sync happened until the user noticed it — while the tray said
+      // "running". The dialog gates only consent.applyConsent.
+      const ensure = appSrc.indexOf('hooks.ensureInstalled()');
+      const dlg = appSrc.indexOf('consent.needsConsentPrompt');
+      assert.ok(ensure !== -1 && dlg !== -1, 'ensureInstalled or the consent prompt not found');
+      assert.ok(ensure < dlg, 'hooks.ensureInstalled()/tick() must start before the consent dialog is awaited');
+      assert.ok(/consent\.applyConsent\(/.test(appSrc), 'the dialog result must still drive applyConsent');
+    });
+
+    check('app window: navigation is origin-locked and window.open is http(s)-only', () => {
+      // preload.js and the membridge:pick-paths bridge stay attached across
+      // navigations, and the dashboard renders teammate-authored content.
+      assert.ok(/will-navigate/.test(appSrc), 'openDashboard must register a will-navigate guard');
+      assert.ok(/origin\s*!==\s*allowedOrigin\)\s*event\.preventDefault\(\)/.test(appSrc),
+        'will-navigate must block any origin other than the local dashboard');
+      assert.ok(/https\?/.test(appSrc.slice(appSrc.indexOf('setWindowOpenHandler'),
+        appSrc.indexOf('setWindowOpenHandler') + 400)),
+        'the window-open handler must allowlist http(s) before shell.openExternal');
+    });
+
+    check('app tray: launch opens a window on non-mac, and click handlers are non-mac only', () => {
+      // Win/Linux were tray-only (Win11 hides new tray icons: launch showed
+      // NOTHING), while on macOS a registered click handler opened the
+      // context menu AND a window on every left-click.
+      const click = appSrc.indexOf("tray.on('click'");
+      assert.ok(click !== -1, 'tray click handler not found');
+      assert.ok(/platform\s*!==\s*'darwin'/.test(appSrc.slice(Math.max(0, click - 400), click)),
+        'tray click/double-click handlers must be registered only when platform !== darwin');
+      assert.ok(/!==\s*'darwin'\)\s*openDashboard\(\)/.test(appSrc),
+        'the ready path must open the dashboard window once on non-mac');
+    });
+
+    check('app daemon takeover: pidfile identity is verified before the kill', () => {
+      // The pidfile stores a bare pid; stale pidfile + OS pid reuse meant a
+      // SIGTERM to whatever random process now owns that number.
+      const fn = appSrc.slice(appSrc.indexOf('function takeOverDaemon'),
+        appSrc.indexOf('async function runSync'));
+      assert.ok(/pidLooksLikeMembridge\(pid\)/.test(fn),
+        'takeOverDaemon must check the command line looks like MemBridge before killing');
+      assert.ok(appSrc.includes('/membridge/i.test(cmd)'),
+        'the identity probe must require the live command line to mention membridge');
+    });
+
+    check('installer template: never invokes sudo (updater runs it detached and non-interactive)', () => {
+      const sudoLines = tmpl.split('\n')
+        .filter(l => !l.trim().startsWith('#'))
+        .filter(l => /\bsudo\b/.test(l));
+      assert.deepStrictEqual(sudoLines, [],
+        'sudo cannot work under the in-app updater\'s detached spawn — use a user-writable bin dir');
+      assert.ok(/\/opt\/homebrew\/bin/.test(tmpl) && /\.local\/bin/.test(tmpl),
+        'the CLI must fall through /opt/homebrew/bin then ~/.local/bin');
+    });
+
+    check('installer template: reports the truthful CLI outcome and enables launch at login', () => {
+      // The old final block printed "CLI installed" even when both copy
+      // attempts had failed.
+      assert.ok(/CLI_STATUS/.test(tmpl), 'the CLI outcome must be tracked, not assumed');
+      for (const state of ['ready', 'not_on_path', 'failed']) {
+        assert.ok(tmpl.includes(state), `CLI_STATUS state ${state} missing from the template`);
+      }
+      assert.ok(/CLI not installed/.test(tmpl), 'the failed branch must say the CLI is NOT installed');
+      assert.ok(/--set-login=on/.test(tmpl), 'the installer must enable launch at login via --set-login=on');
+      const joined = tmpl.replace(/\\\n\s*/g, ' '); // fold shell line continuations
+      assert.ok(/--set-login=on[^\n]*<\/dev\/null/.test(joined),
+        'the --set-login call must not read the piped script (curl|sh: stdin IS the script)');
+      assert.ok(/--set-login=on[^\n]*\|\|/.test(joined),
+        'the --set-login call must be guarded so it can never fail the install');
+    });
+  }
+
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
   // file: these are the actual regression guards, run last so they observe
   // everything the suite did, not just one code path's isolation.

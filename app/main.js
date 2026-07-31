@@ -21,6 +21,7 @@ const notesStore = lib('teammate-notes-store');
 const { startServer } = lib('server');
 const teamsync = lib('teamsync');
 const hooks = lib('hooks');
+const autostart = lib('autostart');
 
 const SMOKE = process.argv.includes('--smoke');
 let tray = null;
@@ -46,15 +47,40 @@ function pidRunning(pid) {
   }
 }
 
+// The pidfile (lib/util.pidPath) stores a BARE pid — nothing about what
+// process it was. A stale pidfile plus OS pid reuse means "alive" alone is
+// not proof it's ours, and killing on that evidence SIGTERMs some random
+// process. Identity check: the live process's command line must mention
+// membridge. Fail-safe — any doubt (ps unavailable, empty output, no match)
+// means no kill; takeOverDaemon still claims the pidfile either way.
+function pidLooksLikeMembridge(pid) {
+  try {
+    const { execSync } = require('child_process');
+    // pid came through parseInt (readPid), so interpolation is safe.
+    const cmd = process.platform === 'win32'
+      ? execSync(
+          `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine"`,
+          { timeout: 5000 }).toString()
+      : execSync(`ps -p ${pid} -o command=`, { timeout: 5000 }).toString();
+    return /membridge/i.test(cmd);
+  } catch {
+    return false;
+  }
+}
+
 // If a CLI daemon is running, the app takes over (one syncer at a time), and
 // registers its own pid so `membridge status`/`stop` keep working.
 function takeOverDaemon() {
   const pid = readPid();
   if (pid && pid !== process.pid && pidRunning(pid)) {
-    try {
-      process.kill(pid);
-      util.log(`tray app took over from CLI daemon (pid ${pid})`);
-    } catch {}
+    if (pidLooksLikeMembridge(pid)) {
+      try {
+        process.kill(pid);
+        util.log(`tray app took over from CLI daemon (pid ${pid})`);
+      } catch {}
+    } else {
+      util.log(`pidfile pid ${pid} is alive but doesn't look like a MemBridge process — not killing it (stale pidfile + pid reuse?)`);
+    }
   }
   fs.mkdirSync(util.homeDir(), { recursive: true });
   fs.writeFileSync(util.pidPath(), String(process.pid));
@@ -105,8 +131,20 @@ const dashboardUrl = () => `http://127.0.0.1:${util.getConfig().dashboardPort}`;
 // no reason for the desktop window to take the extra hop itself.
 const windowUrl = () => dashboardUrl();
 
+// URL parsing that never throws: malformed/exotic URLs come back with a
+// null origin/protocol, which fails every allowlist check below (fail closed).
+function safeOrigin(url) {
+  try {
+    const u = new URL(url);
+    return { origin: u.origin, protocol: u.protocol };
+  } catch {
+    return { origin: null, protocol: null };
+  }
+}
+
 function openDashboard() {
   if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
     return;
@@ -132,10 +170,20 @@ function openDashboard() {
   win.loadURL(windowUrl());
   // Anything the dashboard opens as a popup (the GitHub sign-in round trip)
   // goes to the default browser — GitHub is already signed in there, and
-  // nothing external ever renders inside the app window.
+  // nothing external ever renders inside the app window. http(s) ONLY: the
+  // dashboard renders teammate-authored synced content, so a crafted link
+  // must not be able to reach file:, other apps' custom protocols, etc.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (/^https?:$/i.test(safeOrigin(url).protocol)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+  // And the window itself must never leave the local dashboard: preload.js
+  // and the membridge:pick-paths bridge stay attached across navigations, so
+  // an off-origin page would inherit the native file-picker capability.
+  const allowedOrigin = safeOrigin(windowUrl()).origin;
+  win.webContents.on('will-navigate', (event, url) => {
+    const { origin } = safeOrigin(url);
+    if (!origin || origin !== allowedOrigin) event.preventDefault();
   });
   win.on('closed', () => {
     win = null;
@@ -201,13 +249,26 @@ async function checkForUpdate({ manual = false } = {}) {
       cancelId: 1,
     });
     if (response === 0) {
+      // The curl|sh installer is macOS-only. On win32 there is no /bin/sh at
+      // all, and spawn's missing-executable failure arrives as an async
+      // 'error' EVENT — the try/catch below never sees it, so the old code
+      // died on an uncaught exception instead of updating. Non-mac goes
+      // straight to the releases page.
+      if (process.platform !== 'darwin') {
+        shell.openExternal(updateCheck.RELEASES_PAGE);
+        return;
+      }
       // Install in place instead of opening a web page. Run the pinned installer
       // DETACHED (its own session) so it survives this app quitting — install.sh
       // quits the running MemBridge to replace its bundle, then reopens the new
       // version itself (its step 8 `open`). stdio is ignored; it finishes on its own.
       const { spawn } = require('child_process');
       try {
-        spawn('/bin/sh', ['-c', command], { detached: true, stdio: 'ignore' }).unref();
+        const child = spawn('/bin/sh', ['-c', command], { detached: true, stdio: 'ignore' });
+        // spawn failures surface as an 'error' event, not a throw — without
+        // this listener the whole app goes down on an uncaught exception.
+        child.on('error', () => shell.openExternal(updateCheck.RELEASES_PAGE));
+        child.unref();
         await dialog.showMessageBox({
           type: 'info',
           title: 'Updating MemBridge',
@@ -232,6 +293,43 @@ async function checkForUpdate({ manual = false } = {}) {
       } catch {}
     }
   }
+}
+
+// Two start-at-login mechanisms exist: Electron's login item (this tray
+// checkbox) and lib/autostart's LaunchAgent/systemd/VBS daemon launcher (the
+// dashboard's Settings toggle → POST /api/settings → autostart.enable()).
+// Inside the packaged app the LaunchAgent variant is broken anyway — it
+// launches process.execPath (the Electron binary) WITHOUT ELECTRON_RUN_AS_NODE,
+// so at login it opens the GUI instead of a daemon. The app makes the Electron
+// login item the single source of truth: the checkbox reflects EITHER
+// mechanism, and toggling it writes the login item and removes the daemon
+// launcher, so exactly one mechanism survives every toggle.
+function startAtLoginEnabled() {
+  let daemonAutostart = false;
+  try {
+    daemonAutostart = autostart.isEnabled();
+  } catch {}
+  return app.getLoginItemSettings().openAtLogin || daemonAutostart;
+}
+function setStartAtLogin(enabled) {
+  app.setLoginItemSettings({ openAtLogin: enabled });
+  try {
+    autostart.disable(); // whichever way the toggle went, the daemon launcher goes
+  } catch {}
+  updateMenu();
+}
+
+// Self-heal at launch (packaged builds only): if the dashboard toggle left a
+// daemon launcher behind, convert it into the login item it was meant to be.
+function migrateDaemonAutostart() {
+  if (!app.isPackaged) return; // dev runs must not eat a real CLI-daemon setup
+  try {
+    if (autostart.isEnabled()) {
+      autostart.disable();
+      app.setLoginItemSettings({ openAtLogin: true });
+      util.log('migrated daemon autostart (LaunchAgent/unit/VBS) to the app login item');
+    }
+  } catch {}
 }
 
 function updateMenu() {
@@ -280,8 +378,8 @@ function updateMenu() {
     {
       label: 'Start at login',
       type: 'checkbox',
-      checked: app.getLoginItemSettings().openAtLogin,
-      click: item => app.setLoginItemSettings({ openAtLogin: item.checked }),
+      checked: startAtLoginEnabled(),
+      click: item => setStartAtLogin(item.checked),
     },
     { type: 'separator' },
     { label: 'Quit MemBridge', click: () => app.quit() },
@@ -323,13 +421,48 @@ if (loginArg) {
     tray.setToolTip('MemBridge — shared memory across your AI coding tools');
     // Left-click (or a double-click) the tray icon opens the dashboard — the
     // primary way to open the app on Windows/Linux, where the context menu is
-    // right-click only. On macOS a click opens the menu by convention, so the
-    // menu already carries "Open dashboard" there.
-    tray.on('click', openDashboard);
-    tray.on('double-click', openDashboard);
+    // right-click only. On macOS a click opens the menu by convention (and
+    // registering 'click' there would open the menu AND a window on every
+    // left-click), so these handlers are non-mac only; the menu already
+    // carries "Open dashboard" on macOS.
+    if (process.platform !== 'darwin') {
+      tray.on('click', openDashboard);
+      tray.on('double-click', openDashboard);
+    }
     updateMenu();
 
-    // First-run consent for session summaries
+    // smoke mode verifies tray + server boot only — it must never sync/write
+    if (!SMOKE) {
+      migrateDaemonAutostart();
+      // Auto-register the Claude Code Stop hook when the app launches, so users
+      // who only ever download and open MemBridge.app get it without a manual
+      // `setup-hooks` step. Silent and fail-open. Kept inside !SMOKE so the
+      // CI/build boot-check never writes to a real ~/.claude/settings.json.
+      hooks.ensureInstalled();
+      tick();
+      setInterval(tick, config.intervalSec * 1000);
+      // Fire-and-forget: notify once per version if a newer release exists.
+      checkForUpdate();
+    }
+
+    // Windows/Linux get a real window at launch: those platforms are
+    // tray-only otherwise, and Windows 11 hides new tray icons behind the
+    // overflow chevron — a first launch that shows NOTHING reads as broken.
+    // macOS keeps its menu-bar-only convention.
+    if (!SMOKE && process.platform !== 'darwin') openDashboard();
+
+    // First-run consent for session summaries — AWAITED LAST, deliberately.
+    // This dialog used to run before ensureInstalled()/tick()/setInterval,
+    // which meant no hook install and no sync happened until the user noticed
+    // an unowned dialog, while the tray already said "running". The dialog
+    // gates ONLY consent.applyConsent (recording distill.consent, and running
+    // hooks.setupHooks() on a grant); none of the machinery above is
+    // consent-gated — it already ran unconditionally after the dialog — so
+    // starting it first changes nothing about what consent controls. Sync
+    // output honors the decision at render time: lib/digest.js only adds the
+    // AGENTS.md summary line when distill.consent === 'granted', so a sync
+    // pass that ran while the dialog was still open wrote nothing a "Not now"
+    // should have prevented.
     const consent = lib('consent');
     if (!SMOKE && consent.needsConsentPrompt(config)) {
       const { response } = await dialog.showMessageBox({
@@ -341,19 +474,10 @@ if (loginArg) {
         cancelId: 1,
       });
       consent.applyConsent(response === 0 ? 'granted' : 'declined');
-    }
-
-    // smoke mode verifies tray + server boot only — it must never sync/write
-    if (!SMOKE) {
-      // Auto-register the Claude Code Stop hook when the app launches, so users
-      // who only ever download and open MemBridge.app get it without a manual
-      // `setup-hooks` step. Silent and fail-open. Kept inside !SMOKE so the
-      // CI/build boot-check never writes to a real ~/.claude/settings.json.
-      hooks.ensureInstalled();
-      tick();
-      setInterval(tick, config.intervalSec * 1000);
-      // Fire-and-forget: notify once per version if a newer release exists.
-      checkForUpdate();
+      // A grant used to be visible in the very first sync pass (dialog ran
+      // first). Keep that: re-sync now so the AGENTS.md line lands
+      // immediately instead of one full interval later.
+      if (response === 0) tick();
     }
 
     if (SMOKE) {

@@ -10,7 +10,6 @@ SHA256="__MEMBRIDGE_SHA256__"
 REPO="MembridgeAi/membridge"
 APP_NAME="MemBridge"
 APP_DEST="/Applications/${APP_NAME}.app"
-CLI_DEST="/usr/local/bin/membridge"
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
@@ -60,9 +59,28 @@ run "mv '$TMP/unzip/${APP_NAME}.app' '$APP_DEST'"
 run "xattr -dr com.apple.quarantine '$APP_DEST' 2>/dev/null || true"
 
 # 7. Install the CLI wrapper (runs the bundled CLI via the app's Electron-as-Node)
+#
+# NO SUDO anywhere in this script: the in-app updater re-runs it from a
+# detached, non-interactive spawn where a sudo password prompt can only hang
+# or fail. Install into the first user-writable bin dir instead:
+#   /opt/homebrew/bin  (already on PATH on every Homebrew arm64 Mac)
+#   ~/.local/bin       (created if needed; warned about if not on PATH)
+# CLI_STATUS carries the truthful outcome to the final report:
+#   ready | not_on_path | failed
+CLI_STATUS="failed"
+CLI_DEST=""
+BIN_DIR=""
+if [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then
+  BIN_DIR="/opt/homebrew/bin"
+elif mkdir -p "$HOME/.local/bin" 2>/dev/null && [ -w "$HOME/.local/bin" ]; then
+  BIN_DIR="$HOME/.local/bin"
+fi
 if [ "$DRY_RUN" = 1 ]; then
-  printf '  [dry-run] write %s (Electron-as-Node wrapper)\n' "$CLI_DEST"
-else
+  printf '  [dry-run] write %s/membridge (Electron-as-Node wrapper)\n' "${BIN_DIR:-<no writable bin dir>}"
+  CLI_DEST="${BIN_DIR:-$HOME/.local/bin}/membridge"
+  CLI_STATUS="ready"
+elif [ -n "$BIN_DIR" ]; then
+  CLI_DEST="$BIN_DIR/membridge"
   WRAPPER="$TMP/membridge"
   cat > "$WRAPPER" <<EOF
 #!/bin/sh
@@ -70,23 +88,31 @@ APP="${APP_DEST}"
 exec env ELECTRON_RUN_AS_NODE=1 "\$APP/Contents/MacOS/${APP_NAME}" "\$APP/Contents/Resources/app.asar/bin/membridge.js" "\$@"
 EOF
   chmod +x "$WRAPPER"
-  BIN_DIR="$(dirname "$CLI_DEST")"
-  if mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ] && cp "$WRAPPER" "$CLI_DEST" && chmod +x "$CLI_DEST"; then
+  if cp "$WRAPPER" "$CLI_DEST" && chmod +x "$CLI_DEST"; then
     say "CLI installed at ${CLI_DEST}"
-  elif sudo mkdir -p "$BIN_DIR" && sudo cp "$WRAPPER" "$CLI_DEST" && sudo chmod +x "$CLI_DEST"; then
-    say "CLI installed at ${CLI_DEST}"
-  else
-    say "Couldn't install the CLI automatically. Add it later with:"
-    cat <<MANUAL
-  sudo mkdir -p ${BIN_DIR}
-  sudo tee ${CLI_DEST} >/dev/null <<'SH'
+    case ":$PATH:" in
+      *":$BIN_DIR:"*) CLI_STATUS="ready" ;;
+      *)
+        CLI_STATUS="not_on_path"
+        say "Note: ${BIN_DIR} is not on your PATH. Add this to your shell profile:"
+        printf '  export PATH="%s:$PATH"\n' "$BIN_DIR"
+        ;;
+    esac
+  fi
+fi
+if [ "$CLI_STATUS" = "failed" ]; then
+  CLI_DEST=""
+  say "Couldn't install the CLI automatically (no user-writable bin dir). Add it yourself:"
+  cat <<MANUAL
+  mkdir -p \$HOME/.local/bin
+  cat > \$HOME/.local/bin/membridge <<'SH'
 #!/bin/sh
 APP="${APP_DEST}"
 exec env ELECTRON_RUN_AS_NODE=1 "\$APP/Contents/MacOS/${APP_NAME}" "\$APP/Contents/Resources/app.asar/bin/membridge.js" "\$@"
 SH
-  sudo chmod +x ${CLI_DEST}
+  chmod +x \$HOME/.local/bin/membridge
+  export PATH="\$HOME/.local/bin:\$PATH"
 MANUAL
-  fi
 fi
 
 # 7b. Register the MCP server with every AI tool this user actually has.
@@ -105,16 +131,38 @@ fi
 # stdin is the REST OF THIS SCRIPT. A child that reads stdin would eat it.
 if [ "$DRY_RUN" = 1 ]; then
   printf '  [dry-run] %s mcp register\n' "$CLI_DEST"
-elif [ -x "$CLI_DEST" ]; then
+elif [ -n "$CLI_DEST" ] && [ -x "$CLI_DEST" ]; then
   say "Registering the MemBridge MCP server with your AI tools..."
   "$CLI_DEST" mcp register </dev/null || say "MCP registration didn't complete — run 'membridge mcp register' later. The install is fine."
 fi
 
-# 8. Launch + report
+# 7c. Launch at login, via the app's own headless flag (see app/main.js:
+# `MemBridge --set-login=on` flips the Electron login item and exits without
+# opening any UI), so MemBridge survives reboots. Best-effort: guarded so a
+# failure here can never fail the install. </dev/null for the same reason as
+# mcp register above — under `curl | sh`, stdin is the rest of this script.
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  [dry-run] %s --set-login=on\n' "$APP_DEST/Contents/MacOS/$APP_NAME"
+else
+  "$APP_DEST/Contents/MacOS/$APP_NAME" --set-login=on >/dev/null 2>&1 </dev/null \
+    || say "Couldn't enable launch at login — toggle 'Start at login' in the tray menu."
+fi
+
+# 8. Launch + report (truthful: say what actually happened to the CLI)
 run "open '$APP_DEST'"
 say "Done. ${APP_NAME} is installed and opens with no warning."
-if command -v membridge >/dev/null 2>&1; then
-  say "CLI ready: $(command -v membridge)"
-else
-  say "CLI installed — open a new terminal (ensure /usr/local/bin is on PATH) to use 'membridge'."
-fi
+case "$CLI_STATUS" in
+  ready)
+    if command -v membridge >/dev/null 2>&1; then
+      say "CLI ready: $(command -v membridge)"
+    else
+      say "CLI installed at ${CLI_DEST} — open a new terminal to use 'membridge'."
+    fi
+    ;;
+  not_on_path)
+    say "CLI installed at ${CLI_DEST}, but that directory isn't on your PATH yet — see the note above."
+    ;;
+  *)
+    say "CLI not installed — see the manual steps above."
+    ;;
+esac
