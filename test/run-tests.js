@@ -710,6 +710,21 @@ async function main() {
     assert.notStrictEqual(pkg.build.mac.notarize, false,
       'notarize:false disables notarization outright; leave it unset so credentials decide');
   });
+  check('build config keeps app/package.json version in lockstep with the root version', () => {
+    // Regression: the 0.2.1 and 0.2.2 releases shipped dmgs that self-report
+    // 0.2.0 — electron-builder stamps the app from app/package.json, which
+    // had drifted from the root version npm publishes track. prepare-app.js
+    // now stamps app/package.json from the root on every build (the spawn
+    // above has already run it when the dependency closure resolves), and the
+    // committed file must agree too, so the drift can neither ship nor sit
+    // latent in the tree.
+    const rootPkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
+    const appPkg = JSON.parse(read(path.join(__dirname, '..', 'app', 'package.json')));
+    assert.strictEqual(appPkg.version, rootPkg.version,
+      `app/package.json version ${appPkg.version} drifted from root ${rootPkg.version}; `
+      + 'prepare-app.js should have stamped it — a build from this tree would '
+      + 'self-report the wrong release');
+  });
   check('C1: the npm tarball ships vendor/grammars, not just the packaged Electron app', () => {
     // CRITICAL (final whole-branch review, C1): package.json's "files"
     // whitelist excluded vendor/, so a plain `npm install
