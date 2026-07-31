@@ -43,6 +43,12 @@ export interface FakeOptions {
   hooksUpdateResult?: HookUpdateResult
 }
 
+// The brief fields every StreamEntry now carries (session detail page, Task
+// 2). The fixtures predate them; absence means null / [], never undefined.
+function emptyBrief(): Pick<StreamEntry, 'summaryFull' | 'decisions' | 'gotchas' | 'changes'> {
+  return { summaryFull: null, decisions: null, gotchas: null, changes: [] }
+}
+
 export class FakeDataClient implements DataClient {
   readonly capabilities: Capabilities
   constructor(private opts: FakeOptions = {}) {
@@ -106,7 +112,7 @@ export class FakeDataClient implements DataClient {
   }
   getProjectStream() {
     return this.guard<StreamEntry[]>([
-      { id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z', live: true, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], session: 's-e1' },
+      { id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z', live: true, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], session: 's-e1', ...emptyBrief() },
     ])
   }
   // Feed fixture: 5 entries across 2 projects, 2 named authors + "you", 2
@@ -115,11 +121,11 @@ export class FakeDataClient implements DataClient {
   // without a live daemon.
   private feedFixture(): FeedEntry[] {
     return [
-      { id: 'f1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:36:00Z', live: true, outcome: '', intent: 'make the summary hook fire on session boundaries, not only on stop', files: [], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f1' },
-      { id: 'f2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-29T19:00:00Z', live: false, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f2' },
-      { id: 'f3', author: 'Sarah', authorId: 'sarah', tool: 'Claude Code', at: '2026-07-29T10:00:00Z', live: false, outcome: 'Listing flow validates addresses before payment.', intent: 'validate the address before charging the card', files: ['lib/listing.js'], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f3' },
-      { id: 'f4', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-28T22:00:00Z', live: false, outcome: 'Ports fixed and pushed.', intent: 'fix the port collision in the test suite', files: ['test/run-tests.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f4' },
-      { id: 'f5', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-28T18:00:00Z', live: false, outcome: 'Landing page deployed.', intent: null, files: [], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f5' },
+      { id: 'f1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:36:00Z', live: true, outcome: '', intent: 'make the summary hook fire on session boundaries, not only on stop', files: [], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f1', ...emptyBrief() },
+      { id: 'f2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-29T19:00:00Z', live: false, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f2', ...emptyBrief() },
+      { id: 'f3', author: 'Sarah', authorId: 'sarah', tool: 'Claude Code', at: '2026-07-29T10:00:00Z', live: false, outcome: 'Listing flow validates addresses before payment.', intent: 'validate the address before charging the card', files: ['lib/listing.js'], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f3', ...emptyBrief() },
+      { id: 'f4', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-28T22:00:00Z', live: false, outcome: 'Ports fixed and pushed.', intent: 'fix the port collision in the test suite', files: ['test/run-tests.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f4', ...emptyBrief() },
+      { id: 'f5', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-28T18:00:00Z', live: false, outcome: 'Landing page deployed.', intent: null, files: [], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f5', ...emptyBrief() },
     ]
   }
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }) {

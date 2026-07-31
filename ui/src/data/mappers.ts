@@ -3,7 +3,7 @@
 // LocalDaemonClient.ts so every mapping decision is unit-testable without a
 // live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
 // to keep this file focused on feed/project/member mapping.
-import type { FeedEntry, FeedFilters, LiveSession, LiveSessionGroup, Member, Project, Role, StreamEntry, SyncState } from './types'
+import type { FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, Role, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -24,6 +24,18 @@ export interface RawProjectRow {
   team: { projectId?: string | null; teamId?: string | null } | null
 }
 
+// A raw change row off the wire: lib/changes.js emits every field, but rows
+// from older daemons or team pushes can be sparse -- everything past `file`
+// is optional here and normalized by mapChange, never trusted to be present.
+export interface RawFileChange {
+  file: string
+  status?: string | null
+  add?: number | null
+  del?: number | null
+  note?: string | null
+  dep?: boolean
+}
+
 export interface RawFeedEntry {
   ts: string
   author: string
@@ -39,6 +51,13 @@ export interface RawFeedEntry {
   files: string[]
   goal: string | null
   headline: string | null
+  // Brief fields the daemon has shipped all along (lib/feed.js normalizeLocal
+  // emits them on every entry) -- optional here because a team row or an older
+  // daemon may omit them; mapStreamEntry normalizes absence to null / [].
+  summaryFull?: string | null
+  decisions?: string | null
+  gotchas?: string | null
+  changes?: RawFileChange[] | null
   // Stamped by the daemon (lib/feed.js) from the session's newest event of any
   // kind, against util.LIVE_WINDOW_MS. The UI does not recompute it: this
   // field is the single source both the live dot and Today's LIVE NOW count
@@ -162,6 +181,22 @@ export function streamEntryId(e: Pick<RawFeedEntry, 'session' | 'ts'>): string {
   return `${e.session || 'none'}|${e.ts}`
 }
 
+// Normalizes one raw change row: a valid status survives, anything else
+// (absent, unknown string) falls back to 'edited' -- the daemon's own
+// fallback in lib/changes.js -- and every other field lands as null/false
+// rather than undefined.
+function mapChange(c: RawFileChange): FileChange {
+  const status = c.status === 'new' || c.status === 'deleted' ? c.status : 'edited'
+  return {
+    file: c.file,
+    status,
+    add: typeof c.add === 'number' ? c.add : null,
+    del: typeof c.del === 'number' ? c.del : null,
+    note: c.note || null,
+    dep: !!c.dep,
+  }
+}
+
 export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
   return {
     id: streamEntryId(e),
@@ -174,6 +209,10 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     intent: intentOf(e),
     files: e.files,
     session: e.session,
+    summaryFull: e.summaryFull || null,
+    decisions: e.decisions || null,
+    gotchas: e.gotchas || null,
+    changes: Array.isArray(e.changes) ? e.changes.map(mapChange) : [],
   }
 }
 

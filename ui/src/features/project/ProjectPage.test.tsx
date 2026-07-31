@@ -96,8 +96,8 @@ describe('ProjectPage', () => {
   it('collapses several checkpoint entries of the same session into one row showing the newest text', async () => {
     const client = new FakeDataClient()
     vi.spyOn(client, 'getProjectStream').mockResolvedValue([
-      { id: 'c2', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:05:00Z', live: false, outcome: 'second checkpoint', intent: null, files: [], session: 's1' },
-      { id: 'c1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z', live: false, outcome: 'first checkpoint', intent: null, files: [], session: 's1' },
+      { id: 'c2', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:05:00Z', live: false, outcome: 'second checkpoint', intent: null, files: [], session: 's1', summaryFull: null, decisions: null, gotchas: null, changes: [] },
+      { id: 'c1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z', live: false, outcome: 'first checkpoint', intent: null, files: [], session: 's1', summaryFull: null, decisions: null, gotchas: null, changes: [] },
     ])
     renderWith(client, <ProjectPage slug="membridge" />)
 

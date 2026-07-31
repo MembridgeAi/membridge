@@ -15,6 +15,7 @@ import { FeedPage, dayLabel, groupByDay } from './FeedPage'
 const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
   id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z',
   live: false, outcome: 'done', intent: null, files: [], session: null, project: 'membridge', projectPath: '/Users/x/membridge',
+  summaryFull: null, decisions: null, gotchas: null, changes: [],
   ...overrides,
 })
 

@@ -14,6 +14,10 @@ const entry = (overrides: Partial<StreamEntry> = {}): StreamEntry => ({
   intent: 'make the summary hook fire on session boundaries',
   files: ['lib/hooks.js'],
   session: 's1',
+  summaryFull: null,
+  decisions: null,
+  gotchas: null,
+  changes: [],
   ...overrides,
 })
 

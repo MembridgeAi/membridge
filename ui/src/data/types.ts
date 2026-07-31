@@ -61,6 +61,18 @@ export interface LiveSessionGroup {
   intent: string | null
 }
 
+// One file's change model (lib/changes.js deriveChanges: status + line counts
+// + the agent's highlight note). add/del are null when git could not count
+// (binary, rename, no repo); dep marks lockfile/vendor noise the UI de-emphasizes.
+export interface FileChange {
+  file: string
+  status: 'new' | 'edited' | 'deleted'
+  add: number | null
+  del: number | null
+  note: string | null
+  dep: boolean
+}
+
 export interface StreamEntry {
   id: string
   author: string
@@ -71,6 +83,13 @@ export interface StreamEntry {
   outcome: string
   intent: string | null
   files: string[]
+  // The brief fields the daemon already ships on every /api/feed entry
+  // (lib/feed.js normalizeLocal/normalizeTeam) -- carried, not derived.
+  // Absent fields normalize to null / [], never undefined.
+  summaryFull: string | null
+  decisions: string | null
+  gotchas: string | null
+  changes: FileChange[]
   // The raw session id this checkpoint belongs to (RawFeedEntry.session,
   // untouched) -- carried through so a feed/stream can collapse several
   // checkpoint summaries of the SAME session (mappers.ts

@@ -26,6 +26,40 @@ const entry = (overrides: Partial<RawFeedEntry> = {}): RawFeedEntry => ({
   ...overrides,
 })
 
+describe('mapStreamEntry brief fields (session detail page, Task 2)', () => {
+  it('carries summaryFull, decisions, gotchas and changes through', () => {
+    const mapped = mapStreamEntry(entry({
+      summaryFull: 'The whole unclipped brief, both sentences intact.',
+      decisions: 'Chose the hosted checkout',
+      gotchas: 'Sandbox rate limits bite fast',
+      changes: [{ file: 'src/pay.js', status: 'edited', add: 12, del: 3, note: 'gateway wiring', dep: false }],
+    }))
+    expect(mapped.summaryFull).toBe('The whole unclipped brief, both sentences intact.')
+    expect(mapped.decisions).toBe('Chose the hosted checkout')
+    expect(mapped.gotchas).toBe('Sandbox rate limits bite fast')
+    expect(mapped.changes).toEqual([{ file: 'src/pay.js', status: 'edited', add: 12, del: 3, note: 'gateway wiring', dep: false }])
+  })
+  it('absent brief fields become null / [] and never undefined', () => {
+    const mapped = mapStreamEntry(entry())
+    expect(mapped.summaryFull).toBeNull()
+    expect(mapped.decisions).toBeNull()
+    expect(mapped.gotchas).toBeNull()
+    expect(mapped.changes).toEqual([])
+    expect(Object.values(mapped)).not.toContain(undefined)
+  })
+  it('a sparse daemon change row is normalized, never undefined per field', () => {
+    const mapped = mapStreamEntry(entry({ changes: [{ file: 'package-lock.json' }] }))
+    expect(mapped.changes).toEqual([{ file: 'package-lock.json', status: 'edited', add: null, del: null, note: null, dep: false }])
+  })
+  it('intentOf and outcomeOf behave exactly as before (additive change only)', () => {
+    expect(intentOf(entry({ goal: 'wire payments', ask: 'the verbatim prompt' }))).toBe('wire payments')
+    expect(intentOf(entry({ goal: null, ask: 'the verbatim prompt' }))).toBe('the verbatim prompt')
+    expect(intentOf(entry({ goal: null, ask: '(not captured)' }))).toBeNull()
+    expect(outcomeOf(entry({ headline: 'Payments wired', summary: 'longer text' }))).toBe('Payments wired')
+    expect(outcomeOf(entry({ headline: null, summary: 'longer text' }))).toBe('longer text')
+  })
+})
+
 describe('hasSummary', () => {
   it('is true when a headline is present', () => {
     expect(hasSummary(entry({ headline: 'Shipped the thing' }))).toBe(true)
@@ -104,7 +138,8 @@ describe('streamEntryId and mapStreamEntry', () => {
 describe('collapseSessionCheckpoints', () => {
   const stream = (overrides: Partial<StreamEntry> = {}): StreamEntry => ({
     id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z',
-    live: false, outcome: 'a checkpoint', intent: null, files: [], session: 's1', ...overrides,
+    live: false, outcome: 'a checkpoint', intent: null, files: [], session: 's1',
+    summaryFull: null, decisions: null, gotchas: null, changes: [], ...overrides,
   })
 
   it('collapses several checkpoints of the same session into just the newest one', () => {
