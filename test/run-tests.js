@@ -7,6 +7,7 @@ const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-test-'));
@@ -175,6 +176,28 @@ function check(name, fn) {
 const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
 const count = (hay, needle) => hay.split(needle).length - 1;
+
+// "Not running as root" for the chmod-denial tests below. process.getuid does
+// not exist on win32 (calling it there is a TypeError, which used to fail six
+// checks outright once the suite got that far) -- and on win32 the paired
+// `denied` probe is always false anyway, because fs.chmod touches only the
+// read-only attribute and can never make a file unreadable. So "no getuid"
+// simply means the root-reads-through-anything caveat cannot apply.
+const notRoot = () => typeof process.getuid !== 'function' || process.getuid() !== 0;
+
+// Canonical spelling of a path for comparing against paths GIT wrote to disk.
+// git runs real canonicalization on what it records (macOS: /var ->
+// /private/var; Windows: 8.3 short names like RUNNER~1 -> runneradmin, which
+// is exactly what os.tmpdir() hands this suite on GitHub's Windows runners).
+// fs.realpathSync is the JS implementation and resolves ONLY symlinks, so it
+// covers the mac case but leaves a Windows short name unexpanded and the
+// comparison never matches. realpathSync.native uses the OS call
+// (GetFinalPathNameByHandle) and expands both.
+const realCanon = p => {
+  try { return fs.realpathSync.native(p); } catch {
+    try { return fs.realpathSync(p); } catch { return p; }
+  }
+};
 
 // Minimal OpenAI/Gemini-shaped JSON mock. `handler(req, body, send)` returns a
 // response via send(code, obj). Returns the http.Server (already listening).
@@ -742,8 +765,20 @@ async function main() {
     // and touches no network.
     const out = spawnSync('npm', ['pack', '--dry-run', '--json'], {
       cwd: path.join(__dirname, '..'), encoding: 'utf8',
+      // On Windows npm is npm.cmd, which Node refuses to spawn without a
+      // shell (EINVAL since the CVE-2024-27980 hardening) -- the old call
+      // died with status:null/stderr:undefined before npm ever ran. The args
+      // are static strings, so the shell introduces no quoting hazard.
+      shell: process.platform === 'win32',
+      // The --json file list enumerates every packed file; keep well clear of
+      // the 1MB default so a growing tarball can never turn into ENOBUFS
+      // (which also reports status:null and would look like the same failure).
+      maxBuffer: 16 * 1024 * 1024,
     });
-    assert.strictEqual(out.status, 0, `npm pack --dry-run failed: ${out.stderr}`);
+    // status is null when the spawn itself failed -- surface out.error in
+    // that case instead of the old `undefined`, which hid the real cause.
+    assert.strictEqual(out.status, 0,
+      `npm pack --dry-run failed: ${out.error ? out.error.message : (out.stderr || `status ${out.status}`)}`);
     const [{ files }] = JSON.parse(out.stdout);
     const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
     assert.ok(vendoredWasm.length >= 4,
@@ -9989,6 +10024,18 @@ async function main() {
   // advisor.apiKey field was present. The multi-provider path stores keys at
   // advisor.providers[pid].apiKey and deletes the legacy field, so the guard
   // never fired and a file full of API keys stayed 644.
+  // POSIX modes do not exist on NTFS: fs.chmod there toggles only the
+  // read-only attribute and fs.stat reports 0666 for any writable file, so
+  // asserting `mode & 0o777` would test Node's emulation, not the product.
+  // The product code is already correct on win32 -- writeFileSync's
+  // `{ mode: 0o600 }` and the follow-up chmodSync are harmless no-ops, and the
+  // actual not-world-readable guarantee is delivered by the user profile
+  // directory's ACL (%USERPROFILE% is private to the user by default).
+  // VISIBLE skip, same reasoning as keychain(win) below: a silent pass would
+  // report the F4 modes as verified on a platform where nothing ran.
+  if (process.platform === 'win32') {
+    console.log('  skip  security(F4): POSIX 600/700 modes (3 checks) — no POSIX modes on win32; the profile-dir ACL provides the isolation');
+  } else {
   check('security(F4): config.json holding a provider key is not world-readable', () => {
     const saved = util.loadUserConfig();
     try {
@@ -10027,6 +10074,7 @@ async function main() {
     assert.strictEqual(fs.statSync(util.homeDir()).mode & 0o777, 0o700,
       'the home dir itself must not be listable by other users');
   });
+  }
 
   // ---- FINDING 6 (MEDIUM): \b does not match between '_' and a letter, so
   // every PREFIXED secret name sailed through: DB_PASSWORD=, STRIPE_API_KEY=,
@@ -16200,12 +16248,17 @@ async function main() {
         // this proves prevention works on a project's very FIRST sync too.
         fs.mkdirSync(path.join(wtMain, '.membridge'), { recursive: true });
         // git canonicalizes the path it writes into the linked worktree's
-        // `.git` pointer, so on macOS (/var -> /private/var) worktreeMain's
-        // return value comes back realpath'd even though ROOT itself never
-        // was. Compare against the realpath'd form, exactly like
-        // project-resolve.js's own resolveTrackedKey treats both spellings
-        // of a path as the same key.
-        const wtMainReal = fs.realpathSync(wtMain);
+        // `.git` pointer, so worktreeMain's return value comes back
+        // canonicalized even though ROOT itself never was: on macOS that is
+        // the /var -> /private/var symlink, on Windows it is 8.3 short-name
+        // expansion (GitHub's runners hand this suite a tmpdir under
+        // C:\Users\RUNNER~1\..., which git records as ...\runneradmin\...).
+        // Compare against the canonical form via realCanon --
+        // realpathSync.native, because the plain JS realpathSync resolves
+        // only symlinks and left the Windows short name unexpanded, so the
+        // main-repo key could never match ("the main repo project is
+        // missing" on the Windows CI leg).
+        const wtMainReal = realCanon(wtMain);
 
         const cDir = path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-wt-prevent');
         fs.mkdirSync(cDir, { recursive: true });
@@ -16231,7 +16284,7 @@ async function main() {
 
         const afterFirst = util.loadState();
         const keys = Object.keys(afterFirst.projects || {}).map(np);
-        assert.ok(!keys.includes(np(wtLive)) && !keys.includes(np(fs.realpathSync(wtLive))),
+        assert.ok(!keys.includes(np(wtLive)) && !keys.includes(np(realCanon(wtLive))),
           'a worktree fragment project was minted on the very first sync');
         const mainKey = Object.keys(afterFirst.projects || {}).find(k => np(k) === np(wtMain) || np(k) === np(wtMainReal));
         assert.ok(mainKey, 'the main repo project is missing');
@@ -17137,7 +17190,12 @@ async function main() {
     // counter NAME alone, so two mcp_tool_used points (different tools, same
     // name) zeroed out the whole payload, heartbeat included.
     const workerPath = path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js');
-    const workerModule = await import(workerPath);
+    // MUST be a file:// URL, not a bare absolute path: the ESM loader treats
+    // `D:\...` as a URL whose protocol is `d:` and throws
+    // ERR_UNSUPPORTED_ESM_URL_SCHEME -- which, being outside any check(),
+    // killed the whole suite on the Windows CI leg and hid every test below
+    // this line. (macOS never noticed: a leading `/` is not a URL scheme.)
+    const workerModule = await import(pathToFileURL(workerPath).href);
     const workerInstallId = '12345678-1234-1234-1234-123456789012';
 
     await check('worker: validate() accepts heartbeat + one mcp_tool_used point per allowlisted tool', async () => {
@@ -18292,6 +18350,15 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(claudeBin.loginShell({}), recorded || '/bin/sh');
     });
 
+    // The stub shell is a POSIX sh script; Windows cannot execute it (the
+    // spawn fails before the stub runs), so the "noise around the answer"
+    // scenario cannot be produced there at all. The login-shell query is a
+    // POSIX concept to begin with -- on a real Windows install
+    // resolveClaudeBin reaches this answer via config/recorded/probe instead.
+    // Visible skip, keychain(win)-style, not a silent pass.
+    if (process.platform === 'win32') {
+      console.log('  skip  claude-bin: chatty rc file — the stub login shell is a POSIX script, not executable on win32');
+    } else {
     check('claude-bin: a chatty rc file cannot displace the resolved path', () => {
       const chatty = path.join(cbRoot, 'chatty-shell.sh');
       // Emits rc-file noise on both sides of the answer, as a real .zshrc can.
@@ -18304,6 +18371,7 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(r.source, 'shell');
       assert.strictEqual(r.path, other);
     });
+    }
   }
 
   // ---- MCP agent config discovery (mcp spec §4.1) ----
@@ -19806,7 +19874,7 @@ const repoRoot = require('../lib/repo-root');
       // root reads through any mode, so only assert where the OS denied us.
       let denied = false;
       try { fs.readFileSync(locked, 'utf8'); } catch { denied = true; }
-      if (process.getuid() !== 0 && denied) {
+      if (notRoot() && denied) {
         assert.throws(() => hooks.readSettings(locked), /refusing to touch/i,
           'an unreadable settings file must never read as empty-and-writable');
       }
@@ -19846,9 +19914,15 @@ const repoRoot = require('../lib/repo-root');
     const f = path.join(ROOT, 'settings-mode.json');
     fs.writeFileSync(f, JSON.stringify({ hooks: {} }));
     fs.chmodSync(f, 0o600);
+    // win32 has no POSIX modes to preserve -- chmod above cannot narrow the
+    // reported 0666, so only assert the preservation where it actually took
+    // effect. The write itself still runs everywhere.
+    const modeApplied = (fs.statSync(f).mode & 0o777) === 0o600;
     hooks.writeSettings(f, { hooks: { Stop: [] } });
-    assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600,
-      'an atomic rewrite must not widen the permissions the user chose');
+    if (modeApplied) {
+      assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600,
+        'an atomic rewrite must not widen the permissions the user chose');
+    }
   });
 
   // The end-to-end pair. Atomic writes are what make this dangerous -- a
@@ -19865,7 +19939,7 @@ const repoRoot = require('../lib/repo-root');
     try {
       let denied = false;
       try { fs.readFileSync(f, 'utf8'); } catch { denied = true; }
-      if (process.getuid() !== 0 && denied) {
+      if (notRoot() && denied) {
         const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], {
           env: { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f }, encoding: 'utf8',
         });
@@ -19916,7 +19990,7 @@ const repoRoot = require('../lib/repo-root');
       try {
         let denied = false;
         try { fs.readFileSync(cfgFile, 'utf8'); } catch { denied = true; }
-        if (process.getuid() !== 0 && denied) {
+        if (notRoot() && denied) {
           assert.throws(() => util.loadUserConfig(), /refusing to touch/i,
             'an unreadable config.json must never read as empty-and-writable');
           // The real caller shape (server.js's toggleProject/saveSettings):
@@ -19992,7 +20066,7 @@ const repoRoot = require('../lib/repo-root');
       try {
         let denied = false;
         try { fs.readFileSync(stateFile, 'utf8'); } catch { denied = true; }
-        if (process.getuid() !== 0 && denied) {
+        if (notRoot() && denied) {
           assert.throws(() => util.loadState(), /refusing to touch/i,
             'an unreadable state.json must never read as fresh-and-writable');
           // The real read-modify-write shape (lib/scan.js's syncOnce and
@@ -20070,6 +20144,13 @@ const repoRoot = require('../lib/repo-root');
     }
   });
 
+  if (process.platform === 'win32') {
+    // Same reasoning as the security(F4) skip: NTFS has no POSIX modes, stat
+    // reports 0666 for any writable file, and the isolation comes from the
+    // profile directory's ACL. The write path itself is exercised by the
+    // atomic-rewrite checks on either side of this one.
+    console.log('  skip  util: saveUserConfig 0600 mode — no POSIX modes on win32');
+  } else {
   check('util: saveUserConfig preserves the 0600 mode on an atomic rewrite', () => {
     const savedHome = process.env.MEMBRIDGE_HOME;
     const home = path.join(ROOT, 'util-config-atomic-mode');
@@ -20083,6 +20164,7 @@ const repoRoot = require('../lib/repo-root');
       process.env.MEMBRIDGE_HOME = savedHome;
     }
   });
+  }
 
   // The end-to-end pair, mirroring the hooks.js writeSettings proof above:
   // atomic writes are what make the reader's refusal load-bearing (a rename
@@ -20140,7 +20222,7 @@ const repoRoot = require('../lib/repo-root');
       try {
         let denied = false;
         try { fs.readFileSync(cfgFile, 'utf8'); } catch { denied = true; }
-        if (process.getuid() !== 0 && denied) {
+        if (notRoot() && denied) {
           assert.throws(() => toggleProject('/some/project'), /refusing to touch/i,
             'toggleProject must surface the read failure, not silently write { exclude: [...] } over the whole file');
         }
@@ -20168,7 +20250,7 @@ const repoRoot = require('../lib/repo-root');
     try {
       let denied = false;
       try { fs.readFileSync(ledgerFile, 'utf8'); } catch { denied = true; }
-      if (process.getuid() !== 0 && denied) {
+      if (notRoot() && denied) {
         assert.throws(() => store.readLedger(proj), /refusing to touch/i,
           'an unreadable ledger.json must never read as missing');
         // updateLedger IS the production read-modify-write (every sync tick,
@@ -20758,6 +20840,15 @@ const repoRoot = require('../lib/repo-root');
         }
       });
 
+      // These two need the stub `claude` and stub login shell to actually
+      // EXECUTE (the argv log is the evidence), and both stubs are POSIX sh
+      // scripts Windows cannot run -- there the resolution honestly reports
+      // "not found" and no argv log can ever exist. Everything else in this
+      // block (codex/cursor file writes, the launch gate, remove-hooks) is
+      // platform-neutral and keeps running. Visible skip, keychain(win)-style.
+      if (process.platform === 'win32') {
+        console.log('  skip  mcp-wiring: claude-CLI drive + status-no-respawn (2 checks) — POSIX stub shells, not executable on win32');
+      } else {
       check('mcp-wiring: install-time registration drives the claude CLI, and records the binary it found', () => {
         // The whole reason registration happens in install.sh: that shell can
         // resolve `claude` off the real PATH, and recording it is what keeps
@@ -20785,6 +20876,7 @@ const repoRoot = require('../lib/repo-root');
           assert.ok(new RegExp(`^\\s+${agent}\\b`, 'm').test(st.stdout), `${agent} missing from status:\n${st.stdout}`);
         }
       });
+      }
 
       check('mcp-wiring: a second launch reconcile is gated — nothing is re-read, nothing is re-spawned', () => {
         // A reconcile is ~2s on a miss and ~6s on a repair, almost all of it
