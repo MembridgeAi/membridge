@@ -1876,6 +1876,95 @@ async function main() {
         'future since window must exclude every local row');
     });
 
+    // --- /api/session: one uncollapsed session for the detail page ---
+    // Fixtures are planted straight into state (and restored after): the
+    // endpoint reads state.json per request, and a synthetic project gives
+    // deterministic prompts / checkpoints / a planted secret without racing
+    // the adapter fixtures. The secret sits in a PROMPT and in the LATEST
+    // checkpoint text so the redaction assertions cover both summaryFull and
+    // the prompt chain -- a session page must never surface a secret the feed
+    // suppressed.
+    {
+      const savedSessionState = util.loadState();
+      const sessProj = path.join(ROOT, 'projects', 'session-detail-app');
+      fs.mkdirSync(path.join(sessProj, 'src'), { recursive: true });
+      const SECRET = 'sk-plantedsecret1234567890abcd';
+      const sid = 'sess-detail-1';
+      const stSess = util.loadState();
+      stSess.projects[sessProj] = { events: [
+        { ts: '2026-07-20T10:00:00.000Z', project: sessProj, source: 'Claude Code', kind: 'prompt', session: sid, text: `Wire the payment flow using ${SECRET} for the sandbox` },
+        { ts: '2026-07-20T10:02:00.000Z', project: sessProj, source: 'Claude Code', kind: 'edit', session: sid, file: path.join(sessProj, 'src', 'pay.js') },
+        { ts: '2026-07-20T10:10:00.000Z', project: sessProj, source: 'Distilled', kind: 'summary', session: sid, distilled: true, text: 'Payment flow wired against the hosted checkout sandbox.', goal: 'wire payments', headline: 'Payments wired', decisions: 'Chose the hosted checkout', gotchas: 'Sandbox rate limits bite fast' },
+        { ts: '2026-07-20T10:20:00.000Z', project: sessProj, source: 'Claude Code', kind: 'prompt', session: sid, text: 'Now add refunds too' },
+        { ts: '2026-07-20T10:25:00.000Z', project: sessProj, source: 'Claude Code', kind: 'edit', session: sid, file: path.join(sessProj, 'src', 'refund.js') },
+        { ts: '2026-07-20T10:30:00.000Z', project: sessProj, source: 'Distilled', kind: 'summary', session: sid, distilled: true, text: `Payments and refunds both work end to end against ${SECRET}.`, goal: 'wire payments', headline: 'Payments and refunds live', decisions: 'Refunds reuse the checkout client', gotchas: 'Sandbox rate limits bite fast' },
+      ] };
+      const teamProjS = path.join(ROOT, 'projects', 'session-detail-team');
+      stSess.projects[teamProjS] = { events: [], teamEntries: [
+        { author: 'Marco', ts: '2026-07-21T09:00:00.000Z', source: 'Claude Code', session: 'team-sess-9', ask: null, goal: 'fix login', decisions: 'went with cookie sessions', gotchas: null, summary: 'Fixed the login flow.', headline: 'Login fixed', distilled: true, files: ['src/login.js'], changes: null },
+        { author: 'Marco', ts: '2026-07-21T09:10:00.000Z', source: 'Claude Code', session: 'team-sess-9', ask: 'polish the error copy', goal: null, decisions: null, gotchas: null, summary: null, headline: null, distilled: false, files: [], changes: null },
+      ] };
+      util.saveState(stSess);
+
+      const sessRes = await fetch(`${base}/api/session?id=${encodeURIComponent(sid)}`);
+      const sess = await sessRes.json().catch(() => ({}));
+      check('/api/session returns the spec shape for a known session id', () => {
+        assert.strictEqual(sessRes.status, 200, `expected 200, got ${sessRes.status}`);
+        assert.strictEqual(sess.session, sid, 'session id must round-trip');
+        assert.strictEqual(sess.projectPath, sessProj, 'projectPath must name the owning project');
+        assert.strictEqual(sess.project, 'session-detail-app', 'project must be the basename');
+        assert.strictEqual(sess.source, 'Claude Code', 'source comes from the session entries');
+        assert.strictEqual(sess.author, 'You', 'a local session is self-authored');
+        assert.ok('authorId' in sess, 'authorId must be present (null when signed out)');
+        assert.strictEqual(sess.startedAt, '2026-07-20T10:00:00.000Z', 'startedAt is the earliest event ts');
+        assert.strictEqual(sess.endedAt, '2026-07-20T10:30:00.000Z', 'endedAt is the latest event ts');
+        assert.strictEqual(sess.live, false, 'a 2026-07-20 session is long dead');
+        assert.ok(/refunds both work/.test(sess.summaryFull || ''), 'summaryFull must carry the latest checkpoint text');
+        assert.strictEqual(sess.headline, 'Payments and refunds live');
+        assert.strictEqual(sess.goal, 'wire payments');
+        assert.strictEqual(sess.decisions, 'Refunds reuse the checkout client');
+        assert.strictEqual(sess.gotchas, 'Sandbox rate limits bite fast');
+        assert.deepStrictEqual(sess.files, ['src/pay.js', 'src/refund.js'], 'files is the union across the session');
+        assert.ok(Array.isArray(sess.changes), 'changes must be an array');
+        // Prompts: newest-first and NOT collapsed -- both prompts survive.
+        assert.strictEqual(sess.prompts.length, 2, 'every prompt of the session must be present');
+        assert.ok(/add refunds/.test(sess.prompts[0].ask), 'prompts must be newest-first');
+        assert.ok(/Wire the payment flow/.test(sess.prompts[1].ask), 'the older prompt comes second');
+        assert.deepStrictEqual(sess.prompts[0].files, ['src/refund.js'], 'per-prompt files ride along');
+        assert.deepStrictEqual(sess.prompts[1].files, ['src/pay.js'], 'per-prompt files ride along');
+        assert.ok(sess.prompts.every(p => p.ts && !isNaN(Date.parse(p.ts))), 'every prompt carries a parseable ts');
+        // Checkpoints: the ordered trail, oldest-first.
+        assert.strictEqual(sess.checkpoints.length, 2, 'both checkpoints must be present');
+        assert.ok(String(sess.checkpoints[0].ts) < String(sess.checkpoints[1].ts), 'checkpoints are oldest-first');
+        assert.ok(/Payment flow wired/.test(sess.checkpoints[0].text), 'checkpoint text must be present');
+        assert.ok(/refunds both work/.test(sess.checkpoints[1].text), 'the latest checkpoint closes the trail');
+      });
+      check('/api/session scrubs a planted secret in summaryFull AND in a prompt', () => {
+        assert.ok(!JSON.stringify(sess).includes(SECRET), 'raw planted secret surfaced in /api/session');
+        assert.ok(/\[redacted:/.test(sess.prompts[1].ask), 'the prompt carrying the secret must show a redaction marker');
+        assert.ok(/\[redacted:/.test(sess.summaryFull), 'summaryFull carrying the secret must show a redaction marker');
+      });
+      const missRes = await fetch(`${base}/api/session?id=no-such-session`);
+      const missBody = await missRes.json().catch(() => null);
+      check('/api/session unknown id returns 404 with a JSON body, never a 500', () => {
+        assert.strictEqual(missRes.status, 404, `expected 404, got ${missRes.status}`);
+        assert.ok(missBody && missBody.error, 'the 404 must carry a JSON error body');
+      });
+      const teamSessRes = await fetch(`${base}/api/session?id=team-sess-9`);
+      const teamSess = await teamSessRes.json().catch(() => ({}));
+      check('/api/session team-origin unshared prompt comes back null, never fabricated', () => {
+        assert.strictEqual(teamSessRes.status, 200, `expected 200, got ${teamSessRes.status}`);
+        assert.strictEqual(teamSess.author, 'Marco', 'a team session names its author');
+        assert.strictEqual(teamSess.prompts.length, 2, 'both team rows surface as prompts');
+        assert.strictEqual(teamSess.prompts[0].ask, 'polish the error copy', 'a shared prompt survives, newest-first');
+        assert.strictEqual(teamSess.prompts[1].ask, null, 'an unshared prompt must be null');
+        assert.ok(!JSON.stringify(teamSess).includes('(prompt not shared)'),
+          'the endpoint must never fabricate prompt text -- the placeholder is a render concern');
+      });
+
+      util.saveState(savedSessionState);
+    }
+
     // Catch-Up read pointer: GET is pure; mark/undo rewrite it. Run sequentially
     // so the pointer transitions are deterministic (mark sets prev=old-last).
     const cu0 = await (await fetch(`${base}/api/catchup`)).json();
