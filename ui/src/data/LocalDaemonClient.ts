@@ -4,12 +4,12 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type {
   AccessMatrix, AuditEvent, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
-  Settings, SkeletonStats, Status, StreamEntry,
+  Session, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
-  mapStreamEntry, memberActivity, syncStateOf,
-  type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawTeamFeedEntry,
+  mapSession, mapStreamEntry, memberActivity, syncStateOf,
+  type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawSessionPayload, type RawTeamFeedEntry,
 } from './mappers'
 import { mapSettings, type RawSettingsPayload, type RawTeamMeta, type RawTeamRow } from './settingsMapper'
 import { skeletonStatsFrom, type RawSavingsPayload } from './skeletonStats'
@@ -147,6 +147,17 @@ export class LocalDaemonClient implements DataClient {
     const qs = feedQueryString(filters, opts)
     const raw = await this.requestCache.get(`feed:page:${qs}`, () => get<RawFeedPayload>(`/api/feed?${qs}`))
     return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null }
+  }
+
+  // Not routed through get(): a 404 here is a real page state (the session
+  // was evicted or never existed), so it resolves null instead of throwing --
+  // only non-404 failures reject and reach the retryable error affordance.
+  async getSession(sessionId: string): Promise<Session | null> {
+    const pathAndQuery = `/api/session?id=${encodeURIComponent(sessionId)}`
+    const res = await fetch(`${BASE}${pathAndQuery}`, { headers: { accept: 'application/json' } })
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`${pathAndQuery} failed: ${res.status}`)
+    return mapSession(await res.json() as RawSessionPayload)
   }
 
   async syncProject(projectPath: string): Promise<void> {

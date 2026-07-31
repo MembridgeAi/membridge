@@ -21,6 +21,7 @@ const TodayPage = lazy(() => import('../features/today/TodayPage').then(m => ({ 
 const FeedPage = lazy(() => import('../features/feed/FeedPage').then(m => ({ default: m.FeedPage })))
 const ProjectsPage = lazy(() => import('../features/projects/ProjectsPage').then(m => ({ default: m.ProjectsPage })))
 const ProjectPage = lazy(() => import('../features/project/ProjectPage').then(m => ({ default: m.ProjectPage })))
+const SessionPage = lazy(() => import('../features/session/SessionPage').then(m => ({ default: m.SessionPage })))
 const MembersPage = lazy(() => import('../features/members/MembersPage').then(m => ({ default: m.MembersPage })))
 const InsightsPage = lazy(() => import('../features/insights/InsightsPage').then(m => ({ default: m.InsightsPage })))
 const SettingsPage = lazy(() => import('../features/settings/SettingsPage').then(m => ({ default: m.SettingsPage })))
@@ -63,6 +64,9 @@ export function App() {
             <Route path={ROUTES.projects}><ProjectsPage /></Route>
             <Route path={ROUTES.project}>
               {(params) => <ProjectPage slug={params.slug} />}
+            </Route>
+            <Route path={ROUTES.session}>
+              {(params) => <SessionPage sessionId={decodeURIComponent(params.sessionId)} />}
             </Route>
             <Route path={ROUTES.members}><MembersPage /></Route>
             <Route path={ROUTES.insights}><InsightsPage /></Route>

@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AuditEvent, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
-  Settings, SkeletonStats, Status, StreamEntry,
+  Session, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -33,6 +33,12 @@ export interface DataClient {
   // shrink each page instead of asking the daemon for more. `before` pages
   // backwards using the cursor the previous call returned as `nextBefore`.
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }): Promise<FeedPage>
+  // The session detail page: ONE session, unsliced and uncollapsed (GET
+  // /api/session?id=). Resolves null for an unknown or evicted id -- that is
+  // a real page state ("isn't in memory anymore"), not a failure, so it must
+  // be distinguishable from a rejected fetch (which renders the retryable
+  // error affordance instead).
+  getSession(sessionId: string): Promise<Session | null>
   syncProject(projectPath: string): Promise<void>
   syncAll(): Promise<void>
   setProjectPaused(projectPath: string, paused: boolean): Promise<void>

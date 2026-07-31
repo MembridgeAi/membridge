@@ -3,7 +3,7 @@
 // LocalDaemonClient.ts so every mapping decision is unit-testable without a
 // live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
 // to keep this file focused on feed/project/member mapping.
-import type { FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, Role, StreamEntry, SyncState } from './types'
+import type { FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, Role, Session, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -72,6 +72,62 @@ export interface RawFeedEntry {
 export interface RawFeedPayload {
   entries: RawFeedEntry[]
   nextBefore: string | null
+}
+
+// GET /api/session's payload (lib/server.js sessionPayload). Everything past
+// `session` is optional here: the mapper normalizes absence to null / [] so
+// the page never reads undefined off a sparse or older-daemon response.
+export interface RawSessionPayload {
+  session?: string
+  project?: string
+  projectPath?: string | null
+  author?: string
+  authorId?: string | null
+  source?: string
+  startedAt?: string | null
+  endedAt?: string | null
+  live?: boolean
+  summary?: string | null
+  summaryFull?: string | null
+  goal?: string | null
+  headline?: string | null
+  decisions?: string | null
+  gotchas?: string | null
+  files?: string[]
+  changes?: RawFileChange[] | null
+  checkpoints?: { ts?: string; text?: string }[] | null
+  prompts?: { ts?: string; ask?: string | null; files?: string[] }[] | null
+}
+
+export function mapSession(raw: RawSessionPayload): Session {
+  return {
+    session: raw.session || '',
+    project: raw.project || '',
+    projectPath: raw.projectPath || null,
+    author: raw.author || '',
+    authorId: raw.authorId || null,
+    source: raw.source || '',
+    startedAt: raw.startedAt || null,
+    endedAt: raw.endedAt || null,
+    live: !!raw.live,
+    summary: raw.summary || null,
+    summaryFull: raw.summaryFull || null,
+    goal: raw.goal || null,
+    headline: raw.headline || null,
+    decisions: raw.decisions || null,
+    gotchas: raw.gotchas || null,
+    files: Array.isArray(raw.files) ? raw.files : [],
+    changes: Array.isArray(raw.changes) ? raw.changes.map(mapChange) : [],
+    checkpoints: Array.isArray(raw.checkpoints)
+      ? raw.checkpoints.map(c => ({ ts: c.ts || '', text: c.text || '' }))
+      : [],
+    // ask stays null when the daemon sent null (a team-origin prompt the
+    // author did not share) -- `|| null` also normalizes '' and undefined,
+    // and never invents text.
+    prompts: Array.isArray(raw.prompts)
+      ? raw.prompts.map(p => ({ ts: p.ts || '', ask: p.ask || null, files: Array.isArray(p.files) ? p.files : [] }))
+      : [],
+  }
 }
 
 export interface RawMemberRow {

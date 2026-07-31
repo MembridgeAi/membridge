@@ -108,6 +108,54 @@ export interface FeedEntry extends StreamEntry {
   projectPath: string | null
 }
 
+// ---------------------------------------------------------------------------
+// The session detail page's payload (GET /api/session?id=, lib/server.js
+// sessionPayload): one session, unsliced and uncollapsed. Everything here is
+// redacted by the daemon with the same closure /api/feed uses.
+// ---------------------------------------------------------------------------
+
+// One prompt of the session's chain, newest-first in Session.prompts. `ask`
+// is null for a team-origin prompt the author did not share -- the daemon
+// never fabricates prompt text, so "(prompt not shared)" is a render concern.
+export interface SessionPrompt {
+  ts: string
+  ask: string | null
+  files: string[]
+}
+
+// One distilled checkpoint of the session's trail, oldest-first in
+// Session.checkpoints.
+export interface SessionCheckpoint {
+  ts: string
+  text: string
+}
+
+export interface Session {
+  session: string
+  project: string
+  projectPath: string | null
+  author: string
+  authorId: string | null
+  source: string
+  // The session's extreme event timestamps. Either can be null/unparseable on
+  // damaged history -- renderers omit the duration line rather than show NaN.
+  startedAt: string | null
+  endedAt: string | null
+  // Daemon-stamped (util.isLive over the session's newest event), same as the
+  // feed's flag. The UI never recomputes liveness.
+  live: boolean
+  summary: string | null
+  summaryFull: string | null
+  goal: string | null
+  headline: string | null
+  decisions: string | null
+  gotchas: string | null
+  files: string[]
+  changes: FileChange[]
+  checkpoints: SessionCheckpoint[]
+  prompts: SessionPrompt[]
+}
+
 // `/api/feed` query params (server.js: author/project/source/before/limit).
 // null means "no filter" -- never an empty string, so a filter's absence and
 // a filter matching nothing can't be confused.

@@ -45,6 +45,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getLiveSessions: c => c.getLiveSessions(),
   getProjectStream: c => c.getProjectStream('/x'),
   getFeed: c => c.getFeed({ author: null, project: null, source: null }, { limit: 10, before: null }),
+  getSession: c => c.getSession('s1'),
   syncProject: c => c.syncProject('/x'),
   syncAll: c => c.syncAll(),
   setProjectPaused: c => c.setProjectPaused('/x', true),
@@ -95,6 +96,43 @@ describe('LocalDaemonClient contract: methods not explicitly exempted must attem
       const message = err instanceof Error ? err.message : String(err)
       expect(message).not.toMatch(MISSING_ENDPOINT_SENTINEL)
     }
+  })
+
+  // /api/session's payload contract (session detail page, Task 1/3): the
+  // client must hit the endpoint with the id in the query string, keep an
+  // unshared team prompt's ask as null (never a fabricated placeholder
+  // string), and resolve null -- not throw -- for an unknown/evicted id.
+  it('getSession maps the /api/session shape, keeping prompts: null for an unshared ask', async () => {
+    const payload = {
+      session: 'team-sess-9', project: 'shop-app', projectPath: '/x/shop-app',
+      author: 'Marco', authorId: null, source: 'Claude Code',
+      startedAt: '2026-07-21T09:00:00.000Z', endedAt: '2026-07-21T09:10:00.000Z', live: false,
+      summary: 'Fixed the login flow.', summaryFull: 'Fixed the login flow.',
+      goal: 'fix login', headline: 'Login fixed', decisions: 'went with cookie sessions', gotchas: null,
+      files: ['src/login.js'], changes: [{ file: 'src/login.js', status: 'edited', add: 4, del: 1, note: null, dep: false }],
+      checkpoints: [{ ts: '2026-07-21T09:05:00.000Z', text: 'halfway there' }],
+      prompts: [
+        { ts: '2026-07-21T09:10:00.000Z', ask: 'polish the error copy', files: [] },
+        { ts: '2026-07-21T09:00:00.000Z', ask: null, files: ['src/login.js'] },
+      ],
+    }
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => payload })
+    vi.stubGlobal('fetch', fetchMock)
+    const s = await new LocalDaemonClient().getSession('team-sess-9')
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/session?id=team-sess-9')
+    expect(s).not.toBeNull()
+    expect(s!.session).toBe('team-sess-9')
+    expect(s!.summaryFull).toBe('Fixed the login flow.')
+    expect(s!.prompts).toHaveLength(2)
+    expect(s!.prompts[0].ask).toBe('polish the error copy')
+    expect(s!.prompts[1].ask).toBeNull()
+    expect(s!.checkpoints).toEqual([{ ts: '2026-07-21T09:05:00.000Z', text: 'halfway there' }])
+    expect(s!.changes[0]).toEqual({ file: 'src/login.js', status: 'edited', add: 4, del: 1, note: null, dep: false })
+  })
+
+  it('getSession resolves null on 404 (unknown or evicted id), never throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({ error: 'unknown session' }) }))
+    await expect(new LocalDaemonClient().getSession('no-such-session')).resolves.toBeNull()
   })
 
   // The exemption list itself is the thing that let Finding 1 hide -- pin it

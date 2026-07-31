@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
   AccessMatrix, AssistsStats, AuditEvent, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights, Invite, LiveSession,
-  McpRegisterResult, Member, Project, Role, Settings, SkeletonStats, Status, StreamEntry,
+  McpRegisterResult, Member, Project, Role, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 export interface FakeOptions {
@@ -47,6 +47,86 @@ export interface FakeOptions {
 // 2). The fixtures predate them; absence means null / [], never undefined.
 function emptyBrief(): Pick<StreamEntry, 'summaryFull' | 'decisions' | 'gotchas' | 'changes'> {
   return { summaryFull: null, decisions: null, gotchas: null, changes: [] }
+}
+
+// A 60-prompt session's chain, newest-first (one prompt a minute counting
+// back from the base) -- exercises the 5-then-25 paging without a live
+// daemon or a hand-written 60-row literal.
+function longPromptChain(count: number): SessionPrompt[] {
+  const base = Date.parse('2026-07-28T22:00:00Z')
+  return Array.from({ length: count }, (_, i) => ({
+    ts: new Date(base - i * 60_000).toISOString(),
+    ask: `prompt number ${count - i} of the long refactor`,
+    files: i % 3 === 0 ? ['test/run-tests.js'] : [],
+  }))
+}
+
+// Session-detail fixtures (Task 3), keyed by the SAME session ids the feed
+// fixture rows carry so a row's link resolves in fake mode: one live
+// (s-f1), one finished with a full brief (s-f2), one with empty
+// decisions/gotchas (s-f3), and one 60-prompt session (s-f4).
+const SESSION_FIXTURES: Record<string, Session> = {
+  's-f1': {
+    session: 's-f1', project: 'membridge', projectPath: '/Users/x/membridge',
+    author: 'Andrew', authorId: 'andrew', source: 'Codex',
+    startedAt: '2026-07-29T20:30:00Z', endedAt: '2026-07-29T20:36:00Z', live: true,
+    summary: null, summaryFull: null, goal: null, headline: null,
+    decisions: null, gotchas: null, files: [], changes: [], checkpoints: [],
+    prompts: [{ ts: '2026-07-29T20:36:00Z', ask: 'make the summary hook fire on session boundaries, not only on stop', files: [] }],
+  },
+  's-f2': {
+    session: 's-f2', project: 'membridge', projectPath: '/Users/x/membridge',
+    author: 'Andrew', authorId: 'andrew', source: 'Claude Code',
+    startedAt: '2026-07-29T19:00:00Z', endedAt: '2026-07-29T20:30:00Z', live: false,
+    summary: 'Hook ownership now decided by durability, not who ran last.',
+    summaryFull: 'Hook ownership now decided by durability, not who ran last. The stop path and the recall path share one gate. This third sentence must never render in the header.',
+    goal: 'make the summary hook fire on session boundaries',
+    headline: 'Hook ownership now decided by durability, not who ran last.',
+    decisions: 'Durability beats recency because a crashed run must not steal the hook.',
+    gotchas: 'settings.json rewrites drop unknown keys, so merge before writing.',
+    files: ['lib/hooks.js', 'test/run-tests.js'],
+    changes: [
+      { file: 'lib/hooks.js', status: 'edited', add: 41, del: 12, note: 'ownership gate', dep: false },
+      { file: 'test/run-tests.js', status: 'edited', add: 88, del: 2, note: null, dep: false },
+    ],
+    checkpoints: [
+      { ts: '2026-07-29T19:40:00Z', text: 'Gate extracted; stop path green.' },
+      { ts: '2026-07-29T20:30:00Z', text: 'Hook ownership now decided by durability, not who ran last.' },
+    ],
+    prompts: [
+      { ts: '2026-07-29T20:00:00Z', ask: 'now make recall use the same gate', files: ['lib/hooks.js'] },
+      { ts: '2026-07-29T19:00:00Z', ask: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js', 'test/run-tests.js'] },
+    ],
+  },
+  's-f3': {
+    session: 's-f3', project: 'sublease', projectPath: '/Users/x/sublease',
+    author: 'Sarah', authorId: 'sarah', source: 'Claude Code',
+    startedAt: '2026-07-29T09:00:00Z', endedAt: '2026-07-29T10:00:00Z', live: false,
+    summary: 'Listing flow validates addresses before payment.',
+    summaryFull: 'Listing flow validates addresses before payment.',
+    goal: 'validate the address before charging the card',
+    headline: 'Listing flow validates addresses before payment.',
+    decisions: null, gotchas: null,
+    files: ['lib/listing.js'],
+    changes: [{ file: 'lib/listing.js', status: 'edited', add: 9, del: 1, note: null, dep: false }],
+    checkpoints: [],
+    prompts: [{ ts: '2026-07-29T09:00:00Z', ask: 'validate the address before charging the card', files: ['lib/listing.js'] }],
+  },
+  's-f4': {
+    session: 's-f4', project: 'membridge', projectPath: '/Users/x/membridge',
+    author: 'Andrew', authorId: 'andrew', source: 'Codex',
+    startedAt: '2026-07-28T21:01:00Z', endedAt: '2026-07-28T22:00:00Z', live: false,
+    summary: 'Ports fixed and pushed.',
+    summaryFull: 'Ports fixed and pushed.',
+    goal: 'fix the port collision in the test suite',
+    headline: 'Ports fixed and pushed.',
+    decisions: 'Rotated fixture ports per run instead of pinning one block.',
+    gotchas: null,
+    files: ['test/run-tests.js'],
+    changes: [{ file: 'test/run-tests.js', status: 'edited', add: 30, del: 30, note: 'port rotation', dep: false }],
+    checkpoints: [],
+    prompts: longPromptChain(60),
+  },
 }
 
 export class FakeDataClient implements DataClient {
@@ -109,6 +189,12 @@ export class FakeDataClient implements DataClient {
       { id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:36:00Z', intent: 'make the summary hook fire on session boundaries, not only on stop' },
       { id: 's2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up' },
     ])
+  }
+  // null for an unknown id -- FakeDataClient must model the real client's
+  // "evicted session" resolution, not throw, so the not-in-memory page state
+  // is exercisable in tests.
+  getSession(sessionId: string) {
+    return this.guard<Session | null>(SESSION_FIXTURES[sessionId] ?? null)
   }
   getProjectStream() {
     return this.guard<StreamEntry[]>([

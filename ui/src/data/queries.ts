@@ -80,6 +80,21 @@ export function useFeed(filters: FeedFilters) {
   })
 }
 
+// The session detail page (GET /api/session?id=). Not live-polled: the page
+// is a read of one finished-or-running session's brief; a reader deep in the
+// prompt chain must not have the list reshuffled under them every 10s.
+// `data === null` is the real "not in memory anymore" state (the client
+// resolves null on 404); a rejected fetch is the retryable error state.
+export function useSession(sessionId: string | null) {
+  const c = useDataClient()
+  return useQuery({
+    queryKey: ['session', sessionId],
+    queryFn: () => c.getSession(sessionId as string),
+    enabled: !!sessionId,
+    staleTime: STANDARD_STALE_MS,
+  })
+}
+
 // GET /api/team/access-matrix is owner/admin-only -- 403 for a member (Task
 // 8). `enabled` defaults true for existing/simple callers, but the projects
 // grid (Task 10) must pass false for a member role so this never fires a
