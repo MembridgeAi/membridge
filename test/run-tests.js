@@ -10725,6 +10725,42 @@ async function main() {
     assert.ok(/"did"/.test(over.stderr), 'error points the agent at did for the longer text');
     assert.strictEqual(read(target).trim().split('\n').length, 2, 'rejected line must not be written');
   });
+  check('goal: append enforces GOAL_MAX loudly, telling the agent to write intent in its own words', () => {
+    const proj = path.join(ROOT, 'projects', 'goal-max'); fs.mkdirSync(proj, { recursive: true });
+    const target = path.join(proj, '.membridge', 'summaries.jsonl');
+    const base = { session: 's1', ts: '2026-07-31T00:00:00Z', did: 'did a thing' };
+    const run = obj => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', target, JSON.stringify(obj)], { encoding: 'utf8' });
+    assert.strictEqual(typeof hooks.GOAL_MAX, 'number', 'GOAL_MAX must be exported beside HEADLINE_MAX');
+    assert.strictEqual(hooks.GOAL_MAX, 70, 'GOAL_MAX is the ~70-char intent budget');
+    assert.strictEqual(run({ ...base, goal: 'g'.repeat(hooks.GOAL_MAX) }).status, 0, 'exactly-max goal rejected');
+    assert.strictEqual(run({ ...base, goal: '  ' + 'g'.repeat(hooks.GOAL_MAX) + '  ' }).status, 0,
+      'padding must not count against the max (trimmed length governs)');
+    assert.strictEqual(run(base).status, 0, 'a line with NO goal must still be accepted -- the field stays optional');
+    const over = run({ ...base, goal: 'g'.repeat(hooks.GOAL_MAX + 1) });
+    assert.notStrictEqual(over.status, 0, 'over-max goal accepted');
+    assert.ok(over.stderr.includes(String(hooks.GOAL_MAX)), 'error names the limit');
+    assert.ok(over.stderr.includes(String(hooks.GOAL_MAX + 1)), 'error names the actual length');
+    assert.ok(/own words/i.test(over.stderr), 'error tells the agent to write the intent in its own words');
+    assert.ok(/prompt/i.test(over.stderr), 'error names the failure mode: restating the prompt');
+    assert.notStrictEqual(run({ ...base, goal: 42 }).status, 0, 'non-string goal accepted');
+    assert.strictEqual(read(target).trim().split('\n').length, 3, 'rejected lines must not be written');
+  });
+  check('budgets: blockReason states the goal cap and tightens did to 1-2 sentences', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 's1', 0);
+    assert.ok(r.includes(hooks.GOAL_MAX + ' characters'), 'goal character max stated in the prompt');
+    assert.ok(/goal:[^;]*own words/i.test(r), 'goal asks for the agent\'s own words, not the prompt restated');
+    assert.ok(/did: 1-2 plain-text sentences/.test(r), 'did asks for 1-2 sentences');
+    assert.ok(!/1-3\s+plain-text sentences/.test(r), 'the old 1-3 sentence ask must be gone');
+  });
+  check('digest: the AGENTS.md self-report instruction states the goal budget and the 1-2 sentence did', () => {
+    const cfg = { ...util.getConfig(), distill: { enabled: true, consent: 'granted' } };
+    const block = digest.renderBlock('/repo', { events: [] }, cfg, 'AGENTS.md');
+    assert.ok(block.includes('summaries.jsonl'), 'guard: the standing instruction must be present at all');
+    assert.ok(block.includes(hooks.GOAL_MAX + ' characters'), 'the goal budget must reach Codex-side agents too');
+    assert.ok(/own words/i.test(block), 'the instruction must ask for the intent in the agent\'s own words');
+    assert.ok(/1-2 sentences/.test(block), 'did tightened to 1-2 sentences in the standing instruction');
+    assert.ok(!/1-3 sentences/.test(block), 'the old 1-3 sentence ask must be gone from the instruction');
+  });
   check('append: bare invocation still runs the stop hook (allows on garbage stdin)', () => {
     const out = spawnSync(process.execPath, [HOOK_SCRIPT], { input: 'not json', encoding: 'utf8' });
     assert.strictEqual(out.status, 0);
