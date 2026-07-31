@@ -1,16 +1,16 @@
-# The MemBridge Beta guide
+# The MemBridge guide
 
 The full manual: installing, the dashboard, how sync works, session
 summaries, team sync and privacy, roadmaps, the CLI, supported tools,
 configuration, FAQ, and development. For the short version, start at the
 [README](../README.md).
 
-MemBridge Beta is a menu-bar app (and CLI) for teams that code with AI. It gives
+MemBridge is a menu-bar app (and CLI) for teams that code with AI. It gives
 you one feed of what everyone's AI coding tools have been doing, and it keeps
 the tools themselves in sync: Claude Code, Codex, Gemini CLI and any other
 agent can see each other's recent work, across tools and across teammates.
 
-<img src="screenshots/activity-feed.png" alt="The Activity feed: day cards for each person and project, with live sessions marked Working now" width="100%">
+<img src="screenshots/activity-feed.png" alt="The Feed: one entry per session across people, projects, and tools, with the in-flight session marked live" width="100%">
 
 When Andrew's Codex refactors checkout validation, you see it in the feed,
 and your Claude Code knows about it the next time you open the project.
@@ -37,7 +37,7 @@ macOS (Apple Silicon), one command:
 curl -fsSL https://membridge.app/install.sh | sh
 ```
 
-This installs `MemBridge Beta.app` to `/Applications` and the `membridge` CLI to
+This installs `MemBridge.app` to `/Applications` and the `membridge` CLI to
 `/usr/local/bin` (that step may ask for your password once), verifies the
 download's SHA-256, and launches without a Gatekeeper warning (the app is
 signed and notarized with Apple). Want to read
@@ -67,10 +67,10 @@ The app has six screens: Today, Feed, Projects (plus each project's own
 page), Members, Insights, and Settings.
 
 **Today** is the landing screen: live session intent rows and per-project
-metrics at a glance. **Feed** is the merged activity stream — one entry per
+metrics at a glance. **Feed** is the merged activity stream, one entry per
 session, leading with the outcome and the original prompt underneath as an
 `Intent` line. Filter by person, project, or tool. **Projects** lists what
-MemBridge Beta is watching, local-only or shared, with a week of stats per
+MemBridge is watching, local-only or shared, with a week of stats per
 project.
 
 Open a project and you get its own merged stream: your sessions and your
@@ -83,10 +83,10 @@ on your clipboard, for pasting into ChatGPT, claude.ai, or any web AI that
 can't see your disk.
 
 **Members** handles roles, invites, and the audit trail; **Insights** rolls
-up team-wide savings and severity tiers. Both are team-only — a solo install
+up team-wide savings and severity tiers. Both are team-only; a solo install
 never shows them.
 
-<img src="screenshots/team.png" alt="The Members view: teammates, roles, and the join code" width="100%">
+<img src="screenshots/team.png" alt="The Members view: teammates, roles, invites, and the audit trail" width="100%">
 
 ## How it works
 
@@ -95,7 +95,7 @@ doesn't know what Codex did this morning; your Codex has no idea what your
 teammate's Claude Code shipped an hour ago.
 
 But every major tool already reads a per-project context file at startup,
-and writes its session transcripts to a known folder on disk. MemBridge Beta's
+and writes its session transcripts to a known folder on disk. MemBridge's
 daemon connects the two:
 
 ```
@@ -103,24 +103,24 @@ Claude Code ─┐                          ┌─> CLAUDE.md   (read by Claude 
 Codex ───────┼─> per-project shared ────┼─> AGENTS.md   (read by Codex & most agents)
 any tool ────┘        memory            └─> GEMINI.md…  (configurable)
                         ⇅
-      team sync (opt-in, redacted) — your teammates' MemBridge Beta daemons
+      team sync (opt-in, redacted): your teammates' MemBridge daemons
 ```
 
 The injected block looks like this (taken from a real project):
 
 ```markdown
 <!-- membridge:begin -->
-## Shared AI memory (MemBridge Beta)
+## Shared AI memory (MemBridge)
 
 Recent asks across tools:
 - 2026-07-21 16:02 · Claude Code
   Intent: Fix the flaky cart total test
-  Did: The cart total test is deterministic now — totals are summed in
+  Did: The cart total test is deterministic now: totals are summed in
   cents, so float order no longer changes the result.
   Changes: src/cart.js · test/cart.test.js
 - 2026-07-21 17:34 · Claude Code: Migrate the product images to WebP
 
-Teammates' AI activity (MemBridge Beta team sync):
+Teammates' AI activity (MemBridge team sync):
 - 2026-07-21 14:43 · Andrew · Codex: Refactor checkout validation
   Did: Checkout validation runs address and payment checks in a single
   pass, so a bad card no longer hides an address error.
@@ -159,7 +159,7 @@ Long sessions get checkpoints rather than one shot: the hook re-asks every
 so many edits (defaults: first summary after 1 edit, then every 12), and the
 newest line wins while `memory.md` keeps the full history. Only that newest
 line is ever displayed or shared, so the re-asks exist mainly so a session
-that dies without a clean stop still leaves a recent summary behind — lower
+that dies without a clean stop still leaves a recent summary behind. Lower
 `checkpointEvery` for fresher checkpoints, raise it for fewer interruptions. The hook is
 strictly fail-open: any error, a paused project, or a too-small session
 means Claude Code stops normally. Nothing is installed silently, and
@@ -167,7 +167,7 @@ turning it off removes exactly what was added.
 
 Codex and other `AGENTS.md` readers have no hook, so the injected block
 carries a standing instruction to append the same line on completion.
-Well-behaved agents comply; when they don't, MemBridge Beta falls back to the
+Well-behaved agents comply; when they don't, MemBridge falls back to the
 harvested summary.
 
 ## Team sync and privacy
@@ -196,7 +196,7 @@ worth being precise about each:
   ratio, and per-language counts of cached files. No code, no file names,
   no project names.
 - **An update check** ([`lib/update-check.js`](../lib/update-check.js)).
-  At most every 6 hours, MemBridge Beta asks GitHub's public releases API
+  At most every 6 hours, MemBridge asks GitHub's public releases API
   for the latest version tag. A plain unauthenticated GET; nothing about
   you or your install is sent beyond the request itself.
 
@@ -210,21 +210,21 @@ launches, and every other check happens when you ask for one (the "Check
 for updates" menu item, `membridge update`).
 
 The only files
-MemBridge Beta writes are the context files (inside its own markers) and its own
+MemBridge writes are the context files (inside its own markers) and its own
 state in `~/.membridge`; transcripts are read incrementally and never
 modified.
 
 MemBridge also keeps a durable local archive of teammate activity, one file
 per shared project under `~/.membridge/team-archive/`. The working cache
-only holds each project's newest entries — under a week's worth for a busy
-five-person team — so once an entry aged out of the cache it used to be
+only holds each project's newest entries (under a week's worth for a busy
+five-person team), so once an entry aged out of the cache it used to be
 gone for good; now every pulled entry is appended to the archive too, and
 the daemon walks backward through history, keeping a large but bounded
 window of the team's past activity (the archive caps out at 5,000 entries
-per project — plenty for search, but not literally everything since day
-one for a large, long-running team). The archive lives in the same trust boundary as everything
-else here — same machine, same account — and is redacted at every read,
-never trusted as already-clean at rest.
+per project, plenty for search but not literally everything since day
+one for a large, long-running team). The archive lives in the same trust
+boundary as everything else here, same machine and same account, and is
+redacted at every read, never trusted as already-clean at rest.
 
 Secrets are redacted before any text leaves a transcript, in every path
 (context blocks, memory files, Copy-for-AI, roadmap prompts, team sync).
@@ -262,7 +262,7 @@ The free core never calls any API. Add your own Anthropic key in Settings
 and each project page grows a roadmap generator: describe what you want to
 build, see the estimated cost on the button (about 1¢ with the default
 model), and get a phased plan where every task names the AI model suited to
-it, from "Everyday — Haiku" up to "Frontier — Fable", with a cross-check
+it, from everyday Haiku work up to frontier Fable work, with a cross-check
 task for a second tool. The plan is saved to `.membridge/plan.json` and one
 `Current roadmap:` line joins the shared memory block, so your agents see
 the plan too.
@@ -290,17 +290,41 @@ boxes and terminal-first teammates aren't second-class:
 | `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
 | `membridge team link` / `unlink` / `list` | Share or stop sharing a project |
 | `membridge team setup` | Point at a self-hosted backend |
+| `membridge why <file>[:<line>]` | Which AI sessions edited a file, newest first; `:<line>` narrows to one line |
+| `membridge churn [--session <id>] [--since <Nd>]` | Diagnostic: how much of a session's committed work survives in `HEAD` |
 | `membridge mcp` | Read-only MCP server over stdio |
 
-`membridge mcp` exposes the shared memory as read-only MCP tools —
-`list_projects`, `get_project_memory`, `get_recent_activity`,
-`search_memory`, `why`, and `recall` — for Claude Desktop, Cursor, and
+Run inside a tracked project, `membridge why` traces a file back to the AI
+sessions that edited it:
+
+```
+$ membridge why lib/teamsync.js
+Why lib/teamsync.js — 2 session(s), newest first:
+
+2026-07-29 09:14 · marco · Claude Code
+  Ask: Find out why team sync is broken and fix it
+  Did: Rows are deduped inside upsertEntries, so one self-conflicting
+  pair can no longer black out all teammate activity.
+```
+
+Add `:<line>` (as in `membridge why lib/teamsync.js:214`) and git blame
+narrows it to the single session behind that line; a line git cannot
+attribute (uncommitted, a merge commit, no local attribution) falls back
+to the file-level history with an explicit reason. `membridge churn` is
+the companion diagnostic: for one session (the most recent, by default)
+or a `--since <Nd>` window, it reports what fraction of the committed
+lines still survive in `HEAD`. It is a rework health signal, never a
+target, and by design it has no per-person option.
+
+`membridge mcp` exposes the shared memory as read-only MCP tools
+(`list_projects`, `get_project_memory`, `get_recent_activity`,
+`search_memory`, `why`, and `recall`) for Claude Desktop, Cursor, and
 other MCP clients. `search_memory` is relevance-ranked, not a plain keyword
 match: it scores headlines, decisions, gotchas, goals, files touched,
 per-file change notes, prompts, and summaries, and each result carries a
 relevance score plus which fields matched. It's deliberately not
 recency-weighted, so work from months ago still surfaces when it's the
-best match — teammates re-covering old ground is exactly what it's for.
+best match; teammates re-covering old ground is exactly what it's for.
 Narrow it with optional `author`, `project`, `file`, `tool`, and
 `since`/`until` filters (a bare date like `2026-06-01` includes that whole
 day). It also reaches the durable team archive described above, so it can
@@ -310,7 +334,7 @@ small. `why` traces a file (or a single line) back to the session that
 touched it, and `recall` returns a cached structural skeleton of a tracked
 file. Nothing any of these tools expose can write files or trigger sync,
 and every field passes through the same redaction as the context files.
-The MCP SDK ships with MemBridge — there is nothing extra to install.
+The MCP SDK ships with MemBridge, so there is nothing extra to install.
 Point your client at `{ "command": "membridge", "args": ["mcp"] }`.
 
 ## Supported tools
@@ -322,7 +346,7 @@ Point your client at `{ "command": "membridge", "args": ["mcp"] }`.
 | Gemini CLI | Custom adapter | Point an adapter at its logs, add `GEMINI.md` to targets |
 | Cursor, opencode, Copilot CLI, … | Custom adapter | Any tool that logs sessions as JSONL, no code required |
 
-A custom adapter is a config entry that tells MemBridge Beta where a tool's JSONL
+A custom adapter is a config entry that tells MemBridge where a tool's JSONL
 logs live and which fields hold the project path, timestamp, and message:
 
 ```jsonc
@@ -396,12 +420,12 @@ between the `<!-- membridge -->` markers is rewritten, and removing the
 block restores your file exactly.
 
 **Does my whole team need it installed?** Everyone whose AI activity should
-sync runs MemBridge Beta. People who just want to watch can use the web
+sync runs MemBridge. People who just want to watch can use the web
 workspace from a browser.
 
 **How much overhead does it add?** Near zero. It reads only the bytes
 appended since the last pass, sleeps between syncs (60s default), and its
-runtime dependency list is deliberately short — encryption
+runtime dependency list is deliberately short: encryption
 (`libsodium-wrappers`), code parsing (`web-tree-sitter`), and the MCP server
 (`@modelcontextprotocol/sdk`, `zod`).
 
@@ -413,7 +437,7 @@ npm run app              # run the tray app from source (Electron)
 npm run dist:mac         # build the macOS menu-bar app
 ```
 
-The test suite itself needs no test framework — it is plain Node with
+The test suite itself needs no test framework. It is plain Node with
 `assert`, and it never touches the network. The runtime dependencies
 (`libsodium-wrappers`, `web-tree-sitter`, `@modelcontextprotocol/sdk`, `zod`)
 all arrive with a plain `npm install`; Electron is a devDependency used only
@@ -424,7 +448,7 @@ The suite is fully offline: it runs in temp dirs and talks to mock backends
 (`MEMBRIDGE_API_BASE`, `MEMBRIDGE_TEAM_URL`). To hack on the dashboard
 against fake data without touching your real `~/.membridge`, use the
 `MEMBRIDGE_HOME`, `MEMBRIDGE_CLAUDE_DIR`, `MEMBRIDGE_CODEX_DIR`, and
-`MEMBRIDGE_PORT` env overrides — or run `node scripts/readme-demo.js`,
+`MEMBRIDGE_PORT` env overrides, or run `node scripts/readme-demo.js`,
 which builds a two-user demo team on port 7541 (it's how the screenshots
 in this guide were made).
 
@@ -438,7 +462,7 @@ Code map: [`lib/scan.js`](../lib/scan.js) (adapters → events → sync),
 [`lib/advisor.js`](../lib/advisor.js) (BYOK roadmaps),
 [`lib/teamsync.js`](../lib/teamsync.js) (team sync against Supabase),
 [`lib/server.js`](../lib/server.js) (local HTTP API, serves `ui/dist` at `/`),
-[`ui/`](../ui) (the web UI itself — React + Vite; `cd ui && npm run dev` for a
+[`ui/`](../ui) (the web UI itself, React + Vite; `cd ui && npm run dev` for a
 hot-reloading copy against a running daemon, `npm run build` for the static
 bundle `lib/server.js` serves),
 [`bin/membridge.js`](../bin/membridge.js) (CLI).

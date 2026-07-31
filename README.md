@@ -22,8 +22,8 @@ curl -fsSL https://membridge.app/install.sh | sh
 
 The one-liner is macOS (Apple Silicon). Everywhere else:
 `npm install -g @membridgeai/membridge && membridge start`. Every install option, the
-full CLI, configuration, and the FAQ live in **[the guide](docs/guide.md)** —
-and this page has an animated twin at
+full CLI, configuration, and the FAQ live in **[the guide](docs/guide.md)**.
+This page also has an animated twin at
 **[docs/readme.html](docs/readme.html)** ([membridge.app](https://membridge.app)).
 
 ## One session ends. Every agent remembers.
@@ -35,9 +35,9 @@ to the team. Next time you open the project, your Claude Code already knows.
 
 ## Three quiet steps
 
-| 01 · Watch — **Session logs** | 02 · Distill — **Per-project memory** | 03 · Inject — **Context files** |
+| 01 · Watch: **Session logs** | 02 · Distill: **Per-project memory** | 03 · Inject: **Context files** |
 | --- | --- | --- |
-| A tiny local daemon tails the JSONL session logs your tools already write — Claude Code, Codex, Gemini CLI, any JSONL logger. | Each session is distilled into a small per-project memory: decisions made, gotchas found, who owns what. | The memory lands between markers in `CLAUDE.md`, `AGENTS.md` and `GEMINI.md` — read by every tool at startup. |
+| A tiny local daemon tails the JSONL session logs that Claude Code, Codex, Gemini CLI, and any other JSONL logger already write. | Each session is distilled into a small per-project memory: decisions made, gotchas found, who owns what. | The memory lands between markers in `CLAUDE.md`, `AGENTS.md` and `GEMINI.md`, the files every tool reads at startup. |
 
 ## A memory block, between markers
 
@@ -48,26 +48,30 @@ never touched.
 <!-- membridge:begin -->
 ## Project memory · updated 2h ago
 checkout retries cap at 3 with exponential backoff (validate.ts)
-payment webhooks replay from stripe-cli in dev — never mocked
+payment webhooks replay from stripe-cli in dev, never mocked
 e2e tests need POSTGRES_ISOLATION=strict or they flake              ← new
-andrew owns the pricing service — ask before touching rate tables   ← new
+andrew owns the pricing service; ask before touching rate tables    ← new
 <!-- membridge:end -->
 ```
 
 ## Small surface, sharp edges
 
-- **Team feed** — a redacted digest syncs to your team — optionally.
-  Everything starts local: no cloud, no account, no API keys until you
-  join one.
-- **Summaries by the agent itself** — session summaries are written by the
+- **Team feed.** A redacted digest syncs to your team, and only if you
+  opt in. Everything starts local: no cloud, no account, no API keys until
+  you join one.
+- **Summaries by the agent itself.** Session summaries are written by the
   agent that did the work, not reconstructed by a heuristic after the fact.
-- **Copy-for-AI digest** — one click copies a compact project digest for
+- **Provenance.** `membridge why <file>` lists the AI sessions that edited
+  a file, newest first; add `:<line>` to trace a single line to the one
+  session behind it. `membridge churn` reports how much of a session's
+  committed work still survives in `HEAD`.
+- **Copy-for-AI digest.** One click copies a compact project digest for
   any chat window that can't read your files.
-- **MCP server** — project memory is also exposed over MCP, for tools that
+- **MCP server.** Project memory is also exposed over MCP, for tools that
   would rather query than read a file.
-- **Custom adapters** — point MemBridge at any tool that logs JSONL with a
+- **Custom adapters.** Point MemBridge at any tool that logs JSONL with a
   small adapter. If it writes sessions, it can share them.
-- **Secret redaction** — keys, tokens and private paths are scrubbed before
+- **Secret redaction.** Keys, tokens and private paths are scrubbed before
   anything leaves your machine.
 
 There's more in **[the guide](docs/guide.md)**: the dashboard tour with
