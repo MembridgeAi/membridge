@@ -39,6 +39,11 @@ export interface RawFeedEntry {
   files: string[]
   goal: string | null
   headline: string | null
+  // Stamped by the daemon (lib/feed.js) from the session's newest event of any
+  // kind, against util.LIVE_WINDOW_MS. The UI does not recompute it: this
+  // field is the single source both the live dot and Today's LIVE NOW count
+  // read, which is what keeps the count equal to the number of dots.
+  live: boolean
 }
 
 // feedPayload's response shape (server.js:539 feedPayload -> lib/feed.js
@@ -106,8 +111,15 @@ export function syncStateOf(
 // ---------------------------------------------------------------------------
 // Feed-entry helpers, shared by Project.latestSummary, LiveSession and
 // StreamEntry. Mirrors the retired legacy dashboard's pxGlanceFor/pxHasSummary
-// exactly: a headline wins, a distilled summary is the fallback, and absence
-// of both means "no summary yet" -- the WIP/live signal, not a time window.
+// exactly: a headline wins, a distilled summary is the fallback.
+//
+// This is NOT a liveness signal and must not be used as one again. It was, and
+// because it never consults a clock, a session that ended without landing a
+// summary read as live forever. Worse, the Stop hook re-summarizes a session
+// that is still WORKING every few edits (see collapseSessionCheckpoints), so
+// having a summary does not even mean the session finished. Liveness is the
+// daemon's `live` flag; this answers the narrower "is there a settled summary
+// to show" question its callers actually ask.
 // ---------------------------------------------------------------------------
 export function hasSummary(e: Pick<RawFeedEntry, 'headline' | 'distilled' | 'summary'>): boolean {
   if (e.headline) return true
@@ -157,7 +169,7 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     authorId: e.authorId || '',
     tool: e.source,
     at: e.ts,
-    live: !hasSummary(e),
+    live: !!e.live,
     outcome: outcomeOf(e),
     intent: intentOf(e),
     files: e.files,
@@ -224,15 +236,20 @@ export function feedQueryString(filters: FeedFilters, opts: { limit: number; bef
   return params.toString()
 }
 
-// Live sessions are entries with no summary yet, deduped to the newest entry
-// per session (a session can have several stream entries; only its latest
-// reflects whether it is still live). `entries` is assumed newest-first, the
-// order /api/feed already returns.
+// Live sessions are the entries the daemon marked live, deduped to the newest
+// entry per session (a session can have several stream entries; only its
+// latest reflects whether it is still live). `entries` is assumed
+// newest-first, the order /api/feed already returns.
+//
+// This used to filter on `hasSummary`, which is why Today read "29 live now"
+// against a feed of week-old rows: a session that ended without landing a
+// summary satisfied "no summary yet" forever. Filtering on the same `live`
+// flag the rows render is what makes the count and the dots one set.
 export function dedupeLiveSessions(entries: RawFeedEntry[]): RawFeedEntry[] {
   const seen = new Set<string>()
   const out: RawFeedEntry[] = []
   for (const e of entries) {
-    if (hasSummary(e)) continue
+    if (!e.live) continue
     const key = `${e.projectPath || e.projectId || e.project}::${e.session || e.ts}`
     if (seen.has(key)) continue
     seen.add(key)

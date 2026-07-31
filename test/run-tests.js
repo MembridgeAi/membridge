@@ -3015,6 +3015,62 @@ async function main() {
       if (e) { assert.ok('goal' in e, 'goal key present'); assert.ok('changes' in e, 'changes key present'); }
     });
 
+    // --- liveness -----------------------------------------------------------
+    // "Live" used to mean "this entry has no summary yet", which never looked
+    // at the clock: a session that ended without landing a summary stayed
+    // green forever, and Today counted every one of them under LIVE NOW. It
+    // now means "this session's newest event of ANY kind is inside
+    // util.LIVE_WINDOW_MS", stamped by the daemon so the Feed's indicator and
+    // Today's count read one field instead of each deriving their own.
+    check('util.isLive: recent is live, old is not, unparseable is not', () => {
+      const now = Date.parse('2026-07-09T20:00:00.000Z');
+      const at = ms => new Date(now - ms).toISOString();
+      assert.strictEqual(util.isLive(at(0), now), true, 'an event happening now is live');
+      assert.strictEqual(util.isLive(at(util.LIVE_WINDOW_MS - 60000), now), true, 'inside the window is live');
+      assert.strictEqual(util.isLive(at(util.LIVE_WINDOW_MS + 60000), now), false, 'outside the window is not live');
+      assert.strictEqual(util.isLive(at(8 * 24 * 3600 * 1000), now), false, 'eight days old is not live');
+      assert.strictEqual(util.isLive('not a date', now), false, 'an unparseable ts is not live');
+      assert.strictEqual(util.isLive(null, now), false, 'a missing ts is not live');
+      // Fails closed on a bad clock. A caller reading `now` off an optional
+      // object hands over null, and a default parameter does not fire for
+      // null -- `null - t` is hugely negative, i.e. inside the window, so
+      // this would otherwise have marked every entry in the feed live.
+      assert.strictEqual(util.isLive(at(8 * 24 * 3600 * 1000), null), false,
+        'a null clock must not make an eight-day-old event live');
+      assert.strictEqual(util.isLive(new Date(now + 400 * 24 * 3600 * 1000).toISOString(), now), false,
+        'a far-future timestamp is skew or corruption, not activity');
+    });
+
+    // Pinned off the fixture's own newest entry rather than a literal date, so
+    // these never rot as the fixture moves (the teamMaxAgeHours rule).
+    const liveProbe = await feedPayload({ limit: 50 });
+    const newestTs = ((liveProbe.entries || [])[0] || {}).ts;
+    const justAfter = new Date(Date.parse(newestTs) + 60000).toISOString();
+    const longAfter = new Date(Date.parse(newestTs) + 8 * 24 * 3600 * 1000).toISOString();
+    const liveFeed = await feedPayload({ limit: 50, now: justAfter });
+    const staleFeed = await feedPayload({ limit: 50, now: longAfter });
+    check('feedPayload: a session with recent activity is live', () => {
+      assert.ok(newestTs, 'fixture must produce at least one entry');
+      assert.ok(liveFeed.entries.every(e => 'live' in e), 'every entry must carry a live flag');
+      assert.ok(liveFeed.entries.some(e => e.live === true),
+        'the newest session should be live one minute after its last event');
+    });
+    check('feedPayload: a session whose last event is old is not live, with or without an outcome', () => {
+      assert.ok(staleFeed.entries.length > 0, 'fixture must produce entries to judge');
+      // Assert the flag EXISTS before asserting it is false, or a payload that
+      // simply never stamped `live` would satisfy this test vacuously.
+      assert.ok(staleFeed.entries.every(e => typeof e.live === 'boolean'),
+        'every entry must carry a boolean live flag');
+      const stillLive = staleFeed.entries.filter(e => e.live === true);
+      assert.strictEqual(stillLive.length, 0,
+        `eight days after the last event nothing should be live; got ${stillLive.length}`);
+      // Without this the assertion above could pass under the OLD rule too --
+      // it only bites because the fixture holds summary-less entries, exactly
+      // the ones "no summary yet" would have kept green indefinitely.
+      assert.ok(staleFeed.entries.some(e => !e.headline && !e.summary),
+        'fixture must hold a summary-less entry, or this cannot distinguish the two rules');
+    });
+
     // Rolling-window floor (Activity "always show the last 24h"): window=
     // must lift a small limit so page one covers every entry inside the
     // window, and a before= page (the View more path) must bypass the floor —

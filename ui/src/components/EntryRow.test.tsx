@@ -31,9 +31,17 @@ describe('EntryRow', () => {
     expect(files.className).toContain('mono')
   })
 
-  it('marks a live entry (no summary yet) instead of a clock time', () => {
+  it('marks a still-running entry instead of showing a clock time', () => {
     render(<EntryRow entry={entry({ live: true, outcome: '' })} />)
     expect(screen.getByLabelText('Live')).toBeInTheDocument()
+  })
+
+  // Liveness is a recency judgement the daemon makes, so a row can carry a
+  // finished-looking outcome and still be running -- and, the bug this
+  // guards, a row with no outcome at all is NOT live just for lacking one.
+  it('shows a clock time, not a live dot, for an entry with no outcome that is not running', () => {
+    render(<EntryRow entry={entry({ live: false, outcome: '' })} />)
+    expect(screen.queryByLabelText('Live')).toBeNull()
   })
 
   it('renders an avatar by default', () => {

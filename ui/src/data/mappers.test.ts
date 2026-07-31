@@ -22,6 +22,7 @@ const entry = (overrides: Partial<RawFeedEntry> = {}): RawFeedEntry => ({
   files: [],
   goal: null,
   headline: null,
+  live: false,
   ...overrides,
 })
 
@@ -78,9 +79,16 @@ describe('streamEntryId and mapStreamEntry', () => {
     expect(streamEntryId(entry({ session: 's1', ts: 't1' }))).toBe('s1|t1')
     expect(streamEntryId(entry({ session: null, ts: 't1' }))).toBe('none|t1')
   })
-  it('marks live true exactly when there is no summary yet', () => {
-    expect(mapStreamEntry(entry()).live).toBe(true)
-    expect(mapStreamEntry(entry({ headline: 'done' })).live).toBe(false)
+  // Replaces "marks live true exactly when there is no summary yet", which
+  // asserted the defect itself: it required a summary-less entry to be live
+  // no matter how old it was, which is why week-old rows kept a green dot.
+  // Same two directions as before, plus the two cases that pin the old rule
+  // out -- summary presence must not move `live` either way.
+  it('takes live from the daemon flag, independent of whether a summary landed', () => {
+    expect(mapStreamEntry(entry({ live: true })).live).toBe(true)
+    expect(mapStreamEntry(entry({ live: false })).live).toBe(false)
+    expect(mapStreamEntry(entry({ live: false, headline: null, summary: null })).live).toBe(false)
+    expect(mapStreamEntry(entry({ live: true, headline: 'done' })).live).toBe(true)
   })
   it('carries the raw session id through untouched, for checkpoint collapsing', () => {
     expect(mapStreamEntry(entry({ session: 's1' })).session).toBe('s1')
@@ -157,13 +165,59 @@ describe('feedQueryString', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Liveness is the daemon's call, not the UI's. It used to be derived here as
+// "no summary yet", which never consulted the clock: a session that ended
+// without landing a summary stayed green forever and every one of them was
+// counted under LIVE NOW. The daemon now stamps `live` per entry from the
+// session's newest event of any kind, and both the indicator and the count
+// read that one field -- which is what keeps them in agreement.
+// ---------------------------------------------------------------------------
+describe('liveness comes from the daemon, not from summary presence', () => {
+  it('is live when the daemon says so, even though a summary has landed', () => {
+    // A working session is re-summarized every few edits (see
+    // collapseSessionCheckpoints), so having a summary does NOT mean it ended.
+    expect(mapStreamEntry(entry({ live: true, headline: 'Rebuilt the mapper' })).live).toBe(true)
+  })
+
+  it('is not live when the daemon says so, even with no summary at all', () => {
+    expect(mapStreamEntry(entry({ live: false, headline: null, summary: null })).live).toBe(false)
+  })
+
+  it('keeps a live entry that already carries an outcome', () => {
+    const e = entry({ live: true, headline: 'Rebuilt the mapper' })
+    expect(dedupeLiveSessions([e])).toEqual([e])
+  })
+
+  it('drops a stale entry that never landed a summary', () => {
+    expect(dedupeLiveSessions([entry({ live: false, headline: null, summary: null })])).toHaveLength(0)
+  })
+
+  it('counts exactly the rows that render the indicator', () => {
+    // The invariant behind "29 LIVE NOW next to rows that are not live": the
+    // Today count and the Feed's green dots must be the same set. Both sides
+    // collapse a session's checkpoints to one row, so compare post-collapse.
+    const raw = [
+      entry({ session: 's1', ts: '2026-07-29T21:00:00Z', live: true }),
+      entry({ session: 's1', ts: '2026-07-29T20:59:00Z', live: true }),
+      entry({ session: 's2', ts: '2026-07-29T20:00:00Z', live: false, headline: 'done' }),
+      entry({ session: 's3', ts: '2026-07-29T19:00:00Z', live: true, headline: 'still going' }),
+      entry({ session: 's4', ts: '2026-07-20T19:00:00Z', live: false }),
+    ]
+    const countedByToday = dedupeLiveSessions(raw).length
+    const rowsShowingIndicator = collapseSessionCheckpoints(raw.map(mapStreamEntry)).filter(r => r.live).length
+    expect(countedByToday).toBe(2)
+    expect(rowsShowingIndicator).toBe(countedByToday)
+  })
+})
+
 describe('dedupeLiveSessions and mapLiveSession', () => {
-  it('drops entries that already have a summary', () => {
+  it('drops an entry the daemon did not mark live', () => {
     expect(dedupeLiveSessions([entry({ headline: 'done' })])).toHaveLength(0)
   })
   it('keeps only the newest entry per session (input assumed newest-first)', () => {
-    const newer = entry({ session: 's1', ts: '2026-07-29T21:00:00Z' })
-    const older = entry({ session: 's1', ts: '2026-07-29T19:00:00Z' })
+    const newer = entry({ session: 's1', ts: '2026-07-29T21:00:00Z', live: true })
+    const older = entry({ session: 's1', ts: '2026-07-29T19:00:00Z', live: true })
     const out = dedupeLiveSessions([newer, older])
     expect(out).toEqual([newer])
   })
