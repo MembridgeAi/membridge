@@ -96,7 +96,7 @@ export interface RawSessionPayload {
   files?: string[]
   changes?: RawFileChange[] | null
   checkpoints?: { ts?: string; text?: string }[] | null
-  prompts?: { ts?: string; ask?: string | null; files?: string[] }[] | null
+  prompts?: { ts?: string; ask?: string | null; files?: string[]; undecryptable?: boolean }[] | null
 }
 
 export function mapSession(raw: RawSessionPayload): Session {
@@ -123,9 +123,15 @@ export function mapSession(raw: RawSessionPayload): Session {
       : [],
     // ask stays null when the daemon sent null (a team-origin prompt the
     // author did not share) -- `|| null` also normalizes '' and undefined,
-    // and never invents text.
+    // and never invents text. The undecryptable marker (fail-closed E2E)
+    // rides along only when set, mirroring how the daemon sends it.
     prompts: Array.isArray(raw.prompts)
-      ? raw.prompts.map(p => ({ ts: p.ts || '', ask: p.ask || null, files: Array.isArray(p.files) ? p.files : [] }))
+      ? raw.prompts.map(p => ({
+          ts: p.ts || '',
+          ask: p.ask || null,
+          files: Array.isArray(p.files) ? p.files : [],
+          ...(p.undecryptable ? { undecryptable: true } : {}),
+        }))
       : [],
   }
 }

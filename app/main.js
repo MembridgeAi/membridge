@@ -173,6 +173,56 @@ function safeOrigin(url) {
   }
 }
 
+// Navigation lockdown for EVERY window that renders dashboard content -- the
+// main window AND any child the same-origin window.open carve-out spawns.
+// One installer, applied to both, so the guards cannot drift (review finding:
+// the child window used to get NO guards at all -- it carried preload.js and
+// the membridge:pick-paths IPC bridge, and a teammate-authored link clicked
+// inside it could navigate that capability anywhere, reopening the exact
+// injection gap the hardening closed).
+//
+// Three rules, identical everywhere:
+//   * will-navigate: the window itself may only ever show the local
+//     dashboard origin (preload stays attached across navigations).
+//   * window.open: non-http(s) is denied outright; the LOCAL dashboard
+//     origin (strict origin equality against the bound url -- never a
+//     substring or port-loose match) opens a real BrowserWindow with the
+//     same locked-down webPreferences (session detail spec: middle/cmd-click
+//     on a feed row); every other http(s) url goes to the default browser.
+//   * did-create-window: any child allowed by the carve-out is run through
+//     THIS SAME installer, recursively, so grandchildren are guarded too --
+//     without this, a child's window.open would fall back to Electron's
+//     default allow-with-inherited-preload.
+function installNavigationGuards(contents) {
+  const allowedOrigin = safeOrigin(windowUrl()).origin;
+  contents.on('will-navigate', (event, url) => {
+    const { origin } = safeOrigin(url);
+    if (!origin || origin !== allowedOrigin) event.preventDefault();
+  });
+  contents.setWindowOpenHandler(({ url }) => {
+    const { origin, protocol } = safeOrigin(url);
+    if (!/^https?:$/i.test(protocol || '')) return { action: 'deny' };
+    if (origin && origin === allowedOrigin) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          autoHideMenuBar: true,
+          webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+          },
+        },
+      };
+    }
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  contents.on('did-create-window', (child) => {
+    installNavigationGuards(child.webContents);
+  });
+}
+
 function openDashboard() {
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore();
@@ -222,47 +272,9 @@ function openDashboard() {
       + '</div></body>';
     win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
   });
-  // Anything the dashboard opens as a popup (the GitHub sign-in round trip)
-  // goes to the default browser — GitHub is already signed in there, and
-  // nothing external ever renders inside the app window. http(s) ONLY: the
-  // dashboard renders teammate-authored synced content, so a crafted link
-  // must not be able to reach file:, other apps' custom protocols, etc.
-  //
-  // ONE carve-out (session detail page spec): a middle/cmd-clicked feed row
-  // targets the LOCAL dashboard origin, and handing that to the default
-  // browser would strip the preload bridge and read as "the app kicked me
-  // out". A same-origin url gets a real new BrowserWindow with the SAME
-  // webPreferences as the main window (preload + contextIsolation on,
-  // nodeIntegration off). Origin equality against the bound dashboard url —
-  // never a substring/port-loose match — so every other http(s) url still
-  // goes to shell.openExternal and non-http schemes stay denied outright.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    const { origin, protocol } = safeOrigin(url);
-    if (!/^https?:$/i.test(protocol || '')) return { action: 'deny' };
-    if (origin && origin === safeOrigin(windowUrl()).origin) {
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          autoHideMenuBar: true,
-          webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
-            contextIsolation: true,
-            nodeIntegration: false,
-          },
-        },
-      };
-    }
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  // And the window itself must never leave the local dashboard: preload.js
-  // and the membridge:pick-paths bridge stay attached across navigations, so
-  // an off-origin page would inherit the native file-picker capability.
-  const allowedOrigin = safeOrigin(windowUrl()).origin;
-  win.webContents.on('will-navigate', (event, url) => {
-    const { origin } = safeOrigin(url);
-    if (!origin || origin !== allowedOrigin) event.preventDefault();
-  });
+  // Popup + navigation lockdown, shared with every child window this one is
+  // allowed to spawn -- see installNavigationGuards above for the rules.
+  installNavigationGuards(win.webContents);
   win.on('closed', () => {
     win = null;
   });

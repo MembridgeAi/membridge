@@ -114,6 +114,7 @@ describe('LocalDaemonClient contract: methods not explicitly exempted must attem
       prompts: [
         { ts: '2026-07-21T09:10:00.000Z', ask: 'polish the error copy', files: [] },
         { ts: '2026-07-21T09:00:00.000Z', ask: null, files: ['src/login.js'] },
+        { ts: '2026-07-21T08:50:00.000Z', ask: null, files: [], undecryptable: true },
       ],
     }
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => payload })
@@ -123,9 +124,14 @@ describe('LocalDaemonClient contract: methods not explicitly exempted must attem
     expect(s).not.toBeNull()
     expect(s!.session).toBe('team-sess-9')
     expect(s!.summaryFull).toBe('Fixed the login flow.')
-    expect(s!.prompts).toHaveLength(2)
+    expect(s!.prompts).toHaveLength(3)
     expect(s!.prompts[0].ask).toBe('polish the error copy')
     expect(s!.prompts[1].ask).toBeNull()
+    // The fail-closed E2E marker must survive the mapping -- the page renders
+    // an encrypted state for it, never "(prompt not shared)".
+    expect(s!.prompts[1].undecryptable).toBeUndefined()
+    expect(s!.prompts[2].ask).toBeNull()
+    expect(s!.prompts[2].undecryptable).toBe(true)
     expect(s!.checkpoints).toEqual([{ ts: '2026-07-21T09:05:00.000Z', text: 'halfway there' }])
     expect(s!.changes[0]).toEqual({ file: 'src/login.js', status: 'edited', add: 4, del: 1, note: null, dep: false })
   })

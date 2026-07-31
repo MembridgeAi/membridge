@@ -1903,6 +1903,10 @@ async function main() {
       stSess.projects[teamProjS] = { events: [], teamEntries: [
         { author: 'Marco', ts: '2026-07-21T09:00:00.000Z', source: 'Claude Code', session: 'team-sess-9', ask: null, goal: 'fix login', decisions: 'went with cookie sessions', gotchas: null, summary: 'Fixed the login flow.', headline: 'Login fixed', distilled: true, files: ['src/login.js'], changes: null },
         { author: 'Marco', ts: '2026-07-21T09:10:00.000Z', source: 'Claude Code', session: 'team-sess-9', ask: 'polish the error copy', goal: null, decisions: null, gotchas: null, summary: null, headline: null, distilled: false, files: [], changes: null },
+        // A fail-closed E2E row (mapPulledRow's undecryptable shape): all
+        // content null ON PURPOSE, in its own session so the plain
+        // team-origin checks above stay untouched.
+        { author: 'Marco', ts: '2026-07-21T10:00:00.000Z', source: 'Claude Code', session: 'team-sess-enc', ask: null, goal: null, decisions: null, gotchas: null, summary: null, headline: null, distilled: false, files: [], changes: null, undecryptable: true },
       ] };
       util.saveState(stSess);
 
@@ -1960,6 +1964,19 @@ async function main() {
         assert.strictEqual(teamSess.prompts[1].ask, null, 'an unshared prompt must be null');
         assert.ok(!JSON.stringify(teamSess).includes('(prompt not shared)'),
           'the endpoint must never fabricate prompt text -- the placeholder is a render concern');
+      });
+      // lib/feed.js deliberately marks a row this client could not decrypt
+      // (fail-closed E2E) so renderers show an encrypted state instead of
+      // "(prompt not shared)" -- the session payload must carry the same
+      // marker, or the page misreads a crypto failure as an author choice.
+      const encSess = await (await fetch(`${base}/api/session?id=team-sess-enc`)).json();
+      check('/api/session carries the undecryptable marker for a fail-closed E2E row', () => {
+        assert.strictEqual(encSess.prompts.length, 1, 'the undecryptable row must surface as a prompt');
+        assert.strictEqual(encSess.prompts[0].ask, null, 'content stays null -- fail closed');
+        assert.strictEqual(encSess.prompts[0].undecryptable, true,
+          'the undecryptable marker must survive into the session payload');
+        assert.ok(!JSON.stringify(encSess).includes('(prompt not shared)'),
+          'an encrypted row must never be dressed up as an unshared one');
       });
 
       util.saveState(savedSessionState);
@@ -22689,19 +22706,48 @@ const repoRoot = require('../lib/repo-root');
       // carve-out is strict origin equality against the local dashboard url;
       // the new window carries the same locked-down webPreferences as the
       // main one, and any other http(s) url still goes to the default
-      // browser (non-http stays denied).
-      const handler = appSrc.slice(appSrc.indexOf('setWindowOpenHandler'),
-        appSrc.indexOf('setWindowOpenHandler') + 1400);
-      assert.ok(/origin\s*===\s*safeOrigin\(windowUrl\(\)\)\.origin/.test(handler),
-        'the carve-out must be strict origin EQUALITY against the bound dashboard url');
-      assert.ok(/action:\s*'allow'/.test(handler), 'a same-origin popup must be allowed as a real window');
-      const override = handler.slice(handler.indexOf('overrideBrowserWindowOptions'));
+      // browser (non-http stays denied). Review finding: the guards must
+      // live in ONE shared installer so the main window and every child it
+      // spawns get identical protection and cannot drift.
+      const fnAt = appSrc.indexOf('function installNavigationGuards');
+      assert.ok(fnAt !== -1, 'the shared guard installer (installNavigationGuards) must exist');
+      const fn = appSrc.slice(fnAt, fnAt + 3200);
+      assert.ok(/allowedOrigin\s*=\s*safeOrigin\(windowUrl\(\)\)\.origin/.test(fn),
+        'the allowed origin must come from the bound dashboard url');
+      assert.ok(/origin\s*===\s*allowedOrigin/.test(fn),
+        'the carve-out must be strict origin EQUALITY against the local dashboard origin');
+      assert.ok(/will-navigate/.test(fn), 'the installer must register the will-navigate origin guard');
+      assert.ok(/setWindowOpenHandler/.test(fn), 'the installer must register the window-open handler');
+      assert.ok(/action:\s*'allow'/.test(fn), 'a same-origin popup must be allowed as a real window');
+      const override = fn.slice(fn.indexOf('overrideBrowserWindowOptions'));
       assert.ok(/contextIsolation:\s*true/.test(override) && /nodeIntegration:\s*false/.test(override),
         'the new window must keep contextIsolation on and nodeIntegration off');
       assert.ok(/preload/.test(override), 'the new window must load the same preload bridge');
-      assert.ok(/shell\.openExternal\(url\)/.test(handler),
+      assert.ok(/shell\.openExternal\(url\)/.test(fn),
         'every other http(s) url must still go to the default browser');
-      assert.ok(/action:\s*'deny'/.test(handler), 'the handler must still deny by default');
+      assert.ok(/action:\s*'deny'/.test(fn), 'the handler must still deny by default');
+    });
+
+    check('app window-open: child windows inherit the SAME guards, recursively', () => {
+      // The review\'s blocking finding: the same-origin popup used to get NO
+      // will-navigate guard and NO window-open handler -- a teammate-authored
+      // link clicked inside it could navigate anywhere while still carrying
+      // preload.js and the pick-paths IPC bridge. Children (and their
+      // children) must run through the identical installer.
+      const fnAt = appSrc.indexOf('function installNavigationGuards');
+      const fn = appSrc.slice(fnAt, fnAt + 3200);
+      assert.ok(/did-create-window/.test(fn),
+        'the installer must hook did-create-window so every spawned child is guarded');
+      assert.ok(/installNavigationGuards\(\s*child\.webContents\s*\)/.test(fn),
+        'the child must be guarded by the SAME installer (recursive -- grandchildren too)');
+      assert.ok(/installNavigationGuards\(\s*win\.webContents\s*\)/.test(appSrc),
+        'the main window must use the shared installer, not its own copy of the guards');
+      // No stray second copy of the guards outside the installer: exactly one
+      // setWindowOpenHandler and one will-navigate registration in the file.
+      assert.strictEqual((appSrc.match(/setWindowOpenHandler/g) || []).length, 1,
+        'the window-open handler must exist only inside the shared installer');
+      assert.strictEqual((appSrc.match(/on\('will-navigate'/g) || []).length, 1,
+        'the will-navigate guard must exist only inside the shared installer');
     });
 
     check('app tray: launch opens a window on non-mac, and click handlers are non-mac only', () => {

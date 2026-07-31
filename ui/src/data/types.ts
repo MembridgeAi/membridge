@@ -117,10 +117,14 @@ export interface FeedEntry extends StreamEntry {
 // One prompt of the session's chain, newest-first in Session.prompts. `ask`
 // is null for a team-origin prompt the author did not share -- the daemon
 // never fabricates prompt text, so "(prompt not shared)" is a render concern.
+// `undecryptable` marks the OTHER null-ask state (fail-closed E2E: this
+// client could not decrypt the row) -- rendered as an encrypted state, never
+// as an author's sharing choice.
 export interface SessionPrompt {
   ts: string
   ask: string | null
   files: string[]
+  undecryptable?: boolean
 }
 
 // One distilled checkpoint of the session's trail, oldest-first in

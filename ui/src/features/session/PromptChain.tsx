@@ -62,9 +62,14 @@ export function PromptChain({ prompts, checkpoints }: PromptChainProps) {
               <span className="mono session-prompt-index">{total - i}</span>
               <span className="mono session-prompt-time">{clockTime(p.ts)}</span>
             </div>
+            {/* Two distinct null-ask states, never conflated: undecryptable
+                is a crypto failure on THIS machine (fail-closed E2E), while
+                "(prompt not shared)" is the author's own sharing choice. */}
             {p.ask
               ? <div className="session-prompt-ask">{p.ask}</div>
-              : <div className="session-prompt-ask session-prompt-unshared">(prompt not shared)</div>}
+              : p.undecryptable
+                ? <div className="session-prompt-ask session-prompt-unshared">(encrypted)</div>
+                : <div className="session-prompt-ask session-prompt-unshared">(prompt not shared)</div>}
             {p.files.length > 0 && (
               <div className="session-prompt-files">
                 {p.files.map(f => <span key={f} className="mono session-prompt-file">{f}</span>)}

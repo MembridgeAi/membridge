@@ -73,6 +73,18 @@ describe('PromptChain (Task 5)', () => {
     expect(screen.getByText('src/login.js')).toBeInTheDocument()
   })
 
+  it('an undecryptable prompt renders the encrypted state, never "(prompt not shared)"', () => {
+    // Fail-closed E2E: content is null because this client could NOT decrypt
+    // the row -- a crypto failure, not an author choice. The two states must
+    // never be conflated (lib/feed.js sets the marker for exactly this).
+    const prompts: SessionPrompt[] = [
+      { ts: '2026-07-29T20:00:00Z', ask: null, files: [], undecryptable: true },
+    ]
+    render(<PromptChain prompts={prompts} checkpoints={[]} />)
+    expect(screen.getByText('(encrypted)')).toBeInTheDocument()
+    expect(screen.queryByText('(prompt not shared)')).toBeNull()
+  })
+
   it('per-prompt files render as mono chips', () => {
     const prompts: SessionPrompt[] = [
       { ts: '2026-07-29T20:00:00Z', ask: 'wire it up', files: ['lib/hooks.js', 'test/run-tests.js'] },
