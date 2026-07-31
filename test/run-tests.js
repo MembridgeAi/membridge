@@ -19593,7 +19593,13 @@ const repoRoot = require('../lib/repo-root');
       // earlier version keyed on quotes alone and sailed straight past
       // `const LEGACY = { codex: 'toml' }` -- an unquoted object key is
       // exactly the shape this drift takes.
+      // \r is stripped FIRST: the Windows runner checks out with
+      // core.autocrlf=true (no .gitattributes pins eol), so every line ends
+      // \r\n there -- and `.` never matches \r while the un-multiline `$`
+      // matches only true end-of-string, so the per-line `//.*$` strip
+      // silently removed NOTHING and a commented 'codex' read as code.
       const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp-register.js'), 'utf8')
+        .replace(/\r/g, '')
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .split('\n')
         .map(l => l.replace(/(^|[^:])\/\/.*$/, '$1'))
@@ -20897,7 +20903,15 @@ const repoRoot = require('../lib/repo-root');
         const newAgentDir = path.join(W_ROOT, `late-${wSeq}`);
         fs.mkdirSync(newAgentDir, { recursive: true });
         const cfgFile = path.join(home, '.membridge', 'config.json');
-        const raw = JSON.parse(read(cfgFile));
+        // On POSIX the earlier `mcp register` wrote config.json as a side
+        // effect of recording the login-shell claude resolution. On win32
+        // that resolution honestly reports "not found" (the stub shell is a
+        // POSIX script -- see the skip above), nothing is recorded, and the
+        // file legitimately does not exist yet: start from {} instead of
+        // ENOENT-ing a check whose subject is the late-agent gate, not the
+        // recorded binary.
+        let raw = {};
+        try { raw = JSON.parse(read(cfgFile)); } catch {}
         raw.mcp = { ...(raw.mcp || {}), 'late-tool': { configPath: path.join(newAgentDir, 'mcp.json'), format: 'json' } };
         fs.writeFileSync(cfgFile, JSON.stringify(raw, null, 2));
         const r = runLaunch(home);
