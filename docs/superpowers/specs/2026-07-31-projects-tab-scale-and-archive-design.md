@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-31
 **Status:** Approved design (Andrew, from mock `projects-tab-mockups.html`, variant A)
-**Applies to:** the React/TS dashboard in `ui/` — `features/projects/`, `features/project/`
+**Applies to:** the React/TS dashboard in `ui/` (`features/projects/`, `features/project/`)
 **Builds on:** `ui/src/features/projects/{ProjectsPage,AccessCell}.tsx`, `lib/server.js` (`projectsPayload`, `toggleProject`, `removeBlockFromProject`, `deleteProject`), `lib/util.js` `isProjectOff`
 
 ## Problem
@@ -10,7 +10,7 @@
 Three separate failures of the same screen, all visible at a 10-person team:
 
 1. **The access grid grows a column per member.** `ProjectsPage` renders one `AccessCell` checkbox per member per project. Ten members means ten columns and a horizontal scrollbar; a private project still renders ten *dead* dashed cells for people who can never be granted access until it's shared. The layout's width is O(team size).
-2. **There is no way to get a project out of the list.** The only removal path is `POST /api/projects/delete`, and `deleteProject()` is genuinely destructive: it wipes `.membridge/`, strips MemBridge's block out of `CLAUDE.md`/`AGENTS.md`, prunes the team archive, and drops central state. The user's actual need is organizational — "get this out of my view" — and the only tool available severs history.
+2. **There is no way to get a project out of the list.** The only removal path is `POST /api/projects/delete`, and `deleteProject()` is genuinely destructive: it wipes `.membridge/`, strips MemBridge's block out of `CLAUDE.md`/`AGENTS.md`, prunes the team archive, and drops central state. The user's actual need is organizational ("get this out of my view"), and the only tool available severs history.
 3. **A shared project opens as private and shows only your own sessions.** Tapping into a project that is shared with a teammate renders the Private badge and a self-filtered stream, so the one screen meant to show shared work shows none of it.
 
 ## The model
@@ -20,10 +20,10 @@ Three separate failures of the same screen, all visible at a 10-person team:
 The N member columns collapse into a single **Access** cell per row.
 
 - **Shared project** → a stacked avatar group: the first 4 members, then a `+N` chip, then a short label (`Whole team`, `6 of 10`, `3 of 10`). The whole cell is one button.
-- **Private project** → the text `🔒 Only you`. **No checkboxes render for a project nobody else can be added to** — the dead dashed cells are removed, not restyled.
+- **Private project** → the text `🔒 Only you`. **No checkboxes render for a project nobody else can be added to**: the dead dashed cells are removed, not restyled.
 - Clicking the cell opens an **access popover**: a searchable member list (search appears at >8 members), one row per member with a toggle, and `Everyone` / `No one` shortcuts in the footer.
 
-**Permissions.** The popover's toggles are owner/admin only. This reuses the gate that already exists — `showMatrix = !solo && client.capabilities.teamAdminSupported && isTeamAdmin` — rather than inventing a permission concept:
+**Permissions.** The popover's toggles are owner/admin only. This reuses the gate that already exists (`showMatrix = !solo && client.capabilities.teamAdminSupported && isTeamAdmin`) rather than inventing a permission concept:
 
 - **owner / admin** → toggles are live; changes write through `useSetProjectAccess` exactly as today and land in the audit trail.
 - **member** → the same popover opens as a **read-only roster**: avatars and names, no toggles, no shortcuts, and a one-line note that only owners and admins change access. A member must still be able to *see* who can read a project; they must not be able to change it.
@@ -38,7 +38,7 @@ The table's column set becomes fixed: `Project · Sessions 7d · Last activity �
 **Archive** removes a project from the Projects list and stops MemBridge watching it, while destroying nothing. It composes two existing, tested primitives plus one new flag:
 
 1. Add the path to a new `config.archived` array (same shape and mechanism as `config.exclude` in `toggleProject`).
-2. Pause watching — the path goes into `config.exclude`, so `isProjectOff` reports it off. **This happens BEFORE step 3**: `removeBlockFromProject`'s own contract notes that a sync will re-add the block unless the project is paused first.
+2. Pause watching: the path goes into `config.exclude`, so `isProjectOff` reports it off. **This happens BEFORE step 3**: `removeBlockFromProject`'s own contract notes that a sync will re-add the block unless the project is paused first.
 3. Strip MemBridge's injected block from the project's context files via `removeBlockFromProject`, which by its own definition leaves `.membridge/` history, memory, and central state untouched.
 
 What archive does **not** touch: `.membridge/memory.json`, `memory.md`, `state.projects[key]`, the team archive, team links, or any teammate's view. **Unarchive is total**: drop both config entries, and the next sync re-adds the block. Nothing is reconstructed because nothing was destroyed.
@@ -50,7 +50,7 @@ What archive does **not** touch: `.membridge/memory.json`, `memory.md`, `state.p
 - **Archived projects live in a collapsed `Archived (N)` section** at the bottom of the Projects list, with a per-row `Unarchive`. They are never silently gone.
 - **Archive implies paused.** An archived project that kept capturing, kept posting to the Feed, and kept injecting into `CLAUDE.md` would be an invisible ghost. `Pause` remains its own separate control for a project you want visible but idle.
 
-**Delete** keeps its current destructive behavior and is **removed from bulk selection entirely**. It survives only as a single-project action behind a confirmation that (a) names what is destroyed in plain language — `.membridge/`, the context-file blocks, the team archive — and (b) requires typing the project name. A shared project's delete additionally keeps today's owner/manager gate.
+**Delete** keeps its current destructive behavior and is **removed from bulk selection entirely**. It survives only as a single-project action behind a confirmation that (a) names what is destroyed in plain language (`.membridge/`, the context-file blocks, the team archive) and (b) requires typing the project name. A shared project's delete additionally keeps today's owner/manager gate.
 
 ### 3. Select mode
 
@@ -58,13 +58,13 @@ A `Select` button in the header swaps the table into selection mode: a checkbox 
 
 ### 4. Shared-project fix
 
-Opening a shared project must render its shared identity and its shared stream: the `Shared` badge (from the project's team link, not a stale local flag), the member avatar stack, and a feed containing **every author's** sessions for that project — not a `self`-filtered one. This is a defect fix, not a design change; the project page already has the components.
+Opening a shared project must render its shared identity and its shared stream: the `Shared` badge (from the project's team link, not a stale local flag), the member avatar stack, and a feed containing **every author's** sessions for that project, not a `self`-filtered one. This is a defect fix, not a design change; the project page already has the components.
 
 ## What does NOT change
 
-- `/api/team/access-matrix` and `useSetProjectAccess` — the popover is a new presentation of the same data and the same write.
+- `/api/team/access-matrix` and `useSetProjectAccess`: the popover is a new presentation of the same data and the same write.
 - `AccessCell` remains for any surface still rendering a raw matrix; it simply leaves the projects grid.
-- `deleteProject()`, `removeBlockFromProject()`, `toggleProject()` — behavior untouched. Archive orchestrates them; it does not modify them.
+- `deleteProject()`, `removeBlockFromProject()`, `toggleProject()`: behavior untouched. Archive orchestrates them; it does not modify them.
 - Sync state, the `Add project` dialog, project filtering, and the sessions/activity columns.
 
 ## Error handling
@@ -84,7 +84,7 @@ Whether pausing a **shared** project also stops pulling teammates' entries for i
 - The Access cell is a `<button>` with an accessible name naming the project and count (`Access for membridge-web, 6 of 10 members`).
 - The popover is a focus-trapped dialog dismissed by `Escape` and by outside click; focus returns to the triggering cell.
 - Selection checkboxes are real `<input type="checkbox">` with per-row labels naming the project.
-- The read-only member view is not a disabled control set — disabled toggles read as "broken" to a screen reader. It renders as a plain list plus explanatory text.
+- The read-only member view is not a disabled control set. Disabled toggles read as "broken" to a screen reader. It renders as a plain list plus explanatory text.
 
 ## Testing (`vitest` + Testing Library for `ui/`, `test/run-tests.js` for the daemon)
 
