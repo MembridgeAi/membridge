@@ -26,9 +26,11 @@ describe('session route + page shell (Task 3)', () => {
       name: 'Hook ownership now decided by durability, not who ran last. The stop path and the recall path share one gate.',
     })).toBeInTheDocument()
     expect(screen.queryByText(/This third sentence must never render in the header/)).toBeNull()
-    // Intent row, same labelled shape the feed rows use.
-    expect(screen.getByText('Intent')).toBeInTheDocument()
-    expect(screen.getByText('make the summary hook fire on session boundaries')).toBeInTheDocument()
+    // Intent row, same labelled shape the feed rows use. Scoped to the row:
+    // the same ask text legitimately appears again in the prompt chain.
+    const intentRow = screen.getByText('Intent').closest('.session-intent')
+    expect(intentRow).not.toBeNull()
+    expect(intentRow!.textContent).toContain('make the summary hook fire on session boundaries')
     // Meta row: author, tool, project, prompt count.
     expect(screen.getByText('Andrew')).toBeInTheDocument()
     expect(screen.getByText('Claude Code')).toBeInTheDocument()

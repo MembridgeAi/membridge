@@ -5,6 +5,7 @@ import { relativeAgo } from '../../data/relativeTime'
 import { useSession } from '../../data/queries'
 import type { Session } from '../../data/types'
 import { BriefWidgets } from './BriefWidgets'
+import { PromptChain } from './PromptChain'
 import './session.css'
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ export function SessionPage({ sessionId }: SessionPageProps) {
       )}
       <MetaRow s={s} />
       <BriefWidgets session={s} />
+      <PromptChain prompts={s.prompts} checkpoints={s.checkpoints} />
     </div>
   )
 }

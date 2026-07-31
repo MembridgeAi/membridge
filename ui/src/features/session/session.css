@@ -242,3 +242,118 @@
   color: var(--text3);
   flex: none;
 }
+
+/* --- prompt chain ------------------------------------------------------- */
+
+.session-chain {
+  margin-top: var(--sp-5);
+}
+
+.session-chain-title {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text2);
+  margin-bottom: var(--sp-2);
+}
+
+/* The left-ruled timeline: one rule down the chain, each prompt hanging off it. */
+.session-chain-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-left: 2px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.session-prompt {
+  padding-left: var(--sp-3);
+}
+
+.session-prompt-head {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+.session-prompt-index {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--text3);
+}
+
+.session-prompt-time {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--text3);
+}
+
+.session-prompt-ask {
+  margin-top: 2px;
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text);
+  line-height: var(--lh-snug);
+}
+
+.session-prompt-unshared {
+  color: var(--text3);
+}
+
+.session-prompt-files {
+  margin-top: var(--sp-1);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.session-prompt-file {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--text3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0 5px;
+}
+
+/* A checkpoint that landed after this prompt: accent-ruled block beneath it. */
+.session-prompt-checkpoint {
+  margin-top: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-left: 2px solid var(--accent);
+  background: var(--accent-dim);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: var(--fs-sm);
+  color: var(--text2);
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+.session-prompt-checkpoint-label {
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent2);
+  flex: none;
+}
+
+.session-chain-more {
+  margin-top: var(--sp-3);
+  padding: 4px 10px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text2);
+  background: transparent;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  cursor: pointer;
+}
+.session-chain-more:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
