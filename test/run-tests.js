@@ -13578,6 +13578,20 @@ async function main() {
       distilled: true, files: [], changes: null,
     }]);
 
+    // Pin the archive's mtime to a WHOLE SECOND before the cache is warmed.
+    // The cache keys on stat.mtimeMs, and the fixture below has to restore
+    // that value byte-exactly after mutating the file -- but a natural mtime
+    // carries sub-millisecond precision that does not survive the
+    // seconds-float round trip through utimesSync on every platform
+    // (observed in CI on linux, macOS and Windows alike: 1785462768365.4023
+    // came back as 1785462768365.402, and the "unchanged" key changed). A
+    // whole second is exactly representable everywhere. It must be pinned
+    // HERE, before the warming search below, or the warm captures the
+    // natural mtime and pinning afterwards invalidates the very cache entry
+    // these checks are about.
+    const PINNED_SEC = 1_700_000_000;
+    fs.utimesSync(teamArchiveForCache.archivePath(cachePid), PINNED_SEC, PINNED_SEC);
+
     const sBeforeMutate = mcpMod.searchMemory({ query: 'archivecacheval1' });
     check('mcp: FIX 5 -- search_memory finds a freshly appended archive row before any mutation (fixture sanity check)', () => {
       assert.ok(sBeforeMutate.results.some(r => (r.decisions || '').includes('archivecacheval1')),
@@ -13595,13 +13609,9 @@ async function main() {
     const mutated = raw.replace('archivecacheval1', 'archivecacheval2'); // same length swap
     assert.strictEqual(mutated.length, raw.length, 'test fixture bug: the swap changed the byte length');
     fs.writeFileSync(arcFile, mutated);
-    // Pass fractional SECONDS (numbers), not Date objects: Date only carries
-    // millisecond precision, but APFS (and similar) timestamps carry more --
-    // a Date-based utimesSync silently truncates the sub-millisecond
-    // fraction, so the "pinned" mtime would come back measurably different
-    // and this test would flake on exactly the precision the cache itself
-    // keys on.
-    fs.utimesSync(arcFile, statBefore.atimeMs / 1000, statBefore.mtimeMs / 1000);
+    // Restore the same whole second pinned above -- exactly representable, so
+    // mtimeMs comes back identical and the cache key is genuinely unchanged.
+    fs.utimesSync(arcFile, PINNED_SEC, PINNED_SEC);
     const statAfter = fs.statSync(arcFile);
     assert.strictEqual(statAfter.mtimeMs, statBefore.mtimeMs, 'test fixture bug: mtime moved despite utimesSync');
     assert.strictEqual(statAfter.size, statBefore.size, 'test fixture bug: size changed despite an equal-length swap');
