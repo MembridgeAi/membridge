@@ -47,10 +47,17 @@ export function ExcludedFoldersDialog({ exclude, excludeStale, onClose }: Exclud
     setDraft('')
   }
 
+  // try/catch (Fix 15): the Electron IPC call behind pickPaths CAN reject,
+  // and an uncaught rejection here made the Browse click silently do
+  // nothing. pickPaths.isError renders the inline message below.
   async function handleBrowse() {
-    const picked = await pickPaths.mutateAsync({ kind: 'folder', multiple: true })
-    if (picked.length === 0) return // cancelled -- leave the list exactly as it was
-    setPaths(prev => [...prev, ...picked.filter(p => !prev.includes(p))])
+    try {
+      const picked = await pickPaths.mutateAsync({ kind: 'folder', multiple: true })
+      if (picked.length === 0) return // cancelled -- leave the list exactly as it was
+      setPaths(prev => [...prev, ...picked.filter(p => !prev.includes(p))])
+    } catch {
+      // pickPaths.isError renders the message below; nothing else to do.
+    }
   }
 
   async function handleSave() {
@@ -63,7 +70,7 @@ export function ExcludedFoldersDialog({ exclude, excludeStale, onClose }: Exclud
   }
 
   return (
-    <FormDialog titleId="exclude-dialog-title" title="Excluded folders" wide>
+    <FormDialog titleId="exclude-dialog-title" title="Excluded folders" wide onClose={onClose}>
       <div className="dialog-field">
         Never watched, never synced.
         {paths.length === 0 && <div className="dialog-field-hint">No folders excluded.</div>}
@@ -105,6 +112,9 @@ export function ExcludedFoldersDialog({ exclude, excludeStale, onClose }: Exclud
           <button type="button" className="dialog-btn" onClick={handleBrowse} disabled={pickPaths.isPending}>
             Browse folders…
           </button>
+        )}
+        {pickPaths.isError && (
+          <p className="dialog-error" role="alert">Couldn't open the folder picker. {errorMessage(pickPaths.error)}</p>
         )}
       </label>
       {setSetting.isError && (

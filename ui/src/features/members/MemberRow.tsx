@@ -1,25 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { Avatar } from '../../components/Avatar'
 import { StateChip } from '../../components/StateChip'
+import { relativeAgo } from '../../data/relativeTime'
 import type { Member, Role } from '../../data/types'
-
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
-function relativeTime(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
-  if (ms < MINUTE) return 'just now'
-  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`
-  if (ms < DAY) return `${Math.floor(ms / HOUR)}h ago`
-  return `${Math.floor(ms / DAY)}d ago`
-}
 
 // The one machine running this UI cannot see a teammate's daemon, so the
 // only honest thing to say is when something last arrived from them — never
 // a diagnosis of why nothing has (see Member.lastSharedAt in data/types.ts).
 function sharedLabel(iso: string | null): string {
-  return iso ? `last shared ${relativeTime(iso)}` : 'nothing shared yet'
+  return iso ? `last shared ${relativeAgo(iso)}` : 'nothing shared yet'
 }
 
 interface MemberRowProps {
@@ -42,6 +31,17 @@ interface MemberRowProps {
 export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole, onRequestRemove, onRequestTransfer }: MemberRowProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const moreBtnRef = useRef<HTMLButtonElement>(null)
+
+  // Fix 11: a keyboard- or selection-driven close puts focus back on the ⋯
+  // button that opened the menu, so a keyboard user isn't dumped at the top
+  // of the document. An outside CLICK deliberately does not refocus -- the
+  // user just pointed somewhere else, and yanking focus back would fight
+  // that.
+  function closeMenuAndRestoreFocus() {
+    setMenuOpen(false)
+    moreBtnRef.current?.focus()
+  }
 
   useEffect(() => {
     if (!menuOpen) return
@@ -49,7 +49,7 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
     }
     function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setMenuOpen(false)
+      if (e.key === 'Escape') closeMenuAndRestoreFocus()
     }
     document.addEventListener('mousedown', handleClick)
     document.addEventListener('keydown', handleKey)
@@ -100,6 +100,7 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
         {showMenu && (
           <div className="member-menu" ref={menuRef}>
             <button
+              ref={moreBtnRef}
               type="button"
               className="more"
               aria-haspopup="menu"
@@ -115,7 +116,7 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
                   type="button"
                   role="menuitem"
                   className="member-menu-item"
-                  onClick={() => { setMenuOpen(false); onRequestRemove(member) }}
+                  onClick={() => { closeMenuAndRestoreFocus(); onRequestRemove(member) }}
                 >
                   Remove from team
                 </button>
@@ -124,7 +125,7 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
                     type="button"
                     role="menuitem"
                     className="member-menu-item"
-                    onClick={() => { setMenuOpen(false); onRequestTransfer(member) }}
+                    onClick={() => { closeMenuAndRestoreFocus(); onRequestTransfer(member) }}
                   >
                     Transfer ownership
                   </button>

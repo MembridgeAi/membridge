@@ -642,5 +642,36 @@ describe('SettingsPage', () => {
       const dialog = await screen.findByRole('dialog')
       expect(within(dialog).queryByRole('button', { name: /browse/i })).toBeNull()
     })
+
+    // Fix 15: handleBrowse awaited pickPaths.mutateAsync with no try/catch --
+    // a failed native picker (the Electron IPC call CAN reject) became an
+    // unhandled rejection and the click just silently did nothing.
+    it('surfaces a failed file picker in the context-files dialog instead of nothing', async () => {
+      class BrokenPickerClient extends FakeDataClient {
+        pickPaths(): Promise<string[]> { return Promise.reject(new Error('picker exploded')) }
+      }
+      renderWith(new BrokenPickerClient(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-context-block')
+      await userEvent.click(within(row).getByRole('button', { name: /choose files/i }))
+      const dialog = await screen.findByRole('dialog')
+      await userEvent.click(within(dialog).getByRole('button', { name: /browse files/i }))
+      const alert = await within(dialog).findByText(/couldn't open the file picker/i)
+      expect(alert).toHaveAttribute('role', 'alert')
+      expect(alert.textContent).toContain('picker exploded')
+    })
+
+    it('surfaces a failed folder picker in the excluded-folders dialog instead of nothing', async () => {
+      class BrokenPickerClient extends FakeDataClient {
+        pickPaths(): Promise<string[]> { return Promise.reject(new Error('picker exploded')) }
+      }
+      renderWith(new BrokenPickerClient(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-excluded')
+      await userEvent.click(within(row).getByRole('button', { name: /edit/i }))
+      const dialog = await screen.findByRole('dialog')
+      await userEvent.click(within(dialog).getByRole('button', { name: /browse folders/i }))
+      const alert = await within(dialog).findByText(/couldn't open the folder picker/i)
+      expect(alert).toHaveAttribute('role', 'alert')
+      expect(alert.textContent).toContain('picker exploded')
+    })
   })
 })

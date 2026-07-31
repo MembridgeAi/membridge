@@ -61,6 +61,17 @@ describe('EntryRow', () => {
     expect(screen.queryByLabelText('Live')).toBeNull()
   })
 
+  // Fix 17: a summary-less entry (outcomeOf's '' fallback -- an undistilled
+  // session) used to render an empty outcome div. Say so, mutedly, instead.
+  it('shows a muted "No summary yet" for an entry with no outcome', () => {
+    const { container } = render(<EntryRow entry={entry({ outcome: '' })} />)
+    const note = screen.getByText('No summary yet')
+    expect(note).toBeInTheDocument()
+    expect(note.className).toContain('entry-row-outcome-empty')
+    // And a real outcome never shows the placeholder.
+    expect(container.querySelectorAll('.entry-row-outcome')).toHaveLength(1)
+  })
+
   it('renders an avatar by default', () => {
     render(<EntryRow entry={entry()} />)
     expect(screen.getByLabelText('Andrew')).toBeInTheDocument()

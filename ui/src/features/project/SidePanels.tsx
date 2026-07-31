@@ -1,18 +1,7 @@
 import { StateChip } from '../../components/StateChip'
 import { SyncStateView } from '../../components/SyncState'
+import { relativeAgo } from '../../data/relativeTime'
 import type { Project, StreamEntry as StreamEntryData, SyncState } from '../../data/types'
-
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
-function relativeTime(at: string, now: number = Date.now()): string {
-  const ms = now - new Date(at).getTime()
-  if (ms < MINUTE) return 'now'
-  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`
-  if (ms < DAY) return `${Math.floor(ms / HOUR)}h ago`
-  return `${Math.floor(ms / DAY)}d ago`
-}
 
 interface MemoryPanelProps {
   project: Project
@@ -48,7 +37,7 @@ export function MemoryPanel({ project, latestEntry, onOpenMemory, openPending }:
         <div className="kv">
           <span className="kv-key">Last update</span>
           <span className="mono kv-value">
-            {relativeTime(latestEntry.at)} · by {latestEntry.author}'s {latestEntry.tool}
+            {relativeAgo(latestEntry.at, { justNow: 'now' })} · by {latestEntry.author}'s {latestEntry.tool}
           </span>
         </div>
       )}

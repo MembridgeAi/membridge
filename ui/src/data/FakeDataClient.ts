@@ -169,7 +169,6 @@ export class FakeDataClient implements DataClient {
     ])
   }
   getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
-  inviteMember() { return this.guard<void>(undefined) }
   createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }
   revokeInvite() { return this.guard<void>(undefined) }
   setMemberRole() { return this.guard<void>(undefined) }

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
 import { useOpenConfigFile, useSetSetting, useSettings, useStatus } from '../../data/queries'
@@ -143,12 +144,16 @@ export function SettingsPage() {
   const openConfigFile = useOpenConfigFile()
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null)
 
-  const hasError = settingsQuery.isError || statusQuery.isError
-  if (hasError) {
+  // Full error page only for a first-load failure (no data at all); a failed
+  // refetch with cached data degrades to the inline banner below instead of
+  // blanking a populated screen every time the daemon hiccups -- which on
+  // THIS page is guaranteed to happen right after "Restart daemon".
+  const daemonError = daemonErrorOf([settingsQuery, statusQuery])
+  if (daemonError?.blocking) {
     return (
       <div className="settings-page">
         <p className="settings-error" role="alert">
-          Couldn't reach the daemon. {errorMessage(settingsQuery.error ?? statusQuery.error)}
+          Couldn't reach the daemon. {errorMessage(daemonError.error)}
         </p>
       </div>
     )
@@ -167,6 +172,7 @@ export function SettingsPage() {
 
   return (
     <div className="settings-page">
+      {daemonError && <DaemonErrorBanner className="settings-error" error={daemonError.error} />}
       <div className="settings-header">
         <h1 className="settings-title">Settings</h1>
         <span className="mono settings-scope">this machine</span>

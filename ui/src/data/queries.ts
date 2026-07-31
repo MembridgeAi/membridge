@@ -69,6 +69,14 @@ export function useFeed(filters: FeedFilters) {
     queryFn: ({ pageParam }) => c.getFeed(filters, { limit: FEED_PAGE_SIZE, before: pageParam }),
     initialPageParam: null as string | null,
     getNextPageParam: lastPage => lastPage.nextBefore,
+    // No focus refetch (Fix 16), same reasoning as the deliberate no-poll
+    // above: an infinite query refetches EVERY loaded page on window
+    // refocus, so a reader three "Show more" clicks deep had all their
+    // pages refired at once on alt-tab -- fighting their scroll position
+    // exactly the way the 10s poll would have. staleTime alone can't stop
+    // this (it only masks the first 15s); the feed refreshes via explicit
+    // filter changes and the sync mutations' cache invalidation instead.
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -225,12 +233,21 @@ export function useSetProjectAccess() {
   })
 }
 
+// Both member mutations also invalidate ['accessMatrix'] and
+// ['projectAccess'] (prefix-matched, so every per-project key refreshes):
+// those caches list members too, and invalidating only ['members'] left a
+// removed member ghosting in the projects grid's access columns and the
+// project page's access panel until an unrelated refetch cleared them.
 export function useSetMemberRole() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (vars: { memberId: string; role: Role }) => c.setMemberRole(vars.memberId, vars.role),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['members'] }) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['members'] })
+      qc.invalidateQueries({ queryKey: ['accessMatrix'] })
+      qc.invalidateQueries({ queryKey: ['projectAccess'] })
+    },
   })
 }
 
@@ -239,23 +256,17 @@ export function useRemoveMember() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (memberId: string) => c.removeMember(memberId),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['members'] }) },
-  })
-}
-
-export function useInviteMember() {
-  const c = useDataClient()
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (vars: { email: string; role: Role }) => c.inviteMember(vars.email, vars.role),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['invites'] }) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['members'] })
+      qc.invalidateQueries({ queryKey: ['accessMatrix'] })
+      qc.invalidateQueries({ queryKey: ['projectAccess'] })
+    },
   })
 }
 
 // Mints a fresh onboarding-invite token for a team (DataClient.createInviteLink,
-// POST /api/team/invite). No cache to invalidate: unlike useInviteMember (which
-// feeds the pending-invites list), a minted link is used-and-copied on the
-// spot, not tracked in any list this UI reads back.
+// POST /api/team/invite). No cache to invalidate: a minted link is
+// used-and-copied on the spot, not tracked in any list this UI reads back.
 export function useCreateInviteLink() {
   const c = useDataClient()
   return useMutation({

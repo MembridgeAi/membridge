@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { useDataClient } from '../../data/DataClientProvider'
 import { useInsights, useSettings, useStatus } from '../../data/queries'
@@ -8,8 +9,12 @@ import { PersonBars } from './PersonBars'
 import { ProblemGroup } from './ProblemList'
 import './insights.css'
 
-type Window = 7 | 30 | 90
-const WINDOWS: Window[] = [7, 30, 90]
+// Named WindowDays, never `Window` (Fix 14c): a local type called Window
+// shadowed the global DOM Window type, and a `window` state variable
+// shadowed globalThis.window -- any future `window.x` in this file would
+// silently read the number 30 instead of the browser window.
+type WindowDays = 7 | 30 | 90
+const WINDOWS: WindowDays[] = [7, 30, 90]
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
@@ -48,7 +53,14 @@ function deltaNote(delta: number | null): string | undefined {
 }
 
 function toCsvCell(value: string | number): string {
-  const s = String(value)
+  let s = String(value)
+  // Formula-injection guard (Fix 14b): a TEXT cell starting with =, +, - or
+  // @ executes as a formula when the export lands in Excel/Sheets, and
+  // person names, project names and problem headlines are all text this app
+  // does not author. The leading apostrophe is the standard neutralizer
+  // (spreadsheets render it as plain text). Numbers are never escaped --
+  // they are this export's own figures, not attacker-influenceable text.
+  if (typeof value === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
@@ -58,7 +70,8 @@ function toCsvRow(cells: (string | number)[]): string {
 
 // Every figure here already lives in the fetched Insights payload -- this is
 // a pure client-side transform, never a new number, never a dollar amount.
-function buildCsv(insights: Insights): string {
+// Exported for the formula-escaping tests only.
+export function buildCsv(insights: Insights): string {
   const lines: string[] = [
     toCsvRow(['metric', 'value']),
     toCsvRow(['window_days', insights.window]),
@@ -91,8 +104,17 @@ function exportCsv(insights: Insights): void {
   const link = document.createElement('a')
   link.href = url
   link.download = `membridge-insights-${insights.window}d.csv`
+  // Fix 14a: the anchor must be IN the document when clicked (Firefox
+  // ignores a click on a detached anchor), and the object URL must outlive
+  // the click -- revoking synchronously raced the browser's own async fetch
+  // of the blob and could yield an empty download. Deferring a tick lets the
+  // download start first; the anchor is removed on the same tick.
+  document.body.appendChild(link)
   link.click()
-  URL.revokeObjectURL(url)
+  setTimeout(() => {
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }, 0)
 }
 
 function LRow({ name, sub, value }: { name: string; sub?: string; value: string }) {
@@ -107,8 +129,8 @@ function LRow({ name, sub, value }: { name: string; sub?: string; value: string 
 }
 
 interface InsightsContentProps {
-  window: Window
-  onWindowChange: (w: Window) => void
+  windowDays: WindowDays
+  onWindowChange: (w: WindowDays) => void
   teamLabel: string | null
 }
 
@@ -117,13 +139,17 @@ interface InsightsContentProps {
  *  this actually mounts, which InsightsPage gates on the viewer being an
  *  owner/admin on a team. A member navigating here directly never triggers
  *  this component, and so never triggers the request. */
-function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentProps) {
-  const insightsQuery = useInsights(window)
+function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsContentProps) {
+  const insightsQuery = useInsights(windowDays)
 
-  if (insightsQuery.isError) {
+  // Full error page only for a first-load failure (no data at all); a failed
+  // refetch with cached data degrades to the inline banner below instead of
+  // blanking a populated screen every time the daemon hiccups.
+  const daemonError = daemonErrorOf([insightsQuery])
+  if (daemonError?.blocking) {
     return (
       <div className="insights-page">
-        <p className="insights-error" role="alert">Couldn't reach the daemon. {errorMessage(insightsQuery.error)}</p>
+        <p className="insights-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -140,7 +166,7 @@ function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentP
   const minor = insights.problems.filter(p => p.severity === 'minor')
 
   const stats: StatItem[] = [
-    { value: formatCount(insights.sessions.count), label: 'sessions', note: trendNote(insights.sessions.deltaPct, window) },
+    { value: formatCount(insights.sessions.count), label: 'sessions', note: trendNote(insights.sessions.deltaPct, windowDays) },
     { value: assistsHeadlineValue(insights.assists), label: 'times memory helped' },
     {
       value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
@@ -152,6 +178,7 @@ function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentP
 
   return (
     <div className="insights-page">
+      {daemonError && <DaemonErrorBanner className="insights-error" error={daemonError.error} />}
       <div className="insights-header">
         <h1 className="insights-title">Insights</h1>
         {teamLabel && <span className="mono insights-count">{teamLabel}</span>}
@@ -161,8 +188,8 @@ function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentP
               <button
                 key={w}
                 type="button"
-                aria-pressed={w === window}
-                className={w === window ? 'seg-btn seg-btn-on' : 'seg-btn'}
+                aria-pressed={w === windowDays}
+                className={w === windowDays ? 'seg-btn seg-btn-on' : 'seg-btn'}
                 onClick={() => onWindowChange(w)}
               >
                 {w} days
@@ -185,7 +212,7 @@ function InsightsContent({ window, onWindowChange, teamLabel }: InsightsContentP
           <PersonBars people={insights.perPerson} />
 
           <div className="insights-sect">
-            How well the skeleton is working <span className="insights-hint">last {window} days</span>
+            How well the skeleton is working <span className="insights-hint">last {windowDays} days</span>
           </div>
           <div className="skeleton-panel" data-testid="skeleton-panel">
             <div className="lrow" role="row">
@@ -255,13 +282,17 @@ export function InsightsPage() {
   const client = useDataClient()
   const statusQuery = useStatus()
   const settingsQuery = useSettings()
-  const [window, setWindow] = useState<Window>(30)
+  const [windowDays, setWindowDays] = useState<WindowDays>(30)
 
-  const hasError = statusQuery.isError || settingsQuery.isError
-  if (hasError) {
+  // Same rule as InsightsContent above: blank the page only when a failed
+  // query has no data at all. A refetch failure with cached status/settings
+  // proceeds -- InsightsContent renders the data and its own inline banner
+  // covers the degraded state, so no second banner is stacked here.
+  const outerError = daemonErrorOf([statusQuery, settingsQuery])
+  if (outerError?.blocking) {
     return (
       <div className="insights-page">
-        <p className="insights-error" role="alert">Couldn't reach the daemon. {errorMessage(statusQuery.error ?? settingsQuery.error)}</p>
+        <p className="insights-error" role="alert">Couldn't reach the daemon. {errorMessage(outerError.error)}</p>
       </div>
     )
   }
@@ -287,5 +318,5 @@ export function InsightsPage() {
   const team = settingsQuery.data.team
   const teamLabel = team ? `${team.name} · ${team.memberCount} members` : null
 
-  return <InsightsContent window={window} onWindowChange={setWindow} teamLabel={teamLabel} />
+  return <InsightsContent windowDays={windowDays} onWindowChange={setWindowDays} teamLabel={teamLabel} />
 }

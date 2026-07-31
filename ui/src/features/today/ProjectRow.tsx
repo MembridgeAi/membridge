@@ -17,6 +17,10 @@ interface ProjectRowProps {
    *  that stability is what lets React.memo below actually skip work on
    *  Today's 10s poll tick when this project's own data hasn't changed. */
   onSyncProject: (path: string) => void
+  /** True while THIS project's sync request is in flight (Fix 9) -- the
+   *  caller compares its mutation's variables against this row's path, so a
+   *  pending sync on one project never disables another row's button. */
+  syncPending?: boolean
 }
 
 /** One "Projects · this week" row: name/tag/avatars + latest summary on the
@@ -28,7 +32,7 @@ interface ProjectRowProps {
  *  structural sharing already keeps an unchanged `project` object's identity
  *  stable across a poll, so memo here only re-renders a row whose own data
  *  actually changed. */
-function ProjectRowImpl({ project, memberNames, onSyncProject }: ProjectRowProps) {
+function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: ProjectRowProps) {
   const behind = project.sync.state === 'behind'
   const handleSync = useCallback(() => onSyncProject(project.path), [onSyncProject, project.path])
   return (
@@ -55,7 +59,7 @@ function ProjectRowImpl({ project, memberNames, onSyncProject }: ProjectRowProps
       <div className="project-right">
         <div className="project-metric-line">
           <span className="mono project-metric">{project.sessionsThisWeek} sessions · last 7 days</span>
-          <SyncStateView state={project.sync} onSync={behind ? handleSync : undefined} />
+          <SyncStateView state={project.sync} onSync={behind ? handleSync : undefined} syncPending={syncPending} />
         </div>
         <Sparkline values={project.dailyCounts} muted={project.sync.state !== 'up-to-date'} />
       </div>

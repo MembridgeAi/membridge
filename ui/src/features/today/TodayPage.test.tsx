@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
 import type { LiveSession, Project } from '../../data/types'
@@ -92,9 +93,68 @@ describe('TodayPage', () => {
 
   it('omits team-only stats in solo mode', async () => {
     renderApp({ solo: true }, <TodayPage />)
-    await screen.findByText(/sessions today/i)
+    await screen.findByText(/sessions · last 24h/i)
     expect(screen.queryByText(/updates shared/i)).toBeNull()
     expect(screen.queryByText(/last team sync/i)).toBeNull()
+  })
+
+  // Fix 5: dailyCounts[6] is a ROLLING 24h bucket (lib/server.js
+  // dailySessionBuckets: "Rolling 24h buckets (not calendar days)"), so
+  // calling it "sessions today" overstated what it measures.
+  it('labels the sessions stat as a rolling 24h window, never "today"', async () => {
+    renderApp({}, <TodayPage />)
+    await statCell('sessions · last 24h')
+    expect(screen.queryByText(/sessions today/i)).toBeNull()
+  })
+
+  // Fix 4: the "N live now" stat and the "Happening now" rows must be one
+  // set (mappers.ts: "the count and the dots one set") -- the rows render
+  // GROUPED person+project goals, so the count reads the same groups, not
+  // the raw session list.
+  it('counts live now as the grouped rows on screen, not raw sessions', async () => {
+    // Two live sessions, same person, same project -> ONE row on screen.
+    const sessions = [liveSession({ id: 's1' }), liveSession({ id: 's2' })]
+    renderWith(new LiveSessionsFixtureClient(sessions), <TodayPage />)
+    expect(await screen.findAllByTestId('live-entry')).toHaveLength(1)
+    await expectStatValue('live now', '1')
+  })
+
+  // Fix 9: the header Sync now button reflects its mutation's state instead
+  // of looking dead while a sync runs or silently swallowing a failure.
+  it('disables the header sync button and says Syncing… while the sync runs', async () => {
+    class HangingSyncClient extends FakeDataClient {
+      syncAll() { return new Promise<void>(() => {}) } // never settles
+    }
+    renderWith(new HangingSyncClient(), <TodayPage />)
+    const header = (await screen.findByText('Today')).closest('.today-header') as HTMLElement
+    await userEvent.click(within(header).getByRole('button', { name: 'Sync now' }))
+    const pending = within(header).getByRole('button', { name: 'Syncing…' })
+    expect(pending).toBeDisabled()
+  })
+
+  it('surfaces a failed sync-all instead of looking like nothing happened', async () => {
+    class FailingSyncClient extends FakeDataClient {
+      syncAll() { return Promise.reject(new Error('sync exploded')) }
+    }
+    renderWith(new FailingSyncClient(), <TodayPage />)
+    const header = (await screen.findByText('Today')).closest('.today-header') as HTMLElement
+    await userEvent.click(within(header).getByRole('button', { name: 'Sync now' }))
+    const alert = await screen.findByText(/couldn't sync/i)
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert.textContent).toContain('sync exploded')
+  })
+
+  it('surfaces a failed per-project sync from a behind row', async () => {
+    class FailingProjectSyncClient extends FakeDataClient {
+      syncProject() { return Promise.reject(new Error('project sync exploded')) }
+    }
+    renderWith(new FailingProjectSyncClient(), <TodayPage />)
+    const rows = await screen.findAllByTestId('project-row')
+    const behind = rows.find(r => within(r).queryByText(/behind/))!
+    await userEvent.click(within(behind).getByRole('button', { name: 'Sync now' }))
+    const alert = await screen.findByText(/couldn't sync/i)
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert.textContent).toContain('project sync exploded')
   })
 
   // FINDING 1: a naive count of every project with a latestSummary would be

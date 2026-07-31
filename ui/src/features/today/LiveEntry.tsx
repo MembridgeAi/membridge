@@ -1,19 +1,6 @@
 import { Avatar } from '../../components/Avatar'
+import { elapsedShort } from '../../data/relativeTime'
 import type { LiveSessionGroup } from '../../data/types'
-
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
-/** "now" for < 1m, then minutes, hours, days -- coarsest unit that still
- *  reads as "just happened" for a live session's elapsed time. */
-function elapsedSince(startedAt: string): string {
-  const ms = Date.now() - new Date(startedAt).getTime()
-  if (ms < MINUTE) return 'now'
-  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m`
-  if (ms < DAY) return `${Math.floor(ms / HOUR)}h`
-  return `${Math.floor(ms / DAY)}d`
-}
 
 interface LiveEntryProps {
   group: LiveSessionGroup
@@ -51,7 +38,7 @@ export function LiveEntry({ group }: LiveEntryProps) {
           <span className="mono live-entry-session-count">{group.sessionCount} sessions</span>
         )}
       </span>
-      <span className="mono live-entry-elapsed">{elapsedSince(group.startedAt)}</span>
+      <span className="mono live-entry-elapsed">{elapsedShort(group.startedAt)}</span>
       {group.intent && (
         <div className="live-entry-intent">
           <span className="live-entry-intent-label">Intent</span>

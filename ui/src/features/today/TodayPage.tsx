@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
+import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { weekdayMonthDay } from '../../data/localTime'
 import { groupLiveSessions } from '../../data/mappers'
+import { relativeAgo } from '../../data/relativeTime'
 import { useLiveSessions, useProjects, useSkeletonStats, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
 import type { LiveSession, Project, SkeletonStats } from '../../data/types'
 import { LiveEntry } from './LiveEntry'
@@ -21,10 +23,6 @@ export function todayDateLabel(now: Date = new Date()): string {
   return weekdayMonthDay(now)
 }
 
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
 // Replaces the old per-member synced count: team_members_list exposes no
 // per-member sync state, and a teammate's daemon is invisible from this
 // machine (see data/types.ts, the Member doc comment) -- so no honest
@@ -33,16 +31,15 @@ const DAY = 24 * HOUR
 // label, or `never`.
 export function lastTeamSyncLabel(iso: string | null, now: number = Date.now()): string {
   if (!iso) return 'never'
-  const ms = now - new Date(iso).getTime()
-  if (ms < MINUTE) return 'just now'
-  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`
-  if (ms < DAY) return `${Math.floor(ms / HOUR)}h ago`
-  return `${Math.floor(ms / DAY)}d ago`
+  return relativeAgo(iso, {}, now)
 }
 
 // dailyCounts is a guaranteed 7-entry partition, oldest first (types.ts) --
-// the last entry is today's count.
-const sessionsToday = (projects: Project[]) => projects.reduce((sum, p) => sum + (p.dailyCounts[6] ?? 0), 0)
+// the last entry is the most recent bucket. lib/server.js's
+// dailySessionBuckets documents these as ROLLING 24h buckets, not calendar
+// days (the server has no notion of the browser's timezone) -- so the stat
+// label below says "last 24h", never "today" (Fix 5).
+const sessionsLast24h = (projects: Project[]) => projects.reduce((sum, p) => sum + (p.dailyCounts[6] ?? 0), 0)
 
 // A team-labelled stat must never count a private project's summary. shared
 // is checked first, before latestSummary, so a private project can never
@@ -105,12 +102,14 @@ export function TodayPage() {
   // structural sharing keeps `liveSessions` stable across a no-change poll).
   const liveGroups = useMemo(() => groupLiveSessions(liveSessions), [liveSessions])
 
-  const hasError = statusQuery.isError || projectsQuery.isError || liveQuery.isError
-  if (hasError) {
-    const message = errorMessage(statusQuery.error ?? projectsQuery.error ?? liveQuery.error)
+  // Full error page only for a first-load failure (no data at all); a failed
+  // refetch with cached data degrades to an inline banner below instead of
+  // blanking a populated screen every time the daemon hiccups mid-poll.
+  const daemonError = daemonErrorOf([statusQuery, projectsQuery, liveQuery])
+  if (daemonError?.blocking) {
     return (
       <div className="today-page">
-        <p className="today-error" role="alert">Couldn't reach the daemon. {message}</p>
+        <p className="today-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -123,21 +122,26 @@ export function TodayPage() {
   // as a ledger with nothing in it -- never a guessed number.
   const skeleton: SkeletonStats = skeletonQuery.data ?? { available: false }
 
+  // liveGroups.length, never liveSessions.length (Fix 4): the "Happening
+  // now" rows below render GROUPED person+project goals, and mappers.ts's
+  // contract is that the count and the dots are one set -- a person with two
+  // sessions on one goal is one row, so they are one in this count too.
   const stats: StatItem[] = solo
     ? [
-        { value: String(liveSessions.length), label: 'live now' },
-        { value: String(sessionsToday(projects)), label: 'sessions today' },
+        { value: String(liveGroups.length), label: 'live now' },
+        { value: String(sessionsLast24h(projects)), label: 'sessions · last 24h' },
         { value: skeletonPercentLabel(skeleton), label: 'repeat opens answered by memory' },
       ]
     : [
-        { value: String(liveSessions.length), label: 'live now' },
-        { value: String(sessionsToday(projects)), label: 'sessions today' },
+        { value: String(liveGroups.length), label: 'live now' },
+        { value: String(sessionsLast24h(projects)), label: 'sessions · last 24h' },
         { value: String(updatesShared(projects)), label: 'updates shared' },
         { value: lastTeamSyncLabel(teamLastSync), label: 'last team sync' },
       ]
 
   return (
     <div className="today-page">
+      {daemonError && <DaemonErrorBanner className="today-error" error={daemonError.error} />}
       <div className="today-header">
         <div>
           <h1 className="today-title">Today</h1>
@@ -149,11 +153,21 @@ export function TodayPage() {
             /api/projects/copy, so that control lives on the project page
             (Task 9), not here. */}
         <div className="today-header-actions">
-          <button type="button" className="today-btn today-btn-primary" onClick={() => syncAll.mutate()}>
-            Sync now
+          {/* Fix 9: reflect the mutation's own state -- disabled + "Syncing…"
+              while pending, and a visible alert on failure (below) instead
+              of a click that silently does nothing. */}
+          <button type="button" className="today-btn today-btn-primary" onClick={() => syncAll.mutate()} disabled={syncAll.isPending}>
+            {syncAll.isPending ? 'Syncing…' : 'Sync now'}
           </button>
         </div>
       </div>
+
+      {syncAll.isError && (
+        <p className="today-error" role="alert">Couldn't sync. {errorMessage(syncAll.error)}</p>
+      )}
+      {syncProject.isError && (
+        <p className="today-error" role="alert">Couldn't sync. {errorMessage(syncProject.error)}</p>
+      )}
 
       <StatStrip items={stats} />
 
@@ -179,6 +193,7 @@ export function TodayPage() {
                 project={project}
                 memberNames={memberNames}
                 onSyncProject={syncProject.mutate}
+                syncPending={syncProject.isPending && syncProject.variables === project.path}
               />
             ))
           )}

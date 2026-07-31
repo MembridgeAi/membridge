@@ -2,26 +2,15 @@ import { useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
 import { Avatar } from '../../components/Avatar'
+import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { SyncStateView } from '../../components/SyncState'
 import { useDataClient } from '../../data/DataClientProvider'
+import { relativeAgo } from '../../data/relativeTime'
 import { useAccessMatrix, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
 import { AccessCell } from './AccessCell'
 import { AddProjectDialog } from './AddProjectDialog'
 import './projects.css'
-
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
-function relativeTime(iso: string | null): string {
-  if (!iso) return 'never'
-  const ms = Date.now() - new Date(iso).getTime()
-  if (ms < MINUTE) return 'just now'
-  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`
-  if (ms < DAY) return `${Math.floor(ms / HOUR)}h ago`
-  return `${Math.floor(ms / DAY)}d ago`
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
@@ -35,10 +24,12 @@ interface ProjectTableRowProps {
   showSelfColumn: boolean
   viewerId: string | null
   onSync: () => void
+  /** True while THIS row's sync request is in flight (Fix 9). */
+  syncPending: boolean
   onToggleAccess: (memberId: string, canSee: boolean) => void
 }
 
-function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColumn, viewerId, onSync, onToggleAccess }: ProjectTableRowProps) {
+function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColumn, viewerId, onSync, syncPending, onToggleAccess }: ProjectTableRowProps) {
   return (
     <tr data-testid={`project-row-${project.name}`}>
       <td className="proj-name">
@@ -46,8 +37,8 @@ function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColu
         <span className="mono proj-path">{project.path}</span>
       </td>
       <td className="mono num">{project.sessionsThisWeek}</td>
-      <td className="mono num">{relativeTime(project.lastActivity)}</td>
-      <td><SyncStateView state={project.sync} onSync={project.sync.state === 'behind' ? onSync : undefined} /></td>
+      <td className="mono num">{project.lastActivity ? relativeAgo(project.lastActivity) : 'never'}</td>
+      <td><SyncStateView state={project.sync} onSync={project.sync.state === 'behind' ? onSync : undefined} syncPending={syncPending} /></td>
       {showMatrix && members.map(member => (
         <td className="who" key={member.id}>
           <AccessCell
@@ -68,7 +59,11 @@ function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColu
           <AccessCell memberName="You" checked disabled isSelf onToggle={() => {}} />
         </td>
       )}
-      <td><Link href={`${ROUTES.projects}/${project.name}`} className="proj-btn">Open</Link></td>
+      {/* Route on the encoded PATH, never the raw name: two projects can
+          share a basename (two checkouts of "api"), and a raw name breaks
+          the URL outright on '#' or '?'. ProjectPage decodes and looks up
+          by path, with a name-match fallback for old links. */}
+      <td><Link href={`${ROUTES.projects}/${encodeURIComponent(project.path)}`} className="proj-btn">Open</Link></td>
     </tr>
   )
 }
@@ -111,12 +106,14 @@ export function ProjectsPage() {
     return map
   }, [matrixQuery.data])
 
-  const hasError = projectsQuery.isError || statusQuery.isError || settingsQuery.isError || (showMatrix && matrixQuery.isError)
-  if (hasError) {
-    const message = errorMessage(projectsQuery.error ?? statusQuery.error ?? settingsQuery.error ?? matrixQuery.error)
+  // Full error page only for a first-load failure (no data at all); a failed
+  // refetch with cached data degrades to the inline banner below instead of
+  // blanking a populated grid every time the daemon hiccups mid-poll.
+  const daemonError = daemonErrorOf([projectsQuery, statusQuery, settingsQuery, ...(showMatrix ? [matrixQuery] : [])])
+  if (daemonError?.blocking) {
     return (
       <div className="projects-page">
-        <p className="projects-error" role="alert">Couldn't reach the daemon. {message}</p>
+        <p className="projects-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -134,6 +131,17 @@ export function ProjectsPage() {
 
   return (
     <div className="projects-page">
+      {daemonError && <DaemonErrorBanner className="projects-error" error={daemonError.error} />}
+      {/* Fix 8/9: a failed access toggle rolls back optimistically (the
+          hook's onError) and a failed sync changes nothing on screen -- both
+          need a visible reason, mirroring setAccessDefault's message on the
+          project page. */}
+      {setAccess.isError && (
+        <p className="projects-error" role="alert">Couldn't change access. {errorMessage(setAccess.error)}</p>
+      )}
+      {syncProject.isError && (
+        <p className="projects-error" role="alert">Couldn't sync. {errorMessage(syncProject.error)}</p>
+      )}
       <div className="projects-header">
         <h1 className="projects-title">Projects</h1>
         <span className="mono projects-count">{projects.length} watched · {sharedCount} shared</span>
@@ -186,6 +194,7 @@ export function ProjectsPage() {
                 showSelfColumn={showSelfColumn}
                 viewerId={viewerId}
                 onSync={() => syncProject.mutate(project.path)}
+                syncPending={syncProject.isPending && syncProject.variables === project.path}
                 onToggleAccess={(memberId, canSee) => setAccess.mutate({ projectPath: project.path, memberId, canSee })}
               />
             ))}

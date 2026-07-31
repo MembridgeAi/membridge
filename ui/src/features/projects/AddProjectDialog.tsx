@@ -30,7 +30,7 @@ export function AddProjectDialog({ onClose }: AddProjectDialogProps) {
   }
 
   return (
-    <FormDialog titleId="add-project-title" title="Add project">
+    <FormDialog titleId="add-project-title" title="Add project" onClose={onClose}>
       <form onSubmit={handleSubmit}>
         <label className="dialog-field">
           Folder path

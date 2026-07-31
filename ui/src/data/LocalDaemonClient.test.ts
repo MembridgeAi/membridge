@@ -414,3 +414,65 @@ describe('LocalDaemonClient.getInsights', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/team/insights?window=7', expect.anything())
   })
 })
+
+// P0 Fix 2: getInvites used to REJECT with a developer-facing "no daemon
+// endpoint yet" message, which useInvites retried 3x on every Members mount
+// and then surfaced to the user. There is still no listing endpoint, so the
+// honest resolved value is an empty list -- no request, no rejection.
+describe('LocalDaemonClient.getInvites()', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('resolves [] without firing any request (no listing endpoint exists yet)', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new LocalDaemonClient()
+    await expect(client.getInvites()).resolves.toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// Fix 7: getMembers() fanned out one /api/team/feed request per member via
+// Promise.all -- ONE failed member request rejected the whole call and
+// blanked the entire Members page. A per-member failure now degrades that
+// one member's activity numbers instead of taking everyone else down.
+describe('LocalDaemonClient.getMembers() degrades a single failed member request', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function stubFetchWithOneFailingAuthor(failingAuthor: string) {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const u = new URL(String(url), 'http://x')
+      const respond = (body: unknown, ok = true) => ({ ok, status: ok ? 200 : 500, json: async () => body })
+      if (u.pathname === '/api/team') {
+        return respond({ teams: [{ team_id: 'team-1', role: 'owner' }], viewerId: 'a', inviteCode: null })
+      }
+      if (u.pathname === '/api/team/members') {
+        return respond({
+          members: [
+            { user_id: 'a', display_name: 'Ada', role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
+            { user_id: 'b', display_name: 'Ben', role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+          ],
+        })
+      }
+      if (u.pathname === '/api/team/feed') {
+        if (u.searchParams.get('author') === failingAuthor) return respond({}, false)
+        return respond({ entries: [{ author_id: 'a', project_id: 'p1', ts: '2026-07-23T09:00:00Z' }] })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+  }
+
+  it('still yields every member row when one activity request fails', async () => {
+    stubFetchWithOneFailingAuthor('b')
+    const members = await new LocalDaemonClient().getMembers()
+    expect(members).toHaveLength(2)
+    const ada = members.find(m => m.id === 'a')!
+    const ben = members.find(m => m.id === 'b')!
+    // The healthy member keeps real numbers...
+    expect(ada.projectCount).toBe(1)
+    expect(ada.lastSharedAt).toBe('2026-07-23T09:00:00Z')
+    // ...and the failed one degrades to zero-activity, never an exception.
+    expect(ben.projectCount).toBe(0)
+    expect(ben.lastSharedAt).toBeNull()
+  })
+})

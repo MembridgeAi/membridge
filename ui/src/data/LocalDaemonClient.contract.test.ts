@@ -24,10 +24,10 @@ type Invoker = (client: DataClient) => Promise<unknown>
 // failing to type-check until it's accounted for.
 const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
   // POST /api/team/invite only mints a generic, role-less link and cannot
-  // list issued invites -- no endpoint accepts email/role, and none lists
-  // pending invites. Structurally blocked, not merely unwired.
+  // list issued invites -- no listing endpoint exists, so getInvites
+  // resolves [] without ever attempting a request. (inviteMember was
+  // removed from DataClient entirely for the same structural reason.)
   'getInvites',
-  'inviteMember',
   // pickPaths never has a daemon endpoint to attempt -- it is routed through
   // the Electron IPC bridge (window.membridge, set by app/preload.js), not
   // fetch, because the daemon is a separate process with no GUI to show a
@@ -54,7 +54,6 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getAccessMatrix: c => c.getAccessMatrix(),
   getMembers: c => c.getMembers(),
   getInvites: c => c.getInvites(),
-  inviteMember: c => c.inviteMember('a@b.com', 'member'),
   createInviteLink: c => c.createInviteLink('team-1'),
   revokeInvite: c => c.revokeInvite('i1'),
   setMemberRole: c => c.setMemberRole('m1', 'member'),

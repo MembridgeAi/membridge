@@ -1,3 +1,5 @@
+import { useDialogFocus } from './useDialogFocus'
+
 interface ConfirmDialogProps {
   title: string
   message: string
@@ -15,11 +17,16 @@ interface ConfirmDialogProps {
  * system allowed a subtle shadow (see components.css `.dialog`) — every
  * resting surface elsewhere stays flat; the exception is reserved for true
  * overlays. Each caller renders at most one instance at a time.
+ *
+ * Modal behavior (focus into the panel, Tab trap, Escape cancels, focus
+ * restored to the opener on close) comes from useDialogFocus -- Escape is
+ * disabled while `pending`, matching the disabled Cancel button.
  */
 export function ConfirmDialog({ title, message, confirmLabel, destructive, pending, error, onConfirm, onCancel }: ConfirmDialogProps) {
+  const panelRef = useDialogFocus(pending ? undefined : onCancel)
   return (
     <div className="dialog-overlay">
-      <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+      <div ref={panelRef} tabIndex={-1} className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
         <h2 id="confirm-dialog-title" className="dialog-title">{title}</h2>
         <p className="dialog-message">{message}</p>
         {error && <p className="dialog-error" role="alert">{error}</p>}

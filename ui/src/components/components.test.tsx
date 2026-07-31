@@ -44,6 +44,22 @@ describe('SyncStateView', () => {
     }
   })
 
+  // Fix 13: en-US with hour12:false resolves to the h24 cycle, which
+  // renders the midnight half-hour as "24:30". hourCycle:'h23' pins the
+  // 00-23 clock, so 00:30 reads as 00:30.
+  it('renders the half hour after midnight as 00:30, never 24:30', () => {
+    vi.useFakeTimers()
+    try {
+      // 07:30Z is 00:30 in America/Los_Angeles (the suite's pinned zone).
+      vi.setSystemTime(new Date('2026-07-30T10:00:00Z'))
+      render(<SyncStateView state={{ state: 'behind', lastSyncedAt: '2026-07-30T07:30:00Z' }} onSync={() => {}} />)
+      expect(screen.getByText(/behind · 00:30/)).toBeInTheDocument()
+      expect(screen.queryByText(/24:30/)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps the date for a sync older than today', () => {
     vi.useFakeTimers()
     try {

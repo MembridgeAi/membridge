@@ -32,7 +32,10 @@ export function AuditList() {
 
   return (
     <div className="audit-panel">
-      <div className="section-label">Audit · last 30 days</div>
+      {/* "last 30 events", because that is literally the query (?limit=30
+          events, useAudit(30)) -- "last 30 days" claimed a time window
+          nothing here asks the daemon for (Fix 6). */}
+      <div className="section-label">Audit · last 30 events</div>
       {auditQuery.isError && (
         <p className="audit-error" role="alert">Couldn't load the audit trail. {errorMessage(auditQuery.error)}</p>
       )}

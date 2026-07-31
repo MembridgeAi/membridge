@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { focusManager } from '@tanstack/react-query'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
 import { FEED_PAGE_SIZE } from '../../data/queries'
@@ -79,6 +80,26 @@ describe('FeedPage', () => {
   it('marks a live session', async () => {
     renderApp({}, <FeedPage />)
     expect(await screen.findByLabelText('Live')).toBeInTheDocument()
+  })
+
+  // Fix 16: an infinite query refetches EVERY loaded page on window
+  // refocus by default -- for a reader three "Show more" clicks deep, one
+  // alt-tab refired all their pages at once and fought their scroll
+  // position, the exact behavior the no-poll decision here exists to avoid.
+  it('does not refire the loaded pages on window refocus', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'getFeed')
+    renderWith(client, <FeedPage />)
+    await screen.findByText(/Hook ownership/)
+    const callsAfterLoad = spy.mock.calls.length
+    try {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      expect(spy.mock.calls.length).toBe(callsAfterLoad)
+    } finally {
+      focusManager.setFocused(undefined)
+    }
   })
 
   it('renders an empty state', async () => {

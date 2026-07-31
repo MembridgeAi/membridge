@@ -1,17 +1,6 @@
 import { Avatar } from './Avatar'
+import { relativeAgo } from '../data/relativeTime'
 import type { StreamEntry } from '../data/types'
-
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
-function relativeTime(at: string, now: number = Date.now()): string {
-  const ms = now - new Date(at).getTime()
-  if (ms < MINUTE) return 'now'
-  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`
-  if (ms < DAY) return `${Math.floor(ms / HOUR)}h ago`
-  return `${Math.floor(ms / DAY)}d ago`
-}
 
 // The viewer's own wall clock (no timeZone option, so the browser's resolved
 // zone wins) -- same reasoning as SyncStateView's shortStamp. Pinned to UTC,
@@ -49,7 +38,7 @@ export function EntryRow({ entry, project, showAvatar = true }: EntryRowProps) {
         <span className="entry-row-tool">
           {entry.tool}
           {project && <> · <span className="mono">{project}</span></>}
-          {' · '}{relativeTime(entry.at)}
+          {' · '}{relativeAgo(entry.at, { justNow: 'now' })}
         </span>
       </span>
       <span className="mono entry-row-meta">
@@ -57,7 +46,12 @@ export function EntryRow({ entry, project, showAvatar = true }: EntryRowProps) {
           <>live <span className="live-dot" role="img" aria-label="Live" /></>
         ) : clockTime(entry.at)}
       </span>
-      <div className="entry-row-outcome">{entry.outcome}</div>
+      {/* Fix 17: outcomeOf falls back to '' for an undistilled session --
+          say so mutedly rather than rendering an empty element. No em dash;
+          the row's timestamp already says when it happened. */}
+      {entry.outcome
+        ? <div className="entry-row-outcome">{entry.outcome}</div>
+        : <div className="entry-row-outcome entry-row-outcome-empty">No summary yet</div>}
       {entry.intent && (
         <div className="entry-row-intent">
           <span className="entry-row-intent-label">Intent</span>

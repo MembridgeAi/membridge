@@ -3,7 +3,31 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
-import { InsightsPage } from './InsightsPage'
+import { InsightsPage, buildCsv } from './InsightsPage'
+
+// Fix 14b: a CSV cell starting with =, +, - or @ executes as a formula when
+// the export is opened in Excel/Sheets -- and person names, project names
+// and problem headlines are all attacker-influenceable text. Those cells get
+// a leading apostrophe (the standard spreadsheet neutralizer); purely
+// numeric cells stay untouched.
+describe('buildCsv formula-injection escaping', () => {
+  it('prefix-escapes text cells starting with =, +, - or @, leaving numbers alone', async () => {
+    const base = await new FakeDataClient().getInsights(30)
+    const csv = buildCsv({
+      ...base,
+      perPerson: [{ id: 'u1', name: '+Marco', sessions: 214, shared: 205 }],
+      topProjects: [{ name: '-proj', sessions: 184, people: 3 }],
+      problems: [{ id: 'p1', severity: 'broken', headline: '=HYPERLINK("http://evil")', scale: '@import', action: null }],
+    })
+    expect(csv).toContain(`'+Marco`)
+    expect(csv).toContain(`'-proj`)
+    expect(csv).toContain(`"'=HYPERLINK("`)
+    expect(csv).toContain(`'@import`)
+    // Numbers are not text and must not grow an apostrophe.
+    expect(csv).toContain('window_days,30')
+    expect(csv).toContain(`'+Marco,214,205`)
+  })
+})
 
 describe('InsightsPage', () => {
   it('renders exactly two skeleton lines', async () => {

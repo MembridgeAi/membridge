@@ -7,7 +7,7 @@ import { ProjectPage } from './ProjectPage'
 
 describe('ProjectPage', () => {
   it('states the consequence of revoking a member by name, honestly', async () => {
-    renderApp({}, <ProjectPage name="membridge" />)
+    renderApp({}, <ProjectPage slug="membridge" />)
     const note = await screen.findByText(/loses access to this project/)
     expect(note).toHaveTextContent('Sarah')
     // Three things must all survive here: (1) the backend revokes access
@@ -24,20 +24,33 @@ describe('ProjectPage', () => {
   })
 
   it('leads each stream entry with the outcome and shows the ask as intent', async () => {
-    renderApp({}, <ProjectPage name="membridge" />)
+    renderApp({}, <ProjectPage slug="membridge" />)
     expect(await screen.findByText(/Hook ownership now decided by durability/)).toBeInTheDocument()
     expect(screen.getByText(/make the summary hook fire on session boundaries/)).toBeInTheDocument()
   })
 
   it('toggling a member calls setProjectAccess with that member', async () => {
-    renderApp({}, <ProjectPage name="membridge" />)
+    renderApp({}, <ProjectPage slug="membridge" />)
     const toggle = await screen.findByRole('switch', { name: /Sarah/ })
     await userEvent.click(toggle)
     expect(await screen.findByRole('switch', { name: /Sarah/ })).toBeChecked()
   })
 
+  // Fix 8: useSetProjectAccess rolls an optimistic toggle back on failure,
+  // but no consumer said WHY the toggle snapped back -- the failure needs a
+  // role="alert" line, same as setAccessDefault's below.
+  it('surfaces a failed access toggle instead of silently snapping back', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'setProjectAccess').mockRejectedValue(new Error('access write rejected'))
+    renderWith(client, <ProjectPage slug="membridge" />)
+    await userEvent.click(await screen.findByRole('switch', { name: /Sarah/ }))
+    const alert = await screen.findByText(/couldn't change access/i)
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert.textContent).toContain('access write rejected')
+  })
+
   it('hides the access panel from a member role', async () => {
-    renderApp({ role: 'member' }, <ProjectPage name="membridge" />)
+    renderApp({ role: 'member' }, <ProjectPage slug="membridge" />)
     await screen.findByText(/Hook ownership/)
     expect(screen.queryByText(/who sees this project/i)).toBeNull()
   })
@@ -45,7 +58,7 @@ describe('ProjectPage', () => {
   it('opens memory.md through a real DataClient call', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'openMemoryFile')
-    renderWith(client, <ProjectPage name="membridge" />)
+    renderWith(client, <ProjectPage slug="membridge" />)
     await userEvent.click(await screen.findByRole('button', { name: 'memory.md' }))
     expect(spy).toHaveBeenCalledWith('/Users/x/membridge')
   })
@@ -53,7 +66,7 @@ describe('ProjectPage', () => {
   it('toggles "new members join with access" through a real DataClient call', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'setProjectAccessDefault')
-    renderWith(client, <ProjectPage name="membridge" />)
+    renderWith(client, <ProjectPage slug="membridge" />)
     const toggle = await screen.findByRole('switch', { name: /new members join with access/i })
     expect(toggle).toHaveAttribute('aria-checked', 'true')
     await userEvent.click(toggle)
@@ -63,7 +76,7 @@ describe('ProjectPage', () => {
   it('surfaces a failed access-default write instead of looking like nothing happened', async () => {
     const client = new FakeDataClient()
     vi.spyOn(client, 'setProjectAccessDefault').mockRejectedValue(new Error('default write rejected'))
-    renderWith(client, <ProjectPage name="membridge" />)
+    renderWith(client, <ProjectPage slug="membridge" />)
     const toggle = await screen.findByRole('switch', { name: /new members join with access/i })
     await userEvent.click(toggle)
     expect(await screen.findByText(/default write rejected/i)).toBeInTheDocument()
@@ -72,7 +85,7 @@ describe('ProjectPage', () => {
   it('surfaces a failed memory.md open instead of looking like nothing happened', async () => {
     const client = new FakeDataClient()
     vi.spyOn(client, 'openMemoryFile').mockRejectedValue(new Error('open rejected'))
-    renderWith(client, <ProjectPage name="membridge" />)
+    renderWith(client, <ProjectPage slug="membridge" />)
     await userEvent.click(await screen.findByRole('button', { name: 'memory.md' }))
     expect(await screen.findByText(/open rejected/i)).toBeInTheDocument()
   })
@@ -86,7 +99,7 @@ describe('ProjectPage', () => {
       { id: 'c2', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:05:00Z', live: false, outcome: 'second checkpoint', intent: null, files: [], session: 's1' },
       { id: 'c1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z', live: false, outcome: 'first checkpoint', intent: null, files: [], session: 's1' },
     ])
-    renderWith(client, <ProjectPage name="membridge" />)
+    renderWith(client, <ProjectPage slug="membridge" />)
 
     expect(await screen.findByText('second checkpoint')).toBeInTheDocument()
     expect(screen.queryByText('first checkpoint')).toBeNull()

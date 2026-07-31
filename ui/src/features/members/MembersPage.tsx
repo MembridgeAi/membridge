@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
+import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
-  useCreateInviteLink, useInviteMember, useInvites, useMembers, useRemoveMember, useRevokeInvite,
+  useCreateInviteLink, useInvites, useMembers, useRemoveMember, useRevokeInvite,
   useSetMemberRole, useSettings, useStatus,
 } from '../../data/queries'
 import type { Member, Role } from '../../data/types'
@@ -74,7 +75,11 @@ function InvitesSection() {
  * owner/admin only — the audit trail. Matches team-v1b.html. "Resend" on an
  * invite is permanently omitted -- Task 17 confirmed no mail-delivery path
  * exists anywhere in this codebase or backend for team invites, so there is
- * nothing a "resend" could honestly do.
+ * nothing a "resend" could honestly do. "Invite by email" is gone for the
+ * same honesty reason (P0 Fix 2): no daemon endpoint accepts an email or
+ * role (POST /api/team/invite mints a generic link only), so that form
+ * could never do anything but reject; the invite-link/code path below is
+ * the one real invite mechanism.
  *
  * "Copy invite link" (Fix 1) mints a fresh onboarding-invite token
  * (`POST /api/team/invite`, DataClient.createInviteLink) and copies
@@ -110,12 +115,8 @@ export function MembersPage() {
   const setRole = useSetMemberRole()
   const setRoleFromSelect = useSetMemberRole()
   const removeMember = useRemoveMember()
-  const inviteMember = useInviteMember()
   const createInviteLink = useCreateInviteLink()
 
-  const [showInviteForm, setShowInviteForm] = useState(false)
-  const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteRole, setInviteRole] = useState<Role>('member')
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [pendingError, setPendingError] = useState<string | null>(null)
   const [inviteCopy, setInviteCopy] = useState<InviteCopyState>({ status: 'idle' })
@@ -135,7 +136,6 @@ export function MembersPage() {
   const viewerId = settingsQuery.data?.viewerId ?? null
 
   const ready = statusQuery.data !== undefined && settingsQuery.data !== undefined && membersQuery.data !== undefined
-  const hasError = statusQuery.isError || settingsQuery.isError || membersQuery.isError
   const members = sortMembers(membersQuery.data ?? [])
   const inviteCode = settingsQuery.data?.team?.inviteCode ?? null
   const webUrl = settingsQuery.data?.webUrl ?? null
@@ -219,29 +219,21 @@ export function MembersPage() {
     if (inviteCode) await copyInviteValue(inviteCode, 'code')
   }
 
-  async function handleInviteSubmit(e: FormEvent) {
-    e.preventDefault()
-    try {
-      await inviteMember.mutateAsync({ email: inviteEmail, role: inviteRole })
-      setInviteEmail('')
-      setInviteRole('member')
-      setShowInviteForm(false)
-    } catch {
-      // inviteMember.isError renders the message below; nothing else to do.
-    }
-  }
-
-  if (hasError) {
-    const message = errorMessage(statusQuery.error ?? settingsQuery.error ?? membersQuery.error)
+  // Full error page only for a first-load failure (no data at all); a failed
+  // refetch with cached data degrades to the inline banner below instead of
+  // blanking a populated member list every time the daemon hiccups mid-poll.
+  const daemonError = daemonErrorOf([statusQuery, settingsQuery, membersQuery])
+  if (daemonError?.blocking) {
     return (
       <div className="members-page">
-        <p className="members-error" role="alert">Couldn't reach the daemon. {message}</p>
+        <p className="members-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
       </div>
     )
   }
 
   return (
     <div className="members-page">
+      {daemonError && <DaemonErrorBanner className="members-error" error={daemonError.error} />}
       <div className="members-header">
         <h1 className="members-title">Members</h1>
         <span className="mono members-count">{members.length} active</span>
@@ -273,44 +265,9 @@ export function MembersPage() {
                 )}
               </span>
             )}
-            <button type="button" className="members-btn members-btn-primary" onClick={() => setShowInviteForm(v => !v)}>
-              Invite by email
-            </button>
           </div>
         )}
       </div>
-
-      {canManage && showInviteForm && (
-        <form className="invite-form" onSubmit={handleInviteSubmit}>
-          <input
-            type="email"
-            required
-            className="invite-form-email"
-            placeholder="teammate@company.com"
-            aria-label="Invite email"
-            value={inviteEmail}
-            onChange={e => setInviteEmail(e.target.value)}
-          />
-          <select
-            className="invite-form-role"
-            aria-label="Invite role"
-            value={inviteRole}
-            onChange={e => setInviteRole(e.target.value as Role)}
-          >
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-          </select>
-          <button type="submit" className="members-btn members-btn-primary" disabled={inviteMember.isPending}>
-            Send invite
-          </button>
-          <button type="button" className="members-btn" onClick={() => setShowInviteForm(false)}>
-            Cancel
-          </button>
-          {inviteMember.isError && (
-            <p className="invite-error" role="alert">{errorMessage(inviteMember.error)}</p>
-          )}
-        </form>
-      )}
 
       <div className="members-cols">
         <div className="members-list">

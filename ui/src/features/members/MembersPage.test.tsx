@@ -89,14 +89,26 @@ describe('MembersPage', () => {
     expect(within(andrewRow).getByRole('button', { name: /more actions for andrew/i })).toBeInTheDocument()
   })
 
-  it('lets an owner or admin send an invite by email through a real DataClient call', async () => {
-    const client = new FakeDataClient()
-    const spy = vi.spyOn(client, 'inviteMember')
-    renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /^invite by email$/i }))
-    await userEvent.type(screen.getByLabelText(/invite email/i), 'newperson@acme.dev')
-    await userEvent.click(screen.getByRole('button', { name: /send invite/i }))
-    expect(spy).toHaveBeenCalledWith('newperson@acme.dev', 'member')
+  // P0 Fix 2: invite-by-email could never succeed -- no daemon endpoint
+  // accepts an email or role (POST /api/team/invite mints a generic link
+  // only), so the form always ended in a developer-facing rejection message.
+  // The form is gone; the invite-link/code path is the one real invite path.
+  it('offers no email invite form -- only the real invite-link/code path', async () => {
+    renderApp({}, <MembersPage />)
+    await screen.findByTestId('member-row-andrew')
+    expect(screen.queryByRole('button', { name: /invite by email/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /send invite/i })).toBeNull()
+    expect(screen.queryByLabelText(/invite email/i)).toBeNull()
+    // The real path stays.
+    expect(screen.getByRole('button', { name: /^copy invite link$/i })).toBeInTheDocument()
+  })
+
+  // Fix 6: the audit query is ?limit=30 EVENTS -- "last 30 days" claimed a
+  // time window nothing actually queries.
+  it('labels the audit list by event count, not a time window it never queries', async () => {
+    renderApp({}, <MembersPage />)
+    expect(await screen.findByText('Audit · last 30 events')).toBeInTheDocument()
+    expect(screen.queryByText(/last 30 days/i)).toBeNull()
   })
 
   it('revokes a pending invite via a real DataClient call', async () => {

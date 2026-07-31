@@ -39,7 +39,7 @@ export function EditListDialog({ titleId, title, hint, settingKey, initial, onCl
   }
 
   return (
-    <FormDialog titleId={titleId} title={title} wide>
+    <FormDialog titleId={titleId} title={title} wide onClose={onClose}>
       <label className="dialog-field">
         {hint}
         <textarea

@@ -75,6 +75,31 @@ describe('ProjectsPage', () => {
     await waitFor(() => expect(cell.checked).toBe(true)) // rollback once the write rejects
   })
 
+  // Fix 8: the rollback above needs a visible reason -- a role="alert" line,
+  // mirroring how ProjectPage surfaces setAccessDefault failures.
+  it('surfaces a failed access toggle instead of silently snapping back', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'setProjectAccess').mockRejectedValue(new Error('access write rejected'))
+    renderWith(client, <ProjectsPage />)
+    const row = await screen.findByTestId('project-row-membridge')
+    await userEvent.click(within(row).getByRole('checkbox', { name: /Sarah/ }))
+    const alert = await screen.findByText(/couldn't change access/i)
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert.textContent).toContain('access write rejected')
+  })
+
+  // Fix 9: a failed row sync must not look like nothing happened.
+  it('surfaces a failed project sync instead of looking like nothing happened', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'syncProject').mockRejectedValue(new Error('sync exploded'))
+    renderWith(client, <ProjectsPage />)
+    const row = await screen.findByTestId('project-row-sublease') // the behind fixture row
+    await userEvent.click(within(row).getByRole('button', { name: 'Sync now' }))
+    const alert = await screen.findByText(/couldn't sync/i)
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert.textContent).toContain('sync exploded')
+  })
+
   // The self-revoke guard used to compare a member's id against a hardcoded
   // two-letter placeholder -- a value the real daemon never sends (a real
   // user id looks like 'usr_9f2a'), so the guard silently never activated in

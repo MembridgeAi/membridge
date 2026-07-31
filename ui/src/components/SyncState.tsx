@@ -19,20 +19,28 @@ const shortStamp = (iso: string | null, now: Date = new Date()) => {
   if (!iso) return 'never'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return 'never'
+  // hourCycle:'h23', not hour12:false (Fix 13): the current spec maps
+  // hour12:false to h23 for en-US, but older engines (pre-2021 V8, old
+  // WebViews the daemon-served page can land in) mapped it to h24 and
+  // rendered the midnight half-hour as "24:30". h23 says 00-23 explicitly,
+  // so the rendering never depends on which mapping the engine shipped.
   return isSameLocalDay(d, now)
-    ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+    ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-export function SyncStateView({ state, onSync }: { state: SyncState; onSync?: () => void }) {
+// `syncPending` (Fix 9): while the caller's sync mutation is in flight the
+// button disables and reads "Syncing…" -- otherwise a click looked like it
+// did nothing (and invited a second, redundant sync).
+export function SyncStateView({ state, onSync, syncPending }: { state: SyncState; onSync?: () => void; syncPending?: boolean }) {
   if (state.state === 'up-to-date') return <StateChip tone="ok" glyph="✓">up to date</StateChip>
   if (state.state === 'paused') return <StateChip tone="muted" glyph="">paused</StateChip>
   return (
     <>
       <StateChip tone="warn" glyph="⚠">behind · {shortStamp(state.lastSyncedAt)}</StateChip>
       {onSync && (
-        <button type="button" className="btn-warn" onClick={onSync}>
-          Sync now
+        <button type="button" className="btn-warn" onClick={onSync} disabled={syncPending}>
+          {syncPending ? 'Syncing…' : 'Sync now'}
         </button>
       )}
     </>

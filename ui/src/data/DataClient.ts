@@ -46,8 +46,11 @@ export interface DataClient {
   getAccessMatrix(): Promise<AccessMatrix>
 
   getMembers(): Promise<Member[]>
+  // No daemon endpoint can LIST pending invites yet -- LocalDaemonClient
+  // resolves []. (An email-invite method was removed outright: POST
+  // /api/team/invite mints a generic link and accepts no email or role, so
+  // "invite this email as this role" is structurally impossible today.)
   getInvites(): Promise<Invite[]>
-  inviteMember(email: string, role: Role): Promise<void>
   // Mints a fresh onboarding-invite token for `teamId` (POST /api/team/invite)
   // -- a DIFFERENT mechanism from the standing, never-rotated `team.inviteCode`
   // (Settings.team): each call produces a new one-time token that the hosted

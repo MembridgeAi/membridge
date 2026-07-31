@@ -39,10 +39,17 @@ export function ContextFilesDialog({ contextFiles, onClose }: ContextFilesDialog
   const pickPaths = usePickPaths()
   const { capabilities } = useDataClient()
 
+  // try/catch (Fix 15): the Electron IPC call behind pickPaths CAN reject,
+  // and an uncaught rejection here made the Browse click silently do
+  // nothing. pickPaths.isError renders the inline message below.
   async function handleBrowse() {
-    const picked = await pickPaths.mutateAsync({ kind: 'file', multiple: true })
-    if (picked.length === 0) return // cancelled -- leave the list exactly as typed
-    setTargetsText(prev => mergeLines(prev, picked))
+    try {
+      const picked = await pickPaths.mutateAsync({ kind: 'file', multiple: true })
+      if (picked.length === 0) return // cancelled -- leave the list exactly as typed
+      setTargetsText(prev => mergeLines(prev, picked))
+    } catch {
+      // pickPaths.isError renders the message below; nothing else to do.
+    }
   }
 
   async function handleSave() {
@@ -56,7 +63,7 @@ export function ContextFilesDialog({ contextFiles, onClose }: ContextFilesDialog
   }
 
   return (
-    <FormDialog titleId="context-files-title" title="Choose context files" wide>
+    <FormDialog titleId="context-files-title" title="Choose context files" wide onClose={onClose}>
       <label className="dialog-field">
         Always written
         <div className="dialog-field-hint">
@@ -73,6 +80,9 @@ export function ContextFilesDialog({ contextFiles, onClose }: ContextFilesDialog
           <button type="button" className="dialog-btn" onClick={handleBrowse} disabled={pickPaths.isPending}>
             Browse files…
           </button>
+        )}
+        {pickPaths.isError && (
+          <p className="dialog-error" role="alert">Couldn't open the file picker. {errorMessage(pickPaths.error)}</p>
         )}
       </label>
       <div className="dialog-field">

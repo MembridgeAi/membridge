@@ -9,6 +9,7 @@ import {
   useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useStatus, useSyncProject,
 } from '../../data/queries'
 import type { StreamEntry as StreamEntryData } from '../../data/types'
+import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { EntryRow } from '../../components/EntryRow'
 import { SyncStateView } from '../../components/SyncState'
 import { AccessPanel, type AccessRow } from './AccessPanel'
@@ -49,20 +50,41 @@ function groupByDay(entries: StreamEntryData[]): DayGroup[] {
 }
 
 interface ProjectPageProps {
-  name: string
+  /** The :slug route param -- an encodeURIComponent'd project PATH from any
+   *  link this app builds today, or a bare project name from an old
+   *  name-based deep link (still resolved via the name-match fallback). */
+  slug: string
+}
+
+// wouter's location handling runs decodeURI (which leaves reserved
+// characters like %2F encoded) before matching, so the param needs a full
+// decodeURIComponent here. An old hand-typed link can carry a raw '%' that
+// makes decoding throw -- fall back to the literal segment rather than
+// crashing the page.
+function decodeSlug(slug: string): string {
+  try {
+    return decodeURIComponent(slug)
+  } catch {
+    return slug
+  }
 }
 
 /** The project page: a merged team stream (left) and three ruled panels
  *  (right) — who sees this project, memory status, and sync. Matches
  *  project-v4.html. */
-export function ProjectPage({ name }: ProjectPageProps) {
+export function ProjectPage({ slug }: ProjectPageProps) {
   const client = useDataClient()
   const projectsQuery = useProjects()
   const statusQuery = useStatus()
   const settingsQuery = useSettings()
   const membersQuery = useMembers()
 
-  const project = projectsQuery.data?.find(p => p.name === name) ?? null
+  // Look up by PATH (the unique key -- two projects can share a basename);
+  // fall back to a name match so old name-based deep links keep resolving.
+  const decoded = decodeSlug(slug)
+  const project = projectsQuery.data?.find(p => p.path === decoded)
+    ?? projectsQuery.data?.find(p => p.name === decoded)
+    ?? null
   const streamQuery = useProjectStream(project?.path ?? null)
 
   const solo = statusQuery.data?.solo ?? true
@@ -126,12 +148,14 @@ export function ProjectPage({ name }: ProjectPageProps) {
     if (project) syncProject.mutate(project.path)
   }
 
-  const hasError = projectsQuery.isError || statusQuery.isError || settingsQuery.isError || streamQuery.isError
-  if (hasError) {
-    const message = errorMessage(projectsQuery.error ?? statusQuery.error ?? settingsQuery.error ?? streamQuery.error)
+  // Full error page only for a first-load failure (no data at all); a failed
+  // refetch with cached data degrades to the inline banner below instead of
+  // blanking a populated stream every time the daemon hiccups mid-poll.
+  const daemonError = daemonErrorOf([projectsQuery, statusQuery, settingsQuery, streamQuery])
+  if (daemonError?.blocking) {
     return (
       <div className="project-page">
-        <p className="project-error" role="alert">Couldn't reach the daemon. {message}</p>
+        <p className="project-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -141,7 +165,7 @@ export function ProjectPage({ name }: ProjectPageProps) {
     return (
       <div className="project-page">
         <Link href={ROUTES.projects} className="project-back">← Back to projects</Link>
-        <p className="project-error">Project "{name}" not found.</p>
+        <p className="project-error">Project "{decoded}" not found.</p>
       </div>
     )
   }
@@ -150,6 +174,7 @@ export function ProjectPage({ name }: ProjectPageProps) {
 
   return (
     <div className="project-page">
+      {daemonError && <DaemonErrorBanner className="project-error" error={daemonError.error} />}
       <div className="project-header">
         <Link href={ROUTES.projects} className="project-back" aria-label="Back to projects">←</Link>
         <h1 className="mono project-title">{project.name}</h1>
@@ -189,6 +214,12 @@ export function ProjectPage({ name }: ProjectPageProps) {
               onToggle={(memberId, canSee) => setAccess.mutate({ projectPath: project.path, memberId, canSee })}
               onToggleDefault={next => setAccessDefault.mutate({ projectPath: project.path, defaultAccess: next })}
             />
+          )}
+          {/* Fix 8: useSetProjectAccess rolls its optimistic toggle back on
+              failure -- without this line the toggle just snapped back with
+              no explanation. Mirrors setAccessDefault's message below. */}
+          {setAccess.isError && (
+            <p className="project-error" role="alert">Couldn't change access. {errorMessage(setAccess.error)}</p>
           )}
           {setAccessDefault.isError && (
             <p className="project-error" role="alert">Couldn't save the default. {errorMessage(setAccessDefault.error)}</p>

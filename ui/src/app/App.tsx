@@ -62,7 +62,7 @@ export function App() {
             <Route path={ROUTES.feed}><FeedPage /></Route>
             <Route path={ROUTES.projects}><ProjectsPage /></Route>
             <Route path={ROUTES.project}>
-              {(params) => <ProjectPage name={params.name} />}
+              {(params) => <ProjectPage slug={params.slug} />}
             </Route>
             <Route path={ROUTES.members}><MembersPage /></Route>
             <Route path={ROUTES.insights}><InsightsPage /></Route>

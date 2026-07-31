@@ -349,6 +349,11 @@
   font-size: var(--fs-md);
   line-height: var(--lh-snug);
 }
+/* The "No summary yet" placeholder for an undistilled session -- muted like
+   the intent line, so it never reads as captured content. */
+.entry-row-outcome-empty {
+  color: var(--text3);
+}
 .entry-row-intent {
   grid-column: 2;
   margin-top: 3px;

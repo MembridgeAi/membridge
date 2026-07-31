@@ -214,29 +214,33 @@ export class LocalDaemonClient implements DataClient {
   // id>` and run in parallel, so the rows this reads for any one member can
   // never contain another member's entries -- a noisy teammate's volume
   // structurally cannot crowd out a quiet one anymore.
+  //
+  // allSettled, not all: with one request per member, a single failed
+  // request used to reject the WHOLE call and blank the Members page. A
+  // per-member failure now degrades that one member to zero-activity
+  // ({projectCount: 0, lastSharedAt: null} -- indistinguishable from "has
+  // shared nothing", which is the honest floor) and every other row keeps
+  // its real numbers.
   async getMembers(): Promise<Member[]> {
     const team = await this.firstTeam()
     if (!team) return []
     const membersRes = await get<{ members: RawMemberRow[] }>(`/api/team/members?teamId=${encodeURIComponent(team.team_id)}`)
-    const activity = await Promise.all(membersRes.members.map(m =>
+    const settled = await Promise.allSettled(membersRes.members.map(m =>
       get<{ entries: RawTeamFeedEntry[] }>(
         `/api/team/feed?teamId=${encodeURIComponent(team.team_id)}&author=${encodeURIComponent(m.user_id)}&limit=${TEAM_FEED_LIMIT}`,
       ).then(res => memberActivity(res.entries))))
+    const activity = settled.map(r => r.status === 'fulfilled' ? r.value : { projectCount: 0, lastSharedAt: null })
     return membersRes.members.map((m, i) => mapMember(m, activity[i]))
   }
 
   // The daemon can only mint a generic, role-less invite LINK (POST
   // /api/team/invite) and cannot list the ones already issued -- there is no
-  // endpoint backing "invite this email as this role" or "show pending
-  // invites" today.
+  // endpoint backing "show pending invites" today. Resolving [] (rather than
+  // rejecting with developer text the user then saw, retried 3x per Members
+  // mount) is the honest degraded answer until a listing endpoint lands:
+  // "no pending invites known", which for this daemon is always true.
   getInvites(): Promise<Invite[]> {
-    return Promise.reject(new Error(
-      'getInvites has no daemon endpoint yet -- the daemon can create invite links but cannot list pending ones.'));
-  }
-
-  inviteMember(_email: string, _role: Role): Promise<void> {
-    return Promise.reject(new Error(
-      'inviteMember has no daemon endpoint yet -- POST /api/team/invite creates a generic link and accepts no email or role.'));
+    return Promise.resolve([])
   }
 
   // POST /api/team/invite (lib/teamsync.js createInvite) also returns
