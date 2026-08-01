@@ -175,6 +175,19 @@ function check(name, fn) {
 }
 const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
+// Every SOURCE-SHAPE check (assertions about the bytes of a file committed to
+// this repo) must read through readSource, never through read. actions/checkout
+// on the Windows runner honours core.autocrlf=true and no .gitattributes pins
+// eol, so on Windows every committed file materialises with \r\n. That silently
+// changes what source-shape regexes mean: `.` and `[^\n]` both match \r, an
+// un-multiline `$` matches only true end-of-string, and a shell line-continuation
+// is `\ \r \n` so a /\\\n/ fold matches nothing at all and is a no-op. Each of
+// those makes an assertion pass or fail for a reason that has nothing to do with
+// the code under test. Normalising once, here, means a new assertion added to any
+// of those blocks cannot reintroduce the bug -- and it is deliberately a SEPARATE
+// helper from read(), because the digest CRLF tests assert that \r is PRESERVED
+// and would go vacuous if read() itself normalised.
+const readSource = f => fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
 const count = (hay, needle) => hay.split(needle).length - 1;
 
 // "Not running as root" for the chmod-denial tests below. process.getuid does
@@ -685,7 +698,7 @@ async function main() {
     assert.ok(!out.includes('__MEMBRIDGE_'), 'placeholders left unstamped');
   });
   check('install.sh template carries the safety-critical steps', () => {
-    const tmpl = read(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
+    const tmpl = readSource(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
     assert.ok(tmpl.includes('com.apple.quarantine'), 'quarantine strip missing');
     assert.ok(tmpl.includes('ELECTRON_RUN_AS_NODE=1'), 'CLI wrapper runtime missing');
     assert.ok(tmpl.includes('shasum -a 256'), 'sha256 verification missing');
@@ -10710,7 +10723,7 @@ async function main() {
   // could claim it and have it installed globally by every user who updates.
   // The printed command was already correct, which is what hid the bug.
   check('security(F2): update installs the scoped package name, never the squattable bare one', () => {
-    const src = read(path.join(__dirname, '..', 'bin', 'membridge.js'));
+    const src = readSource(path.join(__dirname, '..', 'bin', 'membridge.js'));
     const pkgName = require('../package.json').name;
     assert.ok(/^@[^/]+\//.test(pkgName), `guard: the published package must be scoped, got ${pkgName}`);
     const spawn = src.match(/spawnSync\(\s*'npm',\s*\[([^\]]*)\]/);
@@ -13323,7 +13336,7 @@ async function main() {
     assert.ok(!('askFull' in short), 'an unclipped ask needs no askFull twin');
   });
   check('teamsync source never touches askFull — the unclipped ask stays on this machine', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'teamsync.js'), 'utf8');
+    const src = readSource(path.join(__dirname, '..', 'lib', 'teamsync.js'));
     assert.ok(!/askFull/.test(src), 'teamsync must not push, pull, or reshare askFull');
   });
   // Task 9 perf fix: deriveChanges (which spawns git subprocesses) must only
@@ -13615,7 +13628,7 @@ async function main() {
       assert.ok(!JSON.stringify(recent2).includes('_highlights'), '_highlights leaked');
     });
     check('mcp: buildEntries on the MCP path defers git-change derivation', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      const src = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
       assert.ok(src.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
       assert.ok(src.includes('deriveEntryChanges'), 'no derive-for-survivors pass');
     });
@@ -14645,7 +14658,7 @@ async function main() {
 
   {
     check('mcp: every tool handler records usage through the tally', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      const src = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
       assert.ok(src.includes("require('./mcp-usage')"), 'mcp-usage not wired');
       assert.ok((src.match(/recordToolUse\(/g) || []).length >= 1, 'no recordToolUse call');
     });
@@ -17918,7 +17931,7 @@ async function main() {
     });
 
     check('counters: worker allowlist mirrors the client (drift check)', () => {
-      const worker = fs.readFileSync(path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js'), 'utf8');
+      const worker = readSource(path.join(__dirname, '..', 'cloudflare', 'counters-worker', 'src', 'index.js'));
       assert.ok(worker.includes("'mcp_tool_used'"), 'worker COUNTER_NAMES missing mcp_tool_used');
       for (const t of counters.MCP_TOOLS) {
         assert.ok(worker.includes(`'${t}'`), `worker DIM_VALUES missing tool ${t}`);
@@ -18982,7 +18995,7 @@ const repoRoot = require('../lib/repo-root');
     });
 
     check('mcp-deps: lib/mcp.js no longer calls them opt-in', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp.js'), 'utf8');
+      const src = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
       assert.ok(!/opt-in/i.test(src), 'the opt-in message is now false and must be gone');
     });
   }
@@ -20336,13 +20349,14 @@ const repoRoot = require('../lib/repo-root');
       // earlier version keyed on quotes alone and sailed straight past
       // `const LEGACY = { codex: 'toml' }` -- an unquoted object key is
       // exactly the shape this drift takes.
-      // \r is stripped FIRST: the Windows runner checks out with
-      // core.autocrlf=true (no .gitattributes pins eol), so every line ends
-      // \r\n there -- and `.` never matches \r while the un-multiline `$`
+      // readSource (not read) strips \r first: the Windows runner checks out
+      // with core.autocrlf=true (no .gitattributes pins eol), so every line
+      // ends \r\n there -- and `.` never matches \r while the un-multiline `$`
       // matches only true end-of-string, so the per-line `//.*$` strip
-      // silently removed NOTHING and a commented 'codex' read as code.
-      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp-register.js'), 'utf8')
-        .replace(/\r/g, '')
+      // silently removed NOTHING and a commented 'codex' read as code. This
+      // check found that class of bug first; the helper now covers every
+      // source-shape read so the next one cannot repeat it.
+      const src = readSource(path.join(__dirname, '..', 'lib', 'mcp-register.js'))
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .split('\n')
         .map(l => l.replace(/(^|[^:])\/\/.*$/, '$1'))
@@ -21462,7 +21476,7 @@ const repoRoot = require('../lib/repo-root');
       // was retired with lib/dashboard/) is a spec §9 violation, so the check
       // is on the source, not on a value.
       const srcs = [
-        fs.readFileSync(path.join(__dirname, '..', 'lib', 'server.js'), 'utf8'),
+        readSource(path.join(__dirname, '..', 'lib', 'server.js')),
       ];
       for (const src of srcs) {
         for (const raw of src.split('\n')) {
@@ -21771,7 +21785,7 @@ const repoRoot = require('../lib/repo-root');
       // `curl ... | sh` means stdin IS the rest of this script; a child that
       // reads stdin swallows the remaining install steps.
       for (const f of ['install.sh.tmpl', 'install.sh']) {
-        const sh = read(path.join(__dirname, '..', 'scripts', 'install', f));
+        const sh = readSource(path.join(__dirname, '..', 'scripts', 'install', f));
         assert.ok(/mcp register/.test(sh), `${f} must register the MCP server at install time`);
         assert.ok(/mcp register\s*<\/dev\/null/.test(sh), `${f} must not let the child read the piped script`);
         assert.ok(/mcp register[^\n]*\|\|/.test(sh), `${f} must warn, never abort, when registration fails`);
@@ -22199,8 +22213,8 @@ const repoRoot = require('../lib/repo-root');
     // that owns the assists surface is checked on the source, not on a value.
     check('assists: no net-savings expression references the injection COUNT figure (spec §9)', () => {
       const srcs = [
-        fs.readFileSync(path.join(__dirname, '..', 'lib', 'server.js'), 'utf8'),
-        fs.readFileSync(path.join(__dirname, '..', 'lib', 'api-insights.js'), 'utf8'),
+        readSource(path.join(__dirname, '..', 'lib', 'server.js')),
+        readSource(path.join(__dirname, '..', 'lib', 'api-insights.js')),
       ];
       for (const src of srcs) {
         for (const raw of src.split('\n')) {
@@ -23241,12 +23255,12 @@ const repoRoot = require('../lib/repo-root');
       // Source-shape check with teeth: the app has its OWN sync loop, and the
       // first version of this feature lived only in bin/ glue — app users
       // never got an index while everything was green. Pin the call site.
-      const appSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'main.js'), 'utf8');
+      const appSrc = readSource(path.join(__dirname, '..', 'app', 'main.js'));
       const i = appSrc.indexOf('async function runSync');
       assert.ok(i !== -1, 'app/main.js runSync not found');
       const body = appSrc.slice(i, appSrc.indexOf('\nfunction tick', i));
       assert.ok(/afterTeamPull\s*\(/.test(body), "the tray app's runSync no longer calls afterTeamPull");
-      const binSrc = fs.readFileSync(path.join(__dirname, '..', 'bin', 'membridge.js'), 'utf8');
+      const binSrc = readSource(path.join(__dirname, '..', 'bin', 'membridge.js'));
       assert.ok(/afterTeamPull\s*\(/.test(binSrc), 'the CLI loop no longer calls afterTeamPull');
     });
 
@@ -23263,8 +23277,8 @@ const repoRoot = require('../lib/repo-root');
   // fix depends on. Every assertion here was proven non-vacuous by mutating
   // the source (reverting the fix) and watching the check fail.
   {
-    const appSrc = read(path.join(__dirname, '..', 'app', 'main.js'));
-    const tmpl = read(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
+    const appSrc = readSource(path.join(__dirname, '..', 'app', 'main.js'));
+    const tmpl = readSource(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
 
     check('app update flow: /bin/sh spawn is darwin-gated and has an async error fallback', () => {
       // On win32 there is no /bin/sh, and spawn's missing-executable failure
@@ -23399,14 +23413,46 @@ const repoRoot = require('../lib/repo-root');
       assert.ok(/--set-login=on[^\n]*\|\|/.test(joined),
         'the --set-login call must be guarded so it can never fail the install');
     });
+
+    check('source-shape reads are line-ending agnostic: the installer checks hold on a CRLF checkout', () => {
+      // Regression guard for the Windows-only CI failure of 2026-08-01. The
+      // Windows runner checks out with core.autocrlf=true and nothing pins eol,
+      // so install.sh.tmpl arrives with \r\n. The `\\\n` fold above then matched
+      // NOTHING (a continuation is `\ \r \n` on Windows), so no line was folded
+      // -- and the </dev/null assertion still passed, because </dev/null shares a
+      // physical line with --set-login=on, while the `||` assertion failed,
+      // because the guard lives on the NEXT line and only the fold ever brought
+      // it into reach. Exactly one check failed, which read as a product bug and
+      // was not. This drives the SAME assertions over a deliberately CRLF copy,
+      // so any future assertion added above that is quietly eol-sensitive is
+      // caught here on macOS instead of on the Windows runner.
+      const real = path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl');
+      const crlfCopy = path.join(ROOT, 'install.sh.tmpl.crlf');
+      fs.writeFileSync(crlfCopy, fs.readFileSync(real, 'utf8').replace(/\r?\n/g, '\r\n'));
+      assert.ok(fs.readFileSync(crlfCopy, 'utf8').includes('\r\n'),
+        'guard: the CRLF fixture must actually be CRLF');
+      // read() leaves the \r in place and every assertion below breaks; going
+      // through readSource is the whole fix, so the guard must exercise it.
+      assert.ok(read(crlfCopy).includes('\r'), 'guard: plain read() must still see the \\r');
+
+      const norm = readSource(crlfCopy);
+      assert.strictEqual(norm, readSource(real),
+        'readSource on a CRLF checkout must reproduce the LF bytes exactly');
+      const joinedCrlf = norm.replace(/\\\n\s*/g, ' ');
+      assert.ok(joinedCrlf !== norm, 'the line-continuation fold must actually fold something');
+      assert.ok(/--set-login=on[^\n]*<\/dev\/null/.test(joinedCrlf),
+        'the </dev/null assertion must hold on a CRLF checkout');
+      assert.ok(/--set-login=on[^\n]*\|\|/.test(joinedCrlf),
+        'the || guard assertion must hold on a CRLF checkout (this is the one that broke Windows CI)');
+    });
   }
 
   // --- packaging pipeline + shell P2 regressions (2026-07-31) ---
   // Same source-shape style as the block above; each assertion proven
   // non-vacuous by reverting the fix and watching the check fail.
   {
-    const appSrc = read(path.join(__dirname, '..', 'app', 'main.js'));
-    const prepSrc = read(path.join(__dirname, '..', 'scripts', 'prepare-app.js'));
+    const appSrc = readSource(path.join(__dirname, '..', 'app', 'main.js'));
+    const prepSrc = readSource(path.join(__dirname, '..', 'scripts', 'prepare-app.js'));
     const rootPkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
     const appPkg = JSON.parse(read(path.join(__dirname, '..', 'app', 'package.json')));
 
