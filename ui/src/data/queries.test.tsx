@@ -8,9 +8,9 @@ import { render, cleanup } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from './DataClientProvider'
 import { FakeDataClient } from './FakeDataClient'
-import { useRemoveMember, useSetMemberRole } from './queries'
+import { useArchiveProject, useRemoveMember, useSetMemberRole, useUnarchiveProject } from './queries'
 
-function mountHook<T>(useHook: () => T): { qc: QueryClient; hook: () => T } {
+function mountHook<T>(useHook: () => T, client: FakeDataClient = new FakeDataClient()): { qc: QueryClient; hook: () => T } {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   let current: T | undefined
   function Probe() {
@@ -19,7 +19,7 @@ function mountHook<T>(useHook: () => T): { qc: QueryClient; hook: () => T } {
   }
   render(
     <QueryClientProvider client={qc}>
-      <DataClientProvider client={new FakeDataClient()}>
+      <DataClientProvider client={client}>
         <Probe />
       </DataClientProvider>
     </QueryClientProvider>,
@@ -46,5 +46,30 @@ describe('member mutations invalidate every member-listing surface (Fix 10)', ()
     expect(spy).toHaveBeenCalledWith({ queryKey: ['members'] })
     expect(spy).toHaveBeenCalledWith({ queryKey: ['accessMatrix'] })
     expect(spy).toHaveBeenCalledWith({ queryKey: ['projectAccess'] })
+  })
+})
+
+// Task 3 (projects tab scale and archive): archiving changes what the
+// projects list shows, so both mutations must reach the client method and
+// refresh the ['projects'] query.
+describe('archive mutations', () => {
+  it('useArchiveProject calls the client with the path and invalidates projects', async () => {
+    const client = new FakeDataClient()
+    const clientSpy = vi.spyOn(client, 'archiveProject')
+    const { qc, hook } = mountHook(() => useArchiveProject(), client)
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync('/Users/x/sublease')
+    expect(clientSpy).toHaveBeenCalledWith('/Users/x/sublease')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['projects'] })
+  })
+
+  it('useUnarchiveProject calls the client with the path and invalidates projects', async () => {
+    const client = new FakeDataClient()
+    const clientSpy = vi.spyOn(client, 'unarchiveProject')
+    const { qc, hook } = mountHook(() => useUnarchiveProject(), client)
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync('/Users/x/sublease')
+    expect(clientSpy).toHaveBeenCalledWith('/Users/x/sublease')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['projects'] })
   })
 })

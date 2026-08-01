@@ -42,6 +42,13 @@ export interface DataClient {
   syncProject(projectPath: string): Promise<void>
   syncAll(): Promise<void>
   setProjectPaused(projectPath: string, paused: boolean): Promise<void>
+  // Archive a project out of the Projects list without destroying anything
+  // (POST /api/projects/archive): the daemon pauses it and strips its context
+  // block, keeping .membridge/, memory and state intact. Local-only, needs no
+  // role. Unarchive is total (POST /api/projects/unarchive): both config
+  // entries drop and the next sync re-adds the block.
+  archiveProject(projectPath: string): Promise<void>
+  unarchiveProject(projectPath: string): Promise<void>
   copyForAI(projectPath: string): Promise<string>
 
   getProjectAccess(projectPath: string): Promise<{ members: { memberId: string; canSee: boolean }[]; defaultAccess: boolean }>

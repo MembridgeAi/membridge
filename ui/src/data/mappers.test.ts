@@ -344,6 +344,14 @@ describe('mapProjectRow', () => {
     const p = mapProjectRow(row, [local, team, other])
     expect(p.memberIds.sort()).toEqual(['me', 'sarah'])
   })
+  it('carries the daemon archived and missing flags, defaulting absence to false', () => {
+    const p = mapProjectRow({ ...row, archived: true, missing: true }, [])
+    expect(p.archived).toBe(true)
+    expect(p.missing).toBe(true)
+    const legacy = mapProjectRow(row, []) // an older daemon's row has neither flag
+    expect(legacy.archived).toBe(false)
+    expect(legacy.missing).toBe(false)
+  })
 })
 
 describe('memberActivity', () => {

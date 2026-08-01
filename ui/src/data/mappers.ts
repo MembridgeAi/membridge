@@ -14,6 +14,10 @@ export interface RawProjectRow {
   path: string
   name: string
   exists: boolean
+  // Optional on the wire: an older daemon's /api/projects predates the
+  // archive feature entirely -- absence normalizes to false in mapProjectRow.
+  archived?: boolean
+  missing?: boolean
   paused: boolean
   lastSync: string | null
   lastActivity: string | null
@@ -447,6 +451,8 @@ export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[], i
     path: row.path,
     name: row.name,
     exists: row.exists,
+    archived: row.archived ?? false,
+    missing: row.missing ?? false,
     paused: row.paused,
     lastSync: row.lastSync,
     lastActivity: row.lastActivity,

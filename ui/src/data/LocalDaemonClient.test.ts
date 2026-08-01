@@ -476,3 +476,35 @@ describe('LocalDaemonClient.getMembers() degrades a single failed member request
     expect(ben.lastSharedAt).toBeNull()
   })
 })
+
+// Task 3 (projects tab scale and archive): the archive mutations must hit the
+// Task-1 daemon endpoints with the project path in the body.
+describe('LocalDaemonClient archive endpoints', () => {
+  function stubPost(body: unknown) {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('archiveProject POSTs the path to /api/projects/archive', async () => {
+    const fetchMock = stubPost({ path: '/x', archived: true, paused: true })
+    await new LocalDaemonClient().archiveProject('/Users/x/membridge')
+    const call = fetchMock.mock.calls.find(([url]) => String(url) === '/api/projects/archive')
+    expect(call).toBeTruthy()
+    expect((call![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ path: '/Users/x/membridge' })
+  })
+
+  it('unarchiveProject POSTs the path to /api/projects/unarchive', async () => {
+    const fetchMock = stubPost({ path: '/x', archived: false })
+    await new LocalDaemonClient().unarchiveProject('/Users/x/membridge')
+    const call = fetchMock.mock.calls.find(([url]) => String(url) === '/api/projects/unarchive')
+    expect(call).toBeTruthy()
+    expect((call![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ path: '/Users/x/membridge' })
+  })
+})

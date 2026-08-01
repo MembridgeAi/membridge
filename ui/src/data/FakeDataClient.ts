@@ -41,6 +41,16 @@ export interface FakeOptions {
   // -- to exercise the UI's failure-surfacing path (a real per-hook failure,
   // not a request-level rejection, which failWith above already covers).
   hooksUpdateResult?: HookUpdateResult
+  // Scales the team fixture (members, access matrix, settings memberCount)
+  // to N members -- the constant-width Access cell must prove the table's
+  // column count is IDENTICAL at 3 and 30 members, and the popover's search
+  // appears only above 8. The shared project's roster stays a strict subset
+  // (6 of N) so the "+N chip and count label" case is real, not "whole team".
+  teamSize?: number
+  // Adds two archived rows to getProjects(): one whose folder exists and one
+  // whose folder is gone (missing) -- the Archived section's two render
+  // states. Opt-in so fixtures that predate archiving are untouched.
+  withArchived?: boolean
 }
 
 // The brief fields every StreamEntry now carries (session detail page, Task
@@ -161,20 +171,44 @@ export class FakeDataClient implements DataClient {
       auth: { paused: null, detail: null, since: null },
     })
   }
+  // The team roster, scaled by opts.teamSize (default: the 3 named members).
+  // Every surface that lists members (getMembers, getAccessMatrix, settings
+  // memberCount, the shared project's roster) reads THIS so a scaled fixture
+  // cannot drift into different answers per surface.
+  private teamMembers(): Member[] {
+    const base: Member[] = [
+      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
+      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false },
+      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
+    ]
+    const size = this.opts.teamSize ?? base.length
+    const out = base.slice(0, Math.min(size, base.length))
+    for (let i = base.length + 1; i <= size; i++) {
+      out.push({ id: `m${i}`, name: `Member ${i}`, email: `member${i}@acme.dev`, role: 'member', joinedAt: '2026-07-25T12:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false })
+    }
+    return out
+  }
+  // The shared project's roster: a strict subset (6 of N) once the team is
+  // bigger than 6, so the Access cell's "+N chip and count label" case is a
+  // real state rather than always collapsing to "whole team".
+  private sharedMemberIds(): string[] {
+    if (this.opts.solo) return [this.viewerId]
+    return this.teamMembers().slice(0, 6).map(m => m.id)
+  }
   getProjects() {
     if (this.opts.empty) return this.guard<Project[]>([])
-    return this.guard<Project[]>([
+    const projects: Project[] = [
       {
-        path: '/Users/x/membridge', name: 'membridge', exists: true, paused: false,
+        path: '/Users/x/membridge', name: 'membridge', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
-        shared: !this.opts.solo, memberIds: this.opts.solo ? [this.viewerId] : [this.viewerId, 'andrew', 'sarah'],
+        shared: !this.opts.solo, memberIds: this.sharedMemberIds(),
         sessionsThisWeek: 31, dailyCounts: [3, 5, 2, 6, 4, 5, 6], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
         sync: { state: 'up-to-date' },
       },
       {
-        path: '/Users/x/sublease', name: 'sublease', exists: true, paused: false,
+        path: '/Users/x/sublease', name: 'sublease', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
         shared: false, memberIds: [this.viewerId],
@@ -182,7 +216,30 @@ export class FakeDataClient implements DataClient {
         latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
         sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
       },
-    ])
+    ]
+    if (this.opts.withArchived) {
+      projects.push(
+        {
+          path: '/Users/x/old-prototype', name: 'old-prototype', exists: true, archived: true, missing: false, paused: true,
+          lastSync: '2026-06-30T10:00:00Z', lastActivity: '2026-06-30T10:00:00Z',
+          sessionsTotal: 12, tools: ['Claude Code'],
+          shared: false, memberIds: [this.viewerId],
+          sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
+          latestSummary: null,
+          sync: { state: 'paused' },
+        },
+        {
+          path: '/Users/x/deleted-folder', name: 'deleted-folder', exists: false, archived: true, missing: true, paused: true,
+          lastSync: '2026-06-01T10:00:00Z', lastActivity: '2026-06-01T10:00:00Z',
+          sessionsTotal: 3, tools: ['Codex'],
+          shared: false, memberIds: [this.viewerId],
+          sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
+          latestSummary: null,
+          sync: { state: 'paused' },
+        },
+      )
+    }
+    return this.guard<Project[]>(projects)
   }
   getLiveSessions() {
     return this.guard<LiveSession[]>(this.opts.empty ? [] : [
@@ -229,6 +286,8 @@ export class FakeDataClient implements DataClient {
   syncProject() { return this.guard<void>(undefined) }
   syncAll() { return this.guard<void>(undefined) }
   setProjectPaused() { return this.guard<void>(undefined) }
+  archiveProject() { return this.guard<void>(undefined) }
+  unarchiveProject() { return this.guard<void>(undefined) }
   copyForAI() { return this.guard('digest text') }
   getProjectAccess() {
     return this.guard({
@@ -239,26 +298,22 @@ export class FakeDataClient implements DataClient {
   setProjectAccess() { return this.guard<void>(undefined) }
   setProjectAccessDefault() { return this.guard<void>(undefined) }
   getAccessMatrix() {
+    const members = this.teamMembers()
+    const sharedIds = new Set(this.sharedMemberIds())
     return this.guard<AccessMatrix>({
-      members: [{ id: this.viewerId, name: 'Marco' }, { id: 'andrew', name: 'Andrew' }, { id: 'sarah', name: 'Sarah' }],
+      members: members.map(m => ({ id: m.id, name: m.name })),
       rows: [
-        { projectPath: '/Users/x/membridge', projectName: 'membridge', shared: true, access: { [this.viewerId]: true, andrew: true, sarah: true } },
-        { projectPath: '/Users/x/sublease', projectName: 'sublease', shared: false, access: { [this.viewerId]: true, andrew: false, sarah: false } },
+        { projectPath: '/Users/x/membridge', projectName: 'membridge', shared: true, access: Object.fromEntries(members.map(m => [m.id, sharedIds.has(m.id)])) },
+        { projectPath: '/Users/x/sublease', projectName: 'sublease', shared: false, access: Object.fromEntries(members.map(m => [m.id, m.id === this.viewerId])) },
       ],
     })
   }
-  // 'andrew' rounds this out to the 3 members getSettings().team.memberCount
-  // already claims, and to the 3 memberIds the shared 'membridge' project
-  // fixture lists above -- he was previously referenced by getLiveSessions(),
-  // getProjectAccess(), and getAccessMatrix() but absent here, so anything
-  // joining those against getMembers() (Task 9's AccessPanel) silently
-  // dropped him.
+  // All member surfaces read teamMembers() above, so the roster, the matrix,
+  // settings memberCount and the shared project's memberIds always agree --
+  // 'andrew' was once absent here while three other fixtures referenced him,
+  // and anything joining those against getMembers() silently dropped him.
   getMembers() {
-    return this.guard<Member[]>([
-      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
-      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false },
-      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
-    ])
+    return this.guard<Member[]>(this.teamMembers())
   }
   getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
   createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }
@@ -333,7 +388,7 @@ export class FakeDataClient implements DataClient {
         excludeStale: [],
       },
       daemon: { running: true, port: 7391, version: '0.1.7', startAtLogin: true, intervalSec: 300, updateAvailable: null },
-      team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' },
+      team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length, inviteCode: 'INV-7F3K9Q' },
       viewerId: this.viewerId,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
       contextFiles: {

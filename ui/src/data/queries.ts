@@ -202,6 +202,29 @@ export function useSetProjectPaused() {
   })
 }
 
+// Archive/unarchive change what the projects list shows (the row moves into
+// or out of the Archived section), so both refresh ['projects']. Not
+// optimistic: the daemon can refuse (404 untracked, 500 failed strip), and
+// the row must fall back to its server state with the inline error rather
+// than pretend the archive landed.
+export function useArchiveProject() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (projectPath: string) => c.archiveProject(projectPath),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }) },
+  })
+}
+
+export function useUnarchiveProject() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (projectPath: string) => c.unarchiveProject(projectPath),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }) },
+  })
+}
+
 // No cache to invalidate -- copying a digest to the clipboard changes
 // nothing server-side. Callers read `.data` for the copied text (e.g. to
 // confirm what landed on the clipboard) and `.isPending` for button state.

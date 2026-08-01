@@ -13,7 +13,7 @@ import { ProjectsPage } from '../features/projects/ProjectsPage'
 
 function project(overrides: Partial<Project>): Project {
   return {
-    path: '/x/p', name: 'p', exists: true, paused: false,
+    path: '/x/p', name: 'p', exists: true, archived: false, missing: false, paused: false,
     lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
     sessionsTotal: 10, tools: ['Claude Code'], shared: false, memberIds: ['me'],
     sessionsThisWeek: 1, dailyCounts: [0, 0, 0, 0, 0, 0, 1],

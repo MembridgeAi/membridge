@@ -72,4 +72,49 @@ describe('FakeDataClient', () => {
   it('rejects every call when configured to fail', async () => {
     await expect(new FakeDataClient({ failWith: 'boom' }).getStatus()).rejects.toThrow('boom')
   })
+
+  // Task 3 (projects tab scale and archive): fixtures the constant-width
+  // Access cell, the popover, and the Archived section are tested against.
+  it('scales the team fixture to 10 and 30 members consistently across members, matrix and settings', async () => {
+    for (const size of [10, 30]) {
+      const c = new FakeDataClient({ teamSize: size })
+      const members = await c.getMembers()
+      expect(members).toHaveLength(size)
+      expect(new Set(members.map(m => m.id)).size).toBe(size)
+      const matrix = await c.getAccessMatrix()
+      expect(matrix.members).toHaveLength(size)
+      expect((await c.getSettings()).team?.memberCount).toBe(size)
+      // The shared project's roster is a strict subset (6 of N), so the
+      // Access cell has a real "+N chip and count label" case to render.
+      const shared = (await c.getProjects()).find(p => p.shared)
+      expect(shared).toBeTruthy()
+      expect(shared!.memberIds).toHaveLength(6)
+    }
+  })
+
+  it('default fixtures carry archived: false and missing: false', async () => {
+    const projects = await new FakeDataClient().getProjects()
+    expect(projects.length).toBeGreaterThan(0)
+    for (const p of projects) {
+      expect(p.archived).toBe(false)
+      expect(p.missing).toBe(false)
+    }
+  })
+
+  it('withArchived adds an archived project and an archived project whose folder is missing', async () => {
+    const projects = await new FakeDataClient({ withArchived: true }).getProjects()
+    const archived = projects.filter(p => p.archived)
+    expect(archived.length).toBe(2)
+    expect(archived.some(p => p.missing)).toBe(true)
+    expect(archived.some(p => !p.missing)).toBe(true)
+    // The unarchived rows are untouched by the option.
+    expect(projects.some(p => !p.archived)).toBe(true)
+  })
+
+  it('models a member-role viewer end to end (settings role and self member row agree)', async () => {
+    const c = new FakeDataClient({ role: 'member' })
+    expect((await c.getSettings()).team?.role).toBe('member')
+    const self = (await c.getMembers()).find(m => m.id === 'me')
+    expect(self?.role).toBe('member')
+  })
 })

@@ -21,6 +21,13 @@ export interface Project {
   path: string
   name: string
   exists: boolean
+  // Archived is a flag on the one projects list (the UI sections on it, it
+  // never re-fetches a second list). `missing` marks an archived row whose
+  // folder no longer exists on disk: rendered with a muted note, and its
+  // Unarchive still works. Both normalize to false on rows from an older
+  // daemon that predates the fields.
+  archived: boolean
+  missing: boolean
   paused: boolean
   lastSync: string | null
   lastActivity: string | null

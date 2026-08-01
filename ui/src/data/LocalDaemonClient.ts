@@ -180,6 +180,17 @@ export class LocalDaemonClient implements DataClient {
     await post('/api/projects/toggle', { path: projectPath })
   }
 
+  // Archive/unarchive (Task 1's endpoints). A failure surfaces to the caller
+  // (the daemon 404s an untracked path and 500s a failed strip) -- the UI
+  // shows the inline error rather than optimistically hiding the row.
+  async archiveProject(projectPath: string): Promise<void> {
+    await post('/api/projects/archive', { path: projectPath })
+  }
+
+  async unarchiveProject(projectPath: string): Promise<void> {
+    await post('/api/projects/unarchive', { path: projectPath })
+  }
+
   async copyForAI(projectPath: string): Promise<string> {
     const r = await post<{ text?: string }>('/api/projects/copy', { path: projectPath })
     return r.text || ''
