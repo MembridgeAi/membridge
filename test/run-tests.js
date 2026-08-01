@@ -653,15 +653,40 @@ async function main() {
       assert.strictEqual(prepareAppResult.status, 0, `prepare-app failed: ${prepareAppResult.stderr}`);
       const appRoot = path.join(__dirname, '..');
       const rootPkg = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+      // The walk resolves each package the way require() does -- up from the
+      // depending package's own directory, checking every node_modules on the
+      // way, stopping at the repo root -- because npm does not guarantee
+      // top-level hoisting. `npm ci --omit=dev`, which is exactly what ci.yml
+      // runs, prunes the devDependency-only top-level `which` and leaves
+      // cross-spawn's copy at node_modules/cross-spawn/node_modules/which and
+      // nowhere else. A top-level-only lookup then threw raw ENOENT on
+      // node_modules/which and failed this check on every CI leg, while
+      // scripts/prepare-app.js (which already resolves this way) had bundled
+      // the package correctly. Same resolution rule as
+      // prepare-app.js's resolvePkgDir, reimplemented here so the check stays
+      // independent of the script it is checking.
+      const resolveDep = (name, fromDir) => {
+        let dir = path.resolve(fromDir);
+        const stop = path.resolve(appRoot);
+        for (;;) {
+          const candidate = path.join(dir, 'node_modules', name);
+          if (fs.existsSync(path.join(candidate, 'package.json'))) return candidate;
+          if (dir === stop) return null;
+          const parent = path.dirname(dir);
+          if (parent === dir) return null;
+          dir = parent;
+        }
+      };
       const want = new Set();
-      const queue = Object.keys(rootPkg.dependencies || {});
+      const queue = Object.keys(rootPkg.dependencies || {}).map(name => ({ name, fromDir: appRoot }));
       while (queue.length) {
-        const name = queue.shift();
+        const { name, fromDir } = queue.shift();
         if (want.has(name)) continue;
         want.add(name);
-        const pkg = JSON.parse(fs.readFileSync(
-          path.join(appRoot, 'node_modules', name, 'package.json'), 'utf8'));
-        queue.push(...Object.keys(pkg.dependencies || {}));
+        const src = resolveDep(name, fromDir);
+        assert.ok(src, `node_modules/${name} is not resolvable from ${fromDir}; run \`npm install\` at the repo root`);
+        const pkg = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8'));
+        queue.push(...Object.keys(pkg.dependencies || {}).map(dep => ({ name: dep, fromDir: src })));
       }
       assert.ok(want.size >= 2, 'closure should hold libsodium-wrappers plus its engine');
       for (const name of want) {
