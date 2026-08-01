@@ -10,6 +10,89 @@ and are flagged as such.
 
 ---
 
+## `lib/activity.js` is one shared corpus, reconciled from two independent extractions
+
+**Decided 2026-08-01.** `lib/activity.js` was extracted out of `lib/mcp.js`
+**twice**, by two people who could not see each other's work.
+
+- `2500761` on master pulled out 78 lines so `lib/hooks-search.js`, the
+  PreToolUse Grep/Glob hook, could build the same entries without loading the
+  MCP SDK at module scope.
+- `3d951a7` on `claude/prompt-sharing-mcp-visibility-26de91`, branched from
+  `802d366` and unaware of the above, pulled out 315 lines so the dashboard's
+  `GET /api/search` could answer from the same corpus.
+
+Same header rationale, same stated goal, different code. They collided as an
+add/add conflict.
+
+**Neither version was a superset.** This was measured before anything was
+chosen, because the obvious move (take the 315-line one, it is bigger) would
+have silently broken the hook.
+
+Master had, the branch lacked:
+
+- `projectEntries(key, proj, config, regexes)`, the single-project assembly.
+  `lib/hooks-search.js` calls it directly. The branch had no `hooks-search.js`
+  at all, so nothing on that side revealed the dependency.
+- Master's `allActivity` **calls** `projectEntries`. The branch's `allActivity`
+  re-inlined the same `buildEntries` + `normalizeLocal` + `teamRowsFor` body,
+  which is precisely the duplication the module exists to delete.
+- `searchLib.rankWithFallback`, the strict-then-relaxed ranking policy moved
+  into `lib/search.js` so the hook and `search_memory` cannot disagree about
+  what "no results" means. The branch reimplemented that two-pass privately
+  inside `searchMemory`.
+
+The branch had, master lacked: `collapseIdentityTwins`/`contentRank`, the LRU
+archive-entry cache, `loadContext`, `trackedProjectEntries`, the archive loop's
+own `seen.add` so the archive cannot return its own twins, and the dedup key
+change below. `mapTeamRow` was byte-identical on both sides.
+
+**Resolution:** the branch's module as the base, with `projectEntries`
+restored, `allActivity` delegating to it, and `searchMemory` ranking through
+`rankWithFallback`. `lib/mcp.js` and the one conflicting test hunk take the
+branch side, which is correct once both halves live in `activity.js`.
+
+### The dedup key changed from author to session, and that is observable
+
+Master keyed duplicate detection on `${author}|${ts}|${source}`. The branch's
+`eventKey` keys on the session id instead, falling back to the author spelling
+only for session-less rows (older captures, harvested rows). The branch's key
+won.
+
+**Why, because someone will ask.** A session id is minted per tool run and is
+never shared between two people, so it names the event itself. An author key
+does not: one human can reach a project's history under two display names, an
+account first pushed as `andrewludwigbrown` that later renders as
+`Andrew Brown`, and every such row is a genuine separate row on the backend.
+Keyed on the author they read as two people doing identical work in the same
+millisecond. On live data this put the same two events in 4 of 8 search
+results.
+
+The visible effect is that search and activity return **fewer** rows than
+before for anyone whose display name has ever changed. That is the fix, not a
+regression.
+
+### The three-leg invariant is now pinned in the suite
+
+The hook, the MCP tools and `/api/search` must answer out of the same entries
+and the same scorer. That is the whole reason the module exists, and it broke
+twice by accident, so it is no longer left to good intentions: a check in
+`test/run-tests.js` asserts at source level that `allActivity` delegates to
+`projectEntries` rather than calling `buildEntries` itself, that both
+`lib/activity.js` and `lib/hooks-search.js` rank through `rankWithFallback` and
+never call `rankEntries` directly, and that `lib/mcp.js` and `lib/server.js`
+both delegate to `activity.searchMemory`.
+
+It is source-level on purpose. The failure being guarded against is two code
+paths that each work correctly in isolation and quietly answer differently,
+which no behavioral assertion catches. Proven non-vacuous in both directions:
+re-inlining the assembly fails it with "allActivity no longer delegates to
+projectEntries", bypassing the scorer fails it with "does not rank through
+rankWithFallback".
+
+**A third extraction is the thing to watch for.** If a future surface needs
+this corpus, it imports from `lib/activity.js`. It does not carve out its own.
+
 ## Node 18 leaves the CI matrix, `engines.node` STAYS at `>=18`
 
 **Status:** decided and merged. The matrix change came from `da584f4` on
