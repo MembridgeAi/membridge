@@ -39,12 +39,17 @@ export function LiveEntry({ group }: LiveEntryProps) {
         )}
       </span>
       <span className="mono live-entry-elapsed">{elapsedShort(group.startedAt)}</span>
-      {group.intent && (
+      {group.intent ? (
         <div className="live-entry-intent">
           <span className="live-entry-intent-label">Intent</span>
           {group.intent}
         </div>
-      )}
+      ) : group.outcome ? (
+        // No captured ask (a teammate who does not share prompts) -- say what
+        // the session has LANDED instead. Unlabelled: it is not an intent, and
+        // mislabelling it would be the inference this row must never make.
+        <div className="live-entry-outcome">{group.outcome}</div>
+      ) : null}
     </div>
   )
 }

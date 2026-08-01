@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, Session, Settings, SkeletonStats, Status, StreamEntry,
+  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -33,6 +33,13 @@ export interface DataClient {
   // shrink each page instead of asking the daemon for more. `before` pages
   // backwards using the cursor the previous call returned as `nextBefore`.
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }): Promise<FeedPage>
+  // Ranked search across everything this machine holds (GET /api/search) --
+  // the viewer's own entries plus teammates' pulled rows AND the durable team
+  // archive, which the feed never pages back to. Server-side scoring, so the
+  // app and an agent using the MCP tools answer from one corpus. An empty
+  // query resolves an empty page rather than rejecting: it is the box before
+  // you type, not an error.
+  search(query: string, filters: FeedFilters, limit: number): Promise<SearchPage>
   // The session detail page: ONE session, unsliced and uncollapsed (GET
   // /api/session?id=). Resolves null for an unknown or evicted id -- that is
   // a real page state ("isn't in memory anymore"), not a failure, so it must

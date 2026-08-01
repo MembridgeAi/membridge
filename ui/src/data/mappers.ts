@@ -78,6 +78,18 @@ export interface RawFeedPayload {
   nextBefore: string | null
 }
 
+// GET /api/search's payload (lib/activity.js searchMemory). Results are the
+// same normalized entries /api/feed returns, plus the scorer's two outputs.
+export interface RawSearchResult extends RawFeedEntry {
+  score?: number
+  matched?: string[]
+}
+export interface RawSearchPayload {
+  query: string
+  total: number
+  results: RawSearchResult[]
+}
+
 // GET /api/session's payload (lib/server.js sessionPayload). Everything past
 // `session` is optional here: the mapper normalizes absence to null / [] so
 // the page never reads undefined off a sparse or older-daemon response.
@@ -237,8 +249,40 @@ export function intentOf(e: Pick<RawFeedEntry, 'goal' | 'ask'>): string | null {
   return normalizedIntentText(e.goal) ?? normalizedIntentText(e.ask)
 }
 
+/** A list row's outcome line is ONE line: the longest real headline measured
+ *  on live data is 75 chars, so 80 is the whole budget. */
+export const OUTCOME_MAX = 80
+
+/** Clip to `max` on a word boundary, with an ellipsis when anything was cut.
+ *  Never mid-word: a stub that breaks inside a word reads as corrupted text
+ *  rather than as a summary. */
+export function clipWords(text: string, max: number): string {
+  const t = text.trim()
+  if (t.length <= max) return t
+  const cut = t.slice(0, max)
+  const space = cut.lastIndexOf(' ')
+  return `${(space > max * 0.5 ? cut.slice(0, space) : cut).replace(/[.,;:\s]+$/, '')}…`
+}
+
+// The outcome line: a headline verbatim when the session landed one, else the
+// summary's FIRST SENTENCE clipped to one line.
+//
+// The fallback used to be the entire `summary`. Only 4 of 21 rows pulled from
+// one teammate carry a headline, so in practice the feed rendered 750-1000
+// character paragraphs as list rows -- 8-12 rendered lines each, one row
+// eating the screen while telling you no more than its first sentence did.
+// The full text is one click away on the session page, and the hover preview
+// still shows it in place.
 export function outcomeOf(e: Pick<RawFeedEntry, 'headline' | 'summary'>): string {
-  return e.headline || e.summary || ''
+  if (e.headline) return e.headline
+  if (!e.summary) return ''
+  const trimmed = e.summary.trim()
+  // First sentence, when there is a real one short enough to stand alone;
+  // otherwise clip the prose itself. `.` inside a path or version (lib/feed.js,
+  // v0.2.3) is not a sentence end, so require whitespace after the stop.
+  const stop = /[.!?](\s|$)/.exec(trimmed)
+  const firstSentence = stop ? trimmed.slice(0, stop.index + 1) : trimmed
+  return clipWords(firstSentence.length <= OUTCOME_MAX ? firstSentence : trimmed, OUTCOME_MAX)
 }
 
 // `session` alone is not unique per entry (a session can carry several
@@ -372,6 +416,7 @@ export function mapLiveSession(e: RawFeedEntry): LiveSession {
     projectName: e.project,
     startedAt: e.ts,
     intent: intentOf(e),
+    outcome: outcomeOf(e) || null,
   }
 }
 
@@ -396,10 +441,13 @@ export function groupLiveSessions(sessions: LiveSession[]): LiveSessionGroup[] {
     const group = byKey.get(key)!
     const oldest = group.reduce((a, b) => (a.startedAt <= b.startedAt ? a : b))
     const newest = group.reduce((a, b) => (a.startedAt >= b.startedAt ? a : b))
-    const withIntent = group.filter(s => s.intent)
-    const latestIntent = withIntent.length > 0
-      ? withIntent.reduce((a, b) => (a.startedAt >= b.startedAt ? a : b)).intent
-      : null
+    // Same rule for both text fields: the most recent NON-EMPTY one in the
+    // group, even when it comes from an older session than the newest.
+    const latest = <K extends 'intent' | 'outcome'>(field: K): string | null => {
+      const carrying = group.filter(s => s[field])
+      if (carrying.length === 0) return null
+      return carrying.reduce((a, b) => (a.startedAt >= b.startedAt ? a : b))[field]
+    }
     return {
       id: key,
       author: newest.author,
@@ -408,7 +456,8 @@ export function groupLiveSessions(sessions: LiveSession[]): LiveSessionGroup[] {
       projectName: newest.projectName,
       startedAt: oldest.startedAt,
       sessionCount: group.length,
-      intent: latestIntent,
+      intent: latest('intent'),
+      outcome: latest('outcome'),
     }
   })
 }

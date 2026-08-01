@@ -16,6 +16,50 @@ function clockTime(at: string): string {
  *  never flashes cards, short enough to answer "is this worth opening"). */
 export const HOVER_PREVIEW_DELAY_MS = 400
 
+/** How many file paths the row names before collapsing to a count. A single
+ *  live row carried 16 paths, wrapping to three lines of mono text that
+ *  out-shouted the outcome above it -- the blast radius is a glance signal,
+ *  not an inventory (the session page lists them all). */
+export const ROW_FILE_LIMIT = 3
+
+/** Longest path shown whole. Past this the leading directories are dropped:
+ *  a row's paths are clipped from the RIGHT by CSS, which eats the filename --
+ *  the one part that identifies the file. Live paths run to 90+ characters
+ *  (a worktree checkout nests the repo several levels deep), so without this
+ *  every long path renders as an indistinguishable prefix. */
+export const PATH_MAX = 34
+
+/** Drop leading directories until the path fits, keeping the last two
+ *  segments at minimum -- "…/search/snippet.ts" says more than
+ *  ".claude/worktrees/prompt-sharing-mcp-visibility-26de91/ui/src/fe…". */
+export function shortPath(file: string): string {
+  if (file.length <= PATH_MAX) return file
+  const parts = file.split('/')
+  if (parts.length <= 2) return file
+  let kept = parts.slice(-2)
+  // Add back as many parent directories as still fit.
+  for (let i = parts.length - 3; i >= 0; i--) {
+    const candidate = [parts[i], ...kept]
+    if (`…/${candidate.join('/')}`.length > PATH_MAX) break
+    kept = candidate
+  }
+  return `…/${kept.join('/')}`
+}
+
+/** Rank the files a row names: source before the docs/specs/CI churn that
+ *  tends to dominate a planning-heavy session, then shortest path first so
+ *  the three shown are the most legible. Pure -- never mutates the input. */
+const SUPPORTING = /^(docs?|specs?|\.github|\.claude|claude)\//
+export function rowFiles(files: string[]): { shown: string[]; more: number } {
+  const ranked = [...files].sort((a, b) => {
+    const aSupporting = SUPPORTING.test(a) ? 1 : 0
+    const bSupporting = SUPPORTING.test(b) ? 1 : 0
+    if (aSupporting !== bSupporting) return aSupporting - bSupporting
+    return a.length - b.length
+  })
+  return { shown: ranked.slice(0, ROW_FILE_LIMIT), more: Math.max(0, ranked.length - ROW_FILE_LIMIT) }
+}
+
 // "2 files · +129 -14" -- the preview's one-line diffstat. Null when the
 // entry has no files (nothing to preview on that line).
 function diffstatLine(e: StreamEntry): string | null {
@@ -77,9 +121,17 @@ function EntryRowBody({ entry, project, showAvatar }: Required<Pick<EntryRowProp
           {entry.intent}
         </div>
       )}
-      {entry.files.length > 0 && (
-        <div className="mono entry-row-files">{entry.files.join(' · ')}</div>
-      )}
+      {entry.files.length > 0 && (() => {
+        const { shown, more } = rowFiles(entry.files)
+        // The count sits OUTSIDE the clipped element: inside it, a row with
+        // three long paths clips the very thing that says how much is hidden.
+        return (
+          <div className="entry-row-files">
+            <span className="mono entry-row-files-list">{shown.map(shortPath).join(' · ')}</span>
+            {more > 0 && <span className="entry-row-files-more">+{more} more</span>}
+          </div>
+        )
+      })()}
     </>
   )
 }

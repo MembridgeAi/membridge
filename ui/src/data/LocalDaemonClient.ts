@@ -4,12 +4,12 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type {
   AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, Session, Settings, SkeletonStats, Status, StreamEntry,
+  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
   mapSession, mapStreamEntry, memberActivity, syncStateOf,
-  type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawSessionPayload, type RawTeamFeedEntry,
+  type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawSearchPayload, type RawSessionPayload, type RawTeamFeedEntry,
 } from './mappers'
 import { mapSettings, type RawSettingsPayload, type RawTeamMeta, type RawTeamRow } from './settingsMapper'
 import { skeletonStatsFrom, type RawSavingsPayload } from './skeletonStats'
@@ -147,6 +147,28 @@ export class LocalDaemonClient implements DataClient {
     const qs = feedQueryString(filters, opts)
     const raw = await this.requestCache.get(`feed:page:${qs}`, () => get<RawFeedPayload>(`/api/feed?${qs}`))
     return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null }
+  }
+
+  async search(query: string, filters: FeedFilters, limit: number): Promise<SearchPage> {
+    const q = query.trim()
+    if (!q) return { query: '', total: 0, results: [] }
+    const params = new URLSearchParams({ q, limit: String(limit) })
+    // Same filter vocabulary as the feed, mapped to the search endpoint's
+    // names: `source` is `tool` there (it matches the entry's source exactly,
+    // where author/project are substring matches).
+    if (filters.author) params.set('author', filters.author)
+    if (filters.project) params.set('project', filters.project)
+    if (filters.source) params.set('tool', filters.source)
+    const raw = await get<RawSearchPayload>(`/api/search?${params.toString()}`)
+    return {
+      query: raw.query,
+      total: raw.total,
+      results: raw.results.map(r => ({
+        ...mapFeedEntry(r),
+        score: typeof r.score === 'number' ? r.score : 0,
+        matched: Array.isArray(r.matched) ? r.matched : [],
+      })),
+    }
   }
 
   // Not routed through get(): a 404 here is a real page state (the session

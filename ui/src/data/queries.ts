@@ -80,6 +80,28 @@ export function useFeed(filters: FeedFilters) {
   })
 }
 
+// Search (GET /api/search). One page, no infinite scroll: a ranked list is
+// answered by its top results or not at all, and paging a relevance ordering
+// invites reading it as a feed.
+//
+// `enabled` on a non-empty query keeps the resting state honest -- an empty
+// box must not fire a request, and must not render "no results" for a search
+// nobody ran. Not live-polled, for the same reason the feed is not: results
+// reshuffling under a reader mid-scan is worse than being seconds stale.
+export const SEARCH_PAGE_SIZE = 25
+
+export function useSearch(query: string, filters: FeedFilters) {
+  const c = useDataClient()
+  const trimmed = query.trim()
+  return useQuery({
+    queryKey: ['search', trimmed, filters],
+    queryFn: () => c.search(trimmed, filters, SEARCH_PAGE_SIZE),
+    enabled: trimmed.length > 0,
+    staleTime: STANDARD_STALE_MS,
+    refetchOnWindowFocus: false,
+  })
+}
+
 // The session detail page (GET /api/session?id=). Not live-polled: the page
 // is a read of one finished-or-running session's brief; a reader deep in the
 // prompt chain must not have the list reshuffled under them every 10s.

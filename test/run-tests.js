@@ -1884,6 +1884,30 @@ async function main() {
       assert.ok(Array.isArray(feedWindow.entries), 'entries is an array');
       assert.ok(feedWindow.entries.length >= 1, 'window must never return fewer than limit entries');
     });
+    // /api/search: the dashboard answers from the SAME machine-local corpus and
+    // scorer the MCP tools use (lib/activity.js), so a person and an agent
+    // searching one machine can never be told different things.
+    const searchHit = await (await fetch(`${base}/api/search?q=webhook&limit=5`)).json();
+    check('/api/search returns ranked results from the shared corpus', () => {
+      assert.ok(Array.isArray(searchHit.results), 'results is an array');
+      assert.strictEqual(searchHit.query, 'webhook', 'query not echoed back');
+      assert.ok(typeof searchHit.total === 'number', 'total missing');
+      assert.ok(searchHit.results.every(r => 'origin' in r && 'author' in r),
+        'results are not feed-normalized entries');
+    });
+    const searchEmpty = await (await fetch(`${base}/api/search?q=`)).json();
+    check('/api/search answers an empty query with an empty result set, never an error', () => {
+      assert.deepStrictEqual(searchEmpty, { query: '', total: 0, results: [] });
+    });
+    const searchFiltered = await (await fetch(`${base}/api/search?q=webhook&author=nobody-by-this-name`)).json();
+    check('/api/search applies filters before ranking', () => {
+      assert.deepStrictEqual(searchFiltered.results, [], 'author filter did not narrow the corpus');
+    });
+    const searchCap = await (await fetch(`${base}/api/search?q=webhook&limit=99999`)).json();
+    check('/api/search clamps limit rather than honoring an unbounded page', () => {
+      assert.ok(searchCap.results.length <= 100, `limit not clamped: ${searchCap.results.length}`);
+    });
+
     const beforeTs = '2099-01-01T00:00:00Z';
     const feedBefore = await (await fetch(`${base}/api/feed?before=${encodeURIComponent(beforeTs)}&limit=50`)).json();
     check('/api/feed before= filters local entries inclusively by ts', () => {
@@ -11386,6 +11410,20 @@ async function main() {
       assert.ok(row.gotchas && row.gotchas.includes('pre-migration backend'), `gotchas was: ${row.gotchas}`);
     });
 
+    // A real captured decision measures ~560 chars at the median and 1030 at
+    // the longest. The wire used to clip these at 240 while shipping the
+    // summary beside them at 4000, so a teammate got the majority of every
+    // note truncated mid-word — long enough to bait, too short to answer.
+    setSummaryEntry(50, 'ssess-long', 'Wire up a long decision',
+      'D'.repeat(900) + ' END-OF-DECISION', 'G'.repeat(900) + ' END-OF-GOTCHA');
+    await teamsync.syncTeams({ project: projS });
+    check('teamsync: a full-length decision/gotcha survives the wire, not a 240-char stub', () => {
+      const row = mockS.entries.find(e => e.session === 'ssess-long');
+      assert.ok(row, 'entry not pushed');
+      assert.ok(row.decisions.includes('END-OF-DECISION'), `decisions truncated at ${row.decisions.length} chars`);
+      assert.ok(row.gotchas.includes('END-OF-GOTCHA'), `gotchas truncated at ${row.gotchas.length} chars`);
+    });
+
     // Second identity joins the team and pulls Summarizer's rows back.
     const projSB = path.join(ROOT, 'projects-sb', 'summary-app');
     fs.mkdirSync(projSB, { recursive: true });
@@ -11939,6 +11977,38 @@ async function main() {
       assert.ok(!gatedLine.includes('undefined') && !/\bnull\b/.test(gatedLine), `null leaked into the line: ${gatedLine}`);
       assert.ok(md.includes('capped backoff'), 'summary Result line missing for the gated entry');
       assert.ok(md.includes('Ship the billing exporter'), 'opted-in ask missing from the pull');
+    });
+
+    // A NEW install shares prompts; an EXISTING config must never be flipped by
+    // an update. The split is load-bearing: getConfig deep-merges DEFAULT_CONFIG
+    // into whatever is on disk, so putting the default there instead of in
+    // freshInstallConfig would silently start uploading the verbatim prompts of
+    // every user who installed under the old off-by-default.
+    check('privacy: a fresh install ships sharePrompts on, written into its own config', () => {
+      const homeNew = path.join(ROOT, 'home-fresh-share');
+      const env = { ...process.env, MEMBRIDGE_HOME: homeNew };
+      const r = spawnSync(process.execPath, ['-e', "require(process.argv[1]).ensureConfig()", path.join(__dirname, '..', 'lib', 'util.js')], { env, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      const written = JSON.parse(read(path.join(homeNew, 'config.json')));
+      assert.strictEqual(written.team.sharePrompts, true, 'a fresh config did not opt in');
+      assert.strictEqual(util.freshInstallConfig().team.sharePrompts, true, 'freshInstallConfig lost the flag');
+    });
+
+    check('privacy: an existing config without the flag is NOT flipped by the shipped defaults', () => {
+      assert.strictEqual(util.DEFAULT_CONFIG.team.sharePrompts, undefined,
+        'the default leaked into DEFAULT_CONFIG, which getConfig merges into every existing config');
+      const homeOld = path.join(ROOT, 'home-legacy-share');
+      fs.mkdirSync(homeOld, { recursive: true });
+      // A pre-existing config that predates the flag entirely.
+      fs.writeFileSync(path.join(homeOld, 'config.json'), JSON.stringify({ team: { url: '', anonKey: '' } }));
+      const env = { ...process.env, MEMBRIDGE_HOME: homeOld };
+      const r = spawnSync(process.execPath, ['-e',
+        "const u=require(process.argv[1]);u.ensureConfig();process.stdout.write(JSON.stringify({merged:u.getConfig().team.sharePrompts,onDisk:u.loadUserConfig().team.sharePrompts}))",
+        path.join(__dirname, '..', 'lib', 'util.js')], { env, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      const seen = JSON.parse(r.stdout);
+      assert.notStrictEqual(seen.merged, true, 'an update flipped prompt sharing on for an existing user');
+      assert.notStrictEqual(seen.onDisk, true, 'an update rewrote an existing config to share prompts');
     });
 
     check('privacy: CLI team share-prompts toggles the config flag', () => {
@@ -13924,9 +13994,14 @@ async function main() {
       assert.ok(!JSON.stringify(recent2).includes('_highlights'), '_highlights leaked');
     });
     check('mcp: buildEntries on the MCP path defers git-change derivation', () => {
-      const src = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
+      // The corpus builder moved to lib/activity.js when the dashboard's
+      // /api/search started answering from it too; the invariant is unchanged
+      // and belongs to whichever file owns allActivity/deriveDeferred.
+      const src = readSource(path.join(__dirname, '..', 'lib', 'activity.js'));
       assert.ok(src.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
       assert.ok(src.includes('deriveEntryChanges'), 'no derive-for-survivors pass');
+      const mcpSrc = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
+      assert.ok(/require\('\.\/activity'\)/.test(mcpSrc), 'lib/mcp.js no longer routes through the shared corpus');
     });
 
     check('mcp: team rows carry session/goal/decisions/gotchas/headline through to activity', () => {

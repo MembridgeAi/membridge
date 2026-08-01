@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
@@ -19,12 +19,49 @@ function project(overrides: Partial<Project> = {}): Project {
   }
 }
 
+// A teammate who does not share prompts has no captured ask at all, so this
+// row rendered as a bare name and a clock -- the single most-looked-at screen
+// saying nothing about what they are doing.
+describe('Happening now: a session with no captured intent', () => {
+  it('falls back to what the session has landed', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getLiveSessions').mockResolvedValue([
+      liveSession({ author: 'Andrew Brown', authorId: 'andrew', intent: null, outcome: 'Windows builds broken since 29 Jul' }),
+    ])
+    renderWith(client, <TodayPage />)
+    expect(await screen.findByText('Windows builds broken since 29 Jul')).toBeInTheDocument()
+    // Not dressed up as an intent -- that label would be an inference.
+    expect(screen.queryByText('Intent')).toBeNull()
+  })
+
+  it('renders nothing extra when there is neither intent nor outcome', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getLiveSessions').mockResolvedValue([
+      liveSession({ author: 'Andrew Brown', authorId: 'andrew', intent: null, outcome: null }),
+    ])
+    renderWith(client, <TodayPage />)
+    const row = await screen.findByTestId('live-entry')
+    expect(row.querySelector('.live-entry-intent')).toBeNull()
+    expect(row.querySelector('.live-entry-outcome')).toBeNull()
+  })
+
+  it('prefers a real captured intent over the outcome fallback', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getLiveSessions').mockResolvedValue([
+      liveSession({ intent: 'wire the search endpoint', outcome: 'Search endpoint wired' }),
+    ])
+    renderWith(client, <TodayPage />)
+    expect(await screen.findByText('wire the search endpoint')).toBeInTheDocument()
+    expect(screen.queryByText('Search endpoint wired')).toBeNull()
+  })
+})
+
 // Fixture factory for a LiveSession, used by the "Happening now" grouping
 // tests below (FIX 1c).
 function liveSession(overrides: Partial<LiveSession> = {}): LiveSession {
   return {
     id: 's1', author: 'You', authorId: 'me', tool: 'Claude Code', projectName: 'membridge',
-    startedAt: '2026-07-29T20:00:00Z', intent: null, ...overrides,
+    startedAt: '2026-07-29T20:00:00Z', intent: null, outcome: null, ...overrides,
   }
 }
 
