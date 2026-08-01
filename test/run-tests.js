@@ -2574,12 +2574,27 @@ async function main() {
       assert.ok(!(cfg.archived || []).includes(pruneDir),
         'a deleted project must not stay in config.archived (re-adding it would resurrect it archived)');
     });
+    // Archive writes the path into config.exclude as well (archive implies
+    // paused), so pruning only config.archived is half a fix: the re-added
+    // project is visible but permanently paused, which is the same trap.
+    check('deleting an archived project prunes its config.exclude entry too', () => {
+      const cfg = util.loadUserConfig();
+      assert.ok(!(cfg.exclude || []).includes(pruneDir),
+        'a deleted project must not stay in config.exclude (re-adding it would resurrect it paused)');
+    });
     await post(`${base}/api/projects/add`, { path: pruneDir });
     const afterReAdd = await (await fetch(`${base}/api/projects`)).json();
     check('re-adding a previously archived-then-deleted path comes back visible, not archived', () => {
       const p = afterReAdd.find(x => x.path.toLowerCase() === pruneDir.toLowerCase());
       assert.ok(p, 're-added project missing from /api/projects');
       assert.notStrictEqual(p.archived, true, 're-added project came back archived');
+    });
+    check('re-adding a previously archived-then-deleted path comes back unpaused', () => {
+      const p = afterReAdd.find(x => x.path.toLowerCase() === pruneDir.toLowerCase());
+      assert.ok(p, 're-added project missing from /api/projects');
+      assert.notStrictEqual(p.paused, true, 're-added project came back paused');
+      assert.strictEqual(util.isProjectOff(pruneDir, util.getConfig()), false,
+        're-added project is still switched off (capture would stay dead with nothing on screen explaining it)');
     });
     await post(`${base}/api/projects/delete`, { path: pruneDir });
 
