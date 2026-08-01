@@ -104,27 +104,39 @@ describe('InsightsPage', () => {
 
   // Assists breakdown (owner's ask: "answered by our memory first should be
   // a better stat -- it should be any instance where the memory helped").
-  // The default FakeDataClient fixture is total: 876, byKind: { recallServed:
-  // 818, teammateNotes: 46, mcpQueries: 12 } -- 818 + 46 + 12 = 876, so the
-  // headline is provably the sum of the auditable rows underneath it, not a
-  // magic number.
+  // The default FakeDataClient fixture is total: 864, byKind: { recallServed:
+  // 818, teammateNotes: 46 } -- 818 + 46 = 864, so the headline is provably
+  // the sum of the auditable rows underneath it, not a magic number.
   it('renders the assists breakdown and its rows sum to the headline', async () => {
     renderApp({}, <InsightsPage />)
-    const strip = await screen.findByText('876')
+    const strip = await screen.findByText('864')
     expect(strip.closest('.stat-cell')).toHaveTextContent('times memory helped')
 
     const breakdown = await screen.findByTestId('assists-breakdown')
     const rows = within(breakdown).getAllByRole('row')
-    expect(rows).toHaveLength(3)
+    expect(rows).toHaveLength(2)
     expect(within(breakdown).getByText('Recall served a file instead of a read')).toBeInTheDocument()
     expect(within(breakdown).getByText('818')).toBeInTheDocument()
     expect(within(breakdown).getByText('Teammate notes delivered into a session')).toBeInTheDocument()
     expect(within(breakdown).getByText('46')).toBeInTheDocument()
-    expect(within(breakdown).getByText('MCP memory tools queried')).toBeInTheDocument()
-    expect(within(breakdown).getByText('12')).toBeInTheDocument()
 
-    const sum = 818 + 46 + 12
-    expect(sum).toBe(876)
+    const sum = 818 + 46
+    expect(sum).toBe(864)
+  })
+
+  // The MCP tally counts DISTINCT tools that have seen use, never calls, so
+  // it saturates at the size of the tool allowlist and can never be an
+  // instance count. It used to be summed into the headline anyway, which
+  // made that headline untraceable and understated real MCP use. It now
+  // renders as its own fraction, outside the rows that sum to the headline.
+  it('shows the MCP tool coverage as a fraction, outside the assist total', async () => {
+    renderApp({}, <InsightsPage />)
+    const gauge = await screen.findByTestId('assists-mcp-tools')
+    expect(gauge).toHaveTextContent('Distinct memory tools in use')
+    expect(gauge).toHaveTextContent('4 of 6')
+    // Not a row: the rows are exactly what the headline sums.
+    expect(within(gauge).queryAllByRole('row')).toHaveLength(0)
+    expect(screen.queryByText(/MCP memory tools queried/i)).toBeNull()
   })
 
   it('shows no breakdown, only pending, when assists are unavailable', async () => {

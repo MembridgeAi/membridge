@@ -36,7 +36,7 @@ export interface FakeOptions {
   // nothing-to-do case); pass 'outdated'/'unknown' to exercise the
   // Update-hooks control's other two chip states.
   hooksVersion?: HooksVersionStatus
-  // updateHooks()'s result. Defaults to both hooks succeeding. Override
+  // updateHooks()'s result. Defaults to every hook succeeding. Override
   // per-hook -- e.g. { stop: { ok: false, detail: '...' }, recall: { ok: true, detail: '...' } }
   // -- to exercise the UI's failure-surfacing path (a real per-hook failure,
   // not a request-level rejection, which failWith above already covers).
@@ -348,7 +348,10 @@ export class FakeDataClient implements DataClient {
   private assistsStats(): AssistsStats {
     return this.opts.skeletonAvailable === false
       ? { available: false }
-      : { available: true, total: 876, byKind: { recallServed: 818, teammateNotes: 46, mcpQueries: 12 } }
+      // 818 + 46 = 864, and the MCP figure sits outside that sum -- a fixture
+      // that folded it in could not model the real payload, where the gauge
+      // is bounded by the tool allowlist (6) and the counters are not.
+      : { available: true, total: 864, byKind: { recallServed: 818, teammateNotes: 46 }, mcpTools: { inUse: 4, total: 6 } }
   }
   getSkeletonStats() {
     return this.guard<SkeletonStats>(this.skeletonStats())
@@ -420,6 +423,7 @@ export class FakeDataClient implements DataClient {
     return this.guard<HookUpdateResult>(this.opts.hooksUpdateResult ?? {
       stop: { ok: true, detail: 'rewritten to the current version' },
       recall: { ok: true, detail: 'rewritten to the current version' },
+      search: { ok: true, detail: 'rewritten to the current version' },
     })
   }
 

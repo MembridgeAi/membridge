@@ -3,7 +3,12 @@
 // Fast path: the Claude Code Stop hook fires on every session stop and the
 // git post-commit hook on every commit — neither may pay for the full CLI
 // require tree below (server, dashboard, team sync).
-if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3] === 'post-commit' || process.argv[3] === 'recall')) {
+if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3] === 'post-commit' || process.argv[3] === 'recall' || process.argv[3] === 'search')) {
+  // `search` (the PreToolUse Grep/Glob hook) is required on its own, not via
+  // lib/hooks, for the same reason it is lazy in lib/membridge-hook.js: it
+  // drags in the feed normalizers and the ranker, and the far hotter stop /
+  // recall paths above must not pay for a module they never touch.
+  if (process.argv[3] === 'search') { require('../lib/hooks-search').runSearch(); return; }
   const hooks = require('../lib/hooks');
   if (process.argv[3] === 'stop') hooks.runStop();
   else if (process.argv[3] === 'post-commit') hooks.runPostCommit();
@@ -371,16 +376,49 @@ function printEmptyState(config, running) {
     : 'open a project in one of those tools. Nothing is captured while the daemon is\nstopped — start it with `membridge start`.');
 }
 
+// What `remove` actually deletes beyond the injected blocks. Named here rather
+// than described loosely, because the whole point of the wording fix below is
+// that the user learns what is going before it goes.
+const REMOVED_MEMORY_CONTENTS = 'memory.json, ledger.json, summaries.jsonl, commits.jsonl, recall cache';
+
+// `membridge remove` was documented as "strip injected memory blocks", and it
+// also wiped each project's ENTIRE `.membridge/` directory without ever saying
+// so. That directory is not derived data a later sync rebuilds: ledger.json,
+// summaries.jsonl and commits.jsonl are the only copy of that history on the
+// machine. A real run of this command destroyed 274KB of it on a live folder,
+// and nothing in the help text or the output had warned.
+//
+// So: the deletion is announced by path BEFORE anything is touched, the
+// summary line says what went, and --keep-memory strips the blocks alone.
+//
+// Deliberately NOT a stdin confirmation. This command is scriptable (install
+// and uninstall flows call it non-interactively), and blocking on a prompt
+// would hang every one of those callers. Announcing plus an opt-out is the
+// non-breaking way to make it honest.
 function cmdRemove() {
   const state = util.loadState();
   const config = util.getConfig();
   const only = opt('--project');
+  const keepMemory = flag('--keep-memory');
   let keys = Object.keys(state.projects || {});
   if (only) {
     const k = findProjectKey(state, only);
     keys = k ? [k] : [path.resolve(only)];
   }
+
+  // Announce first, act second. Only directories that actually exist are
+  // listed, so the warning never cries wolf on a project with no local memory.
+  const memoryDirs = keepMemory
+    ? []
+    : keys.map(key => path.join(key, memorydb.DIR_NAME)).filter(dir => fs.existsSync(dir));
+  if (memoryDirs.length) {
+    console.log(`About to permanently delete the local memory history (${REMOVED_MEMORY_CONTENTS}) in:`);
+    for (const dir of memoryDirs) console.log(`  ${dir}`);
+    console.log('This cannot be undone. Re-run with --keep-memory to strip the injected blocks and keep it.');
+  }
+
   let n = 0;
+  let wiped = 0;
   for (const key of keys) {
     for (const target of util.effectiveTargets(config)) {
       const file = path.join(key, target);
@@ -390,12 +428,17 @@ function cmdRemove() {
         n++;
       }
     }
-    if (memorydb.removeProjectMemory(key)) {
-      console.log(`  removed: ${path.join(key, memorydb.DIR_NAME)}`);
+    if (!keepMemory && memorydb.removeProjectMemory(key)) {
+      console.log(`  local memory history deleted: ${path.join(key, memorydb.DIR_NAME)}`);
       n++;
+      wiped++;
     }
   }
-  console.log(n ? `Done — ${n} file(s) cleaned.` : 'No MemBridge blocks found.');
+  const wipedNote = wiped ? ` Local memory history deleted in ${wiped} project(s).` : '';
+  const keptNote = keepMemory ? ' Local memory history kept (--keep-memory).' : '';
+  console.log(n
+    ? `Done — ${n} file(s) cleaned.${wipedNote}${keptNote}`
+    : `No MemBridge blocks found.${keptNote}`);
 }
 
 // `membridge config <get|set> <key> [value]`. Minimal + generic, but only the
@@ -918,7 +961,8 @@ function cmdHook() {
   if (sub === 'stop') return hooks.runStop();
   if (sub === 'post-commit') return hooks.runPostCommit();
   if (sub === 'recall') return hooks.runRecall();
-  die('Usage: membridge hook <stop|post-commit|recall>  (invoked by the installed hooks — see `membridge setup-hooks`)');
+  if (sub === 'search') return require('../lib/hooks-search').runSearch();
+  die('Usage: membridge hook <stop|post-commit|recall|search>  (invoked by the installed hooks — see `membridge setup-hooks`)');
 }
 
 function cmdHelp() {
@@ -937,7 +981,12 @@ Usage: membridge <command>
   dashboard           open the local web dashboard (starts daemon if needed)
   sync [--dry-run] [--project <path>]   one sync pass right now
   scan                read-only: show which tools/projects were discovered
-  remove [--project <path>]             strip injected memory blocks
+  remove [--project <path>] [--keep-memory]
+                      strip injected memory blocks AND permanently delete each
+                      project's local memory history in .membridge/
+                      (${REMOVED_MEMORY_CONTENTS}).
+                      This cannot be undone. --keep-memory strips the blocks
+                      only and leaves that history alone.
   enable-autostart    launch MemBridge automatically at login
   disable-autostart   remove the login launcher
   update [--check]    check for a newer release and update in place
@@ -964,6 +1013,9 @@ Distillation (agent-written session summaries — see README):
   hook post-commit    the git hook itself (invoked by git, not by you)
   hook recall         the PreToolUse recall hook itself (answers a repeat
                       Read/Grep/Glob from memory; invoked by Claude Code)
+  hook search         the PreToolUse search hook itself (puts matching
+                      project memory in front of a Grep/Glob before it runs;
+                      invoked by Claude Code)
 
 MCP (expose project memory, read-only, to MCP-capable clients — Claude
 Desktop, Cursor, Cowork, ...; see README):

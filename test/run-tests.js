@@ -1573,6 +1573,80 @@ async function main() {
   // (which shares this same MEMBRIDGE_HOME config) behaves exactly as before.
   { const rc = util.loadUserConfig(); rc.extraTargets = { gemini: false, cursor: false, windsurf: false, copilot: false }; util.saveUserConfig(rc); }
 
+  // ===== `remove` must say what it deletes, and be able to not delete it =====
+  //
+  // The CLI help called this command "strip injected memory blocks". It also
+  // wiped the project's ENTIRE .membridge directory -- memory.json,
+  // ledger.json, summaries.jsonl, commits.jsonl, the recall cache -- which is
+  // the only copy of that history on the machine and which no later sync
+  // rebuilds. Confirmed live: 274KB of real project memory destroyed by a
+  // command whose documented job was editing markdown.
+  //
+  // No interactive confirmation is tested for, on purpose: this command is
+  // scripted by install/uninstall flows, so blocking on stdin would be the
+  // breaking change. Honesty (name it, then do it) plus an opt-out instead.
+  {
+    const mkRemoveFixture = name => {
+      const dir = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(path.join(dir, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.membridge', 'summaries.jsonl'), '{"session":"s1","did":"irreplaceable"}\n');
+      fs.writeFileSync(path.join(dir, '.membridge', 'ledger.json'), '{"rows":[]}');
+      fs.writeFileSync(path.join(dir, 'CLAUDE.md'),
+        `# Notes\n\nKeep me.\n\n${digest.BEGIN}\n## Shared AI memory (MemBridge)\n${digest.END}\n`);
+      return dir;
+    };
+    const runRemove = extra => {
+      const r = spawnSync(process.execPath, [BIN, 'remove', ...extra], { encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      return r.stdout;
+    };
+
+    check('remove: --keep-memory strips the block and leaves the local memory history untouched', () => {
+      const dir = mkRemoveFixture('remove-keep-app');
+      const out = runRemove(['--project', dir, '--keep-memory']);
+      assert.ok(!read(path.join(dir, 'CLAUDE.md')).includes(digest.BEGIN), 'block not stripped');
+      assert.ok(read(path.join(dir, 'CLAUDE.md')).includes('Keep me.'), 'original content lost');
+      assert.ok(fs.existsSync(path.join(dir, '.membridge', 'summaries.jsonl')),
+        '--keep-memory deleted the memory history anyway');
+      assert.ok(/keep-memory/i.test(out), `the output never says the memory was kept: ${out}`);
+      assert.ok(!/permanently delete/i.test(out), `--keep-memory still threatened a deletion: ${out}`);
+      // The surviving .membridge marker would otherwise make this fixture look
+      // like a tracked project to every later sync pass in this suite.
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    check('remove: names the local memory directory it is about to delete, before deleting it', () => {
+      const dir = mkRemoveFixture('remove-warn-app');
+      const memDir = path.join(dir, '.membridge');
+      const out = runRemove(['--project', dir]);
+      assert.ok(out.includes(memDir), `the deleted directory was never named: ${out}`);
+      // The warning has to come BEFORE the line reporting the deletion, or it
+      // is not a warning, it is a receipt.
+      const warnAt = out.search(/permanently delete/i);
+      const doneAt = out.indexOf('local memory history deleted:');
+      assert.ok(warnAt !== -1, `no warning that this is a permanent deletion: ${out}`);
+      assert.ok(doneAt !== -1, `the deletion is not reported at all: ${out}`);
+      assert.ok(warnAt < doneAt, `the warning printed after the deletion: ${out}`);
+      assert.ok(/cannot be undone/i.test(out), `the output never says it is irreversible: ${out}`);
+      assert.ok(/--keep-memory/.test(out), `the output never offers the opt-out: ${out}`);
+      // And it genuinely deleted, so the warning is not theatre.
+      assert.ok(!fs.existsSync(memDir), 'the memory directory survived a plain remove');
+    });
+
+    check('remove: the CLI help admits the command deletes local memory history and documents --keep-memory', () => {
+      const help = spawnSync(process.execPath, [BIN, 'help'], { encoding: 'utf8' });
+      assert.strictEqual(help.status, 0, help.stderr);
+      const line = help.stdout.split('\n').findIndex(l => /^\s{2}remove \[/.test(l));
+      assert.ok(line !== -1, `no remove entry in the help text: ${help.stdout}`);
+      const entry = help.stdout.split('\n').slice(line, line + 6).join('\n');
+      assert.ok(/--keep-memory/.test(entry), `help never mentions the opt-out: ${entry}`);
+      assert.ok(/delete/i.test(entry) && /memory history/i.test(entry),
+        `help still describes remove as block-stripping only: ${entry}`);
+      assert.ok(/summaries\.jsonl/.test(entry), `help does not name what is deleted: ${entry}`);
+      assert.ok(/cannot be undone/i.test(entry), `help never says the deletion is irreversible: ${entry}`);
+    });
+  }
+
   // ===== Regression: a clean project's lastSync must keep moving =====
   // Reported live: a project sat on the "behind · <date>" badge with a Sync
   // now button for minutes on end while the daemon ticked past it twice. Every
@@ -8865,6 +8939,65 @@ async function main() {
     assert.ok(withClaude.startsWith(digest.BEGIN) && withClaude.trim().endsWith(digest.END), 'block markers lost once the MCP line is present');
   });
 
+  // ---- The block's own framing of its own instructions ----
+  //
+  // Established on a real install: MemBridge's MCP tools were called ZERO
+  // times over months despite being correctly registered, and the injected
+  // block is the ONLY thing that tells a reading agent they exist. Two
+  // properties of the block's text explain it, and both are testable.
+  //
+  // (1) The preamble used to say "Treat as background context" about the
+  //     whole block, which demotes every instruction inside it -- including
+  //     the MCP procedure -- to passive reading material. The background
+  //     framing must scope to the activity summaries, and the block must say
+  //     out loud that its instructions are instructions.
+  check('digest: the preamble frames the activity as background context but NOT the block\'s own instructions', () => {
+    const block = digest.renderBlock('/repo', { events: [] }, util.getConfig(), 'CLAUDE.md', [], undefined);
+    const preamble = block.split('\n').find(l => l.startsWith('_Recent work done'));
+    assert.ok(preamble, 'the preamble line is gone entirely');
+    assert.ok(/background context/.test(preamble), 'the activity summaries lost their background-context framing');
+    assert.ok(/instructions in this block are not/.test(preamble),
+      `the preamble still demotes the block's own instructions to background: ${preamble}`);
+    // The exact counter-instruction that caused this: a bare "Treat as
+    // background context." sentence applying to everything above the marker.
+    assert.ok(!/Treat as background context\./.test(preamble),
+      `the blanket "treat as background context" instruction is back: ${preamble}`);
+    assert.ok(/Do not edit this block/.test(preamble), 'the do-not-edit warning was lost in the rewrite');
+  });
+
+  // (2) The MCP nudge used to be a fact with a suggestion attached ("this
+  //     project's memory is ALSO queryable ... search it before exploring a
+  //     file fresh"): "also" marks the tools optional, and the trigger asked
+  //     the agent to classify its own activity mid-task. It is now shaped
+  //     like the AGENTS.md self-report ask, which demonstrably DOES get
+  //     followed: observable trigger, exact action, explicit stopping point.
+  //
+  //     The bound is not decoration. An unscoped "always call this first"
+  //     produces reflexive calls on trivial tasks -- billed tokens, nothing
+  //     recalled -- so the scoping clause is asserted just as hard as the
+  //     trigger.
+  check('digest: the MCP nudge is a bounded procedure with an observable trigger, not an optional aside', () => {
+    const registeredClaude = [{ agent: 'claude-code', status: 'registered', detail: null }];
+    const block = digest.renderBlock('/repo', { events: [] }, util.getConfig(), 'CLAUDE.md', [], registeredClaude);
+    const line = block.split('\n').find(l => l.includes('search_memory'));
+    assert.ok(line, 'the MCP line is gone');
+
+    // Observable trigger: an action the agent is about to take, named by tool.
+    assert.ok(/Before you grep, glob, or read files/.test(line),
+      `the trigger is not an observable action: ${line}`);
+    // Exact action, with the call shape spelled out.
+    assert.ok(/call `search_memory` first/.test(line), `no exact action for search_memory: ${line}`);
+    assert.ok(/not a sentence/.test(line), `the call shape (keywords, not prose) is missing: ${line}`);
+    assert.ok(/call `why` with its path/.test(line), `no exact action for why: ${line}`);
+    // Explicit stopping point, so a miss does not strand the agent.
+    assert.ok(/continue as normal/.test(line), `no stopping point on an empty result: ${line}`);
+    // The bound: scoped to reconstructing prior work, never every task.
+    assert.ok(/skip it on a task that does not depend/.test(line), `the nudge is unbounded: ${line}`);
+    assert.ok(!/\bALWAYS\b/.test(line), `an unscoped ALWAYS produces reflexive calls: ${line}`);
+    // The optional framing that made it ignorable.
+    assert.ok(!/also queryable/.test(line), `the "also" (optional/secondary) framing is back: ${line}`);
+  });
+
   // The wiring half: lib/scan.js actually reads mcp-register.js's recorded
   // rows and threads them into renderBlock for every dirty project -- not
   // just something renderBlock can do if handed the right argument by hand.
@@ -8897,6 +9030,144 @@ async function main() {
     }
   });
 
+  // ---- Block-recipe refresh: reaching QUIET projects when the note itself
+  // changes ----
+  //
+  // The MCP-registration invalidation (lib/mcp-register.js) closes exactly one
+  // trigger. The other one is the note's own WORDING: when a user upgrades to a
+  // build whose block reads differently, nothing about that gives any project a
+  // new event, so lib/scan.js's dirty filter skips every quiet project and they
+  // keep the OLD wording forever. That silently defeats every future
+  // improvement to the block, so the mechanism has to be general: a signature of
+  // what PRODUCED the block, compared against what produced the one on disk.
+  //
+  // The hard constraint is that it must SETTLE. Widening the dirty filter would
+  // re-render everything on every tick (a regression this repo already fixed),
+  // so the signature is recorded the moment it is acted on and an unchanged
+  // signature must mark nothing at all on the very next pass.
+  {
+    const blockSig = require('../lib/block-signature');
+
+    check('block-signature: the signature moves with the MemBridge version', () => {
+      const cfg = util.getConfig();
+      const sig = blockSig.blockSignature(cfg);
+      assert.ok(sig && typeof sig === 'string', `no signature was produced: ${sig}`);
+      // Human-readable prefix on purpose: the version is what a person
+      // reading state.json needs, and it is also the commonest reason to move.
+      assert.ok(sig.startsWith(`v=${require('../package.json').version}`), `signature does not name its version: ${sig}`);
+      assert.strictEqual(sig, blockSig.blockSignature(cfg), 'the same inputs must produce the same signature');
+    });
+
+    check('block-signature: a config knob that changes the block\'s text moves the signature', () => {
+      const base = { targets: ['CLAUDE.md'] };
+      const sig = blockSig.blockSignature(base);
+      // Each of these changes the rendered block with no new event behind it,
+      // which is precisely the class of change the dirty flag cannot see.
+      assert.notStrictEqual(blockSig.blockSignature({ ...base, writeProjectMemory: false }), sig, 'the memory.md pointer line is not covered');
+      assert.notStrictEqual(blockSig.blockSignature({ ...base, targets: ['CLAUDE.md', 'AGENTS.md'] }), sig, 'a newly added target file is not covered');
+      assert.notStrictEqual(blockSig.blockSignature({ ...base, extraTargets: { gemini: true } }), sig, 'an opt-in extra target is not covered');
+      assert.notStrictEqual(blockSig.blockSignature({ ...base, redact: ['secret-\\d+'] }), sig, 'a new redaction pattern is not covered');
+      assert.notStrictEqual(blockSig.blockSignature({ ...base, distill: { consent: 'granted' } }), sig, 'the AGENTS.md self-report ask is not covered');
+      assert.notStrictEqual(blockSig.blockSignature({ ...base, maxPrompts: 2 }), sig, 'how many asks are rendered is not covered');
+      // ...and one that does NOT: a knob with no reach into renderBlock must
+      // not drag every project through a re-render for nothing.
+      assert.strictEqual(blockSig.blockSignature({ ...base, intervalSec: 999 }), sig, 'an unrelated knob moved the signature');
+    });
+
+    check('block-signature: an unreadable config skips the refresh rather than guessing at one', () => {
+      // A corrupt `targets` (not an array) makes util.effectiveTargets throw.
+      // Fail-open is the whole contract here: a signature we cannot compute
+      // must mean "do nothing", never a thrown sync pass and never a blanket
+      // re-render of every project the user owns.
+      assert.strictEqual(blockSig.blockSignature({ targets: 7 }), null);
+      const state = { projects: { '/tmp/quiet': { events: [] } } };
+      assert.strictEqual(blockSig.pendingRefresh(state, { targets: 7 }), null);
+    });
+
+    check('block-signature: pendingRefresh names every project once, then nothing', () => {
+      const cfg = { targets: ['CLAUDE.md'] };
+      const state = { projects: { '/tmp/quiet-a': { events: [] }, '/tmp/quiet-b': { events: [] } } };
+      // No record at all is the upgrade case: a block of unknown vintage is
+      // not a block known to be current, so it is re-rendered once.
+      const first = blockSig.pendingRefresh(state, cfg);
+      assert.deepStrictEqual(first.keys, ['/tmp/quiet-a', '/tmp/quiet-b']);
+      assert.strictEqual(first.signature, blockSig.blockSignature(cfg));
+      // Recording what it acted on is what makes it a ONE-SHOT.
+      const settled = { ...state, [blockSig.SIGNATURE_KEY]: first.signature };
+      assert.strictEqual(blockSig.pendingRefresh(settled, cfg), null, 'an unchanged signature must mark nothing');
+      // ...and a later change reopens it exactly once more.
+      const moved = blockSig.pendingRefresh(settled, { ...cfg, writeProjectMemory: false });
+      assert.deepStrictEqual(moved.keys, ['/tmp/quiet-a', '/tmp/quiet-b']);
+    });
+
+    check('block-signature: only a project that already carries a block counts as stale', () => {
+      // NEVER CONJURE. A changed recipe makes an EXISTING block stale; it is
+      // not a reason to put a block where the user just removed one, or where
+      // there has never been one at all.
+      const cfg = { targets: ['CLAUDE.md', 'AGENTS.md'] };
+      const bare = path.join(ROOT, 'block-sig-bare');
+      fs.mkdirSync(bare, { recursive: true });
+      assert.strictEqual(blockSig.hasRenderedBlock(bare, cfg), false, 'an empty project claimed a block');
+      // A file the USER wrote is not our block either.
+      fs.writeFileSync(path.join(bare, 'CLAUDE.md'), '# my own notes\n');
+      assert.strictEqual(blockSig.hasRenderedBlock(bare, cfg), false, 'a hand-written context file was mistaken for ours');
+      // ...and a second target carrying one is enough, since a re-render
+      // rewrites every target at once.
+      fs.writeFileSync(path.join(bare, 'AGENTS.md'), `${digest.BEGIN}\nhi\n${digest.END}\n`);
+      assert.strictEqual(blockSig.hasRenderedBlock(bare, cfg), true, 'a real block went unseen');
+    });
+
+    // The wiring half, through a REAL sync pass: a project with no events and
+    // no dirty flag is exactly the one the bug stranded, and a full sweep
+    // (never `{ project }`, which bypasses the dirty filter and would prove
+    // nothing) is the only thing that shows it healing on its own.
+    const quiet = path.join(ROOT, 'block-sig-quiet');
+    const stripped = path.join(ROOT, 'block-sig-stripped');
+    fs.mkdirSync(quiet, { recursive: true });
+    fs.mkdirSync(stripped, { recursive: true });
+    // Give `quiet` its block the ordinary way (one dirty pass), so what the
+    // sweeps below exercise is a project already carrying a block of the WRONG
+    // vintage, not a first-ever render. `stripped` stays bare on purpose.
+    const seeded = util.loadState();
+    util.saveState({
+      ...seeded,
+      projects: {
+        ...(seeded.projects || {}),
+        [quiet]: { events: [], dirty: true },
+        [stripped]: { events: [], lastSync: '2020-01-01T00:00:00.000Z' },
+      },
+    });
+    syncOnce();
+    const quietBefore = read(path.join(quiet, 'CLAUDE.md'));
+    // Now the upgrade itself: a recorded signature from a build that is gone.
+    const stale = util.loadState();
+    util.saveState({ ...stale, blockSignature: 'v=0.0.0-before-the-upgrade' });
+    const sweep1 = syncOnce();
+    const afterSweep1 = util.loadState();
+    const sweep2 = syncOnce();
+    const afterSweep2 = util.loadState();
+
+    check('scan: an upgraded block recipe re-renders a project that has no new events at all', () => {
+      assert.ok(quietBefore.includes(digest.BEGIN), 'the fixture never got its first block, so nothing below is a re-render');
+      assert.ok(sweep1.projects.includes(quiet), `the quiet project was skipped: ${JSON.stringify(sweep1.projects)}`);
+      assert.strictEqual(afterSweep1.blockSignature, blockSig.blockSignature(util.getConfig()),
+        'the signature it acted on was not recorded, so the next pass would repeat it forever');
+    });
+
+    check('scan: a recipe change never conjures a block into a project that had none', () => {
+      assert.ok(!sweep1.projects.includes(stripped), `a bare project was dragged into the refresh: ${JSON.stringify(sweep1.projects)}`);
+      assert.ok(!fs.existsSync(path.join(stripped, 'CLAUDE.md')), 'a block was conjured into a project that never had one');
+    });
+
+    check('scan: the second pass over an unchanged recipe marks nothing at all', () => {
+      // THE steady-state proof. Anything that re-renders every project on
+      // every tick is the regression this repo already fixed once.
+      assert.ok(!sweep2.projects.includes(quiet), `the quiet project was re-rendered for nothing: ${JSON.stringify(sweep2.projects)}`);
+      const key = Object.keys(afterSweep2.projects).find(k => k.toLowerCase() === quiet.toLowerCase());
+      assert.notStrictEqual(afterSweep2.projects[key].dirty, true, 'the quiet project was left marked after it had already been rendered');
+    });
+  }
+
   // setup-hooks / remove-hooks: surgical merge into a user's settings.json.
   const claudeSettings = path.join(ROOT, 'claude-settings.json');
   const seedSettings = {
@@ -8919,16 +9190,19 @@ async function main() {
     assert.strictEqual(JSON.stringify(afterSetup.hooks.Stop[0]), JSON.stringify(seedSettings.hooks.Stop[0]), 'user Stop hook changed');
     assert.strictEqual(afterSetup.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved absolute form');
     // PreToolUse: the user's own Bash-matcher entry survives untouched, and
-    // the recall hook is appended as its own entry alongside it (Task 5).
-    assert.strictEqual(afterSetup.hooks.PreToolUse.length, 2, 'recall entry not appended');
+    // BOTH of MemBridge's PreToolUse hooks are appended as their own entries
+    // alongside it -- recall on Read (Task 5) and search on Grep|Glob.
+    assert.strictEqual(afterSetup.hooks.PreToolUse.length, 3, 'recall + search entries not appended');
     assert.deepStrictEqual(afterSetup.hooks.PreToolUse[0], seedSettings.hooks.PreToolUse[0], 'unrelated PreToolUse hook changed');
     assert.strictEqual(afterSetup.hooks.PreToolUse[1].matcher, 'Read', 'recall hook matcher missing/wrong');
     assert.strictEqual(afterSetup.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand(), 'recall command missing or not the resolved absolute form');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[2].matcher, 'Grep|Glob', 'search hook matcher missing/wrong');
+    assert.strictEqual(afterSetup.hooks.PreToolUse[2].hooks[0].command, hooks.searchCommand(), 'search command missing or not the resolved absolute form');
     assert.strictEqual(afterSetup.model, 'opus');
     assert.deepStrictEqual(afterSetup.feedbackSurveyState, seedSettings.feedbackSurveyState, 'unknown keys lost');
     assert.ok(/already installed/.test(setup2.stdout), `second run said: ${setup2.stdout}`);
     assert.strictEqual(afterSetup2.hooks.Stop.length, 2, 'setup-hooks duplicated the Stop entry');
-    assert.strictEqual(afterSetup2.hooks.PreToolUse.length, 2, 'setup-hooks duplicated the recall entry');
+    assert.strictEqual(afterSetup2.hooks.PreToolUse.length, 3, 'setup-hooks duplicated a PreToolUse entry');
   });
   check('distill: hook command is absolute and needs no PATH', () => {
     const cmd = hooks.hookCommand();
@@ -8962,15 +9236,18 @@ async function main() {
       assert.strictEqual(after1.hooks.Stop[0].hooks[0].command, hooks.hookCommand(), 'auto-registered command is not the resolved form');
       // Task 5: ensureInstalled registers the recall PreToolUse hook the same
       // way, on the same every-launch path, from a settings file that starts
-      // with no PreToolUse key at all.
-      assert.strictEqual(after1.hooks.PreToolUse.length, 1, 'recall hook not auto-registered');
+      // with no PreToolUse key at all -- and the search hook alongside it, so
+      // a launch is what puts BOTH of them back after a version upgrade.
+      assert.strictEqual(after1.hooks.PreToolUse.length, 2, 'recall + search hooks not auto-registered');
       assert.strictEqual(after1.hooks.PreToolUse[0].matcher, 'Read', 'recall hook matcher missing/wrong');
       assert.strictEqual(after1.hooks.PreToolUse[0].hooks[0].command, hooks.recallCommand(), 'auto-registered recall command is not the resolved form');
+      assert.strictEqual(after1.hooks.PreToolUse[1].matcher, 'Grep|Glob', 'search hook matcher missing/wrong');
+      assert.strictEqual(after1.hooks.PreToolUse[1].hooks[0].command, hooks.searchCommand(), 'auto-registered search command is not the resolved form');
       assert.strictEqual(after1.model, 'opus', 'unrelated settings key lost');
       hooks.ensureInstalled();
       const after2 = JSON.parse(read(arFile));
       assert.strictEqual(after2.hooks.Stop.length, 1, 'ensureInstalled duplicated the Stop entry');
-      assert.strictEqual(after2.hooks.PreToolUse.length, 1, 'ensureInstalled duplicated the recall entry');
+      assert.strictEqual(after2.hooks.PreToolUse.length, 2, 'ensureInstalled duplicated a PreToolUse entry');
     } finally {
       process.env.MEMBRIDGE_CLAUDE_SETTINGS = prev;
     }
@@ -9203,9 +9480,10 @@ async function main() {
     assert.strictEqual(out.status, 0, out.stderr);
     const after = JSON.parse(read(f));
     assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own hook");
-    assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the user entry');
+    assert.strictEqual(after.hooks.PreToolUse.length, 3, 'the recall + search entries were not appended alongside the user entry');
     assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit a foreign matcher');
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
+    assert.strictEqual(after.hooks.PreToolUse[2].matcher, 'Grep|Glob', 'the search hook must register on Grep/Glob, not inherit a foreign matcher');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
@@ -9226,7 +9504,7 @@ async function main() {
     assert.strictEqual(out.status, 0, out.stderr);
     const after = JSON.parse(read(f));
     assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own false-positive recall-shaped hook");
-    assert.strictEqual(after.hooks.PreToolUse.length, 2, 'the recall entry was not appended alongside the false-positive user entry');
+    assert.strictEqual(after.hooks.PreToolUse.length, 3, 'the recall + search entries were not appended alongside the false-positive user entry');
     assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit the false-positive matcher');
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
@@ -13947,8 +14225,15 @@ async function main() {
       assert.ok(!JSON.stringify(recent2).includes('_highlights'), '_highlights leaked');
     });
     check('mcp: buildEntries on the MCP path defers git-change derivation', () => {
+      // The per-project entry assembly moved to lib/activity.js when the
+      // PreToolUse search hook needed the same entries without dragging in the
+      // MCP SDK, so the deferral now lives THERE while the derive-for-
+      // survivors pass stays here. Both halves are still required: deferring
+      // without deriving would silently drop change notes, and deriving
+      // without deferring re-introduces a git subprocess per entry per project.
       const src = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
-      assert.ok(src.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
+      const activitySrc = readSource(path.join(__dirname, '..', 'lib', 'activity.js'));
+      assert.ok(activitySrc.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
       assert.ok(src.includes('deriveEntryChanges'), 'no derive-for-survivors pass');
     });
 
@@ -14972,6 +15257,132 @@ async function main() {
       }
       const size = mcpMod._archiveCacheSizeForTests();
       assert.ok(size <= 20, `archive cache grew unbounded: ${size} entries cached after 25 distinct projects were searched`);
+    });
+  }
+
+  // ---- get_project_memory parity with the injected block ----
+  //
+  // The tool's stated contract (see the comments above recentAsks/teammates
+  // in lib/mcp.js) is "the same sections CLAUDE.md/AGENTS.md carry". It used
+  // to return strictly LESS: renderBlock prints "Intent:" (goal) and "Notes:"
+  // (decisions + gotchas) for local sessions AND for teammates, and the rows
+  // carry a headline too, and none of the four ever reached the tool. An
+  // agent that took the tool at its word got an ask and a result with all the
+  // WHY stripped out -- which is worse than no tool, because it looks whole.
+  //
+  // Runs against its OWN MEMBRIDGE_HOME: getProjectMemory re-reads config and
+  // state on every call (lib/mcp.js loadContext), so swapping the env var is
+  // enough to keep this fixture from perturbing any other check in section 14.
+  {
+    const parityHome = path.join(ROOT, 'mcp-parity-home');
+    const parityProj = path.join(ROOT, 'projects', 'mcp-parity-app');
+    fs.mkdirSync(parityHome, { recursive: true });
+    fs.mkdirSync(parityProj, { recursive: true });
+    // Every why-field carries its own distinct secret, so a field that reaches
+    // the caller un-redacted names itself in the failure.
+    fs.writeFileSync(path.join(parityHome, 'state.json'), JSON.stringify({
+      version: util.STATE_VERSION,
+      files: {},
+      projects: {
+        [parityProj]: {
+          events: [
+            { ts: '2026-05-01T10:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'par1',
+              text: 'make the retry queue stop stalling' },
+            { ts: '2026-05-01T10:05:00.000Z', source: 'Distilled', kind: 'summary', session: 'par1', distilled: true,
+              text: 'Rewrote the consumer side of the retry queue.',
+              goal: 'stop the queue stalling under load token=sk-parity-goal-1',
+              headline: 'Retry queue no longer stalls token=sk-parity-head-1',
+              decisions: 'kept the queue schema token=sk-parity-dec-1',
+              gotchas: 'consumers need a restart token=sk-parity-got-1' },
+          ],
+          teamEntries: [{
+            author: 'Priya', ts: new Date(Date.now() - 60000).toISOString(), source: 'Codex', session: 'par-team-1',
+            ask: 'rotate the vault credentials',
+            goal: 'rotate every vault credential token=sk-parity-tgoal-1',
+            headline: 'Vault tokens rotated token=sk-parity-thead-1',
+            decisions: 'rotation happens in vault token=sk-parity-tdec-1',
+            gotchas: 'terraform needs a manual approve token=sk-parity-tgot-1',
+            summary: 'stored the new token in the vault',
+            files: ['infra/vault.tf'],
+          }],
+        },
+      },
+    }, null, 2));
+
+    const savedHome = process.env.MEMBRIDGE_HOME;
+    process.env.MEMBRIDGE_HOME = parityHome;
+    let parity;
+    try {
+      parity = mcpMod.getProjectMemory(parityProj);
+    } finally {
+      process.env.MEMBRIDGE_HOME = savedHome;
+    }
+
+    const WHY_FIELDS = ['goal', 'headline', 'decisions', 'gotchas'];
+
+    check('mcp: get_project_memory carries a local session\'s goal/headline/decisions/gotchas, not just ask + result', () => {
+      assert.ok(Array.isArray(parity.recentAsks) && parity.recentAsks.length === 1,
+        `expected exactly the planted session, got ${JSON.stringify(parity.recentAsks)}`);
+      const s = parity.recentAsks[0];
+      for (const f of WHY_FIELDS) {
+        assert.ok(typeof s[f] === 'string' && s[f].length,
+          `recentAsks[0].${f} missing -- the block renders it, the tool does not: ${JSON.stringify(s)}`);
+      }
+      assert.ok(/stop the queue stalling under load/.test(s.goal), `goal is not the session's goal: ${s.goal}`);
+      assert.ok(/Retry queue no longer stalls/.test(s.headline), `headline is not the session's headline: ${s.headline}`);
+      assert.ok(/kept the queue schema/.test(s.decisions), `decisions wrong: ${s.decisions}`);
+      assert.ok(/consumers need a restart/.test(s.gotchas), `gotchas wrong: ${s.gotchas}`);
+      // The fields that already worked must not have regressed.
+      assert.ok(/retry queue stop stalling/.test(s.ask), `ask lost: ${s.ask}`);
+      assert.ok(/Rewrote the consumer side/.test(s.result), `result lost: ${s.result}`);
+    });
+
+    check('mcp: get_project_memory carries a teammate row\'s goal/headline/decisions/gotchas too', () => {
+      assert.ok(Array.isArray(parity.teammates) && parity.teammates.length === 1,
+        `expected exactly the planted teammate row, got ${JSON.stringify(parity.teammates)}`);
+      const t = parity.teammates[0];
+      assert.strictEqual(t.author, 'Priya');
+      for (const f of WHY_FIELDS) {
+        assert.ok(typeof t[f] === 'string' && t[f].length,
+          `teammates[0].${f} missing -- the block renders it, the tool does not: ${JSON.stringify(t)}`);
+      }
+      assert.ok(/rotate every vault credential/.test(t.goal), `teammate goal wrong: ${t.goal}`);
+      assert.ok(/Vault tokens rotated/.test(t.headline), `teammate headline wrong: ${t.headline}`);
+      assert.ok(/rotation happens in vault/.test(t.decisions), `teammate decisions wrong: ${t.decisions}`);
+      assert.ok(/terraform needs a manual approve/.test(t.gotchas), `teammate gotchas wrong: ${t.gotchas}`);
+    });
+
+    check('mcp: the newly-mapped why-fields get the same redaction pass their siblings already got', () => {
+      const blob = JSON.stringify(parity);
+      for (const secret of ['sk-parity-goal-1', 'sk-parity-head-1', 'sk-parity-dec-1', 'sk-parity-got-1',
+        'sk-parity-tgoal-1', 'sk-parity-thead-1', 'sk-parity-tdec-1', 'sk-parity-tgot-1']) {
+        assert.ok(!blob.includes(secret), `${secret} leaked through get_project_memory un-redacted`);
+      }
+      assert.ok(count(blob, '[redacted') >= 8, `expected a redaction marker per planted secret: ${blob}`);
+    });
+
+    check('mcp: a session with no distilled why-fields reports them as null, never as the string "null"', () => {
+      // redactedOrNull's contract, extended to the new fields: an absent field
+      // is JSON null so a client can tell "not shared" from "shared as empty".
+      const bareHome = path.join(ROOT, 'mcp-parity-bare-home');
+      const bareProj = path.join(ROOT, 'projects', 'mcp-parity-bare-app');
+      fs.mkdirSync(bareHome, { recursive: true });
+      fs.mkdirSync(bareProj, { recursive: true });
+      fs.writeFileSync(path.join(bareHome, 'state.json'), JSON.stringify({
+        version: util.STATE_VERSION,
+        files: {},
+        projects: { [bareProj]: { events: [
+          { ts: '2026-05-02T10:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'bare1', text: 'a plain ask' },
+        ] } },
+      }, null, 2));
+      const saved = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = bareHome;
+      let bare;
+      try { bare = mcpMod.getProjectMemory(bareProj); } finally { process.env.MEMBRIDGE_HOME = saved; }
+      assert.strictEqual(bare.recentAsks.length, 1, JSON.stringify(bare.recentAsks));
+      for (const f of WHY_FIELDS) {
+        assert.strictEqual(bare.recentAsks[0][f], null, `${f} should be JSON null when nothing was distilled`);
+      }
     });
   }
 
@@ -22111,6 +22522,245 @@ const repoRoot = require('../lib/repo-root');
       }
     });
 
+    // ---- Registration-change invalidation ----
+    //
+    // The injected context block advertises the MCP tools only when THIS
+    // target's own agent is registered (digest.mcpLiveFor), but a block is
+    // only re-rendered when its PROJECT is dirty (lib/scan.js). Nothing
+    // connected the two, so the instant registration flipped from absent to
+    // live (every upgrade, and some fresh installs) every already-rendered
+    // block was stale, and a project with no new events never healed.
+    // Measured on a real install: 8 of 9 projects carried a nudge-less block
+    // dated days before the registration stamp.
+    //
+    // The fix has to stay a ONE-SHOT state write triggered by a verdict
+    // CHANGE. Widening lib/scan.js's dirty filter instead would re-render
+    // every project on every tick, which is a regression this repo already
+    // fixed once (a synced project still has events).
+    {
+      // Two shapes of "live" that differ only in `reason`: a row that moved
+      // from 'cli' to 'updated' while staying 'registered' is the SAME
+      // verdict, and must not trigger a re-render storm.
+      const LIVE = [
+        { agent: 'claude-code', status: 'registered', reason: 'cli' },
+        { agent: 'codex', status: 'unchanged', reason: 'ours' },
+      ];
+      const LIVE_OTHER_REASON = [
+        { agent: 'claude-code', status: 'registered', reason: 'updated' },
+        { agent: 'codex', status: 'unchanged', reason: 'present' },
+      ];
+      const DEAD = [
+        { agent: 'claude-code', status: 'skipped', reason: 'no-bin' },
+        { agent: 'codex', status: 'failed', reason: 'unreadable' },
+      ];
+
+      let invSeq = 0;
+      const invHome = raw => {
+        const h = path.join(W_ROOT, `inv-${invSeq++}`);
+        fs.mkdirSync(h, { recursive: true });
+        fs.writeFileSync(path.join(h, 'state.json'), raw);
+        return h;
+      };
+      // Two QUIET projects: no events, so nothing else in the daemon would
+      // ever mark them dirty. They are exactly the projects the bug stranded.
+      const trackedState = () => JSON.stringify({
+        version: 2,
+        files: {},
+        projects: { '/tmp/quiet-a': { events: [] }, '/tmp/quiet-b': { events: [] } },
+      }, null, 2);
+      const projectsOf = home => JSON.parse(read(path.join(home, 'state.json'))).projects;
+      const dirtyFlags = home => Object.values(projectsOf(home)).map(p => p.dirty === true);
+      const withHome = (home, fn) => {
+        const saved = process.env.MEMBRIDGE_HOME;
+        process.env.MEMBRIDGE_HOME = home;
+        try { return fn(); } finally { process.env.MEMBRIDGE_HOME = saved; }
+      };
+
+      check('mcp-invalidation: a row whose reason changed but whose verdict did not marks nothing dirty', () => {
+        const home = invHome(trackedState());
+        const marked = withHome(home, () => mcpRegister.invalidateOnRegistrationChange(LIVE, LIVE_OTHER_REASON));
+        assert.strictEqual(marked, 0, 'cli -> updated is not a verdict change');
+        assert.deepStrictEqual(dirtyFlags(home), [false, false]);
+      });
+
+      check('mcp-invalidation: registration going live marks every tracked project for one re-render', () => {
+        const home = invHome(trackedState());
+        assert.strictEqual(withHome(home, () => mcpRegister.invalidateOnRegistrationChange(DEAD, LIVE)), 2);
+        assert.deepStrictEqual(dirtyFlags(home), [true, true]);
+      });
+
+      check('mcp-invalidation: a first-ever registration (no prior rows at all) counts as a verdict change', () => {
+        const home = invHome(trackedState());
+        assert.strictEqual(withHome(home, () => mcpRegister.invalidateOnRegistrationChange(null, LIVE)), 2);
+        assert.deepStrictEqual(dirtyFlags(home), [true, true]);
+      });
+
+      check('mcp-invalidation: registration going away marks every tracked project too', () => {
+        // The nudge has to come OUT of the blocks just as promptly as it went
+        // in: an agent told to call a server it can no longer reach is worse
+        // than one never told about it.
+        const home = invHome(trackedState());
+        assert.strictEqual(withHome(home, () => mcpRegister.invalidateOnRegistrationChange(LIVE, DEAD)), 2);
+        assert.deepStrictEqual(dirtyFlags(home), [true, true]);
+      });
+
+      check('mcp-invalidation: a throw inside the invalidation is swallowed, never raised into the launch path', () => {
+        // An unparseable state.json makes util.loadState throw by design
+        // (it refuses to write over what it could not read).
+        const home = invHome('{ not json');
+        assert.strictEqual(withHome(home, () => mcpRegister.invalidateOnRegistrationChange(DEAD, LIVE)), 0);
+      });
+
+      // End to end through the launch path itself: the gate, the reconcile,
+      // the stamp and the invalidation all have to agree, and only a child
+      // with an injected HOME exercises the real thing.
+      const runLaunchJson = (home, extraEnv = {}) => spawnSync(process.execPath,
+        ['-e', 'process.stdout.write(JSON.stringify(require(process.argv[1]).ensureRegistered()))',
+          path.join(__dirname, '..', 'lib', 'mcp-register.js')],
+        { env: fixtureEnv(home, extraEnv), encoding: 'utf8', timeout: 60000 });
+      const mbHomeOf = home => path.join(home, '.membridge');
+
+      check('mcp-wiring: the launch reconcile that first registers MCP marks every tracked project for re-render', () => {
+        const home = mkFixture();
+        fs.writeFileSync(path.join(mbHomeOf(home), 'state.json'), trackedState());
+        const r = runLaunchJson(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        const out = JSON.parse(r.stdout);
+        assert.strictEqual(out.ran, true, `the fixture must actually reconcile: ${r.stdout}`);
+        // Codex registration is pure file surgery, so its row is live on every
+        // platform; the claude-code row depends on a POSIX stub shell and is
+        // deliberately not what this check hangs on.
+        assert.ok(digest.mcpLiveFor('AGENTS.md', out.rows),
+          `AGENTS.md must be live or this check is vacuous: ${r.stdout}`);
+        const projects = projectsOf(mbHomeOf(home));
+        assert.strictEqual(Object.keys(projects).length, 2, 'the tracked projects must survive the launch');
+        for (const k of Object.keys(projects)) assert.strictEqual(projects[k].dirty, true, `${k} was left stale`);
+      });
+
+      check('mcp-wiring: a reconcile that does not change the verdict leaves quiet projects alone', () => {
+        const home = mkFixture();
+        const stateFile = path.join(mbHomeOf(home), 'state.json');
+        fs.writeFileSync(stateFile, trackedState());
+        assert.strictEqual(runLaunchJson(home).status, 0);
+        // Clear the flags that first (verdict-changing) launch set, standing
+        // in for the sync pass that consumed them.
+        const cleared = JSON.parse(read(stateFile));
+        for (const k of Object.keys(cleared.projects)) delete cleared.projects[k].dirty;
+        fs.writeFileSync(stateFile, JSON.stringify(cleared, null, 2));
+        // Reopen the gate with an agent that is NOT a context-block target:
+        // registering it changes the rows without changing any target's verdict.
+        const lateDir = path.join(W_ROOT, 'late-verdict');
+        fs.mkdirSync(lateDir, { recursive: true });
+        const cfgFile = path.join(mbHomeOf(home), 'config.json');
+        let raw = {};
+        try { raw = JSON.parse(read(cfgFile)); } catch {}
+        raw.mcp = { ...(raw.mcp || {}), 'late-tool': { configPath: path.join(lateDir, 'mcp.json'), format: 'json' } };
+        fs.writeFileSync(cfgFile, JSON.stringify(raw, null, 2));
+        const r = runLaunchJson(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.strictEqual(JSON.parse(r.stdout).ran, true, 'the late agent must reopen the gate');
+        const projects = projectsOf(mbHomeOf(home));
+        for (const k of Object.keys(projects)) {
+          assert.notStrictEqual(projects[k].dirty, true, `${k} was re-rendered for nothing`);
+        }
+      });
+
+      // ---- The two paths that never reach the launch gate ----
+      //
+      // `membridge mcp register` (what install.sh runs) and the app's own
+      // "re-register MCP" button in Settings both land on registerNow(), which
+      // stamps a fingerprint of its OWN. Every ensureRegistered() afterwards
+      // sees a current fingerprint and returns 'current' before the
+      // invalidation above can run, so on the commonest setup path there is --
+      // the user turning MCP on -- every block already on disk kept advertising
+      // nothing, forever. unregisterNow() is the mirror: without it the blocks
+      // keep naming a server that is gone, and the launch path then answers
+      // 'opted-out' forever so it can never self-correct either.
+      const clearDirtyFlags = home => {
+        const file = path.join(mbHomeOf(home), 'state.json');
+        const s = JSON.parse(read(file));
+        for (const k of Object.keys(s.projects)) delete s.projects[k].dirty;
+        fs.writeFileSync(file, JSON.stringify(s, null, 2));
+      };
+
+      check('mcp-wiring: an explicit `mcp register` marks every tracked project for re-render', () => {
+        const home = mkFixture();
+        fs.writeFileSync(path.join(mbHomeOf(home), 'state.json'), trackedState());
+        const r = runCli(home, ['mcp', 'register']);
+        assert.strictEqual(r.status, 0, r.stderr);
+        // Codex registration is pure file surgery, so it is live on every
+        // platform -- the same non-vacuousness guard the launch checks use.
+        const rows = (JSON.parse(read(path.join(mbHomeOf(home), 'state.json'))).mcpRegistration || {}).rows;
+        assert.ok(digest.mcpLiveFor('AGENTS.md', rows), `AGENTS.md must be live or this check is vacuous: ${JSON.stringify(rows)}`);
+        const projects = projectsOf(mbHomeOf(home));
+        assert.strictEqual(Object.keys(projects).length, 2, 'the tracked projects must survive an explicit register');
+        for (const k of Object.keys(projects)) assert.strictEqual(projects[k].dirty, true, `${k} was left stale`);
+        // And this is WHY it has to happen here: the launch path can no longer
+        // see anything to do, so it is not a second chance at this.
+        const launch = runLaunchJson(home);
+        assert.strictEqual(launch.status, 0, launch.stderr);
+        assert.strictEqual(JSON.parse(launch.stdout).reason, 'current');
+      });
+
+      check('mcp-wiring: a repeat `mcp register` with nothing to change marks nothing', () => {
+        const home = mkFixture();
+        fs.writeFileSync(path.join(mbHomeOf(home), 'state.json'), trackedState());
+        assert.strictEqual(runCli(home, ['mcp', 'register']).status, 0);
+        // Stand in for the sync pass that consumed the first register's flags.
+        clearDirtyFlags(home);
+        const r = runCli(home, ['mcp', 'register']);
+        assert.strictEqual(r.status, 0, r.stderr);
+        const projects = projectsOf(mbHomeOf(home));
+        for (const k of Object.keys(projects)) assert.notStrictEqual(projects[k].dirty, true, `${k} was re-rendered for nothing`);
+      });
+
+      check('mcp-wiring: an explicit `mcp unregister` pulls the nudge back out of quiet projects', () => {
+        const home = mkFixture();
+        fs.writeFileSync(path.join(mbHomeOf(home), 'state.json'), trackedState());
+        assert.strictEqual(runCli(home, ['mcp', 'register']).status, 0);
+        clearDirtyFlags(home);
+        const r = runCli(home, ['mcp', 'unregister']);
+        assert.strictEqual(r.status, 0, r.stderr);
+        const projects = projectsOf(mbHomeOf(home));
+        assert.strictEqual(Object.keys(projects).length, 2, 'the tracked projects must survive an explicit unregister');
+        for (const k of Object.keys(projects)) assert.strictEqual(projects[k].dirty, true, `${k} still names a server that is gone`);
+      });
+
+      check('mcp-wiring: the opted-out launch path never marks a project dirty', () => {
+        // State first, THEN remove-hooks: its own state write is a
+        // read-modify-write, so writing the projects afterwards would erase
+        // the opt-out record this check depends on.
+        //
+        // SCOPE. remove-hooks runs `mcp unregister` too, which now invalidates
+        // on its own (above) -- so what is asserted here is the LAUNCH path
+        // specifically: whatever remove-hooks left behind, an opted-out launch
+        // must return before touching any of it.
+        const home = mkFixture();
+        fs.writeFileSync(path.join(mbHomeOf(home), 'state.json'), trackedState());
+        const rm = runCli(home, ['remove-hooks']);
+        assert.strictEqual(rm.status, 0, rm.stderr);
+        const before = projectsOf(mbHomeOf(home));
+        const r = runLaunchJson(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.strictEqual(JSON.parse(r.stdout).reason, 'opted-out');
+        const projects = projectsOf(mbHomeOf(home));
+        assert.strictEqual(Object.keys(projects).length, 2, 'the tracked projects must survive remove-hooks');
+        assert.deepStrictEqual(projects, before, 'the opted-out launch path wrote to the tracked projects');
+      });
+
+      check('mcp-wiring: an unreadable state.json cannot break the launch reconcile', () => {
+        // ensureRegistered is fail-open in every direction, and the new
+        // invalidation must not be the one thing that changes that.
+        const home = mkFixture();
+        fs.writeFileSync(path.join(mbHomeOf(home), 'state.json'), '{ not json');
+        const r = runLaunchJson(home);
+        assert.strictEqual(r.status, 0, r.stderr);
+        const out = JSON.parse(r.stdout);
+        assert.strictEqual(out.ran, true, `a corrupt state must not stop registration: ${r.stdout}`);
+        assert.strictEqual(out.reason, 'reconciled');
+      });
+    }
+
     check('mcp-wiring: not one byte of the real agent configs was touched', () => {
       // Three files that exist on this machine. Everything above injects HOME,
       // and this is what proves it.
@@ -22477,7 +23127,7 @@ const repoRoot = require('../lib/repo-root');
       // lives under util.homeDir(), and by this point in the suite the
       // shared home's tally file may already carry entries from the real
       // MCP-tool-registration exercises earlier in this file. An isolated
-      // home is what makes the mcpQueries assertion below exact.
+      // home is what makes the mcpTools assertion below exact.
       process.env.MEMBRIDGE_HOME = path.join(ROOT, 'assists-mcp-home');
       try {
         const now = Date.now();
@@ -22487,11 +23137,14 @@ const repoRoot = require('../lib/repo-root');
         const payload = savingsPayload();
         const assists = apiInsights.assistsFrom(payload);
         assert.strictEqual(assists.available, true);
-        assert.deepStrictEqual(assists.byKind, { recallServed: 2, teammateNotes: 7, mcpQueries: 2 });
-        assert.strictEqual(assists.total, 2 + 7 + 2, 'total must be the exact sum of its parts, not a re-derived figure');
+        assert.deepStrictEqual(assists.byKind, { recallServed: 2, teammateNotes: 7 });
+        assert.strictEqual(assists.total, 2 + 7, 'total must be the exact sum of its parts, not a re-derived figure');
         // holdout.skips (5) must never leak into the count -- it measures
         // what a call WOULD have cost, not a delivered instance.
-        assert.strictEqual(assists.total, 11, 'holdout must not be folded in');
+        assert.strictEqual(assists.total, 9, 'holdout must not be folded in');
+        // The MCP tally rides alongside the total, never inside it: it is a
+        // coverage gauge bounded by the allowlist, not a per-instance count.
+        assert.deepStrictEqual(assists.mcpTools, { inUse: 2, total: mcpUsageLib.MCP_TOOLS.length });
       } finally {
         process.env.MEMBRIDGE_HOME = prevHome;
       }
@@ -22505,8 +23158,68 @@ const repoRoot = require('../lib/repo-root');
         const savings = { totals: { avoided: { tokens: 0, serves: 3, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 }, notesInjections: 1 } };
         const assists = apiInsights.assistsFrom(savings);
         assert.strictEqual(assists.available, true);
-        assert.strictEqual(assists.byKind.mcpQueries, 0, 'absence must read as zero, never throw');
+        assert.strictEqual(assists.mcpTools.inUse, 0, 'absence must read as zero, never throw');
         assert.strictEqual(assists.total, 4);
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
+    });
+
+    // ===== The MCP figure is a COVERAGE GAUGE, not a count.
+    // mcpUsage.toolsUsedWithin filters lib/counters.js's fixed six-item
+    // MCP_TOOLS allowlist against a last-used-timestamp map, so its length is
+    // structurally bounded at six forever, however many thousands of calls
+    // land. Summing that into a total otherwise made of two genuine
+    // per-instance counters made the total mean nothing and understated heavy
+    // MCP use to almost nothing. The tally itself stays exactly as it is --
+    // lib/mcp-usage.js records "which tools see use, never how often" on
+    // purpose, and that is a privacy stance, not a bug -- so the fix is to
+    // report the gauge honestly beside the total instead of inside it.
+    check('assists: the saturating MCP tool gauge is never folded into the assist total', () => {
+      const gp = path.join(ROOT, 'assists-gauge');
+      fs.mkdirSync(gp, { recursive: true });
+      assistsLedgerStore.writeLedger(gp, {
+        updatedAt: new Date().toISOString(), sessions: 1, requests: 1, volume: 1000,
+        reads: { first: 1, sameSession: 0, crossSession: 0 }, hotPaths: [],
+        avoided: { tokens: 5000, serves: 3, tierA: 2, tierB: 1, partialWins: 0, netNegatives: 0 },
+        holdout: { skips: 0, callTokens: 0 },
+        notes: { injections: 4, tokens: 800, seenKeys: [] },
+        seenKeys: [], readKeys: [], sessionIds: ['s1'], fileReaders: {},
+      });
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'assists-gauge-home');
+      try {
+        const now = Date.now();
+        // EVERY tool in the allowlist: the gauge is pinned at its ceiling,
+        // which is exactly the state a heavy MCP user is permanently in.
+        for (const tool of mcpUsageLib.MCP_TOOLS) mcpUsageLib.recordToolUse(tool, { config: {}, now });
+        util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [gp]: { name: 'assists-gauge', events: [] } } });
+        const assists = apiInsights.assistsFrom(savingsPayload());
+        assert.deepStrictEqual(assists.byKind, { recallServed: 3, teammateNotes: 4 });
+        assert.strictEqual(assists.total, 3 + 4, 'a saturated gauge must not inflate the total');
+        assert.strictEqual(assists.mcpTools.inUse, mcpUsageLib.MCP_TOOLS.length,
+          'every tool was recorded, so the gauge must sit at its ceiling');
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+      }
+    });
+
+    check('assists: the MCP gauge carries its own denominator, read from the allowlist rather than hardcoded', () => {
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'assists-gauge-denominator-home');
+      try {
+        // One allowlist, not a copy: the numerator and the denominator have
+        // to come from the same array or "N of 6" can drift into a lie.
+        assert.strictEqual(mcpUsageLib.MCP_TOOLS, require('../lib/counters').MCP_TOOLS);
+        const savings = { totals: { avoided: { tokens: 0, serves: 1, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 }, notesInjections: 0 } };
+        const assists = apiInsights.assistsFrom(savings);
+        assert.strictEqual(assists.mcpTools.total, mcpUsageLib.MCP_TOOLS.length);
+        assert.ok(assists.mcpTools.inUse <= assists.mcpTools.total,
+          'a coverage gauge can never exceed its own denominator');
+        const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'api-insights.js'), 'utf8');
+        const gaugeLine = (src.split('\n').find(l => /^\s*mcpTools:/.test(l)) || '').trim();
+        assert.ok(gaugeLine, 'assistsFrom must still report the gauge');
+        assert.ok(!/\d/.test(gaugeLine), `the allowlist size must come from the allowlist, never a literal: ${gaugeLine}`);
       } finally {
         process.env.MEMBRIDGE_HOME = prevHome;
       }
@@ -23912,6 +24625,334 @@ const repoRoot = require('../lib/repo-root');
       const restoreAt = appSrc.indexOf('paused = loadPersistedPaused()');
       assert.ok(restoreAt !== -1 && restoreAt < appSrc.indexOf('setInterval(tick'),
         'the persisted pause must be restored before the first sync tick');
+    });
+  }
+
+  // --- The PreToolUse SEARCH hook (lib/hooks-search.js) --------------------
+  // MemBridge's memory of prior work, put in front of a Grep/Glob without the
+  // agent ever asking for it. Driven exactly like the recall hook's own tests
+  // above: spawn lib/membridge-hook.js and feed the payload on stdin.
+  {
+    const searchQueryLib = require('../lib/search-query');
+    const searchBriefLib = require('../lib/search-brief');
+    const activityLib = require('../lib/activity');
+    const searchRankLib = require('../lib/search');
+    const hooksSearchLib = require('../lib/hooks-search');
+    const SEARCH_ENTRY = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
+
+    const searchProj = path.join(ROOT, 'projects', 'search-hook-proj');
+    fs.mkdirSync(path.join(searchProj, '.membridge'), { recursive: true });
+    const searchEvents = [
+      { kind: 'prompt', ts: '2026-06-01T10:00:00.000Z', source: 'Claude Code', session: 'sess-vault', text: 'make the vault rotation retry on a 401' },
+      { kind: 'edit', ts: '2026-06-01T10:05:00.000Z', source: 'Claude Code', session: 'sess-vault', file: path.join(searchProj, 'lib', 'rotate.js') },
+      {
+        kind: 'summary', ts: '2026-06-01T11:00:00.000Z', source: 'Claude Code', session: 'sess-vault',
+        text: 'Vault rotation now retries once on a 401 and then fails closed.',
+        headline: 'vault rotation retries once, then fails closed',
+        decisions: 'chose fail-closed over fail-open for rotation',
+        gotchas: 'the expired credential arrives as a 200 with an error body',
+        distilled: true,
+      },
+      { kind: 'prompt', ts: '2026-06-02T10:00:00.000Z', source: 'Claude Code', session: 'sess-tokens', text: 'rename the palette tokens' },
+    ];
+    {
+      const st = util.loadState();
+      util.saveState({ ...st, projects: { ...(st.projects || {}), [searchProj]: { events: searchEvents } } });
+    }
+
+    const runSearchHook = (payload, env) => spawnSync(process.execPath, [SEARCH_ENTRY, 'search'], {
+      input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const grepPayload = (session, pattern, extra = {}) => ({
+      session_id: session, cwd: searchProj, tool_name: 'Grep',
+      tool_input: { pattern, ...extra },
+    });
+
+    check('search hook: a Grep in a tracked project is handed matching memory WITHOUT the agent asking', () => {
+      // The whole point. The MCP tools were called zero times in months of
+      // real use; an instruction is a request an agent can skip, a hook is not.
+      const out = runSearchHook(grepPayload('sess-serve-1', 'vault rotation'));
+      assert.strictEqual(out.status, 0, out.stderr);
+      const j = JSON.parse(out.stdout);
+      assert.strictEqual(j.hookSpecificOutput.hookEventName, 'PreToolUse');
+      // Never a deny: the Grep the agent wrote must still run, untouched.
+      assert.strictEqual(j.hookSpecificOutput.permissionDecision, 'allow',
+        'the search hook must never block or answer the search itself');
+      const ctx = j.hookSpecificOutput.additionalContext;
+      assert.ok(/vault rotation retries once/.test(ctx), `the matching memory must be in the block: ${ctx}`);
+      assert.ok(/fail-closed/.test(ctx), `the WHY (decisions/gotchas) must ride along: ${ctx}`);
+      assert.ok(!/palette tokens/.test(ctx), `an unrelated session must not be dragged in: ${ctx}`);
+    });
+
+    check('search hook: the same session is not served the same memory twice', () => {
+      // A differently-worded search that lands on memory this session already
+      // holds is still a duplicate. Dedupe is by ENTRY, which subsumes
+      // "substantially the same query" without having to define it.
+      const first = runSearchHook(grepPayload('sess-dupe', 'rotation'));
+      assert.ok(first.stdout.trim(), 'the first search must serve, or this check is vacuous');
+      const again = runSearchHook(grepPayload('sess-dupe', 'vault rotation'));
+      assert.strictEqual(again.status, 0, again.stderr);
+      assert.strictEqual(again.stdout.trim(), '', `already-served memory was served again: ${again.stdout}`);
+      // ...and a DIFFERENT session starts clean: the memo is per session.
+      const other = runSearchHook(grepPayload('sess-dupe-other', 'vault rotation'));
+      assert.ok(other.stdout.trim(), 'the served memo must be per session, not per project');
+    });
+
+    check('search hook: a miss is SILENT — no "no results" noise on every search', () => {
+      const miss = runSearchHook(grepPayload('sess-miss-1', 'quaternion'));
+      assert.strictEqual(miss.status, 0, miss.stderr);
+      assert.strictEqual(miss.stdout.trim(), '', `a miss must print nothing at all: ${miss.stdout}`);
+    });
+
+    check('search hook: a pattern with nothing specific in it never reaches disk', () => {
+      // `.*`, `\\s+\\d+` and two-letter fragments can only ever match
+      // everything or nothing; rejecting them before any state load is what
+      // keeps the common case free.
+      for (const pattern of ['.*', '\\s+\\d+', '^$', '[a-z]{2}', 'id']) {
+        const out = runSearchHook(grepPayload('sess-noise', pattern));
+        assert.strictEqual(out.status, 0, out.stderr);
+        assert.strictEqual(out.stdout.trim(), '', `pattern ${JSON.stringify(pattern)} must be rejected outright`);
+      }
+    });
+
+    check('search hook: Glob is covered too, not just Grep', () => {
+      const out = runSearchHook({
+        session_id: 'sess-glob', cwd: searchProj, tool_name: 'Glob',
+        tool_input: { pattern: '**/*rotation*.js' },
+      });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const j = JSON.parse(out.stdout);
+      assert.strictEqual(j.hookSpecificOutput.permissionDecision, 'allow');
+      assert.ok(/vault rotation/.test(j.hookSpecificOutput.additionalContext));
+    });
+
+    check('search hook: a paused/excluded project is skipped, exactly as every other hook skips it', () => {
+      // The per-project pause is the user's escape hatch and the ONLY switch
+      // this feature has; there is deliberately no feature-level toggle.
+      const off = path.join(searchProj, '.membridge-off');
+      fs.writeFileSync(off, '');
+      try {
+        const out = runSearchHook(grepPayload('sess-paused', 'vault rotation'));
+        assert.strictEqual(out.status, 0, out.stderr);
+        assert.strictEqual(out.stdout.trim(), '', 'a paused project must serve nothing');
+      } finally {
+        fs.unlinkSync(off);
+      }
+      // ...and un-pausing restores it, so the check above proved the gate and
+      // not merely that this fixture never serves.
+      const back = runSearchHook(grepPayload('sess-unpaused', 'vault rotation'));
+      assert.ok(back.stdout.trim(), 'un-pausing must restore serving');
+    });
+
+    check('search hook: an untracked working directory is skipped CLEANLY, not by throwing', () => {
+      // Silence alone would be satisfied by the fail-open catch swallowing a
+      // crash, which is a completely different (and much worse) code path than
+      // the resolve gate returning. So this asserts the same three things the
+      // recall hook's own M5 miss check does: exit 0, no output, and NOTHING
+      // written to the log — a hook that stepped aside on purpose logs nothing,
+      // a hook that blew up logs 'hook search error'. It must also leave no
+      // state behind in a directory MemBridge does not own.
+      const untracked = path.join(ROOT, 'search-untracked');
+      fs.mkdirSync(untracked, { recursive: true });
+      const logBefore = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
+      const out = runSearchHook({
+        session_id: 'sess-untracked', cwd: untracked, tool_name: 'Grep',
+        tool_input: { pattern: 'vault rotation' },
+      });
+      const logAfter = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
+      assert.strictEqual(out.status, 0, out.stderr);
+      assert.strictEqual(out.stdout.trim(), '', 'no tracked project owns this cwd, so nothing may be served');
+      assert.ok(!logAfter.slice(logBefore.length).includes('hook search error'),
+        'the untracked cwd threw and was swallowed by the fail-open catch instead of being gated');
+      assert.ok(!fs.existsSync(path.join(untracked, '.membridge')),
+        'the hook created state inside a directory MemBridge does not track');
+    });
+
+    check('search hook: it runs on its own account, with no config flag able to switch it off', () => {
+      // Owner's decision: memory delivery IS the product, so it ships with no
+      // feature toggle. A config carrying every plausible off-switch (including
+      // recall's real one) must change nothing here.
+      const prev = util.loadUserConfig();
+      util.saveUserConfig({
+        ...prev,
+        recall: { ...(prev.recall || {}), enabled: false },
+        search: { enabled: false },
+        searchRecall: { enabled: false },
+      });
+      try {
+        const out = runSearchHook(grepPayload('sess-noflag', 'vault rotation'));
+        assert.strictEqual(out.status, 0, out.stderr);
+        const j = JSON.parse(out.stdout);
+        assert.ok(/vault rotation/.test(j.hookSpecificOutput.additionalContext),
+          'the search hook must not honour any feature-level off switch');
+      } finally {
+        util.saveUserConfig(prev);
+      }
+    });
+
+    check('search hook: FAIL-OPEN — a forced internal failure exits 0 with no output at all', () => {
+      // The single most important property: a hook failure must never block,
+      // corrupt or delay a Grep.
+      const forced = runSearchHook(grepPayload('sess-forcefail', 'vault rotation'), { MEMBRIDGE_SEARCH_FORCE_FAIL: '1' });
+      assert.strictEqual(forced.status, 0, `a thrown hook must still exit 0: ${forced.stderr}`);
+      assert.strictEqual(forced.stdout.trim(), '', 'a thrown hook must print nothing');
+    });
+
+    check('search hook: FAIL-OPEN — a garbled or empty payload steps aside silently', () => {
+      for (const input of ['', 'not json at all', '[]', 'null', JSON.stringify({ tool_name: 'Grep' })]) {
+        const out = spawnSync(process.execPath, [SEARCH_ENTRY, 'search'], { input, encoding: 'utf8', env: process.env });
+        assert.strictEqual(out.status, 0, `payload ${JSON.stringify(input)} must exit 0: ${out.stderr}`);
+        assert.strictEqual(out.stdout.trim(), '', `payload ${JSON.stringify(input)} must print nothing`);
+      }
+    });
+
+    check('search-query: a Grep regex becomes the words a human meant, not its metacharacters', () => {
+      assert.strictEqual(searchQueryLib.queryFromPattern('function\\s+parseAuth\\('), 'function parseauth');
+      assert.strictEqual(searchQueryLib.queryFromPattern('^\\s*teamAccessLost\\b'), 'teamaccesslost');
+      assert.strictEqual(searchQueryLib.queryFromPattern('vault|rotation'), 'vault rotation');
+      // `.` and `-` survive inside a token so filenames stay whole...
+      assert.strictEqual(searchQueryLib.queryFromPattern('auth\\.js'), 'auth.js');
+      // ...but a bare `.*` trims to nothing rather than becoming a term.
+      assert.strictEqual(searchQueryLib.queryFromPattern('.*'), null);
+    });
+
+    check('search-query: a pattern with no specific term in it yields no query at all', () => {
+      for (const p of ['.*', '\\d+', '^$', '[a-z]{2}', 'id', '  ', '{}', '(.*)']) {
+        assert.strictEqual(searchQueryLib.queryFromPattern(p), null, `${JSON.stringify(p)} must not become a query`);
+      }
+      assert.strictEqual(searchQueryLib.queryFromToolInput(null), null);
+      assert.strictEqual(searchQueryLib.queryFromToolInput({}), null);
+      // A long alternation is capped, or the majority rule makes it match
+      // nothing while still costing a full scan.
+      const many = searchQueryLib.queryFromPattern('alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel');
+      assert.strictEqual(many.split(' ').length, searchQueryLib.MAX_TERMS);
+      // A machine-sized pattern is refused outright rather than tokenized:
+      // nothing that long is a question a person is asking.
+      const huge = 'searchable'.repeat(searchQueryLib.MAX_PATTERN_CHARS);
+      assert.ok(huge.length > searchQueryLib.MAX_PATTERN_CHARS, 'fixture must exceed the bound');
+      assert.strictEqual(searchQueryLib.queryFromPattern(huge), null);
+    });
+
+    check('search-brief: the injected block is hard-capped in results AND characters', () => {
+      // Even with no measurement anywhere, a block that can grow without limit
+      // in front of every search is a defect on its own terms.
+      const long = 'x'.repeat(4000);
+      const many = Array.from({ length: 12 }, (_, i) => ({
+        ts: `2026-06-0${(i % 9) + 1}T10:00:00.000Z`, author: 'Teammate',
+        headline: `${long} ${i}`, decisions: long, score: 40 - i,
+      }));
+      const brief = searchBriefLib.build(many);
+      assert.ok(brief, 'a block with real matches must be produced');
+      assert.ok(brief.entries.length <= searchBriefLib.MAX_RESULTS,
+        `at most ${searchBriefLib.MAX_RESULTS} results, got ${brief.entries.length}`);
+      assert.ok(brief.text.length <= searchBriefLib.MAX_CHARS,
+        `block is ${brief.text.length} chars, cap is ${searchBriefLib.MAX_CHARS}`);
+      // The entries reported as served must be exactly the ones the text names.
+      assert.ok(brief.entries.every(e => brief.text.includes(String(e.headline).slice(0, 20))),
+        'build() must report as served only what it actually rendered');
+    });
+
+    check('search-brief: nothing worth saying returns null, never an empty block', () => {
+      assert.strictEqual(searchBriefLib.build([]), null);
+      assert.strictEqual(searchBriefLib.build(null), null);
+      // A score reachable only through `project`/`author` — fields every entry
+      // in a project shares — is evidence of nothing and must not surface.
+      assert.strictEqual(searchBriefLib.build([{ ts: '2026-06-01T00:00:00.000Z', headline: 'weak', score: searchBriefLib.MIN_SCORE - 1 }]), null);
+      assert.ok(searchBriefLib.build([{ ts: '2026-06-01T00:00:00.000Z', headline: 'strong', score: searchBriefLib.MIN_SCORE }]));
+    });
+
+    check('search: rankWithFallback is the ONE two-pass policy, shared by search_memory and the hook', () => {
+      const entries = [
+        { ts: '2026-06-01T00:00:00.000Z', headline: 'vault rotation fails closed', project: 'p', author: 'a' },
+        { ts: '2026-06-02T00:00:00.000Z', headline: 'palette tokens renamed', project: 'p', author: 'a' },
+      ];
+      // Strict pass: a majority of terms must match, so a precise query is precise.
+      const strict = searchRankLib.rankWithFallback(entries, 'vault rotation');
+      assert.strictEqual(strict.length, 1);
+      assert.ok(/vault/.test(strict[0].headline));
+      // Question-shaped query: the filler words can never appear in memory
+      // prose, so the strict majority finds nothing and the relaxed pass runs.
+      const relaxed = searchRankLib.rankWithFallback(entries, 'has anyone dealt with vault rotation');
+      assert.ok(relaxed.length >= 1, 'the relaxed fallback must rescue a question-shaped query');
+      // A single-term miss must NOT be relaxed into matching everything.
+      assert.deepStrictEqual(searchRankLib.rankWithFallback(entries, 'quaternion'), []);
+    });
+
+    check('activity: projectEntries builds one project\'s local + cached team entries, and honours teamAccessLost', () => {
+      const st = util.loadState();
+      const proj = st.projects[searchProj];
+      const cfg = util.getConfig();
+      const regexes = digest.compileRedactions(cfg);
+      const withTeam = { ...proj, teamEntries: [{ author: 'Teammate', ts: '2026-06-03T00:00:00.000Z', source: 'Codex', headline: 'teammate note' }] };
+      const got = activityLib.projectEntries(searchProj, withTeam, cfg, regexes);
+      assert.ok(got.local.length >= 2, 'local entries must be built from the project events');
+      assert.ok(got.local.every(e => e.origin === 'local' && e.project === 'search-hook-proj'));
+      assert.strictEqual(got.team.length, 1, 'cached team rows must be normalized alongside');
+      assert.strictEqual(got.team[0].author, 'Teammate');
+      // A machine the backend no longer lists contributes nothing from the
+      // team side, while the user's OWN work is untouched.
+      const lost = activityLib.projectEntries(searchProj, { ...withTeam, teamAccessLost: true }, cfg, regexes);
+      assert.deepStrictEqual(lost.team, []);
+      assert.strictEqual(lost.local.length, got.local.length);
+    });
+
+    check('search hook: setup-hooks registers it on Grep|Glob and remove-hooks takes it back out', () => {
+      const f = path.join(ROOT, 'claude-settings-search-hook.json');
+      const userEntry = { matcher: 'Bash', hooks: [{ type: 'command', command: 'node /Users/x/Documents/Membridge/scripts/mylint.js' }] };
+      fs.writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [userEntry] } }, null, 2));
+      const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const after = JSON.parse(read(f));
+      const ours = after.hooks.PreToolUse.filter(e => e.hooks.some(h => h.command === hooks.searchCommand()));
+      assert.strictEqual(ours.length, 1, `exactly one search entry expected: ${JSON.stringify(after.hooks.PreToolUse)}`);
+      assert.strictEqual(ours[0].matcher, 'Grep|Glob', 'the search hook must register on Grep and Glob');
+      assert.strictEqual(ours[0].hooks[0].timeout, 5, 'the settings timeout is this hook\'s only real bound');
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks rewrote the user's own hook");
+      // Idempotent: a second run must not duplicate it.
+      const out2 = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out2.status, 0, out2.stderr);
+      const after2 = JSON.parse(read(f));
+      assert.strictEqual(after2.hooks.PreToolUse.filter(e => e.hooks.some(h => h.command === hooks.searchCommand())).length, 1,
+        'setup-hooks duplicated the search entry');
+      // ...and remove-hooks takes ours out while leaving the user's alone.
+      const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(rm.status, 0, rm.stderr);
+      const afterRm = JSON.parse(read(f));
+      assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry],
+        'remove-hooks must strip both PreToolUse hooks of ours and nothing else');
+    });
+
+    check('search hook: ownership is anchored — a user hook merely ending in "membridge-hook.js search" is never claimed', () => {
+      // Same false-positive class as the recall hook's own anchoring fix: a
+      // bare substring test would have setup-hooks OVERWRITE the user's command
+      // and remove-hooks DELETE it.
+      const f = path.join(ROOT, 'claude-settings-search-fp-anchor.json');
+      const userEntry = { matcher: 'Grep', hooks: [{ type: 'command', command: '"/usr/bin/notmembridge-hook.js" search' }] };
+      fs.writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [userEntry] } }, null, 2));
+      const env = { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f };
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const after = JSON.parse(read(f));
+      assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks claimed a hook that was never ours");
+      const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      assert.strictEqual(rm.status, 0, rm.stderr);
+      assert.deepStrictEqual(JSON.parse(read(f)).hooks.PreToolUse, [userEntry],
+        'remove-hooks deleted a hook that was never ours');
+    });
+
+    check('search hook: the served memo is bounded and lives beside the project, not in recall\'s state', () => {
+      // Two independent session records must never share a file, and the memo
+      // must not grow for the life of a long session.
+      assert.ok(hooksSearchLib.searchDir(searchProj).endsWith(path.join('.membridge', 'search')),
+        `unexpected memo location: ${hooksSearchLib.searchDir(searchProj)}`);
+      assert.ok(hooksSearchLib.SERVED_MEMO_MAX > 0 && hooksSearchLib.SERVED_MEMO_MAX <= 1000);
+      const memo = hooksSearchLib.sessionStatePath(searchProj, 'sess-serve-1');
+      assert.ok(fs.existsSync(memo), 'a served search must leave a session memo behind');
+      const raw = JSON.parse(read(memo));
+      assert.ok(Array.isArray(raw.served) && raw.served.length >= 1);
+      assert.ok(raw.served.every(v => typeof v === 'string' && v.length <= 16),
+        'fingerprints must be hashed, never the verbatim ask');
     });
   }
 

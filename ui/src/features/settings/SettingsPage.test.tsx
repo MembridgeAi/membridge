@@ -185,6 +185,7 @@ describe('SettingsPage', () => {
         hooksUpdateResult: {
           stop: { ok: false, detail: 'settings.json is not valid JSON — fix or remove it first' },
           recall: { ok: true, detail: 'already up to date' },
+          search: { ok: true, detail: 'already up to date' },
         },
       })
       renderWith(client, <SettingsPage />)
