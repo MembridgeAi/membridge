@@ -71,13 +71,13 @@ export function AccessPanel({ rows, defaultAccess, onToggle, onToggleDefault }: 
           <Toggle
             on={row.canSee}
             onChange={next => onToggle(row.id, next)}
-            label={`${row.name} — sees this project`}
+            label={`${row.name} sees this project`}
           />
         </RuledRow>
       ))}
       {hidden.map(row => (
         <p className="access-note" key={row.id}>
-          {row.name} loses access to this project right away — nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.
+          {row.name} loses access to this project right away. Nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.
         </p>
       ))}
       <div className="access-default">

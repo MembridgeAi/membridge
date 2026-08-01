@@ -21,7 +21,7 @@ describe('Shell', () => {
     expect(screen.getByText('MemBridge HQ')).toBeInTheDocument()
   })
 
-  it('omits team navigation entirely in solo mode — not disabled, absent', async () => {
+  it('omits team navigation entirely in solo mode, not disabled, absent', async () => {
     renderApp({ solo: true })
     await screen.findByRole('link', { name: 'Today' })
     expect(screen.queryByRole('link', { name: 'Members' })).toBeNull()

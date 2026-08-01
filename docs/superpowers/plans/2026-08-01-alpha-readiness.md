@@ -43,7 +43,7 @@ Do not mark this done off a green test suite.
 - [ ] Determine "homes to that root" using the same resolution the scanner uses (`projectResolve.rehomeEvents` / `findProjectKey`). Do not reimplement the matching, or adoption and ingestion will disagree.
 - [ ] If per-file attribution is not cheaply determinable before scanning, the acceptable fallback is: on adoption, clear offsets for all session files whose stored project attribution is unset or points at an untracked root. Never clear offsets for files attributed to an already-tracked project.
 - [ ] Wire `--no-backfill` to skip the reset.
-- [ ] Preserve the once-only offset invariant for the steady state. The dirty-flag comment at `lib/scan.js:651` explains why it exists. This change is a scoped reset at adoption, nothing more.
+- [ ] Preserve the once-only offset invariant for the steady state. The dirty-flag comment at `lib/scan.js:654` explains why it exists. This change is a scoped reset at adoption, nothing more.
 - [ ] Second test: adopting project A must not re-inject project B. Assert B's block is byte-identical before and after.
 
 ## Task 3b: end-to-end acceptance

@@ -823,6 +823,58 @@ async function main() {
     assert.ok(vendoredWasm.length >= 4,
       `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
   });
+  check('F1: the npm tarball ships ui/dist, so an npm-only install has a dashboard', () => {
+    // CRITICAL (alpha readiness, F1): package.json's "files" whitelist omitted
+    // ui/dist, so `membridge dashboard` returned 503 "UI not built. Run: cd ui
+    // && npm run build" for EVERY npm install -- telling a user to build in a
+    // directory the tarball does not contain. The Electron app was the only
+    // working surface, and it is Apple Silicon only.
+    //
+    // This packs for real and extracts, rather than trusting `npm pack
+    // --dry-run --json` like C1 above. The dry-run file list is computed from
+    // the "files" globs and is happy to list a directory that does not exist
+    // on disk at pack time, which is exactly the failure mode once the UI
+    // build moves into a lifecycle script: the manifest would look correct and
+    // the tarball would still be empty. Only the extracted bytes prove it.
+    const packDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-pack-'));
+    try {
+      const out = spawnSync('npm', ['pack', '--pack-destination', packDir], {
+        cwd: path.join(__dirname, '..'), encoding: 'utf8',
+        // Same npm.cmd/EINVAL and ENOBUFS reasoning as C1 above.
+        shell: process.platform === 'win32',
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      assert.strictEqual(out.status, 0,
+        `npm pack failed: ${out.error ? out.error.message : (out.stderr || `status ${out.status}`)}`);
+      const tarballs = fs.readdirSync(packDir).filter(f => f.endsWith('.tgz'));
+      assert.strictEqual(tarballs.length, 1,
+        `expected exactly one packed tarball, got ${JSON.stringify(tarballs)}`);
+      // bsdtar ships in Windows 10 1803+ and on the windows-latest runner, so
+      // this needs no platform branch and no tar dependency.
+      const untar = spawnSync('tar', ['-xzf', path.join(packDir, tarballs[0]), '-C', packDir], {
+        encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+      });
+      assert.strictEqual(untar.status, 0,
+        `extracting the tarball failed: ${untar.error ? untar.error.message : (untar.stderr || `status ${untar.status}`)}`);
+      const shell = path.join(packDir, 'package', 'ui', 'dist', 'index.html');
+      assert.ok(fs.existsSync(shell),
+        'the packed tarball has no ui/dist/index.html, so `membridge dashboard` '
+        + 'serves the 503 for every npm install');
+      // An index.html that ships without its hashed bundle is a white screen,
+      // which reads as "works" to a status-code check and as "broken" to a
+      // human. Assert the shell actually references an asset that is present.
+      const html = read(shell);
+      const refs = [...html.matchAll(/(?:src|href)="\/(assets\/[^"]+)"/g)].map(m => m[1]);
+      assert.ok(refs.length > 0,
+        `the packed index.html references no /assets/* bundle: ${html.slice(0, 400)}`);
+      for (const ref of refs) {
+        assert.ok(fs.existsSync(path.join(packDir, 'package', 'ui', 'dist', ref)),
+          `packed index.html references ${ref}, which is not in the tarball`);
+      }
+    } finally {
+      fs.rmSync(packDir, { recursive: true, force: true });
+    }
+  });
 
   // --- 1. fresh sync ---
   const r1 = syncOnce();
@@ -1645,6 +1697,107 @@ async function main() {
       assert.ok(/summaries\.jsonl/.test(entry), `help does not name what is deleted: ${entry}`);
       assert.ok(/cannot be undone/i.test(entry), `help never says the deletion is irreversible: ${entry}`);
     });
+
+    // --- F2: `membridge add`, the missing enrollment path ---
+    // CRITICAL (alpha readiness, F2): there was no CLI command to enroll a
+    // project at all. The ingestion gate (isTrackedProject) only keeps events
+    // whose project is a state.projects key or already has a .membridge/
+    // directory, and nothing in the daemon discovers a new root. The one
+    // enrollment path in the codebase was POST /api/projects/adopt, a
+    // dashboard action, which combined with F1 shipping no dashboard left an
+    // npm user with no way in short of planting a .membridge/ by hand.
+    {
+      const addHome = path.join(ROOT, 'add-cli-home');
+      const addEnv = { ...process.env, MEMBRIDGE_HOME: addHome };
+      const runAdd = (...argv) =>
+        spawnSync(process.execPath, [BIN, 'add', ...argv], { encoding: 'utf8', env: addEnv });
+      const addState = () => {
+        try { return JSON.parse(read(path.join(addHome, 'state.json'))); } catch { return { projects: {} }; }
+      };
+      // Compare canonically: cmdAdd realpaths its targets (see the dual-key
+      // check below), and on macOS the suite's ROOT is under /var, a symlink
+      // to /private/var. Comparing the raw fixture path would never match.
+      const canon = p => { try { return util.normPath(fs.realpathSync(p)); } catch { return util.normPath(p); } };
+      const tracked = p =>
+        Object.keys(addState().projects || {}).some(k => canon(k) === canon(p));
+
+      const addProj = path.join(ROOT, 'projects', 'cli-adopt-me');
+      fs.mkdirSync(addProj, { recursive: true });
+
+      check('add: `membridge add <dir>` enrolls the directory as a tracked project', () => {
+        const out = runAdd(addProj);
+        assert.strictEqual(out.status, 0,
+          `\`membridge add\` did not succeed: status ${out.status}, stdout ${out.stdout}, stderr ${out.stderr}`);
+        assert.ok(tracked(addProj),
+          `add left no state.projects key for ${addProj}: ${JSON.stringify(addState().projects)}`);
+      });
+
+      check('add: with no argument it adopts the current directory', () => {
+        const cwdProj = path.join(ROOT, 'projects', 'cli-adopt-cwd');
+        fs.mkdirSync(cwdProj, { recursive: true });
+        const out = spawnSync(process.execPath, [BIN, 'add'], { encoding: 'utf8', env: addEnv, cwd: cwdProj });
+        assert.strictEqual(out.status, 0, `bare \`membridge add\` failed: ${out.stderr || out.stdout}`);
+        assert.ok(tracked(cwdProj), `bare add did not adopt its cwd: ${JSON.stringify(addState().projects)}`);
+      });
+
+      check('add: reports adopted, already tracked and skipped per path, and takes several at once', () => {
+        const a = path.join(ROOT, 'projects', 'cli-adopt-multi-a');
+        const b = path.join(ROOT, 'projects', 'cli-adopt-multi-b');
+        fs.mkdirSync(a, { recursive: true });
+        fs.mkdirSync(b, { recursive: true });
+        const missing = path.join(ROOT, 'projects', 'cli-adopt-nope');
+        // addProj is already tracked by the first check above.
+        const out = runAdd(a, b, addProj, missing);
+        assert.ok(tracked(a) && tracked(b), 'a multi-path add did not adopt every good path');
+        const s = out.stdout;
+        assert.ok(s.includes(a) && s.includes(b) && s.includes(addProj) && s.includes(missing),
+          `every path should be named in the output, got: ${s}`);
+        assert.ok(/already tracked/i.test(s), `the already-tracked path is not reported as such: ${s}`);
+        assert.ok(/not a directory/i.test(s), `the bad path's reason is not reported: ${s}`);
+        // One bad path must not abandon the rest, which is a guarantee
+        // adoptProjects already makes and this must not reimplement.
+        assert.ok(/adopted/i.test(s), `nothing was reported as adopted: ${s}`);
+      });
+
+      check('add: an explicit path and the same dir as cwd produce ONE project key, not two', () => {
+        // addProject keys on path.resolve(), which does not follow symlinks,
+        // while process.cwd() is already resolved. On macOS the suite's own
+        // ROOT lives under /var -> /private/var, so without canonicalizing in
+        // cmdAdd the two spellings of one directory become two tracked
+        // projects and findProjectKey never matches across the pair. This is
+        // the check that caught it.
+        const dual = path.join(ROOT, 'projects', 'cli-adopt-dual');
+        fs.mkdirSync(dual, { recursive: true });
+        const before = Object.keys(addState().projects || {}).length;
+        assert.strictEqual(runAdd(dual).status, 0, 'explicit-path add failed');
+        const out = spawnSync(process.execPath, [BIN, 'add'], { encoding: 'utf8', env: addEnv, cwd: dual });
+        assert.strictEqual(out.status, 0, `cwd add failed: ${out.stderr || out.stdout}`);
+        const after = Object.keys(addState().projects || {}).length;
+        assert.strictEqual(after - before, 1,
+          `one directory adopted two ways produced ${after - before} keys: `
+          + JSON.stringify(Object.keys(addState().projects || {})));
+        assert.ok(/already tracked/i.test(out.stdout),
+          `the second add should report the project as already tracked: ${out.stdout}`);
+      });
+
+      check('add: the help text carries it in the top block, beside scan and sync', () => {
+        const help = spawnSync(process.execPath, [BIN, 'help'], { encoding: 'utf8' });
+        assert.strictEqual(help.status, 0, help.stderr);
+        const lines = help.stdout.split('\n');
+        const at = n => lines.findIndex(l => new RegExp(`^\\s{2}${n}\\b`).test(l));
+        const addAt = at('add');
+        assert.ok(addAt !== -1, `no add entry in the help text: ${help.stdout}`);
+        const scanAt = at('scan');
+        const syncAt = at('sync');
+        assert.ok(syncAt !== -1 && scanAt !== -1, 'sync/scan vanished from the help');
+        // "top block, not buried": within a few lines of the scan/sync pair.
+        assert.ok(Math.abs(addAt - scanAt) <= 4,
+          `add is not beside scan and sync (add at ${addAt}, scan at ${scanAt}, sync at ${syncAt})`);
+        // The pair must be discoverable from each other.
+        const entry = lines.slice(addAt, addAt + 3).join('\n');
+        assert.ok(/remove/.test(entry), `add's help does not cross-reference remove: ${entry}`);
+      });
+    }
   }
 
   // ===== Regression: a clean project's lastSync must keep moving =====
@@ -3047,7 +3200,7 @@ async function main() {
       assert.ok(/1 event\(s\), last sync 2026-07-09/.test(active), `active project line changed: ${active}`);
       assert.ok(/no sessions captured yet/.test(empty), `empty project reads as active: ${empty}`);
       // Teammate activity is real content, so it is not "nothing to inject".
-      assert.ok(/no local sessions yet — 1 teammate entry synced/.test(teamOnly),
+      assert.ok(/no local sessions yet, 1 teammate entry synced/.test(teamOnly),
         `team-only project misreported: ${teamOnly}`);
       assert.ok(!/No agent sessions captured yet/.test(out), `whole-install empty state fired with sessions present: ${out}`);
     });
@@ -9859,7 +10012,7 @@ async function main() {
   });
   check('distill: status reports the Distill line with hook install state', () => {
     const out = spawnSync(process.execPath, [BIN, 'status'], { env: envHook, encoding: 'utf8' });
-    assert.ok(/Distill:\s+enabled — Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
+    assert.ok(/Distill:\s+enabled, Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
   });
   const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
   const afterRemove = JSON.parse(read(claudeSettings));
@@ -15822,7 +15975,7 @@ async function main() {
       { cwd: projLine, encoding: 'utf8', env: process.env });
     check('why: `membridge why <file>` (no line) is unchanged file-level output', () => {
       assert.strictEqual(cliPlain.status, 0, cliPlain.stderr);
-      assert.ok(/Why src\/auth\.js —/.test(cliPlain.stdout), `stdout: ${cliPlain.stdout}`);
+      assert.ok(/Why src\/auth\.js:/.test(cliPlain.stdout), `stdout: ${cliPlain.stdout}`);
       assert.ok(!/commit [0-9a-f]/.test(cliPlain.stdout), 'plain why must not print a commit line');
     });
 
@@ -15854,7 +16007,7 @@ async function main() {
       // credited candidate catches up) — the annotation must not promise
       // recency it cannot know.
       assert.ok(!/just committed/i.test(cliPending.stdout), `annotation must not claim "just committed": ${cliPending.stdout}`);
-      assert.ok(/Why src\/pending\.js —/.test(cliPending.stdout), `expected file-level history fallback in: ${cliPending.stdout}`);
+      assert.ok(/Why src\/pending\.js:/.test(cliPending.stdout), `expected file-level history fallback in: ${cliPending.stdout}`);
     });
 
     // MCP boundary: the why tool gains an optional line param.

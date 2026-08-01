@@ -20,7 +20,7 @@ function vintageGlyph(v: HookVintage): string {
 
 function vintageLabel(v: HookVintage): string {
   if (v === 'current') return 'up to date'
-  if (v === 'outdated') return 'outdated — update available'
+  if (v === 'outdated') return 'outdated, update available'
   return 'unknown'
 }
 

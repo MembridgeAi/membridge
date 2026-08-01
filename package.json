@@ -25,12 +25,15 @@
   "files": [
     "bin",
     "lib",
+    "ui/dist",
     "vendor",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node test/run-tests.js",
+    "build:ui": "node scripts/build-ui.js",
+    "prepack": "npm run build:ui",
     "prepublishOnly": "npm test",
     "start": "node bin/membridge.js start",
     "app": "node scripts/prepare-app.js && electron app",

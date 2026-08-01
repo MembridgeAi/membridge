@@ -68,7 +68,7 @@ export function ContextFilesDialog({ contextFiles, onClose }: ContextFilesDialog
         Always written
         <div className="dialog-field-hint">
           One file per line, relative to each project's root.
-          {!capabilities.filePicker && ' Open MemBridge.app for a Browse button — this browser tab can only take typed paths.'}
+          {!capabilities.filePicker && ' Open MemBridge.app for a Browse button. This browser tab can only take typed paths.'}
         </div>
         <textarea
           className="dialog-textarea"
