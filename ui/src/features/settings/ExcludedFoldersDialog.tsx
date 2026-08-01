@@ -96,7 +96,7 @@ export function ExcludedFoldersDialog({ exclude, excludeStale, onClose }: Exclud
         Add a folder
         <div className="dialog-field-hint">
           A path or glob (e.g. */node_modules).
-          {!capabilities.filePicker && ' Open MemBridge.app for a Browse button — this browser tab can only take typed paths.'}
+          {!capabilities.filePicker && ' Open MemBridge.app for a Browse button. This browser tab can only take typed paths.'}
         </div>
         <input
           className="dialog-input"

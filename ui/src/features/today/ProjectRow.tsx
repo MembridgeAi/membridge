@@ -52,7 +52,7 @@ function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: Pr
         {project.latestSummary && (
           <div className="project-summary">
             {project.latestSummary.text}
-            <span className="project-summary-by"> — {project.latestSummary.author}</span>
+            <span className="project-summary-by">, {project.latestSummary.author}</span>
           </div>
         )}
       </div>

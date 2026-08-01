@@ -260,7 +260,7 @@ export function MembersPage() {
                 )}
                 {inviteCopy.status === 'revealed' && (
                   <span className="mono invite-code-reveal" role="status">
-                    Couldn't copy automatically — copy this {inviteCopy.kind}: {inviteCopy.value}
+                    Couldn't copy automatically. Copy this {inviteCopy.kind}: {inviteCopy.value}
                   </span>
                 )}
               </span>
@@ -312,7 +312,7 @@ export function MembersPage() {
             // syncs again keeps whatever it already has; nothing here can
             // reach it. Say all three plainly, since a confirm dialog is
             // the moment the admin forms their expectation.
-            ? `Removing ${pendingAction.member.name} cuts off access to every shared project right away — nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.`
+            ? `Removing ${pendingAction.member.name} cuts off access to every shared project right away. Nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.`
             : `${pendingAction.member.name} becomes the team owner immediately. This can't be undone from here.`}
           confirmLabel={pendingAction.kind === 'remove' ? 'Remove from team' : 'Transfer ownership'}
           destructive={pendingAction.kind === 'remove'}

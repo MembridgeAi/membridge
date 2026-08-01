@@ -108,7 +108,7 @@ describe('SettingsPage', () => {
     const row = await screen.findByTestId('setting-mcp')
     await user.click(within(row).getByRole('button', { name: /re-register/i }))
     expect(await within(row).findByText(/claude code: registered/i)).toBeInTheDocument()
-    expect(within(row).getByText(/codex: unchanged — already registered/i)).toBeInTheDocument()
+    expect(within(row).getByText(/codex: unchanged, already registered/i)).toBeInTheDocument()
   })
 
   // A failed row must surface visibly, never read as a silent success.
@@ -121,7 +121,7 @@ describe('SettingsPage', () => {
     renderWith(client, <SettingsPage />)
     const row = await screen.findByTestId('setting-mcp')
     await user.click(within(row).getByRole('button', { name: /re-register/i }))
-    const resultChip = await within(row).findByText(/cursor: failed — config file is not writable/i)
+    const resultChip = await within(row).findByText(/cursor: failed, config file is not writable/i)
     expect(resultChip).toBeInTheDocument()
     expect(resultChip.className).toMatch(/chip-bad/)
   })
@@ -149,11 +149,11 @@ describe('SettingsPage', () => {
       expect(within(row).getByText(/recall hook: up to date/i)).toBeInTheDocument()
     })
 
-    it('renders "outdated — update available" honestly, distinct from up to date', async () => {
+    it('renders "outdated, update available" honestly, distinct from up to date', async () => {
       const client = new FakeDataClient({ hooksVersion: { stop: 'outdated', recall: 'current' } })
       renderWith(client, <SettingsPage />)
       const row = await screen.findByTestId('setting-summaries')
-      expect(within(row).getByText(/stop hook: outdated — update available/i)).toBeInTheDocument()
+      expect(within(row).getByText(/stop hook: outdated, update available/i)).toBeInTheDocument()
       expect(within(row).getByText(/recall hook: up to date/i)).toBeInTheDocument()
     })
 
@@ -183,7 +183,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup()
       const client = new FakeDataClient({
         hooksUpdateResult: {
-          stop: { ok: false, detail: 'settings.json is not valid JSON — fix or remove it first' },
+          stop: { ok: false, detail: 'settings.json is not valid JSON, fix or remove it first' },
           recall: { ok: true, detail: 'already up to date' },
           search: { ok: true, detail: 'already up to date' },
         },

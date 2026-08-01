@@ -3099,7 +3099,7 @@ async function main() {
       assert.ok(/1 event\(s\), last sync 2026-07-09/.test(active), `active project line changed: ${active}`);
       assert.ok(/no sessions captured yet/.test(empty), `empty project reads as active: ${empty}`);
       // Teammate activity is real content, so it is not "nothing to inject".
-      assert.ok(/no local sessions yet — 1 teammate entry synced/.test(teamOnly),
+      assert.ok(/no local sessions yet, 1 teammate entry synced/.test(teamOnly),
         `team-only project misreported: ${teamOnly}`);
       assert.ok(!/No agent sessions captured yet/.test(out), `whole-install empty state fired with sessions present: ${out}`);
     });
@@ -9911,7 +9911,7 @@ async function main() {
   });
   check('distill: status reports the Distill line with hook install state', () => {
     const out = spawnSync(process.execPath, [BIN, 'status'], { env: envHook, encoding: 'utf8' });
-    assert.ok(/Distill:\s+enabled — Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
+    assert.ok(/Distill:\s+enabled, Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
   });
   const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
   const afterRemove = JSON.parse(read(claudeSettings));
@@ -15874,7 +15874,7 @@ async function main() {
       { cwd: projLine, encoding: 'utf8', env: process.env });
     check('why: `membridge why <file>` (no line) is unchanged file-level output', () => {
       assert.strictEqual(cliPlain.status, 0, cliPlain.stderr);
-      assert.ok(/Why src\/auth\.js —/.test(cliPlain.stdout), `stdout: ${cliPlain.stdout}`);
+      assert.ok(/Why src\/auth\.js:/.test(cliPlain.stdout), `stdout: ${cliPlain.stdout}`);
       assert.ok(!/commit [0-9a-f]/.test(cliPlain.stdout), 'plain why must not print a commit line');
     });
 
@@ -15906,7 +15906,7 @@ async function main() {
       // credited candidate catches up) — the annotation must not promise
       // recency it cannot know.
       assert.ok(!/just committed/i.test(cliPending.stdout), `annotation must not claim "just committed": ${cliPending.stdout}`);
-      assert.ok(/Why src\/pending\.js —/.test(cliPending.stdout), `expected file-level history fallback in: ${cliPending.stdout}`);
+      assert.ok(/Why src\/pending\.js:/.test(cliPending.stdout), `expected file-level history fallback in: ${cliPending.stdout}`);
     });
 
     // MCP boundary: the why tool gains an optional line param.

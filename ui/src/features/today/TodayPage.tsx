@@ -183,7 +183,7 @@ export function TodayPage() {
         <div className="section-label">Projects · this week</div>
         <div className="project-list">
           {projects.length === 0 ? (
-            <p className="today-empty-note">No projects yet — sync your first project to see it here.</p>
+            <p className="today-empty-note">No projects yet. Sync your first project to see it here.</p>
           ) : weekProjects.length === 0 ? (
             <p className="today-empty-note">No project activity in the last 7 days.</p>
           ) : (

@@ -263,13 +263,13 @@ function cmdStatus() {
   console.log(`Interval:  ${config.intervalSec}s   Targets: ${util.effectiveTargets(config).join(', ')}`);
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
-  console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'} — Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
+  console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'}, Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
   printMcpStatus(config);
   const encOn = ((config.team || {}).encrypt !== false);
   const keyAlerts = Array.isArray(state.keyAlerts) ? state.keyAlerts.length : 0;
-  let encLine = encOn ? 'on (E2E, fail-closed)' : 'OFF — plaintext sync (explicit team.encrypt=false hatch)';
-  if (encOn && state.teamCryptoPaused) encLine += ` — PAUSED: ${state.teamCryptoPaused}`;
-  if (keyAlerts) encLine += ` — ${keyAlerts} KEY ALERT(S): verify with \`membridge team fingerprint\`, then \`membridge team trust\``;
+  let encLine = encOn ? 'on (E2E, fail-closed)' : 'OFF, plaintext sync (explicit team.encrypt=false hatch)';
+  if (encOn && state.teamCryptoPaused) encLine += `, PAUSED: ${state.teamCryptoPaused}`;
+  if (keyAlerts) encLine += `, ${keyAlerts} KEY ALERT(S): verify with \`membridge team fingerprint\`, then \`membridge team trust\``;
   console.log(`Encrypt:   ${encLine}`);
   const projects = Object.entries(state.projects || {});
   console.log(`Projects:  ${projects.length}`);
@@ -283,7 +283,7 @@ function cmdStatus() {
     const detail = events
       ? `${events} event(s), last sync ${proj.lastSync || 'never'}`
       : emptyProjectDetail(proj);
-    console.log(`  ${key}${paused} — ${detail}`);
+    console.log(`  ${key}${paused}, ${detail}`);
   }
   if (!captured) printEmptyState(config, running);
   prompts.flushValueMoment(config);
@@ -308,12 +308,12 @@ function printMcpStatus(config) {
     return;
   }
   if (!rec || !Array.isArray(rec.rows) || !rec.rows.length) {
-    console.log('MCP:       not registered with any AI tool yet — run `membridge mcp register`');
+    console.log('MCP:       not registered with any AI tool yet. Run `membridge mcp register`');
     return;
   }
   const when = rec.at ? ` (last checked ${rec.at})` : '';
   if (rec.mode === 'unregister') {
-    console.log(`MCP:       removed from your AI tools${when} — re-register with \`membridge mcp register\``);
+    console.log(`MCP:       removed from your AI tools${when}. Re-register with \`membridge mcp register\``);
   } else {
     console.log(`MCP:       server name \`membridge\`${when}`);
   }
@@ -325,7 +325,7 @@ function printMcpStatus(config) {
 function emptyProjectDetail(proj) {
   const n = (proj.teamEntries || []).length;
   if (!n) return 'no sessions captured yet, nothing to inject';
-  return `no local sessions yet — ${n} teammate entr${n === 1 ? 'y' : 'ies'} synced`;
+  return `no local sessions yet, ${n} teammate entr${n === 1 ? 'y' : 'ies'} synced`;
 }
 
 // Where each enabled adapter looks for sessions, and whether that root is
@@ -358,7 +358,7 @@ function printEmptyState(config, running) {
   const tools = joinNames([...new Set(roots.map(r => r.name))]);
   console.log('');
   if (!roots.length) {
-    console.log('No session adapters are enabled, so nothing can be captured — every tool is');
+    console.log('No session adapters are enabled, so nothing can be captured. Every tool is');
     console.log(`switched off in the \`adapters\` section of ${util.configPath()}.`);
     return;
   }
@@ -373,7 +373,7 @@ function printEmptyState(config, running) {
   console.log(`No agent sessions captured yet. MemBridge reads ${tools} session logs;`);
   console.log(running
     ? `open a project in one of those tools and check back after a sync (every ${config.intervalSec}s).`
-    : 'open a project in one of those tools. Nothing is captured while the daemon is\nstopped — start it with `membridge start`.');
+    : 'open a project in one of those tools. Nothing is captured while the daemon is\nstopped. Start it with `membridge start`.');
 }
 
 // What `remove` actually deletes beyond the injected blocks. Named here rather
@@ -437,7 +437,7 @@ function cmdRemove() {
   const wipedNote = wiped ? ` Local memory history deleted in ${wiped} project(s).` : '';
   const keptNote = keepMemory ? ' Local memory history kept (--keep-memory).' : '';
   console.log(n
-    ? `Done — ${n} file(s) cleaned.${wipedNote}${keptNote}`
+    ? `Done, ${n} file(s) cleaned.${wipedNote}${keptNote}`
     : `No MemBridge blocks found.${keptNote}`);
 }
 
@@ -510,7 +510,7 @@ function mcpRow(r) {
   // sentence was written; on a success it is internal detail ('created',
   // 'cli') that reads as noise next to the status word.
   const why = r.detail || ((r.status === 'skipped' || r.status === 'failed') ? r.reason : '');
-  return why ? `${head} — ${why}` : head;
+  return why ? `${head}, ${why}` : head;
 }
 
 function cmdMcpRegister() {
@@ -585,7 +585,7 @@ async function cmdUpdate() {
 // resolve to a single owning commit.
 const LINE_FALLBACK = {
   'no-line': 'no valid line number given',
-  'uncommitted': 'that line was last touched by an edit that is not committed yet — not yet attributable',
+  'uncommitted': 'that line was last touched by an edit that is not committed yet, not yet attributable',
   'pending': 'attribution pending',
   'unmapped': 'that line traces to a commit with no local session attribution',
   'merge': 'that line traces to a merge commit (no single ask)',
@@ -611,12 +611,12 @@ function cmdWhy() {
     abs = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
   } catch {}
   const hit = projectResolve.resolveTrackedKey(state, abs);
-  if (!hit) die(`${fileArg} is not inside a tracked project — no MemBridge activity recorded there.`);
+  if (!hit) die(`${fileArg} is not inside a tracked project. No MemBridge activity recorded there.`);
   // Relativize against hit.root (the spelling the walk matched, an ancestor
   // of abs) and hand fileProvenance the RELATIVE path — relative paths are
   // spelling-independent, so the key's own spelling no longer matters.
   const rel = provenance.normalizeRel(hit.root, abs);
-  if (!rel) die(`${fileArg} is not inside a tracked project — no MemBridge activity recorded there.`);
+  if (!rel) die(`${fileArg} is not inside a tracked project. No MemBridge activity recorded there.`);
   const key = hit.key;
   const proj = state.projects[key];
 
@@ -636,7 +636,7 @@ function cmdWhy() {
       console.log(`No recorded AI edits for ${rel} in ${key}.`);
       return;
     }
-    console.log(`Why ${rel} — ${rows.length} session(s), newest first:\n`);
+    console.log(`Why ${rel}: ${rows.length} session(s), newest first:\n`);
     for (const r of rows) renderRow(r);
   };
 
@@ -649,11 +649,11 @@ function cmdWhy() {
   // explicit fallback reason followed by the file-level history.
   const res = provenance.lineProvenance(key, proj, config, rel, line, Date.now());
   if (res.fallback || !res.session) {
-    console.log(`Line ${rel}:${line} — ${LINE_FALLBACK[res.fallback] || 'no line-level attribution'}; showing file-level history instead.\n`);
+    console.log(`Line ${rel}:${line}: ${LINE_FALLBACK[res.fallback] || 'no line-level attribution'}; showing file-level history instead.\n`);
     renderFileLevel();
     return;
   }
-  console.log(`Why ${rel}:${line} — commit ${(res.sha || '').slice(0, 10)}:\n`);
+  console.log(`Why ${rel}:${line} at commit ${(res.sha || '').slice(0, 10)}:\n`);
   renderRow(res.session);
 }
 
@@ -668,7 +668,7 @@ function cmdChurn() {
     const a = args[i];
     if (!a.startsWith('--')) continue;
     if (!ALLOWED.has(a)) {
-      die(`Unknown option "${a}". churn takes only --session <id>, --since <Nd>, --project <path>. It has no per-person/teammate/author option by design — churn is never compared across people.`);
+      die(`Unknown option "${a}". churn takes only --session <id>, --since <Nd>, --project <path>. It has no per-person/teammate/author option by design, churn is never compared across people.`);
     }
     i++; // skip the flag's value
   }
@@ -679,7 +679,7 @@ function cmdChurn() {
   try { abs = fs.realpathSync(base); } catch {}
   // resolveTrackedKey walks up from a file's dirname — probe with a child.
   const hit = projectResolve.resolveTrackedKey(state, path.join(abs, '_'));
-  if (!hit) die(`${base} is not inside a tracked project — no MemBridge commits recorded there.`);
+  if (!hit) die(`${base} is not inside a tracked project. No MemBridge commits recorded there.`);
   const key = hit.key;
   const proj = state.projects[key] || { events: [] };
 
@@ -748,20 +748,20 @@ async function cmdJoin() {
     const email = opt('--email');
     const password = opt('--password') || process.env.MEMBRIDGE_PASSWORD || null;
     if (!email || !password) {
-      die('You are not logged in. Add --email and --password and MemBridge will log you in — or create the account if it is new.');
+      die('You are not logged in. Add --email and --password and MemBridge will log you in, or create the account if it is new.');
     }
     try {
       await teamsync.login(config, email, password, opt('--name'));
     } catch {
       const r = await teamsync.signup(config, email, password, opt('--name'));
       if (r.needsConfirmation) {
-        die(`Account created — check ${email} for a confirmation link, then run this join command again.`);
+        die(`Account created. Check ${email} for a confirmation link, then run this join command again.`);
       }
     }
   }
   const t = await teamsync.join(config, input);
   console.log(`Joined team "${t.team_name}".`);
-  console.log('Next: link a project with `membridge team link` inside it — or just work; matching git remotes are detected and suggested automatically.');
+  console.log('Next: link a project with `membridge team link` inside it, or just work; matching git remotes are detected and suggested automatically.');
 }
 
 async function cmdTeam() {
@@ -775,7 +775,7 @@ async function cmdTeam() {
     const url = opt('--url');
     const anonKey = opt('--anon-key');
     if (!url || !anonKey) {
-      die('Usage: membridge team setup --url https://<ref>.supabase.co --anon-key <anon key>\n(Advanced — self-hosting your own backend. On a normal build team sync already works; just run `membridge signup`.)');
+      die('Usage: membridge team setup --url https://<ref>.supabase.co --anon-key <anon key>\n(Advanced, self-hosting your own backend. On a normal build team sync already works; just run `membridge signup`.)');
     }
     const raw = util.loadUserConfig();
     raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), url, anonKey };
@@ -804,10 +804,10 @@ async function cmdTeam() {
   if (sub === 'fingerprint') {
     const r = await teamsync.fingerprintReport();
     if (!r.ok) die(r.error);
-    console.log(`Your key:   ${r.mine || '(no identity yet — created on the first team sync)'}`);
+    console.log(`Your key:   ${r.mine || '(no identity yet, created on the first team sync)'}`);
     if (!r.members.length) console.log('No teammate keys pinned yet.');
     for (const m of r.members) console.log(`  ${m.name || m.userId}:  ${m.fingerprint}`);
-    console.log('Compare these with your teammate over a trusted channel (a call, in person) — never through the synced backend itself.');
+    console.log('Compare these with your teammate over a trusted channel (a call, in person), never through the synced backend itself.');
     return;
   }
 
@@ -819,7 +819,7 @@ async function cmdTeam() {
   // a changed teammate key is ever accepted.
   if (sub === 'trust') {
     const needle = args[2];
-    if (!needle) die('Usage: membridge team trust <user-id or display name>\n(Only after verifying fingerprints out-of-band — `membridge team fingerprint` on both machines.)');
+    if (!needle) die('Usage: membridge team trust <user-id or display name>\n(Only after verifying fingerprints out-of-band, `membridge team fingerprint` on both machines.)');
     const r = await teamsync.trustMember(config, needle);
     if (!r.ok) die(r.error);
     console.log(`Re-pinned ${r.name || r.userId}.`);
@@ -839,12 +839,12 @@ async function cmdTeam() {
     if (!teams.length) die('You are not in any team yet.');
     if (!teamId && teams.length === 1) teamId = teams[0].team_id;
     if (!teamId) {
-      die('You are in multiple teams — pick one with --team <id>:\n' +
+      die('You are in multiple teams. Pick one with --team <id>:\n' +
         teams.map(t => `  ${t.team_id}  ${t.team_name || ''}`).join('\n'));
     }
     const r = await teamsync.rekeyTeam(config, teamId);
     if (!r.ok) die(r.error);
-    console.log(`Team rekeyed — new epoch ${r.epoch}, sealed to ${r.sealed} member(s). Encryption is active on this device now.`);
+    console.log(`Team rekeyed, new epoch ${r.epoch}, sealed to ${r.sealed} member(s). Encryption is active on this device now.`);
     if (r.withheld && r.withheld.length) {
       console.log(`  Withheld from (unpublished or unverified key): ${r.withheld.join(', ')}`);
       console.log('  They rejoin encryption once their key is trusted (`membridge team trust <name>`) and they sync.');
@@ -899,18 +899,18 @@ async function cmdTeam() {
     const projectPath = path.resolve(opt('--project') || process.cwd());
     let teamId = opt('--team');
     const teams = await teamsync.listTeams(config);
-    if (!teams.length) die('You are not in any team yet — `membridge team create <name>` or `team join <code>` first.');
+    if (!teams.length) die('You are not in any team yet. Run `membridge team create <name>` or `team join <code>` first.');
     if (!teamId && teams.length === 1) teamId = teams[0].team_id;
     if (!teamId) {
-      die(`You are in ${teams.length} teams — pick one with --team <id>:\n` +
+      die(`You are in ${teams.length} teams. Pick one with --team <id>:\n` +
         teams.map(t => `  ${t.team_id}  ${t.team_name}`).join('\n'));
     }
     const team = teams.find(t => t.team_id === teamId);
     const link = await teamsync.linkProject(config, projectPath, teamId, team ? team.team_name : '');
     if (link.adopted) {
-      console.log(`Adopted the existing ${path.join(memorydb.DIR_NAME, 'team.json')} — linked ${projectPath} to team "${link.teamName || link.teamId}", the same shared project as the teammate who committed it.`);
+      console.log(`Adopted the existing ${path.join(memorydb.DIR_NAME, 'team.json')}, linked ${projectPath} to team "${link.teamName || link.teamId}", the same shared project as the teammate who committed it.`);
     } else {
-      console.log(`Linked ${projectPath} to team "${team ? team.team_name : teamId}".\nRedacted memory entries for this project now sync with your team (${path.join(memorydb.DIR_NAME, 'team.json')} — commit it so teammates' clones link to the same project from any fork; if ${memorydb.DIR_NAME}/ is gitignored, add a \`!${memorydb.DIR_NAME}/team.json\` exception).`);
+      console.log(`Linked ${projectPath} to team "${team ? team.team_name : teamId}".\nRedacted memory entries for this project now sync with your team (${path.join(memorydb.DIR_NAME, 'team.json')}, commit it so teammates' clones link to the same project from any fork; if ${memorydb.DIR_NAME}/ is gitignored, add a \`!${memorydb.DIR_NAME}/team.json\` exception).`);
     }
     // First pass right away so the link is visible without waiting a tick.
     await teamSyncPass({ project: projectPath });
@@ -920,7 +920,7 @@ async function cmdTeam() {
   if (sub === 'unlink') {
     const projectPath = path.resolve(opt('--project') || process.cwd());
     console.log(teamsync.unlinkProject(projectPath)
-      ? `Unlinked ${projectPath} — this project no longer syncs with any team.`
+      ? `Unlinked ${projectPath}, this project no longer syncs with any team.`
       : 'This project was not linked.');
     return;
   }
@@ -931,7 +931,7 @@ async function cmdTeam() {
     if (!creds) return;
     const teams = await teamsync.listTeams(config);
     if (!teams.length) {
-      console.log('No teams yet — create one with: membridge team create <name>');
+      console.log('No teams yet. Create one with: membridge team create <name>');
       return;
     }
     console.log('Teams:');
@@ -962,15 +962,15 @@ function cmdHook() {
   if (sub === 'post-commit') return hooks.runPostCommit();
   if (sub === 'recall') return hooks.runRecall();
   if (sub === 'search') return require('../lib/hooks-search').runSearch();
-  die('Usage: membridge hook <stop|post-commit|recall|search>  (invoked by the installed hooks — see `membridge setup-hooks`)');
+  die('Usage: membridge hook <stop|post-commit|recall|search>  (invoked by the installed hooks, see `membridge setup-hooks`)');
 }
 
 function cmdHelp() {
-  console.log(`MemBridge v${pkg.version} — shared memory across your AI coding tools
+  console.log(`MemBridge v${pkg.version}: shared memory across your AI coding tools
 
 Your AI tools each keep their own session history. MemBridge watches them all,
 distills a brief per-project memory, and writes it into the context files every
-tool reads (CLAUDE.md, AGENTS.md, ...) — so Codex knows what Claude Code did,
+tool reads (CLAUDE.md, AGENTS.md, ...), so Codex knows what Claude Code did,
 and vice versa. Everything stays on your machine.
 
 Usage: membridge <command>
@@ -996,15 +996,15 @@ Usage: membridge <command>
   daemon              run in the foreground (used internally / by services)
   help                this text
 
-Provenance (why a file/line looks the way it does — see README):
+Provenance (why a file/line looks the way it does, see README):
   why <file>[:<line>] which AI sessions edited this file, newest first; add
                       :<line> for the one session behind a single line
   churn [--session <id>] [--since <Nd>] [--project <path>]
                       diagnostic-only: what fraction of a session's committed
-                      lines still survive in HEAD (a rework health signal —
+                      lines still survive in HEAD (a rework health signal,
                       never a target, never compared across people)
 
-Distillation (agent-written session summaries — see README):
+Distillation (agent-written session summaries, see README):
   setup-hooks         add a Claude Code Stop hook (agent-written session
                       summaries) AND a git post-commit hook in every tracked
                       repo (instant commit->session provenance capture)
@@ -1017,10 +1017,10 @@ Distillation (agent-written session summaries — see README):
                       project memory in front of a Grep/Glob before it runs;
                       invoked by Claude Code)
 
-MCP (expose project memory, read-only, to MCP-capable clients — Claude
+MCP (expose project memory, read-only, to MCP-capable clients: Claude
 Desktop, Cursor, Cowork, ...; see README):
   mcp                 start a read-only MCP server over stdio
-                      Nothing to install — it ships with MemBridge, and the
+                      Nothing to install. It ships with MemBridge, and the
                       installer registers it with every AI tool you have.
   mcp register        register the server with every installed AI tool
                       (Claude Code, Codex, Cursor, ...); prints one line per
@@ -1030,7 +1030,7 @@ Desktop, Cursor, Cowork, ...; see README):
                       (a foreign server that happens to be named "membridge"
                       is never touched)
 
-Team sync (share project memory with your team — see README):
+Team sync (share project memory with your team, see README):
   join <link-or-code> [--email <e> --password <p>]   one command from invite to member
   signup / login --email <e> --password <p> [--name "You"]
   logout

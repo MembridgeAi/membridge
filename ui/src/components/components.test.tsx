@@ -150,7 +150,7 @@ describe('Toggle', () => {
   })
 
   it('is queryable by a member name embedded in its label', () => {
-    render(<Toggle on={true} label="Sarah — can see this project" onChange={() => {}} />)
+    render(<Toggle on={true} label="Sarah can see this project" onChange={() => {}} />)
     expect(screen.getByRole('switch', { name: /Sarah/ })).toHaveAttribute('aria-checked', 'true')
   })
 })

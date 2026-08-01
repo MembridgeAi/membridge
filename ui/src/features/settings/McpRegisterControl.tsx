@@ -62,7 +62,7 @@ export function McpRegisterControl() {
       </button>
       {rows.map(row => (
         <StateChip key={row.agent} tone={toneFor(row.status)} glyph={glyphFor(row.status)}>
-          {`${agentLabel(row.agent)}: ${row.status}${row.detail ? ` — ${row.detail}` : ''}`}
+          {`${agentLabel(row.agent)}: ${row.status}${row.detail ? `, ${row.detail}` : ''}`}
         </StateChip>
       ))}
       {registerMcp.isError && (
