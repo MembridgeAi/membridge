@@ -7960,6 +7960,192 @@ async function main() {
       fs.writeFileSync(util.statePath(), savedState);
     }
   });
+  // ---- Tier 1: measured spend (measured-savings spec, Task 1) ----
+  // The whole point of this payload is that NOTHING in it is estimated. Every
+  // number traces to a vendor-reported `message.usage` the adapters already
+  // ingest, normalised once by lib/usage-normalize.js. These tests therefore
+  // assert provenance as much as arithmetic: the cache subset rules have to
+  // survive end to end, because getting them wrong double-counts cache on
+  // OpenAI and Google and would silently inflate the one figure on the page
+  // that is supposed to be beyond argument.
+  {
+    const server = require('../lib/server');
+    const mkSpendProj = name => {
+      const p = path.join(ROOT, 'projects', name);
+      fs.mkdirSync(p, { recursive: true });
+      return p;
+    };
+    // Runs measuredSpendPayload against an isolated state.projects, then puts
+    // the suite's real accumulated state back -- same guard the /api/savings
+    // tests use, for the same reason (every other project's events would
+    // otherwise land in these totals).
+    const withProjects = (projects, fn) => {
+      const savedState = read(util.statePath());
+      try {
+        util.saveState({ version: util.STATE_VERSION, files: {}, projects });
+        return fn();
+      } finally {
+        fs.writeFileSync(util.statePath(), savedState);
+      }
+    };
+
+    check('measured-spend: vendor usage becomes per-project and per-day measured tokens', () => {
+      const p = mkSpendProj('spend-anthropic');
+      const events = [
+        { ts: '2026-07-30T10:00:00Z', source: 'claude-code', kind: 'usage', session: 's1',
+          messageId: 'm1', model: 'claude-opus-4',
+          usage: { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 500,
+            cache_creation_input_tokens: 300 } },
+        { ts: '2026-07-30T11:00:00Z', source: 'claude-code', kind: 'usage', session: 's1',
+          messageId: 'm2', model: 'claude-opus-4',
+          usage: { input_tokens: 100, output_tokens: 20 } },
+        // A narrative event carrying no usage at all: it must not create a
+        // request, a day bucket, or a session row.
+        { ts: '2026-07-30T12:00:00Z', source: 'claude-code', kind: 'prompt', session: 's1', text: 'hi' },
+      ];
+      const payload = withProjects({ [p]: { name: 'spend-anthropic', events } },
+        () => server.measuredSpendPayload());
+      assert.strictEqual(payload.projects.length, 1);
+      const proj = payload.projects[0];
+      assert.strictEqual(proj.path, p);
+      // Anthropic's three input fields are DISJOINT, so nothing is subtracted:
+      // input 1000+100, cacheRead 500, cacheWrite 300, output 200+20.
+      assert.deepStrictEqual(proj.tokens,
+        { input: 1100, output: 220, cacheRead: 500, cacheWrite: 300, requests: 2 });
+      assert.deepStrictEqual(payload.totals,
+        { input: 1100, output: 220, cacheRead: 500, cacheWrite: 300, requests: 2 });
+      // Per day. Both usage records fall on the same local calendar day here.
+      assert.strictEqual(proj.days.length, 1);
+      assert.deepStrictEqual(proj.days[0].tokens,
+        { input: 1100, output: 220, cacheRead: 500, cacheWrite: 300, requests: 2 });
+    });
+
+    check('measured-spend: OpenAI and Google cached tokens stay a SUBSET of input, end to end', () => {
+      const po = mkSpendProj('spend-openai');
+      const pg = mkSpendProj('spend-google');
+      const payload = withProjects({
+        [po]: { name: 'spend-openai', events: [
+          { ts: '2026-07-30T10:00:00Z', source: 'codex', kind: 'usage', session: 'o1',
+            messageId: 'om1', model: 'gpt-5',
+            usage: { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 50 } },
+        ] },
+        [pg]: { name: 'spend-google', events: [
+          { ts: '2026-07-30T10:00:00Z', source: 'gemini', kind: 'usage', session: 'g1',
+            messageId: 'gm1', model: 'gemini-2.5-pro',
+            usage: { promptTokenCount: 800, cachedContentTokenCount: 300, candidatesTokenCount: 40 } },
+        ] },
+      }, () => server.measuredSpendPayload());
+      const byName = Object.fromEntries(payload.projects.map(x => [x.name, x]));
+      // OpenAI: cached_input_tokens is INSIDE input_tokens, so uncached input
+      // is 1000-400=600 and the cache read is 400. Reporting input as 1000
+      // here would double-count the cache against the same 1000 tokens.
+      assert.deepStrictEqual(byName['spend-openai'].tokens,
+        { input: 600, output: 50, cacheRead: 400, cacheWrite: 0, requests: 1 });
+      // Google: cachedContentTokenCount is likewise inside promptTokenCount.
+      assert.deepStrictEqual(byName['spend-google'].tokens,
+        { input: 500, output: 40, cacheRead: 300, cacheWrite: 0, requests: 1 });
+      // And the subset rule must hold in the roll-up too, not just per project.
+      assert.deepStrictEqual(payload.totals,
+        { input: 1100, output: 90, cacheRead: 700, cacheWrite: 0, requests: 2 });
+    });
+
+    check('measured-spend: a malformed or missing usage record contributes nothing and never throws', () => {
+      const p = mkSpendProj('spend-malformed');
+      const events = [
+        { ts: '2026-07-30T10:00:00Z', source: 'claude-code', kind: 'usage', session: 's1',
+          messageId: 'good', usage: { input_tokens: 100, output_tokens: 10 } },
+        // usage absent entirely
+        { ts: '2026-07-30T10:01:00Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'b1' },
+        // usage present but garbage: strings, negatives, nulls, wrong types
+        { ts: '2026-07-30T10:02:00Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'b2',
+          usage: { input_tokens: 'lots', output_tokens: -5, cache_read_input_tokens: null } },
+        { ts: '2026-07-30T10:03:00Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'b3',
+          usage: 'not an object' },
+        { ts: '2026-07-30T10:04:00Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'b4',
+          usage: [] },
+        // unparseable timestamp: cannot be attributed to a day
+        { ts: 'not-a-date', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'b5',
+          usage: { input_tokens: 999, output_tokens: 999 } },
+        // NB: a bare null event is deliberately NOT in this fixture. It cannot
+        // reach the payload through state.json at all -- lib/util.js loadState
+        // treats an event that is null or missing a session as pre-v2 state and
+        // discards the WHOLE state file, which is a migration guard upstream of
+        // anything here. measuredSpendPayload still guards against it (`e &&`)
+        // as defence in depth, but asserting it through saveState would only be
+        // re-testing that guard.
+      ];
+      let payload;
+      assert.doesNotThrow(() => {
+        payload = withProjects({ [p]: { name: 'spend-malformed', events } },
+          () => server.measuredSpendPayload());
+      });
+      // Only the one good record survives. The malformed ones contribute
+      // nothing -- not a zero row, not a NaN, not a partial count.
+      assert.deepStrictEqual(payload.totals,
+        { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, requests: 1 });
+      for (const v of Object.values(payload.projects[0].tokens)) {
+        assert.ok(Number.isFinite(v), 'every reported figure must be a finite number');
+      }
+    });
+
+    check('measured-spend: a session with no usage data at all is ABSENT, never present as zero', () => {
+      const p = mkSpendProj('spend-absent-session');
+      const events = [
+        { ts: '2026-07-30T10:00:00Z', source: 'claude-code', kind: 'usage', session: 'has-usage',
+          messageId: 'm1', usage: { input_tokens: 100, output_tokens: 10 } },
+        // 'no-usage' did real work but the transcript carried no usage record.
+        // Counting it as a zero-token session would drag every mean toward zero.
+        { ts: '2026-07-30T10:05:00Z', source: 'claude-code', kind: 'prompt', session: 'no-usage', text: 'do a thing' },
+        { ts: '2026-07-30T10:06:00Z', source: 'claude-code', kind: 'edit', session: 'no-usage', file: 'x.js' },
+      ];
+      const payload = withProjects({ [p]: { name: 'spend-absent-session', events } },
+        () => server.measuredSpendPayload());
+      const sessions = payload.projects[0].sessions;
+      assert.deepStrictEqual(sessions.map(s => s.session), ['has-usage'],
+        'a session with no usage record must not appear in the measured cohort at all');
+      assert.ok(!sessions.some(s => s.session === 'no-usage'));
+    });
+
+    check('measured-spend: sibling usage records of ONE request are deduped, not counted twice', () => {
+      const p = mkSpendProj('spend-dedupe');
+      // One API response written as three transcript records repeating the
+      // same usage object at different timestamps -- roughly 57% of stored
+      // usage rows in the wild. Counting them all triples measured spend.
+      const usage = { input_tokens: 500, output_tokens: 100 };
+      const events = [
+        { ts: '2026-07-30T10:00:00.100Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'msg-1', usage },
+        { ts: '2026-07-30T10:00:00.200Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'msg-1', usage },
+        { ts: '2026-07-30T10:00:00.300Z', source: 'claude-code', kind: 'usage', session: 's1', messageId: 'msg-1', usage },
+      ];
+      const payload = withProjects({ [p]: { name: 'spend-dedupe', events } },
+        () => server.measuredSpendPayload());
+      assert.deepStrictEqual(payload.totals,
+        { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, requests: 1 });
+    });
+
+    check('measured-spend: the payload carries no dollar figure and no file path', () => {
+      const p = mkSpendProj('spend-shape');
+      const events = [
+        { ts: '2026-07-30T10:00:00Z', source: 'claude-code', kind: 'usage', session: 's1',
+          messageId: 'm1', model: 'claude-opus-4', usage: { input_tokens: 100, output_tokens: 10 } },
+        { ts: '2026-07-30T10:01:00Z', source: 'claude-code', kind: 'read', session: 's1',
+          file: '/secret/path/to/thing.js', toolUseId: 't1' },
+      ];
+      const payload = withProjects({ [p]: { name: 'spend-shape', events } },
+        () => server.measuredSpendPayload());
+      assert.deepStrictEqual(Object.keys(payload).sort(), ['projects', 'totals']);
+      assert.deepStrictEqual(Object.keys(payload.projects[0]).sort(),
+        ['days', 'name', 'path', 'sessions', 'tokens'],
+        'the measured-spend project shape must stay exactly this set');
+      assert.deepStrictEqual(Object.keys(payload.totals).sort(),
+        ['cacheRead', 'cacheWrite', 'input', 'output', 'requests']);
+      const wire = JSON.stringify(payload);
+      // Same rule as /api/savings: tokens only, never a priced figure.
+      assert.ok(!/inCost|outCost|usd|cost/i.test(wire), 'measured spend must never carry a dollar figure');
+      assert.ok(!wire.includes('/secret/path/to/thing.js'), 'read paths must never ride this payload');
+    });
+  }
+
   check('codex adapter: two token_count events with the same timestamp get distinct messageIds; both survive buildRequests', () => {
     const ledger = require('../lib/ledger');
     const entries = [
