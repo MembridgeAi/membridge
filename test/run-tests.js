@@ -2490,6 +2490,45 @@ async function main() {
       assert.ok(fs.existsSync(path.join(proj1, 'AGENTS.md')), 'AGENTS.md not recreated after unarchive + sync');
     });
 
+    // Task 2: projectsPayload reports archived state as a FLAG on the one
+    // list. The UI sections on it; it never re-fetches a second list, and a
+    // vanished folder is reported (missing), never omitted or thrown on.
+    await post(`${base}/api/projects/archive`, { path: proj1 });
+    const payloadArchived = await (await fetch(`${base}/api/projects`)).json();
+    check('projectsPayload marks an archived project archived: true and still returns it', () => {
+      const p = payloadArchived.find(x => x.path.toLowerCase() === proj1.toLowerCase());
+      assert.ok(p, 'archived project vanished from /api/projects');
+      assert.strictEqual(p.archived, true, `archived flag said: ${JSON.stringify(p && p.archived)}`);
+      assert.ok(!p.missing, 'a project whose folder exists must not be flagged missing');
+      const others = payloadArchived.filter(x => x.path.toLowerCase() !== proj1.toLowerCase());
+      assert.ok(others.length, 'fixture needs at least one unarchived project');
+      assert.ok(others.every(x => x.archived !== true), 'an unarchived project was flagged archived');
+    });
+
+    const ghostDir = path.join(ROOT, 'projects', 'ghost-app');
+    fs.mkdirSync(ghostDir, { recursive: true });
+    await post(`${base}/api/projects/add`, { path: ghostDir });
+    await post(`${base}/api/projects/archive`, { path: ghostDir });
+    fs.rmSync(ghostDir, { recursive: true, force: true });
+    const payloadGhost = await (await fetch(`${base}/api/projects`)).json();
+    check('an archived project whose folder is gone is returned with a missing flag', () => {
+      const g = payloadGhost.find(x => x.path.toLowerCase() === ghostDir.toLowerCase());
+      assert.ok(g, 'missing-folder archived project was omitted from /api/projects');
+      assert.strictEqual(g.archived, true, 'missing-folder project lost its archived flag');
+      assert.strictEqual(g.missing, true, `missing flag said: ${JSON.stringify(g && g.missing)}`);
+    });
+    const ghostUnarch = await (await post(`${base}/api/projects/unarchive`, { path: ghostDir })).json();
+    check('a missing-folder archived project still unarchives', () => {
+      assert.strictEqual(ghostUnarch.archived, false, `unarchive said: ${JSON.stringify(ghostUnarch)}`);
+      assert.ok(!(util.loadUserConfig().archived || []).includes(ghostDir), 'archived entry not removed');
+    });
+    await post(`${base}/api/projects/delete`, { path: ghostDir });
+    await post(`${base}/api/projects/unarchive`, { path: proj1 });
+    await post(`${base}/api/sync`, { project: proj1 });
+    check('fixture restored: proj1 unarchived with its block back before the delete tests', () => {
+      assert.ok(claudeMd().includes(digest.BEGIN), 'block not restored');
+    });
+
     const delRes = await (await post(`${base}/api/projects/delete`, { path: proj1 })).json();
     const afterDel = await (await fetch(`${base}/api/projects`)).json();
     check('delete project strips blocks, memory and state', () => {
