@@ -10,25 +10,36 @@ and are flagged as such.
 
 ---
 
-## Node 18 is dropped, `engines.node` moves to `>=20`
+## Node 18 leaves the CI matrix, `engines.node` STAYS at `>=18`
 
-**Status:** decided, not yet merged. The change is one commit, `da584f4`, on
-branch `fix/release-pipeline`, one ahead of master.
+**Status:** decided and merged. The matrix change came from `da584f4` on
+`fix/release-pipeline`. The `engines` half of that commit was reverted after the
+runtime was actually tested.
 
-**Reasoning.** Every CI run since the React UI landed on 2026-07-29 has failed,
-and the Node 18 legs are the reason. This was reproduced locally on a real Node
-18.20.8. The static evidence stands on its own: `vite` 8.1.5 and `rolldown`
-1.1.5 both declare `engines: {"node":"^20.19.0 || >=22.12.0"}`, and rolldown's
-distributed build does `import { formatWithOptions, styleText } from "node:util"`,
-where `styleText` does not exist before Node 20. Vite 8 builds through rolldown,
-so the UI build is impossible on 18 no matter what the manifest says.
+**Reasoning, and the distinction that matters.** Node 18 cannot BUILD the UI.
+`vite` 8.1.5 and `rolldown` 1.1.5 both declare
+`engines: {"node":"^20.19.0 || >=22.12.0"}`, rolldown's distributed build does
+`import { formatWithOptions, styleText } from "node:util"`, and `styleText` does
+not exist before Node 20. Reproduced on real Node 18.20.8. Every CI run since
+the React UI landed on 2026-07-29 failed, and on the runs checked leg by leg,
+the Node 18 legs failed at `npm run build` on all three operating systems and
+never reached the test step. So 18 leaves the matrix.
 
-The framing matters and should not be lost. `engines.node: ">=18"` was a promise
-the dependency tree does not support. Moving to `>=20` is a **correctness fix to
-the manifest**, not a reduction of the support matrix to make a red build go
-green. The support was never there; the manifest was simply wrong about it.
-Users pinned to Node 18 currently get a silent failure later. After the change
-they get an honest engines warning at install time.
+**But that is a build-time constraint, and `engines` is a claim about the
+runtime.** The npm tarball's `files` field is `bin`, `lib`, `vendor`,
+`README.md`, `LICENSE`. It ships no `ui/dist` and no build toolchain, so an npm
+consumer never runs vite and never reaches `styleText`. Verified rather than
+assumed: a packed 0.2.3 tarball was installed into a clean directory under real
+Node 18.20.8, and `membridge --version`, `--help` and `status` all worked, the
+daemon started and served `/api/status` with a real payload after a successful
+sync, and the MCP server initialized and listed all six tools. A grep of `lib/`
+and `bin/` for Node 20+ APIs finds none.
+
+Raising the floor to `>=20` on build-toolchain evidence would have locked out
+users who are fine. That is the mirror image of the bug being fixed, which is a
+manifest making a claim reality does not support. The matrix and `engines`
+disagree deliberately, and the reason is recorded in a comment in
+`.github/workflows/ci.yml` beside the matrix so it is not re-litigated.
 
 The matrix keeps all three operating systems. `windows-latest` is load-bearing,
 not decoration: it is the only place `lib/keychain.js`'s DPAPI backend ever

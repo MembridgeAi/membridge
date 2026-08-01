@@ -18,9 +18,19 @@ jobs:
         # storage while the suite still reports green.
         os: [ubuntu-latest, windows-latest, macos-latest]
         # 18 dropped: the ui leg cannot go green on it. Vite 8 builds through
-        # rolldown, which imports styleText from node:util -- Node 20+ only --
+        # rolldown, which imports styleText from node:util, added in Node 20,
         # and vite, @vitejs/plugin-react, vitest and jsdom all declare engines
-        # that exclude 18. Node 18 has been EOL since April 2025.
+        # that exclude 18.
+        #
+        # This matrix and package.json's `engines` DISAGREE ON PURPOSE, and the
+        # disagreement is correct. Node 18 is a BUILD-TIME constraint, not a
+        # runtime one. `engines` is a claim about the runtime, and the npm
+        # tarball ships only bin, lib and vendor (see the `files` field), so an
+        # npm consumer never runs vite and never reaches styleText. Verified on
+        # real Node 18.20.8 against a packed tarball: the CLI, the daemon and
+        # all six MCP tools work. `engines` therefore stays at >=18. Raising it
+        # on build-toolchain evidence would lock out users who are fine, which
+        # is the mirror image of the bug this comment exists to record.
         node: [20, 22]
     runs-on: ${{ matrix.os }}
     steps:
