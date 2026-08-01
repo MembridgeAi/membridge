@@ -10,6 +10,11 @@ function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
   const refreshTokens = new Map();  // refreshToken -> userId
+  // PKCE auth codes: authCode -> { userId, challenge }. GoTrue hands one of
+  // these to the redirect target when the authorize request carried a
+  // code_challenge, and only trades it for a session against the matching
+  // verifier. Seeded by tests, since the GitHub round trip has no stand-in.
+  const authCodes = new Map();
   const teams = new Map();          // teamId -> { id, name, inviteCode }
   const members = [];               // { teamId, userId, displayName, role }
   const projects = [];              // { id, teamId, name, repoUrl }
@@ -17,12 +22,14 @@ function createMockSupabase() {
   const invites = new Map();        // token -> { token, teamId, expiresAt, maxUses, useCount, revokedAt }
   const pubkeys = new Map();        // member_pubkeys: userId -> public_key (009)
   const teamKeys = [];              // team_keys rows: { team_id, epoch, member_user_id, sealed_team_key } (009)
+  const projectAccess = [];         // project_access rows (023): { team_id, project_key, member_id, can_see, updated_at, updated_by }
+  const teamAudit = [];             // team_audit rows (023): { id, team_id, actor_id, action, object_type, object_key, detail, created_at }
   const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0 };
   // Test knobs for backend quirks. rejectSummary is kept for back-compat;
   // rejectColumns is the general form — any column name added here provokes the
   // PostgREST "schema cache" error until the POST body no longer carries it, so
   // the client's drop-and-retry loop can be exercised across multiple columns.
-  const flags = { rejectSummary: false, rejectColumns: new Set() };
+  const flags = { rejectSummary: false, rejectColumns: new Set(), failEntryInserts: false };
 
   const uuid = () => crypto.randomUUID();
   const shortToken = () => crypto.randomBytes(8).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x').slice(0, 10);
@@ -30,6 +37,15 @@ function createMockSupabase() {
   const memberRole = (teamId, userId) => (members.find(m => m.teamId === teamId && m.userId === userId) || {}).role || null;
   const isManager = (teamId, userId) => ['owner', 'admin'].includes(memberRole(teamId, userId));
   const projectTeam = projectId => (projects.find(p => p.id === projectId) || {}).teamId;
+  // 025_enforce_project_access.sql §1 (can_see_project): default-allow — a
+  // project with no project_access row for this member is visible; an
+  // explicit can_see=false row for THIS user is a revoke and wins. Mirrors
+  // the predicate exactly, not a permissive stand-in.
+  const canSeeProject = (projectId, userId) => {
+    const row = projectAccess.find(r =>
+      r.team_id === projectTeam(projectId) && r.project_key === projectId && r.member_id === userId);
+    return !row || row.can_see !== false;
+  };
 
   function newSession(user) {
     const access = `at-${uuid()}`;
@@ -40,7 +56,7 @@ function createMockSupabase() {
       access_token: access,
       refresh_token: refresh,
       expires_in: 3600,
-      user: { id: user.id, email: user.email },
+      user: { id: user.id, email: user.email, user_metadata: user.metadata || {} },
     };
   }
 
@@ -173,6 +189,9 @@ function createMockSupabase() {
         .map(e => ({ ...e, project_name: (projects.find(p => p.id === e.project_id) || {}).name }))
         .filter(e => projectTeam(e.project_id) === body.p_team)
         .filter(e => !(projects.find(p => p.id === e.project_id) || {}).archivedAt)
+        // 024 §4: team_feed is security definer, so RLS does not cover it —
+        // the can_see_project predicate is written into the RPC body itself.
+        .filter(e => canSeeProject(e.project_id, userId))
         .filter(e => !body.p_author || e.author_id === body.p_author)
         .filter(e => !body.p_project || e.project_id === body.p_project)
         .filter(e => !body.p_source || e.source === body.p_source)
@@ -199,6 +218,17 @@ function createMockSupabase() {
       if (p) p.archivedAt = null;
       return json(res, 200, null);
     }
+    // 026_project_access_default.sql: "new members join with access" toggle.
+    // Same manager gate as archive/unarchive, same security-definer shape.
+    if (fn === 'set_project_access_default') {
+      const teamId = projectTeam(body.p_project);
+      if (!isManager(teamId, userId)) {
+        return json(res, 403, { message: "only a team owner or admin can change this project's default access" });
+      }
+      const p = projects.find(x => x.id === body.p_project);
+      if (p) p.defaultAccess = !!body.p_default;
+      return json(res, 200, null);
+    }
     json(res, 404, { message: `unknown rpc ${fn}` });
   }
 
@@ -217,6 +247,30 @@ function createMockSupabase() {
           return json(res, 400, { message: `Could not find the '${col}' column of 'memory_entries' in the schema cache` });
         }
       }
+      // An upsert is ONE statement, and Postgres refuses to update the same
+      // row twice within it: two payload rows sharing the on_conflict key
+      // abort the whole batch with SQLSTATE 21000, whatever `Prefer` says
+      // (that only governs conflicts with rows ALREADY in the table). The
+      // row-at-a-time loop below silently tolerated such a batch, which is
+      // why a self-conflicting push looked fine here while failing in
+      // production. Only upserts (on_conflict present) can raise this.
+      if (url.searchParams.has('on_conflict')) {
+        const seen = new Set();
+        for (const r of rows) {
+          const k = [r.project_id, r.author_id, r.ts, r.source].join(' ');
+          if (seen.has(k)) {
+            return json(res, 400, {
+              code: '21000',
+              message: 'ON CONFLICT DO UPDATE command cannot affect row a second time',
+            });
+          }
+          seen.add(k);
+        }
+      }
+      // Blunt "the insert failed" knob, independent of the schema-drift and
+      // duplicate-key paths above: lets a test prove what survives a push
+      // that simply does not land.
+      if (flags.failEntryInserts) return json(res, 500, { message: 'insert failed' });
       const merge = /merge-duplicates/.test(prefer || '');
       for (const r of rows) {
         if (r.author_id !== userId || !isMember(projectTeam(r.project_id), userId)) {
@@ -250,11 +304,36 @@ function createMockSupabase() {
     }
     const eq = (p.get('project_id') || '').replace(/^eq\./, '');
     const neq = (p.get('author_id') || '').replace(/^neq\./, '');
-    const gt = decodeURIComponent((p.get('created_at') || '').replace(/^gt\./, ''));
-    if (!isMember(projectTeam(eq), userId)) return json(res, 200, []);
-    const rows = entries
-      .filter(e => e.project_id === eq && e.author_id !== neq && e.created_at > gt)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    // created_at carries the forward pull's operator: `gt.` (ascending,
+    // "everything since the cursor"). The backward backfill walker now pages
+    // on `id` instead (an id cursor has no ties; see lib/teamsync.js
+    // backfillArchivePage for why created_at's ties made it unsafe to page
+    // on). Real PostgREST would AND every filter sent; teamsync only ever
+    // sends one shape per call, so matching just what is present is enough.
+    const createdAtRaw = p.get('created_at') || '';
+    const isGt = /^gt\./.test(createdAtRaw);
+    const createdAtBound = decodeURIComponent(createdAtRaw.replace(/^gt\./, ''));
+    const idRaw = p.get('id') || '';
+    const isIdLt = /^lt\./.test(idRaw);
+    const idBound = isIdLt ? Number(decodeURIComponent(idRaw.replace(/^lt\./, ''))) : null;
+    const order = p.get('order') || '';
+    const descById = order === 'id.desc';
+    const descByCreatedAt = order === 'created_at.desc';
+    // 025 §2: memory_entries_select ANDs can_see_project onto the membership
+    // check — a revoked member's direct pull sees nothing for this project.
+    if (!isMember(projectTeam(eq), userId) || !canSeeProject(eq, userId)) return json(res, 200, []);
+    let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
+    if (isGt) rows = rows.filter(e => e.created_at > createdAtBound);
+    if (isIdLt) rows = rows.filter(e => Number(e.id) < idBound);
+    // Order THEN limit — a descending page must return the NEWEST rows below
+    // the bound (the tail closest to the cursor), not just the first `limit`
+    // rows encountered in storage order before sorting.
+    rows = rows
+      .slice()
+      .sort((a, b) => {
+        if (descById) return b.id - a.id;
+        return descByCreatedAt ? b.created_at.localeCompare(a.created_at) : a.created_at.localeCompare(b.created_at);
+      })
       .slice(0, parseInt(p.get('limit') || '200', 10));
     // Real PostgREST only returns the requested columns — project to
     // selectCols (when the caller sent one) so a dropped-and-retried select
@@ -292,6 +371,20 @@ function createMockSupabase() {
         return json(res, 200, { id: user.id, email: user.email, user_metadata: user.metadata || {} });
       }
       if (url.pathname === '/auth/v1/token') {
+        if (url.searchParams.get('grant_type') === 'pkce') {
+          // The PKCE exchange. The code alone is worthless: the caller must
+          // present the verifier whose s256 hash is the challenge that was
+          // sent with the authorize request.
+          const rec = authCodes.get(body.auth_code);
+          if (!rec) return json(res, 400, { error_description: 'invalid auth code' });
+          const digest = crypto.createHash('sha256').update(String(body.code_verifier || '')).digest('base64url');
+          if (digest !== rec.challenge) {
+            return json(res, 400, { error_description: 'code challenge does not match' });
+          }
+          authCodes.delete(body.auth_code); // single use, as GoTrue does
+          const codeUser = [...users.values()].find(u => u.id === rec.userId);
+          return json(res, 200, newSession(codeUser));
+        }
         if (url.searchParams.get('grant_type') === 'password') {
           const user = users.get(body.email);
           if (!user || user.password !== body.password) {
@@ -312,12 +405,15 @@ function createMockSupabase() {
       }
       if (url.pathname === '/rest/v1/project_stats' && req.method === 'GET') {
         // The security_invoker view: per-project last activity / contributor /
-        // entry counts, RLS-filtered to the caller's teams.
+        // entry counts, RLS-filtered to the caller's teams. 024 §3 ANDs
+        // can_see_project into the view itself — a revoked member's row
+        // disappears entirely, not just its stats.
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const teamEq = (url.searchParams.get('team_id') || '').replace(/^eq\./, '');
         const rows = projects
-          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) && !p.archivedAt)
+          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) && !p.archivedAt &&
+            canSeeProject(p.id, userId))
           .map(p => {
             const es = entries.filter(e => e.project_id === p.id);
             return {
@@ -330,9 +426,18 @@ function createMockSupabase() {
         return json(res, 200, rows);
       }
       if (url.pathname === '/rest/v1/projects' && req.method === 'GET') {
-        // Auto-link fetch: RLS means only projects in the caller's teams.
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
+        const idEq = (url.searchParams.get('id') || '').replace(/^eq\./, '');
+        if (idEq) {
+          // 026_project_access_default.sql: single-project default_access
+          // lookup (lib/api-access.js readAccess). Same projects_select
+          // policy as the auto-link fetch below (is_team_member(team_id)).
+          const p = projects.find(x => x.id === idEq && isMember(x.teamId, userId));
+          if (!p) return json(res, 200, []);
+          return json(res, 200, [{ default_access: p.defaultAccess !== false }]);
+        }
+        // Auto-link fetch: RLS means only projects in the caller's teams.
         const rows = projects
           .filter(p => isMember(p.teamId, userId) && p.repoUrl)
           .map(p => ({ id: p.id, team_id: p.teamId, name: p.name, repo_url: p.repoUrl }));
@@ -423,11 +528,83 @@ function createMockSupabase() {
           .map(k => ({ epoch: k.epoch, member_user_id: k.member_user_id, sealed_team_key: k.sealed_team_key }));
         return json(res, 200, rows);
       }
+      // ---- 024_project_access_and_audit.sql tables, RLS mirrored from its policies ----
+      if (url.pathname === '/rest/v1/project_access') {
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        if (req.method === 'POST') {
+          // Manager-only write (023: project_access_insert/update policies).
+          // Manual upsert on the (team_id, project_key, member_id) PK — the
+          // on_conflict query param is accepted but not parsed, same as the
+          // team_keys mock above.
+          const rows = Array.isArray(body) ? body : [body];
+          for (const r of rows) {
+            if (!isManager(r.team_id, userId)) return json(res, 403, { message: 'row-level security violation' });
+            const idx = projectAccess.findIndex(x =>
+              x.team_id === r.team_id && x.project_key === r.project_key && x.member_id === r.member_id);
+            const row = {
+              team_id: r.team_id, project_key: r.project_key, member_id: r.member_id,
+              can_see: !!r.can_see, updated_at: r.updated_at || new Date().toISOString(),
+              updated_by: r.updated_by || userId,
+            };
+            if (idx >= 0) projectAccess[idx] = row; else projectAccess.push(row);
+          }
+          res.writeHead(201);
+          return res.end();
+        }
+        // GET (024 §6: project_access_select narrowed to owner/admin — a
+        // member reading the whole grid would learn about projects they
+        // cannot see and every other member's flags).
+        const q = url.searchParams;
+        const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        const keyEq = (q.get('project_key') || '').replace(/^eq\./, '');
+        if (teamEq && !isManager(teamEq, userId)) return json(res, 200, []);
+        const rows = projectAccess.filter(r =>
+          (!teamEq || r.team_id === teamEq) && (!keyEq || r.project_key === keyEq));
+        return json(res, 200, rows.map(r => ({ project_key: r.project_key, member_id: r.member_id, can_see: r.can_see })));
+      }
+      if (url.pathname === '/rest/v1/team_audit') {
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        if (req.method === 'POST') {
+          // Manager-only insert, no update/delete route at all — append-only
+          // (023: team_audit_insert is the only write policy on this table).
+          // 024 §5 additionally requires actor_id = auth.uid(): a role check
+          // alone let an owner/admin POST with someone else's id and blame
+          // them for the write.
+          const rows = Array.isArray(body) ? body : [body];
+          for (const r of rows) {
+            if (!isManager(r.team_id, userId)) return json(res, 403, { message: 'row-level security violation' });
+            const actorId = r.actor_id || userId;
+            if (actorId !== userId) {
+              return json(res, 403, { message: 'row-level security violation: actor_id must equal auth.uid()' });
+            }
+            teamAudit.unshift({
+              id: uuid(), team_id: r.team_id, actor_id: actorId,
+              action: r.action, object_type: r.object_type, object_key: r.object_key || null,
+              detail: r.detail === undefined ? null : r.detail,
+              created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+            });
+          }
+          res.writeHead(201);
+          return res.end();
+        }
+        // GET (023: team_audit_select policy) — manager-only read.
+        const q = url.searchParams;
+        const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        if (!teamEq || !isManager(teamEq, userId)) return json(res, 200, []);
+        const limit = parseInt(q.get('limit') || '50', 10);
+        const rows = [...teamAudit]
+          .filter(r => r.team_id === teamEq)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))
+          .slice(0, Math.max(1, limit));
+        return json(res, 200, rows);
+      }
       json(res, 404, { message: 'not found' });
     });
   });
 
-  return { server, users, sessions, teams, members, projects, entries, invites, pubkeys, teamKeys, stats, flags };
+  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags };
 }
 
 module.exports = { createMockSupabase };

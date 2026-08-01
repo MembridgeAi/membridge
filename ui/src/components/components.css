@@ -1,0 +1,479 @@
+/* Shared component styles for the ui/src/components kit. One stylesheet,
+ * imported once from main.tsx — no CSS-in-JS, no per-component modules.
+ * Global rules (see docs/superpowers/plans/2026-07-29-apps-interface-rebuild.md
+ * "Global Constraints"): the --r / --r-sm radius scale (see tokens.css)
+ * everywhere except avatars (circles) and the Toggle switch (documented
+ * exception below); no drop shadow on resting content; no gradients; hover
+ * changes background/border only.
+ * Type scale, spacing scale and motion tokens live in styles/tokens.css;
+ * the settle-in/pulse-live keyframes live in styles/base.css and are
+ * referenced by name here.
+ */
+
+/* StatStrip — a ruled grid, never a big number inside a rounded card. The
+ * lead stat (first cell) gets the one splash of accent color in the strip
+ * — everything else stays neutral so that tint still means something. */
+.stat-strip {
+  display: flex;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.stat-cell {
+  flex: 1;
+  padding: var(--sp-3) var(--sp-3);
+  border-left: 1px solid var(--line);
+}
+.stat-cell:first-child {
+  border-left: none;
+}
+.stat-value {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+}
+.stat-cell:first-child .stat-value {
+  color: var(--accent2);
+}
+.stat-label {
+  margin-top: 3px;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text2);
+}
+.stat-note {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text3);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .stat-cell { animation: settle-in var(--dur-base) var(--ease-out) both; }
+  .stat-cell:nth-child(1) { animation-delay: 0ms; }
+  .stat-cell:nth-child(2) { animation-delay: 30ms; }
+  .stat-cell:nth-child(3) { animation-delay: 60ms; }
+  .stat-cell:nth-child(4) { animation-delay: 90ms; }
+}
+
+/* RuledRow — a flex row, separated by a hairline only. A quiet hover
+ * background is the one texture cue every ruled row in the system shares,
+ * so scanning a dense list doesn't rely on hairlines alone. */
+.ruled-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ruled-row { transition: background-color var(--dur-fast) var(--ease-out); }
+}
+.ruled-row:hover {
+  background: var(--panel2);
+}
+
+/* StateChip — soft tint, --r-sm radius (small control), glyph + words
+ * (never color alone). */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--r-sm);
+  padding: 2px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chip-ok {
+  background: var(--green-dim);
+  color: var(--green);
+}
+.chip-warn {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+.chip-bad {
+  background: var(--red-dim);
+  color: var(--red);
+}
+.chip-muted {
+  background: var(--panel2);
+  color: var(--text3);
+}
+
+.btn-warn {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line2);
+}
+.btn-warn:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .btn-warn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
+
+/* Toggle — DELIBERATE EXCEPTION to the one-radius rule. A switch only reads
+ * as a switch when its track is pill-shaped, so this is the sole
+ * non-avatar element allowed a radius other than --r. */
+.toggle {
+  position: relative;
+  width: 26px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--line2);
+  border-radius: 8px; /* exception: pill-shaped track, needs >= half its own
+    15px height to read as a switch -- not expressible as --r or --r-sm */
+  background: var(--panel2);
+}
+.toggle-on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%; /* exception: the switch's own thumb, same reasoning */
+  background: var(--text3);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .toggle-thumb { transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+}
+.toggle-on .toggle-thumb {
+  transform: translateX(11px);
+  background: var(--accent);
+}
+
+/* Avatar — the one non-switch exception: avatars representing people are
+ * circles, per the global constraint. Nothing else gets border-radius: 50%. */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%; /* exception: people are circles */
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Sparkline — bars, no axis. Color communicates nothing on its own; the
+ * series is described in words via aria-label. */
+.sparkline rect {
+  fill: var(--accent2);
+}
+.sparkline-muted rect {
+  fill: var(--text3);
+}
+
+/* Dialog — the ONE place in this system allowed a subtle shadow (global
+ * constraint: no box-shadow on resting content; one level allowed only for
+ * true overlays). Shared by ConfirmDialog and FormDialog (confirm/cancel
+ * prompts and small edit forms alike), so every feature that needs an
+ * overlay -- Members' remove/transfer, Settings' leave-team/edit-list/
+ * choose-files, Projects' add-project -- gets the identical shape instead of
+ * a per-feature reimplementation. */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+.dialog {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dialog { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+.dialog-wide {
+  width: 440px;
+}
+.dialog-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.dialog-message {
+  margin: 0 0 12px;
+  color: var(--text2);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dialog-error {
+  margin: 0 0 12px;
+  color: var(--red);
+  font-size: 11px;
+}
+/* The typed-confirmation input (ConfirmDialog confirmInput): full width so
+ * the expected text is readable, monospace to make an exact match obvious. */
+.dialog-confirm-input {
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 5px 8px;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  color: var(--text2);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.dialog-btn {
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.dialog-btn:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dialog-btn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
+.dialog-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.dialog-btn-danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+.dialog-field {
+  display: block;
+  margin: 0 0 10px;
+  color: var(--text2);
+  font-size: 11px;
+}
+.dialog-field-hint {
+  margin-top: 1px;
+  color: var(--text3);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+.dialog-input,
+.dialog-textarea {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  color: var(--text);
+}
+.dialog-textarea {
+  min-height: 90px;
+  resize: vertical;
+  font-family: var(--mono);
+  border-radius: var(--r); /* base.css's input/select radius rule doesn't cover textarea */
+}
+.dialog-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.dialog-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+/* EntryRow — a merged-stream row, shared by the Feed (cross-project) and
+ * the project page (single-project). A 3-column grid (avatar / who+tool[+
+ * project]+time / meta), outcome+intent+files sharing the who cell's left
+ * edge (grid-column: 2). The avatar cell is always rendered, even with
+ * nothing inside it (EntryRow's showAvatar=false, solo mode) -- an empty
+ * cell collapses to the gap width instead of reflowing the other two
+ * columns' grid-column assignments. */
+.entry-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 10px;
+  padding: 10px 16px;
+  align-items: start;
+  border-bottom: 1px solid var(--line);
+}
+.entry-row:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .entry-row {
+    transition: background-color var(--dur-fast) var(--ease-out);
+    animation: settle-in var(--dur-base) var(--ease-out) both;
+  }
+}
+.entry-row-avatar-cell {
+  display: flex;
+  align-items: center;
+}
+.entry-row-who-cell {
+  min-width: 0;
+}
+.entry-row-who {
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+.entry-row-tool {
+  margin-left: 6px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.entry-row-meta {
+  padding-top: 2px;
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.entry-row-meta .live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 3px;
+  border-radius: var(--r-sm);
+  background: var(--green);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .entry-row-meta .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+}
+.entry-row-outcome {
+  grid-column: 2;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+}
+/* The "No summary yet" placeholder for an undistilled session -- muted like
+   the intent line, so it never reads as captured content. */
+.entry-row-outcome-empty {
+  color: var(--text3);
+}
+/* Task 6: a row with a session is a real <a> (middle/cmd-click must work).
+ * Same grid, same height -- the link resets are the only differences, plus
+ * position: relative so the affordance and the hover preview can anchor
+ * without adding grid tracks (the row's anatomy stays byte-identical). */
+.entry-row-link {
+  position: relative;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  /* Room for the affordance chevron without moving the meta column. */
+  padding-right: 28px;
+}
+
+.entry-row-affordance {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text3);
+  font-size: var(--fs-lg);
+  pointer-events: none;
+}
+.entry-row-link:hover .entry-row-affordance {
+  color: var(--text2);
+}
+
+/* Hover preview (spec Level 1.5): pointer devices only -- the (hover: hover)
+ * gate is the device sniff, in CSS where it belongs. Touch and keyboard
+ * users never see it; the session page carries all of its content. It is
+ * absolutely positioned so an open preview never changes the row's height
+ * (locked: nothing expands inside the feed). */
+.entry-row-preview {
+  display: none;
+}
+@media (hover: hover) {
+  .entry-row-preview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    position: absolute;
+    left: 42px;
+    top: calc(100% - 6px);
+    z-index: 30;
+    max-width: 440px;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--panel2);
+    border: 1px solid var(--line2);
+    border-radius: var(--r);
+    pointer-events: none;
+  }
+}
+.entry-row-preview-outcome {
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+}
+.entry-row-preview-why {
+  color: var(--text2);
+  font-size: var(--fs-sm);
+}
+.entry-row-preview-diffstat {
+  color: var(--text3);
+  font-size: var(--fs-xs);
+}
+
+.entry-row-intent {
+  grid-column: 2;
+  margin-top: 3px;
+  color: var(--text3);
+  font-size: 11px;
+  line-height: var(--lh-tight);
+}
+.entry-row-intent-label {
+  margin-right: 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.entry-row-files {
+  grid-column: 2;
+  margin-top: 3px;
+  color: var(--text3);
+  font-size: 10px;
+}
+
+/* Placeholder — for routes not yet built. A quiet state should look
+ * composed, not like something failed to load: a small mark, generous
+ * space, and text that's centered rather than clinging to the edge. */
+.placeholder {
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+  color: var(--text2);
+}
+.placeholder::before {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 0 auto var(--sp-3);
+  background: var(--line2);
+}
+.placeholder-title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+}
+.placeholder-note {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text3);
+}

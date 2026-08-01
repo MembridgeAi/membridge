@@ -1,7 +1,8 @@
 # Builds the MemBridge tray app for macOS (menu bar) and Windows (system tray)
 # on their native runners. Runs on every push to master (fresh artifact per
 # push), on manual dispatch, and on every published release; release builds are
-# attached to the release as downloadable zips.
+# attached to the release as a signed+notarized mac dmg and zip, and a
+# windows zip.
 name: Build app
 
 on:
@@ -17,26 +18,128 @@ permissions:
 jobs:
   mac:
     runs-on: macos-latest
+    # `secrets` is NOT a context you can read from a step-level `if:` (only
+    # job-level `env:` can see it), so signing availability is resolved once
+    # here and every step below keys off these two flags instead. A fork, or a
+    # PR from a fork, sees empty secrets: both come out "false" and the job
+    # still produces an unsigned build exactly as it did before, rather than
+    # failing on missing credentials.
+    #
+    # MB_CAN_NOTARIZE deliberately repeats the two signing secrets rather than
+    # referring to MB_CAN_SIGN (entries in the same env block cannot reference
+    # each other): notarizing an app that was never signed is a guaranteed
+    # failure, so a half-configured secret set must fall back to plain
+    # unsigned rather than to sign-less notarization.
+    env:
+      MB_CAN_SIGN: ${{ secrets.CSC_LINK != '' && secrets.CSC_KEY_PASSWORD != '' }}
+      MB_CAN_NOTARIZE: >-
+        ${{ secrets.CSC_LINK != '' && secrets.CSC_KEY_PASSWORD != ''
+        && secrets.APPLE_API_KEY != '' && secrets.APPLE_API_KEY_ID != ''
+        && secrets.APPLE_API_ISSUER != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # A plain install now brings the MCP SDK + zod with it. Mirrors ci.yml.
       - run: npm install
-      # The MCP tests need these opt-in deps (deliberately kept out of
-      # package.json so a plain install stays light). Mirrors ci.yml.
-      - run: npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4
+      # The React UI is a separate npm workspace and the ONLY UI the app has --
+      # the legacy dashboard was deleted in 0.2.0. Without these two steps
+      # prepare-app.js packaged a UI-less app and v0.2.0 shipped a window whose
+      # entire contents were "UI not built". Mirrors ci.yml, including
+      # `working-directory:` over `cd ui &&` (POSIX-only, breaks the Windows
+      # leg) and the build running BEFORE the root suite, whose /app
+      # static-serving checks need a real ui/dist.
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
       - run: node test/run-tests.js
-      - run: npm run dist:mac
+      # The App Store Connect key is base64 in the secret, but electron-builder
+      # passes APPLE_API_KEY straight to notarytool as a FILE PATH, so it has
+      # to be decoded onto disk. It goes in RUNNER_TEMP rather than the
+      # workspace so no packaging glob or upload-artifact path can ever sweep
+      # it into a published artifact, and it is deleted below whatever happens.
+      - name: Write the App Store Connect API key
+        if: env.MB_CAN_NOTARIZE == 'true'
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          # Via env, never inlined into the script: an inlined ${{ secrets.* }}
+          # is pasted into the shell before it runs.
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+      # One packaging step for both the signed and unsigned paths, so they
+      # cannot drift apart. Everything is driven by whether the values are
+      # empty: electron-builder tests `CSC_IDENTITY_AUTO_DISCOVERY !== "false"`,
+      # and its notarization step is skipped with a warning (not an error) when
+      # the APPLE_API_* trio is absent, which is what makes the unsigned
+      # fallback work without a second step. package.json build.mac leaves
+      # `notarize` unset ON PURPOSE: unset means "notarize exactly when
+      # credentials are present", which is the guard that lets forks and PR
+      # builds succeed with no secrets at all. Do not set notarize:false there.
+      - name: Package
+        run: npm run dist:mac
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ env.MB_CAN_SIGN }}
+          # Must stay empty unless ALL THREE are available: electron-builder
+          # throws InvalidConfigurationError when APPLE_API_KEY is set and
+          # either of the other two is not, so pointing this at the temp path
+          # unconditionally would fail every fork build.
+          APPLE_API_KEY: ${{ env.MB_CAN_NOTARIZE == 'true' && format('{0}/AuthKey.p8', runner.temp) || '' }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          # Read only by the APPLE_ID/app-specific-password notarization path,
+          # not the API-key path used here. Passed so that switching paths is a
+          # workflow edit rather than a secrets change.
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # if: always() -- a failed or cancelled packaging step must not leave a
+      # usable signing key on the runner.
+      - name: Delete the App Store Connect API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
       - uses: actions/upload-artifact@v4
         with:
           name: membridge-mac
-          path: dist/*.zip
+          # Both targets: the dmg is what membridge.app links, the zip is what
+          # install.sh fetches.
+          path: |
+            dist/*.zip
+            dist/*.dmg
       - name: Attach to release
         if: github.event_name == 'release'
-        run: gh release upload "$TAG" dist/*.zip --clobber
+        run: gh release upload "$TAG" dist/*.zip dist/*.dmg --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+      # membridge.app links releases/latest/download/MemBridge-arm64.dmg -- an
+      # UNVERSIONED name, while electron-builder only ever emits versioned ones
+      # (MemBridge-0.2.0-arm64.dmg). The unversioned aliases were hand-uploaded
+      # to v0.1.2 and to nothing since, so v0.2.0 became "latest" without them
+      # and that button is 404ing right now. Re-uploading the alias on EVERY
+      # release is what stops the next release breaking it again.
+      - name: Attach unversioned download alias to release
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(dist/*-arm64.dmg)
+          # Fail loudly rather than alias whichever file sorted first: a silent
+          # wrong pick would publish a download button pointing at the wrong
+          # artifact, which is the failure this step exists to prevent.
+          if [ ${#built[@]} -ne 1 ]; then
+            echo "expected exactly one arm64 dmg in dist/, found ${#built[@]}: ${built[*]-none}" >&2
+            exit 1
+          fi
+          # Staged OUTSIDE dist/ so the globs above can never sweep the alias
+          # up and publish the same bytes twice under two names. mktemp rather
+          # than $RUNNER_TEMP to keep this identical to the windows job, where
+          # $RUNNER_TEMP is a backslash path that Git Bash mangles.
+          stage=$(mktemp -d)
+          cp "${built[0]}" "$stage/MemBridge-arm64.dmg"
+          gh release upload "$TAG" "$stage/MemBridge-arm64.dmg" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
@@ -49,7 +152,12 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4
+      # Same as the mac job: ui/ is the only UI the app has. `working-directory:`
+      # rather than `cd ui &&` matters most here -- this leg is cmd.exe.
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
       - run: node test/run-tests.js
       - run: npm run dist:win
       - uses: actions/upload-artifact@v4
@@ -61,6 +169,26 @@ jobs:
         # Git Bash on the Windows runner, so the glob + $TAG match the mac job.
         shell: bash
         run: gh release upload "$TAG" dist/*.zip --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+      # The other half of the 404: membridge.app links
+      # releases/latest/download/MemBridge-win.zip. Same reasoning as the mac
+      # alias above.
+      - name: Attach unversioned download alias to release
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(dist/*.zip)
+          if [ ${#built[@]} -ne 1 ]; then
+            echo "expected exactly one zip in dist/, found ${#built[@]}: ${built[*]-none}" >&2
+            exit 1
+          fi
+          stage=$(mktemp -d)
+          cp "${built[0]}" "$stage/MemBridge-win.zip"
+          gh release upload "$TAG" "$stage/MemBridge-win.zip" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}

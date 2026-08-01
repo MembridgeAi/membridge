@@ -1,0 +1,25 @@
+name = "membridge-counters"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Anonymous product-health counters. Writes to Analytics Engine only — this
+# Worker holds no secrets and no binding to Supabase, deliberately (see
+# src/index.js's header and spec §2).
+[[analytics_engine_datasets]]
+binding = "COUNTERS"
+dataset = "membridge_counters"
+
+# Hostname settled 2026-07-29, once membridge.app moved to Cloudflare. It is on
+# the brand domain rather than the deprecated .me, which matters more here than
+# anywhere else: this URL is compiled into lib/counters-backend.json at build
+# time and every shipped client keeps pointing at whatever it was built with.
+# Old installs never update it, so counters.membridge.app has to keep answering
+# for as long as any client from this era is running. Do not repoint it casually.
+[[routes]]
+pattern = "counters.membridge.app"
+custom_domain = true
+
+# RECOMMENDED, set in the dashboard rather than here (rate limiting rules are
+# not expressible in wrangler.toml): a rate limit on this hostname of ~10
+# requests per minute per IP. A healthy install sends at most one request per
+# state change and one per day; anything above that is a bug or an attack.

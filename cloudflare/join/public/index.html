@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Join your team on MemBridge</title>
+<style>
+  /* Tokens from membridge.app — this is a customer-facing page and must read
+     as the product, not as internal tooling. */
+  :root {
+    --blue:#2F4FE0; --blue-dark:#2440C4;
+    --ink:#10182B; --muted:#5D6B85; --faint:#8A96AC;
+    --bg:#FFFFFF; --bg-alt:#F7F9FE; --tint:#EDF1FD; --tint-border:#D9E2FA; --border:#E6EAF3;
+    --green:#1D8A5F; --red:#C0392E;
+    --radius:14px;
+    --serif:'Iowan Old Style','Palatino Linotype',Palatino,Georgia,'Times New Roman',serif;
+    --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);
+       display:flex;align-items:center;justify-content:center;min-height:100vh;padding:32px 20px;-webkit-font-smoothing:antialiased}
+  .card{max-width:520px;width:100%}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font:11.5px/1 var(--mono);letter-spacing:1.38px;
+           text-transform:uppercase;color:var(--blue);background:var(--tint);border:1px solid var(--tint-border);
+           border-radius:999px;padding:9px 16px;margin-bottom:20px}
+  h1{font:500 36px/1.15 var(--serif);letter-spacing:-.4px;margin:0 0 12px}
+  h1 em{font-style:italic;color:var(--blue)}
+  p{color:var(--muted);margin:0 0 18px}
+  p.lead{color:var(--ink)}
+  label{display:block;font:11.5px/1 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--faint);margin:0 0 7px}
+  input{font:15px var(--sans);color:var(--ink);background:var(--bg);border:1px solid var(--border);
+        border-radius:10px;padding:12px 14px;width:100%;margin-bottom:16px}
+  button{font:600 15px var(--sans);padding:13px 22px;border-radius:12px;border:1px solid var(--blue);
+         background:var(--blue);color:#fff;cursor:pointer;width:100%}
+  button:hover{background:var(--blue-dark)}
+  button:disabled{opacity:.55;cursor:default}
+  .gh{display:inline-flex;align-items:center;gap:9px;justify-content:center}
+  .err{color:var(--red);font-size:14px;margin-top:14px}
+  .ok{color:var(--green)}
+  pre{background:var(--bg-alt);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+      font:13px var(--mono);overflow-x:auto;margin:0 0 16px}
+  .steps{counter-reset:s;padding:0;margin:0 0 18px;list-style:none}
+  .steps li{counter-increment:s;position:relative;padding-left:30px;margin-bottom:12px;color:var(--ink);font-size:15px}
+  .steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:20px;height:20px;border-radius:50%;
+    background:var(--tint);color:var(--blue);font:600 11px/20px var(--mono);text-align:center}
+  .muted-note{font-size:13px;color:var(--faint);margin-top:22px}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="eyebrow"><span id="badge">MemBridge</span></div>
+
+  <section id="v-invite" hidden>
+    <h1>You've been <em>invited</em></h1>
+    <p class="lead">Sign in to create your team. Your account and your encryption keys are yours — MemBridge never sees your session content.</p>
+    <label for="name">your name</label>
+    <input id="name" placeholder="Ada Lovelace" maxlength="80" autocomplete="name">
+    <button id="go" class="gh">
+      <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      Continue with GitHub
+    </button>
+    <p class="err" id="inviteErr" hidden></p>
+  </section>
+
+  <section id="v-working" hidden>
+    <h1>Setting up <em>your team</em></h1>
+    <p>One moment.</p>
+  </section>
+
+  <section id="v-done" hidden>
+    <h1>You're <em>in</em></h1>
+    <p class="lead">Team <b id="teamName"></b> is ready. Install MemBridge on each machine and it will start sharing context automatically.</p>
+    <ol class="steps">
+      <li>Install it:<pre id="installCmd">curl -fsSL https://membridge.app/install.sh | sh</pre></li>
+      <li>Sign in with the same account:<pre>membridge login</pre></li>
+      <li>Link a repo:<pre>membridge team link</pre></li>
+    </ol>
+    <p class="muted-note">Invite the rest of your team from the app once you're set up.</p>
+  </section>
+
+  <section id="v-error" hidden>
+    <h1>That link <em>didn't work</em></h1>
+    <p id="errText"></p>
+    <p class="muted-note">Invite links expire and can only be used once. Ask whoever sent it for a fresh one.</p>
+  </section>
+</div>
+
+<script>
+// Public by design: the anon key is meant to ship in clients, and row-level
+// security is what actually protects the data. Same values as lib/backend.json.
+const SUPABASE_URL = 'https://mefgbiecvoszjorwzkfz.supabase.co';
+const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lZmdiaWVjdm9zempvcnd6a2Z6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM4NzU5OTQsImV4cCI6MjA5OTQ1MTk5NH0.WTM_iCm3qNtoov8QPB6BloAfKB7WLrVD01CTeTcH7wA';
+
+// The invite token rides in the URL FRAGMENT so it is never sent to a server,
+// never lands in an access log, and never leaks via Referer. But Supabase's
+// OAuth redirect returns its session in that same fragment and would overwrite
+// it — so the token is stashed in sessionStorage before we leave, and the
+// fragment is stripped from the address bar immediately either way.
+const STASH = 'membridge.invite';
+const $ = id => document.getElementById(id);
+const show = id => { for (const s of document.querySelectorAll('section')) s.hidden = s.id !== id; };
+
+function readFragment() {
+  const raw = location.hash.slice(1);
+  if (!raw) return {};
+  if (raw.includes('=')) return Object.fromEntries(new URLSearchParams(raw));
+  return { invite: raw };
+}
+
+function fail(msg) { $('errText').textContent = msg; show('v-error'); }
+
+async function rpc(fn, body, accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: {
+      apikey: ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).message || text; } catch {}
+    throw new Error(msg);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+(async function () {
+  const frag = readFragment();
+
+  // Clear the fragment before anything else — an invite token or a session
+  // token sitting in the address bar is one screenshot away from being shared.
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+
+  // --- returning from GitHub -------------------------------------------------
+  if (frag.access_token) {
+    const invite = sessionStorage.getItem(STASH);
+    const name = sessionStorage.getItem(STASH + '.name') || '';
+    sessionStorage.removeItem(STASH);
+    sessionStorage.removeItem(STASH + '.name');
+    if (!invite) return fail('The invite was lost during sign-in. Open your invite link again.');
+
+    show('v-working');
+    try {
+      const out = await rpc('redeem_onboarding_invite',
+        { p_token: invite, p_display_name: name || 'Member' }, frag.access_token);
+      $('teamName').textContent = (out && out.team_name) || 'your team';
+      show('v-done');
+    } catch (err) {
+      // The RPC raises for an invalid, expired or already-redeemed token; the
+      // wording matters because all three land here and "invalid" alone reads
+      // as "we have no idea".
+      fail(String(err.message || err));
+    }
+    return;
+  }
+
+  // --- arriving with an invite ----------------------------------------------
+  if (frag.error_description) return fail(decodeURIComponent(frag.error_description).replace(/\+/g, ' '));
+  if (!frag.invite) {
+    return fail('This page needs an invite link. The one you were sent should end in a long code after a # sign.');
+  }
+
+  show('v-invite');
+  $('name').focus();
+  $('go').onclick = () => {
+    const name = $('name').value.trim();
+    if (!name) { $('inviteErr').textContent = 'Please enter your name first.'; $('inviteErr').hidden = false; return; }
+    $('go').disabled = true;
+    sessionStorage.setItem(STASH, frag.invite);
+    sessionStorage.setItem(STASH + '.name', name);
+    const back = location.origin + location.pathname;
+    location.href = `${SUPABASE_URL}/auth/v1/authorize?provider=github&redirect_to=${encodeURIComponent(back)}`;
+  };
+})();
+</script>
+</body>
+</html>

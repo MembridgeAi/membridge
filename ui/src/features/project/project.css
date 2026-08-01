@@ -1,0 +1,270 @@
+/* Project page — imported once from ProjectPage.tsx (per-feature CSS, same
+ * precedent as today.css). One --r radius everywhere except avatars
+ * (circles), no shadows, no gradients, hover changes background/border only.
+ * Type/spacing/motion tokens from styles/tokens.css; settle-in keyframe
+ * from styles/base.css. */
+
+.project-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: var(--sp-4) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .project-header { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+.project-back {
+  color: var(--text3);
+  text-decoration: none;
+  font-size: 13px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .project-back { transition: color var(--dur-fast) var(--ease-out); }
+}
+.project-back:hover {
+  color: var(--text2);
+}
+.project-title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
+}
+/* The shared project's member stack (spec section 4): overlapping avatars
+ * plus a +N chip, read-only, visible at every role. */
+.project-member-stack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.project-member-stack .avatar:not(:first-child) {
+  margin-left: -6px;
+}
+.project-member-more {
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.project-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.project-btn {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--text2);
+}
+.project-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.project-btn-primary:hover {
+  background: var(--accent2);
+  border-color: var(--accent2);
+}
+.project-btn-ghost:hover {
+  background: var(--panel2);
+}
+.project-btn:disabled {
+  opacity: 0.6;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .project-btn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
+
+/* Duplicated from today.css's .tag rules -- each feature CSS file owns its
+ * small utility classes rather than importing another feature's stylesheet. */
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  background: var(--panel2);
+  color: var(--text2);
+}
+.tag-team {
+  background: var(--accent-dim);
+  color: var(--accent2);
+}
+.tag-private {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.project-error {
+  margin: 12px 16px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
+.project-empty-note {
+  margin: 0;
+  padding: var(--sp-5) var(--sp-4) var(--sp-6);
+  text-align: center;
+  color: var(--text3);
+}
+.project-empty-note::before {
+  content: "";
+  display: block;
+  width: 4px;
+  height: 4px;
+  margin: 0 auto var(--sp-3);
+  background: var(--line2);
+}
+
+/* Two columns: flex stream + fixed 300px side, stacking below 1000px. */
+.project-cols {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.project-stream {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.project-side {
+  width: 300px;
+  flex-shrink: 0;
+}
+@media (max-width: 1000px) {
+  .project-cols {
+    flex-direction: column;
+  }
+  .project-stream {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .project-side {
+    width: auto;
+  }
+}
+
+.project-day {
+  color: var(--text3);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: var(--fw-medium);
+  padding: var(--sp-5) var(--sp-4) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Stream entries now render through the shared <EntryRow> component
+ * (ui/src/components/EntryRow.tsx) -- its .entry-row* styles live in
+ * components.css, alongside the rest of the shared component kit. */
+
+/* Side panels — ruled sections, no cards. */
+.panel {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.panel-last {
+  border-bottom: none;
+}
+.section-label {
+  color: var(--text3);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: var(--sp-5) var(--sp-4) 6px;
+  font-weight: 600;
+}
+
+/* .access-row combines with the shared .ruled-row class (RuledRow
+ * component), which already owns the hover background + transition in
+ * components.css -- no need to duplicate it here. */
+.access-row {
+  gap: 8px;
+  padding: 6px 16px;
+}
+.access-name {
+  font-weight: 600;
+}
+.access-role {
+  color: var(--text3);
+  font-size: 10px;
+  text-transform: capitalize;
+  letter-spacing: 0.05em;
+  margin-left: -2px;
+}
+.access-row .toggle {
+  margin-left: auto;
+}
+.access-note {
+  margin: 2px 0;
+  padding: 2px 16px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.access-default {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 5px 16px;
+  color: var(--text2);
+}
+.access-default-label {
+  color: var(--text2);
+}
+.access-default .toggle {
+  margin-left: auto;
+}
+
+.kv {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  color: var(--text2);
+}
+.kv-key {
+  width: 86px;
+  flex-shrink: 0;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.kv-value {
+  font-size: 10.5px;
+}
+
+/* A button that reads as an inline text link -- used for memory.md (opens
+ * the file in the OS file manager via DataClient.openMemoryFile). No
+ * underline until hover, so it doesn't compete with the surrounding text;
+ * no background per the global "hover changes background/border only" rule. */
+.link-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent2);
+  font-size: inherit;
+  cursor: pointer;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+.link-btn:disabled {
+  color: var(--text3);
+  cursor: default;
+  text-decoration: none;
+}

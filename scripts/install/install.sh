@@ -1,8 +1,8 @@
 #!/bin/sh
 # MemBridge macOS installer — installs the app + `membridge` CLI, no Gatekeeper warning.
 # Pinned to one release (version + SHA-256) by scripts/install/gen-install.js.
-#   curl -fsSL https://membridge.me/install.sh | sh
-#   curl -fsSL https://membridge.me/install.sh | sh -s -- --dry-run
+#   curl -fsSL https://membridge.app/install.sh | sh
+#   curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run
 set -eu
 
 VERSION="0.1.2"
@@ -20,8 +20,8 @@ die() { printf '\033[1;31mmembridge error\033[0m %s\n' "$1" >&2; exit 1; }
 run() { if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else eval "$@"; fi; }
 
 # 1. Preflight
-[ "$(uname -s)" = "Darwin" ] || die "macOS only. On Linux/Windows: npm i -g membridge"
-[ "$(uname -m)" = "arm64" ] || die "No prebuilt app for $(uname -m) yet. On Intel Macs: npm i -g membridge"
+[ "$(uname -s)" = "Darwin" ] || die "macOS only. On Linux/Windows: npm i -g @membridgeai/membridge"
+[ "$(uname -m)" = "arm64" ] || die "No prebuilt app for $(uname -m) yet. On Intel Macs: npm i -g @membridgeai/membridge"
 command -v curl   >/dev/null 2>&1 || die "curl is required."
 command -v shasum >/dev/null 2>&1 || die "shasum is required."
 
@@ -87,6 +87,27 @@ SH
   sudo chmod +x ${CLI_DEST}
 MANUAL
   fi
+fi
+
+# 7b. Register the MCP server with every AI tool this user actually has.
+#
+# HERE, and not left to the daemon, because this runs in the user's own shell:
+# `claude` resolves off the real PATH (nvm, volta, asdf, a custom prefix) with
+# no searching, and what it resolves is recorded so later launches never have
+# to search either. A GUI-launched app inherits roughly /usr/bin:/bin and would
+# often find nothing at all.
+#
+# NEVER ABORTS. Registration is a convenience; a MemBridge that installed fine
+# but could not write someone's Cursor config must still be an install that
+# succeeded. `|| true` under `set -e`, and the CLI itself reports per agent.
+#
+# </dev/null matters: this script is routinely run as `curl ... | sh`, so
+# stdin is the REST OF THIS SCRIPT. A child that reads stdin would eat it.
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  [dry-run] %s mcp register\n' "$CLI_DEST"
+elif [ -x "$CLI_DEST" ]; then
+  say "Registering the MemBridge MCP server with your AI tools..."
+  "$CLI_DEST" mcp register </dev/null || say "MCP registration didn't complete — run 'membridge mcp register' later. The install is fine."
 fi
 
 # 8. Launch + report

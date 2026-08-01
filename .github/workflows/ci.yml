@@ -11,18 +11,52 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # windows-latest is load-bearing, not decoration: it is the ONLY place
+        # lib/keychain.js's DPAPI backend is ever executed. The keychain(win)
+        # checks in test/run-tests.js print a visible skip everywhere else, so
+        # dropping this leg silently removes all coverage of Windows private-key
+        # storage while the suite still reports green.
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: [18, 20, 22]
+        # 18 dropped: the ui leg cannot go green on it. Vite 8 builds through
+        # rolldown, which imports styleText from node:util, added in Node 20,
+        # and vite, @vitejs/plugin-react, vitest and jsdom all declare engines
+        # that exclude 18.
+        #
+        # This matrix and package.json's `engines` DISAGREE ON PURPOSE, and the
+        # disagreement is correct. Node 18 is a BUILD-TIME constraint, not a
+        # runtime one. `engines` is a claim about the runtime, and the npm
+        # tarball ships only bin, lib and vendor (see the `files` field), so an
+        # npm consumer never runs vite and never reaches styleText. Verified on
+        # real Node 18.20.8 against a packed tarball: the CLI, the daemon and
+        # all six MCP tools work. `engines` therefore stays at >=18. Raising it
+        # on build-toolchain evidence would lock out users who are fine, which
+        # is the mirror image of the bug this comment exists to record.
+        node: [20, 22]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # Prod deps from the lockfile (tests exercise libsodium-wrappers), minus
-      # devDependencies — electron/electron-builder are heavy and unused by the
-      # suite. The MCP SDK + zod are deliberately opt-in (not in package.json),
-      # but the MCP tests require them, so install them without saving.
+      # Prod deps from the lockfile (tests exercise libsodium-wrappers and the
+      # MCP SDK), minus devDependencies — electron/electron-builder are heavy
+      # and unused by the suite. No side-install: the MCP SDK and zod are
+      # ordinary dependencies now, and CI must fail if they ever stop being.
       - run: npm ci --omit=dev --no-audit --no-fund
-      - run: npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4
+      # The React UI (ui/) is its own npm workspace with its own devDeps
+      # (vite, vitest, @testing-library) that the build and tests need, so
+      # this installs full (not --omit=dev), unlike the root step above.
+      # `working-directory:` is used instead of `cd ui &&` because the latter
+      # is a POSIX-only chain that breaks in cmd.exe/PowerShell — the whole
+      # point of running this leg on windows-latest.
+      - run: npm ci
+        working-directory: ui
+      # Build BEFORE the root suite: its /app static-serving checks need a real
+      # ui/dist, and ui/dist is gitignored, so a fresh checkout has none. With
+      # the build after, those checks skipped on every CI run and the route
+      # shipped exercised only on machines that happened to have a local build.
+      - run: npm run build
+        working-directory: ui
       - run: node test/run-tests.js
+      - run: npx vitest run
+        working-directory: ui

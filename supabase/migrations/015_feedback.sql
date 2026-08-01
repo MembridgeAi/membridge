@@ -1,5 +1,5 @@
 -- 015_feedback.sql
--- The public.feedback table backing membridge.me/feedback (CLI + site nudges).
+-- The public.feedback table backing membridge.app/feedback (CLI + site nudges).
 -- NOTE: this table was created directly in the dashboard before this migration
 -- existed; the DDL below mirrors the LIVE shape exactly and is idempotent, so a
 -- fresh environment reproduces prod and running it against prod is a no-op.

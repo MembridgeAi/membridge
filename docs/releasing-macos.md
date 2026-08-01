@@ -20,7 +20,7 @@ release regenerates and republishes `install.sh`.
    It prints the version + SHA-256 it embedded.
 4. (The asset name must match `MemBridge-<version>-arm64.zip` — the installer
    builds the download URL from it.)
-5. Publish `install.sh` so `https://membridge.me/install.sh` serves it: copy
+5. Publish `install.sh` so `https://membridge.app/install.sh` serves it: copy
    `scripts/install/install.sh` to the root of the `mmelika/membridge-site`
    repo as `install.sh`, commit, and push (GitHub Pages serves it). The raw
    fallback URL, which works without the site repo, is
@@ -28,7 +28,7 @@ release regenerates and republishes `install.sh`.
 6. Commit the regenerated `scripts/install/install.sh` in this repo.
 7. Smoke-test on a clean Apple Silicon machine:
    ```sh
-   curl -fsSL https://membridge.me/install.sh | sh
+   curl -fsSL https://membridge.app/install.sh | sh
    membridge --version
    ```
    Confirm zero Gatekeeper prompts on the app.

@@ -3,14 +3,19 @@
 // Fast path: the Claude Code Stop hook fires on every session stop and the
 // git post-commit hook on every commit — neither may pay for the full CLI
 // require tree below (server, dashboard, team sync).
-if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3] === 'post-commit')) {
+if (process.argv[2] === 'hook' && (process.argv[3] === 'stop' || process.argv[3] === 'post-commit' || process.argv[3] === 'recall')) {
   const hooks = require('../lib/hooks');
-  (process.argv[3] === 'stop' ? hooks.runStop : hooks.runPostCommit)();
+  if (process.argv[3] === 'stop') hooks.runStop();
+  else if (process.argv[3] === 'post-commit') hooks.runPostCommit();
+  else hooks.runRecall();
   return;
 }
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+// The published package name, single-sourced: anything that installs or names
+// this package must read it from here, never re-type it (see cmdUpdate).
+const PKG_NAME = require('../package.json').name;
 const util = require('../lib/util');
 const { scanAll, syncOnce, getAdapters, findProjectKey } = require('../lib/scan');
 const digest = require('../lib/digest');
@@ -19,6 +24,9 @@ const { startServer } = require('../lib/server');
 const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
 const hooks = require('../lib/hooks');
+const counters = require('../lib/counters');
+const notes = require('../lib/teammate-notes');
+const notesStore = require('../lib/teammate-notes-store');
 const prompts = require('../lib/prompts');
 const pkg = require('../package.json');
 
@@ -65,11 +73,20 @@ function cmdSync() {
   }
 }
 
+// Post-pull teammate-notes work (rebuild for changed projects + first-install
+// backfill) lives in lib/teammate-notes-store.js's afterTeamPull, because the
+// tray app (app/main.js) runs its own sync loop and must run the same logic --
+// the first version lived here as glue and the app never executed it.
+function rebuildNotesForChanged(changed) {
+  notesStore.afterTeamPull(changed);
+}
+
 // One team push/pull pass; pulled teammate entries re-render those projects'
 // context blocks right away.
 async function teamSyncPass(opts = {}) {
   const r = await teamsync.syncTeams(opts);
   for (const key of r.changed) syncOnce({ project: key });
+  rebuildNotesForChanged(r.changed);
   for (const e of r.errors) util.log(`team sync: ${e}`);
   if (r.synced.length || r.errors.length) {
     console.log(`team sync: ${r.synced.length} project(s), ${r.changed.length} with new teammate activity${r.errors.length ? `, ${r.errors.length} error(s) (see log)` : ''}`);
@@ -112,7 +129,7 @@ function cmdDaemon() {
   // Auto-register the Claude Code Stop hook on every daemon boot, so it lands
   // however MemBridge was installed (git clone, npm, curl) without a manual
   // `setup-hooks` step. Silent and fail-open — never blocks the daemon.
-  hooks.ensureInstalled();
+  const { registration } = hooks.ensureInstalled() || {};
 
   const cleanup = () => {
     try {
@@ -142,9 +159,27 @@ function cmdDaemon() {
         util.log(`sync: ${r.newEvents} new event(s) -> ${r.changes.map(c => c.file).join('; ')}`);
       }
       teamTick();
+      countersTick();
     } catch (err) {
       util.log(`sync error: ${err.stack || err}`);
     }
+  };
+  // Anonymous product-health counters, on the same tick and guarded the same
+  // way. emitCounters decides internally whether anything is actually worth
+  // sending (state change, or once a day) — calling it every pass is cheap and
+  // keeps the cadence logic in one place. Cannot block or fail the sync: it
+  // swallows its own errors and this adds a second net.
+  let countersBusy = false;
+  const countersTick = () => {
+    if (countersBusy) return;
+    countersBusy = true;
+    // The MCP process itself never calls out to the network (lib/mcp.js) —
+    // it only tallies locally (lib/mcp-usage.js). This daemon reads that
+    // tally on its own existing cadence and folds it into the same payload.
+    const mcpToolsUsed = require('../lib/mcp-usage').toolsUsedWithin(24 * 3600000, {});
+    counters.emitCounters(util.loadState(), util.getConfig(), { registration, mcpToolsUsed })
+      .catch(err => util.log(`counters error: ${err && err.message}`))
+      .finally(() => { countersBusy = false; });
   };
   // Team sync rides the same tick, guarded so a slow network round cannot
   // overlap the next one. Best-effort: errors are logged, local sync is never
@@ -156,6 +191,7 @@ function cmdDaemon() {
     teamsync.syncTeams()
       .then(r => {
         for (const key of r.changed) syncOnce({ project: key });
+        rebuildNotesForChanged(r.changed);
         for (const e of r.errors) util.log(`team sync: ${e}`);
         if (r.changed.length) util.log(`team sync: pulled teammate activity into ${r.changed.length} project(s)`);
       })
@@ -223,6 +259,7 @@ function cmdStatus() {
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
   console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'} — Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
+  printMcpStatus(config);
   const encOn = ((config.team || {}).encrypt !== false);
   const keyAlerts = Array.isArray(state.keyAlerts) ? state.keyAlerts.length : 0;
   let encLine = encOn ? 'on (E2E, fail-closed)' : 'OFF — plaintext sync (explicit team.encrypt=false hatch)';
@@ -231,11 +268,107 @@ function cmdStatus() {
   console.log(`Encrypt:   ${encLine}`);
   const projects = Object.entries(state.projects || {});
   console.log(`Projects:  ${projects.length}`);
+  let captured = 0;
   for (const [key, proj] of projects) {
     const paused = util.isProjectOff(key, config) ? ' [paused]' : '';
-    console.log(`  ${key}${paused} — ${proj.events.length} event(s), last sync ${proj.lastSync || 'never'}`);
+    const events = (proj.events || []).length;
+    captured += events;
+    // A project MemBridge has nothing for must not read like an active one:
+    // that sameness is what makes a working install look broken.
+    const detail = events
+      ? `${events} event(s), last sync ${proj.lastSync || 'never'}`
+      : emptyProjectDetail(proj);
+    console.log(`  ${key}${paused} — ${detail}`);
   }
+  if (!captured) printEmptyState(config, running);
   prompts.flushValueMoment(config);
+}
+
+// Which AI tools can actually call MemBridge's MCP server, and — the part that
+// matters — which ones CANNOT and why.
+//
+// An agent MemBridge failed to register is the whole reason this feature
+// exists: a silent skip is indistinguishable from the feature working, so
+// every agent gets a line here, including the ones nothing was written for,
+// carrying the config key that fixes it.
+//
+// Read from the RECORDED rows, never re-run. `status` is a read-only command,
+// and re-registering to report on it would both write from a read and add
+// seconds to it (`claude mcp get` alone costs ~2.1s).
+function printMcpStatus(config) {
+  let rec = null;
+  try { rec = require('../lib/mcp-register').lastRegistration(); } catch {}
+  if ((config.mcp || {}).autoRegister === false && !rec) {
+    console.log('MCP:       auto-registration off (config.mcp.autoRegister is false)');
+    return;
+  }
+  if (!rec || !Array.isArray(rec.rows) || !rec.rows.length) {
+    console.log('MCP:       not registered with any AI tool yet — run `membridge mcp register`');
+    return;
+  }
+  const when = rec.at ? ` (last checked ${rec.at})` : '';
+  if (rec.mode === 'unregister') {
+    console.log(`MCP:       removed from your AI tools${when} — re-register with \`membridge mcp register\``);
+  } else {
+    console.log(`MCP:       server name \`membridge\`${when}`);
+  }
+  for (const r of rec.rows) console.log(mcpRow(r));
+}
+
+// Teammate activity is still something to inject, so a project with no local
+// sessions of its own says which of the two it is rather than reading as dead.
+function emptyProjectDetail(proj) {
+  const n = (proj.teamEntries || []).length;
+  if (!n) return 'no sessions captured yet, nothing to inject';
+  return `no local sessions yet — ${n} teammate entr${n === 1 ? 'y' : 'ies'} synced`;
+}
+
+// Where each enabled adapter looks for sessions, and whether that root is
+// actually there. Best-effort: an adapter that throws is reported as not found
+// rather than taking `status` down with it.
+function sessionRootsOf(config) {
+  const roots = [];
+  for (const adapter of getAdapters(config)) {
+    try {
+      for (const root of adapter.sessionRoots(config)) {
+        let found = false;
+        try {
+          found = fs.existsSync(root);
+        } catch {}
+        roots.push({ name: adapter.displayName, root, found });
+      }
+    } catch {}
+  }
+  return roots;
+}
+
+const joinNames = names =>
+  names.length < 2 ? (names[0] || '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+
+// Nothing captured anywhere. Two users read that state — printed identically to
+// a healthy one — as proof MemBridge was broken, when it was working and simply
+// had nothing to inject yet. Two different causes, two different next steps.
+function printEmptyState(config, running) {
+  const roots = sessionRootsOf(config);
+  const tools = joinNames([...new Set(roots.map(r => r.name))]);
+  console.log('');
+  if (!roots.length) {
+    console.log('No session adapters are enabled, so nothing can be captured — every tool is');
+    console.log(`switched off in the \`adapters\` section of ${util.configPath()}.`);
+    return;
+  }
+  if (!roots.some(r => r.found)) {
+    console.log(`No supported AI tool found. MemBridge reads ${tools} session logs,`);
+    console.log('and none of those directories exist on this machine:');
+    for (const r of roots) console.log(`  ${r.name.padEnd(14)} ${r.root} (not found)`);
+    console.log('Run one of those tools once, or point MemBridge at another tool via the');
+    console.log(`\`adapters\` section of ${util.configPath()}.`);
+    return;
+  }
+  console.log(`No agent sessions captured yet. MemBridge reads ${tools} session logs;`);
+  console.log(running
+    ? `open a project in one of those tools and check back after a sync (every ${config.intervalSec}s).`
+    : 'open a project in one of those tools. Nothing is captured while the daemon is\nstopped — start it with `membridge start`.');
 }
 
 function cmdRemove() {
@@ -312,8 +445,47 @@ function cmdDashboard() {
 // lib/mcp.js (and its @modelcontextprotocol/sdk + zod dependencies) is
 // required lazily, here only, so every other command stays on the
 // dependency-light main path — `membridge status` etc. never load the SDK.
+// `membridge mcp` with NO subcommand is the server itself — that exact argv is
+// what every registered entry runs, so it must stay the default forever. The
+// verbs hang off it rather than replacing it.
 async function cmdMcp() {
-  await require('../lib/mcp').startMcpServer();
+  const sub = args[1];
+  if (!sub) return require('../lib/mcp').startMcpServer();
+  if (sub === 'register') return cmdMcpRegister();
+  if (sub === 'unregister') return cmdMcpUnregister();
+  // Never fall through to starting the server: a typo would hang the terminal
+  // on a stdio server waiting for a client that will never speak.
+  die(`Unknown mcp subcommand: ${sub}\nUsage: membridge mcp [register|unregister]`);
+}
+
+// One line per agent, for both the `mcp register` output and `membridge
+// status`. `reason` is the stable machine token; `detail` is the sentence, and
+// for anything actionable it already names the config key that fixes it.
+function mcpRow(r) {
+  const head = `  ${String(r.agent).padEnd(14)}${r.status}`;
+  // The reason token is a fallback only where something is wrong and no
+  // sentence was written; on a success it is internal detail ('created',
+  // 'cli') that reads as noise next to the status word.
+  const why = r.detail || ((r.status === 'skipped' || r.status === 'failed') ? r.reason : '');
+  return why ? `${head} — ${why}` : head;
+}
+
+function cmdMcpRegister() {
+  const mcpRegister = require('../lib/mcp-register');
+  const { rows, recordedBin } = mcpRegister.registerNow();
+  console.log('MCP server registration (server name: membridge):');
+  for (const r of rows) console.log(mcpRow(r));
+  if (recordedBin) console.log(`Recorded the \`claude\` binary at ${recordedBin} so later launches need not search for it.`);
+  const failed = rows.filter(r => r.status === 'failed').length;
+  if (failed) console.log(`${failed} agent(s) could not be written; nothing of theirs was changed.`);
+}
+
+function cmdMcpUnregister() {
+  const mcpRegister = require('../lib/mcp-register');
+  const { rows } = mcpRegister.unregisterNow();
+  console.log('MCP server removal (server name: membridge):');
+  for (const r of rows) console.log(mcpRow(r));
+  console.log('Re-register anytime with: membridge mcp register');
 }
 
 // `membridge update` — check GitHub for a newer release and update in place.
@@ -348,7 +520,12 @@ async function cmdUpdate() {
     return;
   }
   console.log(`Updating via: ${command}\n`);
-  const res = spawnSync('npm', ['install', '-g', 'membridge'], { stdio: 'inherit' });
+  // SECURITY: never write the package name out by hand here. This ran the BARE
+  // name `membridge`, which is unclaimed on the registry and squattable — the
+  // printed command above was the correct scoped one, and that divergence is
+  // exactly what hid the bug. Derive both from package.json so they cannot
+  // drift apart again.
+  const res = spawnSync('npm', ['install', '-g', PKG_NAME], { stdio: 'inherit' });
   if (res.status !== 0) {
     die(`Update failed (exit ${res.status}). Run it manually:\n  ${command}`);
   }
@@ -740,7 +917,8 @@ function cmdHook() {
   const sub = args[1];
   if (sub === 'stop') return hooks.runStop();
   if (sub === 'post-commit') return hooks.runPostCommit();
-  die('Usage: membridge hook <stop|post-commit>  (invoked by the installed hooks — see `membridge setup-hooks`)');
+  if (sub === 'recall') return hooks.runRecall();
+  die('Usage: membridge hook <stop|post-commit|recall>  (invoked by the installed hooks — see `membridge setup-hooks`)');
 }
 
 function cmdHelp() {
@@ -784,15 +962,21 @@ Distillation (agent-written session summaries — see README):
   remove-hooks        remove the MemBridge hooks (your other hooks are kept)
   hook stop           the Stop hook itself (invoked by Claude Code, not by you)
   hook post-commit    the git hook itself (invoked by git, not by you)
+  hook recall         the PreToolUse recall hook itself (answers a repeat
+                      Read/Grep/Glob from memory; invoked by Claude Code)
 
 MCP (expose project memory, read-only, to MCP-capable clients — Claude
 Desktop, Cursor, Cowork, ...; see README):
   mcp                 start a read-only MCP server over stdio
-                      One-time setup — MemBridge's core stays dependency-free,
-                      so this needs its own packages installed once:
-                        npm install @modelcontextprotocol/sdk zod
-                      Then point your MCP client's config at:
-                        { "command": "membridge", "args": ["mcp"] }
+                      Nothing to install — it ships with MemBridge, and the
+                      installer registers it with every AI tool you have.
+  mcp register        register the server with every installed AI tool
+                      (Claude Code, Codex, Cursor, ...); prints one line per
+                      tool, including the ones it could not write and why.
+                      Turn the automatic pass off with config.mcp.autoRegister
+  mcp unregister      remove MemBridge's entry from those tools' configs
+                      (a foreign server that happens to be named "membridge"
+                      is never touched)
 
 Team sync (share project memory with your team — see README):
   join <link-or-code> [--email <e> --password <p>]   one command from invite to member
@@ -841,7 +1025,22 @@ const commands = {
       util.saveUserConfig(raw);
     }
   },
-  'remove-hooks': () => console.log(hooks.removeHooks()),
+  // `remove-hooks` is the documented "take MemBridge back out of my tools"
+  // command, so it also strips the MCP registration — uninstalling must leave
+  // nothing of ours behind in anyone's config.
+  //
+  // Wired HERE and not inside hooks.removeHooks(), deliberately. That function
+  // is also called by lib/server.js when the dashboard's Settings toggle turns
+  // *distillation* off, and by lib/consent.js when the first-run prompt is
+  // declined. Session summaries and the MCP server are unrelated features:
+  // putting the unregister inside removeHooks() would silently tear the MCP
+  // server out of Codex and Cursor because someone switched off Stop-hook
+  // summaries, and would do it from inside an HTTP handler that would then
+  // block for seconds on `claude mcp remove`.
+  'remove-hooks': () => {
+    console.log(hooks.removeHooks());
+    cmdMcpUnregister();
+  },
   'enable-autostart': () => console.log(autostart.enable()),
   'disable-autostart': () => console.log(autostart.disable()),
   help: cmdHelp,

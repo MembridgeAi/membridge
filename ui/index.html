@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MemBridge</title>
+    <script>
+      // No-flash theme bootstrap. Runs synchronously, before any stylesheet
+      // paints or the React bundle loads, so the very first frame already
+      // carries the right palette instead of flashing tokens.css's :root
+      // default (dark) and then snapping to light a moment later. Mirrors
+      // ui/src/theme/theme.ts's readStoredMode/effectiveTheme by hand -- it
+      // cannot import that module, since ES module imports load
+      // asynchronously and would defeat the entire point of running before
+      // first paint. Keep the storage key and the light/dark decision here
+      // in lockstep with that file if either one ever changes.
+      (function () {
+        try {
+          var KEY = 'membridge:theme'
+          var stored = window.localStorage.getItem(KEY)
+          var mode = stored === 'light' || stored === 'dark' ? stored : 'system'
+          var theme = mode === 'system'
+            ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+            : mode
+          document.documentElement.setAttribute('data-theme', theme)
+        } catch (e) {
+          // Storage/matchMedia denied (private mode, an older WebView) --
+          // leave the attribute unset; tokens.css's bare :root default is
+          // dark, a real intentional theme rather than a broken page.
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

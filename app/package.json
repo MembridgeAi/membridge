@@ -1,8 +1,14 @@
 {
   "name": "membridge-app",
-  "version": "0.1.2",
-  "description": "MemBridge tray app - shared memory across your AI coding tools",
+  "version": "0.2.3",
+  "description": "Shared memory across your AI coding tools. A tiny background daemon that watches Claude Code, Codex and any other agent's session logs, distills a brief per-project memory, and syncs it into the context files every tool reads (CLAUDE.md, AGENTS.md, ...).",
   "main": "main.js",
-  "author": "Marco Melika <marco@melika.com>",
-  "license": "MIT"
+  "author": "Andrew Brown & Marco Melika",
+  "license": "FSL-1.1-ALv2",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "libsodium-wrappers": "^0.8.4",
+    "web-tree-sitter": "^0.26.11",
+    "zod": "^4"
+  }
 }

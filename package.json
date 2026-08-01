@@ -1,6 +1,6 @@
 {
   "name": "@membridgeai/membridge",
-  "version": "0.1.2",
+  "version": "0.2.3",
   "description": "Shared memory across your AI coding tools. A tiny background daemon that watches Claude Code, Codex and any other agent's session logs, distills a brief per-project memory, and syncs it into the context files every tool reads (CLAUDE.md, AGENTS.md, ...).",
   "keywords": [
     "ai",
@@ -25,12 +25,13 @@
   "files": [
     "bin",
     "lib",
+    "vendor",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node test/run-tests.js",
-    "prepublishOnly": "npm install --no-save --no-audit --no-fund @modelcontextprotocol/sdk@^1 zod@^4 && npm test",
+    "prepublishOnly": "npm test",
     "start": "node bin/membridge.js start",
     "app": "node scripts/prepare-app.js && electron app",
     "dist:mac": "node scripts/prepare-app.js && electron-builder --mac --publish never",
@@ -67,6 +68,7 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": false
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
       "target": [
@@ -87,6 +89,9 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
-    "libsodium-wrappers": "^0.8.4"
+    "@modelcontextprotocol/sdk": "^1",
+    "libsodium-wrappers": "^0.8.4",
+    "web-tree-sitter": "^0.26.11",
+    "zod": "^4"
   }
 }

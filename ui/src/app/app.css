@@ -1,0 +1,148 @@
+/* App shell layout — imported once from main.tsx, alongside
+ * components/components.css. Same rules apply here (see that file's header):
+ * the --r / --r-sm scale everywhere, no cards, no gradients, hover changes
+ * background/border only. The status dot below intentionally uses --r-sm
+ * instead of a circle — border-radius: 50% is reserved for avatars only. */
+
+.shell {
+  display: flex;
+  height: 100vh;
+}
+
+.rail {
+  width: 170px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: 12px 10px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.logo-mark {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.team-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 6px 8px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+.team-switch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  margin: 1px 0;
+  color: var(--text2);
+  text-decoration: none;
+  font-weight: var(--fw-normal);
+  border-left: 3px solid transparent; /* same width as .nav-item-active's
+    accent bar below, so the active row never nudges its neighbors'
+    icon/text out of alignment when the current route changes */
+  border-radius: var(--r);
+}
+.nav-item:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .nav-item {
+    transition: background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+}
+/* The active item has to read as unmistakably current: a full-strength
+ * (not dim) accent left bar, a tinted background, accent text, and extra
+ * weight — four cues stacked so it never reads as "just another link". */
+.nav-item-active {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: var(--fw-medium);
+}
+.nav-icon {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.nav-group-label {
+  margin: var(--sp-5) 8px 4px;
+  color: var(--text3);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.create-team {
+  margin: 4px 0 0;
+  padding: 8px;
+  text-align: left;
+  background: transparent;
+  color: var(--text2);
+  border: 1px dashed var(--line2);
+}
+
+.rail-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 0;
+  border-top: 1px solid var(--line);
+  color: var(--text2);
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-sm);
+  background: var(--green);
+  flex-shrink: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .status-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+}
+
+.shell-main {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.shell-error {
+  margin: 12px 12px 0;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
