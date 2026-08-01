@@ -18875,6 +18875,135 @@ const repoRoot = require('../lib/repo-root');
     assert.strictEqual(repoRoot.ledgerKeyFor(wt, path.join(wt, 'src', 'root.ts')), 'src/root.ts');
   });
 
+  // ---- linkedWorktreesOf: the block never reached worktrees ----
+  // Attribution was already correct -- work done in a worktree is credited to
+  // the main repo, so the root's block was current. Delivery was not: the
+  // block was written ONLY to <projectRoot>/CLAUDE.md, and an agent whose cwd
+  // is the worktree reads the worktree. Measured live: a worktree session was
+  // handed the HOME project's block (zero teammate entries) while the repo
+  // root's block carried four current ones.
+  check('worktrees: a main repo lists its linked worktrees', () => {
+    const found = repoRoot.linkedWorktreesOf(mono).map(p => path.resolve(p));
+    assert.ok(found.includes(path.resolve(wt)),
+      `expected ${wt} in ${JSON.stringify(found)}`);
+  });
+
+  check('worktrees: a worktree has none of its own (no infinite fan-out)', () => {
+    assert.deepStrictEqual(repoRoot.linkedWorktreesOf(wt), []);
+  });
+
+  check('worktrees: a plain repo with no worktrees returns []', () => {
+    const solo = path.join(ROOT, 'projects', 'solo-repo');
+    fs.mkdirSync(solo, { recursive: true });
+    spawnSync('git', ['init', '-q', solo], { encoding: 'utf8' });
+    assert.deepStrictEqual(repoRoot.linkedWorktreesOf(solo), []);
+  });
+
+  check('worktrees: a non-repo directory returns [] rather than throwing', () => {
+    assert.deepStrictEqual(repoRoot.linkedWorktreesOf(path.join(ROOT, 'projects', 'not-a-repo')), []);
+    assert.deepStrictEqual(repoRoot.linkedWorktreesOf(''), []);
+  });
+
+  check('worktrees: found by ASKING GIT, not by globbing a container path', () => {
+    // The owner's own repo keeps worktrees under BOTH `.claude/worktrees/` and
+    // `.worktrees/`. The container is whatever the caller of `git worktree
+    // add` chose, so any path convention misses real worktrees. This one sits
+    // OUTSIDE the main repo entirely -- a glob of <root>/.claude/worktrees
+    // could not see it, and git's registry does.
+    const far = path.join(ROOT, 'projects', 'detached-wt');
+    spawnSync('git', ['-C', mono, 'worktree', 'add', '-q', '-b', 'far-x', far], { encoding: 'utf8' });
+    assert.ok(fs.existsSync(far), 'fixture: git worktree add failed');
+    // Compared through realpath, not path.resolve: a worktree OUTSIDE the
+    // project has no project path-space to be re-expressed in, so it keeps
+    // git's own (symlink-resolved) path. On macOS the suite's ROOT is under
+    // /var/... while git records /private/var/... — the same directory, and
+    // only realpath makes that comparison honest.
+    const real = p => fs.realpathSync(p);
+    const found = repoRoot.linkedWorktreesOf(mono).map(real);
+    assert.ok(found.includes(real(far)), 'a worktree outside the main repo must still be found');
+    spawnSync('git', ['-C', mono, 'worktree', 'remove', '--force', far], { encoding: 'utf8' });
+  });
+
+  check('worktrees: a stale registry entry is skipped, never returned', () => {
+    // `rm -rf` on a worktree without `git worktree prune` leaves the registry
+    // entry behind. Returning it would make injection write a CLAUDE.md into
+    // a path the user deleted, recreating the directory.
+    const ghost = path.join(ROOT, 'projects', 'ghost-wt');
+    spawnSync('git', ['-C', mono, 'worktree', 'add', '-q', '-b', 'ghost-x', ghost], { encoding: 'utf8' });
+    fs.rmSync(ghost, { recursive: true, force: true });
+    const found = repoRoot.linkedWorktreesOf(mono).map(p => path.resolve(p));
+    assert.ok(!found.includes(path.resolve(ghost)), 'a deleted worktree must not be an injection target');
+    assert.ok(!fs.existsSync(ghost), 'listing a stale entry must not recreate its directory');
+    spawnSync('git', ['-C', mono, 'worktree', 'prune'], { encoding: 'utf8' });
+  });
+
+  // ---- END-TO-END: the block actually lands in the worktree ----
+  // The unit tests above prove the worktree can be FOUND. This proves a real
+  // sync pass writes the rendered block there -- the only thing that makes an
+  // agent running in a worktree see its team's activity.
+  {
+    const wtProj = path.join(ROOT, 'projects', 'wt-inject');
+    fs.mkdirSync(path.join(wtProj, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(wtProj, '.membridge'), { recursive: true }); // tracked marker
+    spawnSync('git', ['init', '-q', wtProj], { encoding: 'utf8' });
+    fs.writeFileSync(path.join(wtProj, 'src', 'a.js'), 'module.exports = 1;\n');
+    for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) {
+      spawnSync('git', ['-C', wtProj, ...args], { encoding: 'utf8' });
+    }
+    const wtChild = path.join(wtProj, '.claude', 'worktrees', 'task-1');
+    spawnSync('git', ['-C', wtProj, 'worktree', 'add', '-q', '-b', 'task-1', wtChild], { encoding: 'utf8' });
+
+    const stBefore = util.loadState();
+    stBefore.projects = stBefore.projects || {};
+    stBefore.projects[wtProj] = {
+      dirty: true,
+      // `kind: 'prompt'` + `text` is the shape digest.js actually reads
+      // (recentPrompts / sessionGroups filter on it); an {ask, summary} object
+      // renders an EMPTY block, which is how this fixture first fooled itself
+      // into passing the byte-equality check while carrying no content.
+      events: [{
+        ts: new Date().toISOString(),
+        source: 'Claude Code',
+        session: 'wt-sess-1',
+        kind: 'prompt',
+        text: 'Ship the worktree visibility fix',
+      }],
+    };
+    util.saveState(stBefore);
+    syncOnce();
+
+    check('worktree-inject: the worktree gets its own copy of the block', () => {
+      const inWt = path.join(wtChild, 'CLAUDE.md');
+      assert.ok(fs.existsSync(inWt),
+        'THE BUG: nothing was written into the worktree, so an agent with cwd there sees no team context');
+      const md = fs.readFileSync(inWt, 'utf8');
+      assert.ok(md.includes(digest.BEGIN) && md.includes(digest.END), 'markers missing in the worktree copy');
+      assert.ok(md.includes('Ship the worktree visibility fix'), 'the worktree copy is missing this project\'s content');
+    });
+
+    check('worktree-inject: the worktree copy is identical to the root copy', () => {
+      // Same project, so the same block -- the copy must not be a degraded or
+      // differently-scoped rendering. Byte equality is the whole contract.
+      const root = fs.readFileSync(path.join(wtProj, 'CLAUDE.md'), 'utf8');
+      const inWt = fs.readFileSync(path.join(wtChild, 'CLAUDE.md'), 'utf8');
+      const blockOf = s => s.slice(s.indexOf(digest.BEGIN), s.lastIndexOf(digest.END) + digest.END.length);
+      assert.strictEqual(blockOf(inWt), blockOf(root));
+    });
+
+    check('worktree-inject: removing the block cleans the worktree too', () => {
+      // Cleanup must cover exactly what injection wrote. A block left in a
+      // worktree nothing rewrites is stale forever, invisible, and charged to
+      // every future session in that directory.
+      const server = require('../lib/server');
+      const res = server.removeBlockFromProject(wtProj);
+      assert.ok(!res.error, `removeBlockFromProject failed: ${res.error}`);
+      const inWt = path.join(wtChild, 'CLAUDE.md');
+      const left = fs.existsSync(inWt) ? fs.readFileSync(inWt, 'utf8') : '';
+      assert.ok(!left.includes(digest.BEGIN),
+        'ORPHAN BLOCK: injection reached the worktree but removal did not');
+    });
+  }
+
   check('ledger-key: warm() can resolve every key it is handed', () => {
     // The contract recall-store.warm() depends on: path.join(projectPath, key)
     // must land on the real file for a main-checkout read.
