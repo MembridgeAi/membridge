@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
+import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { SyncStateView } from '../../components/SyncState'
 import { useDataClient } from '../../data/DataClientProvider'
 import { relativeAgo } from '../../data/relativeTime'
-import { useAccessMatrix, useArchiveProject, useMembers, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
+import { useAccessMatrix, useArchiveProject, useDeleteProject, useMembers, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
 import { AccessPopover } from './AccessPopover'
 import { AccessSummary, type AccessMemberRef } from './AccessSummary'
@@ -31,9 +32,12 @@ interface ProjectTableRowProps {
   onOpenAccess: () => void
   /** Select mode: when non-null, a checkbox gutter leads the row. */
   selection: { selected: boolean; onToggle: (selected: boolean) => void } | null
+  /** Single-project delete (Task 6). Null in select mode: Delete is not a
+   *  bulk action, so no delete control may exist while selecting. */
+  onDelete: (() => void) | null
 }
 
-function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPending, onOpenAccess, selection }: ProjectTableRowProps) {
+function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPending, onOpenAccess, selection, onDelete }: ProjectTableRowProps) {
   return (
     <tr data-testid={`project-row-${project.name}`}>
       {selection && (
@@ -70,7 +74,19 @@ function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPe
           share a basename (two checkouts of "api"), and a raw name breaks
           the URL outright on '#' or '?'. ProjectPage decodes and looks up
           by path, with a name-match fallback for old links. */}
-      <td><Link href={`${ROUTES.projects}/${encodeURIComponent(project.path)}`} className="proj-btn">Open</Link></td>
+      <td className="row-actions">
+        <Link href={`${ROUTES.projects}/${encodeURIComponent(project.path)}`} className="proj-btn">Open</Link>
+        {onDelete && (
+          <button
+            type="button"
+            className="proj-btn proj-btn-delete"
+            aria-label={`Delete ${project.name}`}
+            onClick={onDelete}
+          >
+            Delete
+          </button>
+        )}
+      </td>
     </tr>
   )
 }
@@ -93,6 +109,9 @@ export function ProjectsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkReport, setBulkReport] = useState<string | null>(null)
   const [archivedOpen, setArchivedOpen] = useState(false)
+  // The single project path a delete confirmation is open for, or null.
+  // Structurally one at a time: the dialog is keyed off this one path.
+  const [deleteFor, setDeleteFor] = useState<string | null>(null)
 
   const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
@@ -117,6 +136,7 @@ export function ProjectsPage() {
   const syncProject = useSyncProject()
   const archiveProject = useArchiveProject()
   const unarchiveProject = useUnarchiveProject()
+  const deleteProject = useDeleteProject()
 
   const projects = projectsQuery.data ?? []
   // Archived rows leave the main table and live in the collapsed section at
@@ -207,6 +227,7 @@ export function ProjectsPage() {
   const sharedCount = activeProjects.filter(p => p.shared).length
   const columnCount = (showAccess ? COLUMN_COUNT : COLUMN_COUNT - 1) + (selectMode ? 1 : 0)
 
+  const deleteTarget = deleteFor ? projects.find(p => p.path === deleteFor) ?? null : null
   const accessProject = accessFor ? projects.find(p => p.path === accessFor) ?? null : null
   const accessRoster = accessProject ? rosterFor(accessProject) : []
   // An admin's popover lists the whole team (grant and revoke); a member's
@@ -298,6 +319,7 @@ export function ProjectsPage() {
                 selected: selected.has(project.path),
                 onToggle: isSelected => toggleSelected(project.path, isSelected),
               } : null}
+              onDelete={selectMode ? null : () => { deleteProject.reset(); setDeleteFor(project.path) }}
             />
           ))}
           {ready && filtered.length === 0 && (
@@ -377,6 +399,19 @@ export function ProjectsPage() {
           viewerId={viewerId}
           onToggle={(memberId, canSee) => setAccess.mutate({ projectPath: accessProject.path, memberId, canSee })}
           onClose={() => setAccessFor(null)}
+        />
+      )}
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Delete ${deleteTarget.name}?`}
+          message={`This permanently deletes what MemBridge holds for ${deleteTarget.name}: the .membridge/ folder (its memory and history), the MemBridge block in its context files (CLAUDE.md and AGENTS.md), and its team archive. If you only want it out of this list, Archive it instead: that destroys nothing.`}
+          confirmLabel="Delete project"
+          destructive
+          pending={deleteProject.isPending}
+          error={deleteProject.isError ? errorMessage(deleteProject.error) : null}
+          confirmInput={{ requiredText: deleteTarget.name, label: 'Type the project name to confirm' }}
+          onConfirm={() => deleteProject.mutate(deleteTarget.path, { onSuccess: () => setDeleteFor(null) })}
+          onCancel={() => setDeleteFor(null)}
         />
       )}
       {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} />}

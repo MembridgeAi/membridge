@@ -212,6 +212,18 @@
   color: var(--red);
   font-size: 11px;
 }
+/* The typed-confirmation input (ConfirmDialog confirmInput): full width so
+ * the expected text is readable, monospace to make an exact match obvious. */
+.dialog-confirm-input {
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 5px 8px;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  color: var(--text2);
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

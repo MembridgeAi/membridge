@@ -225,6 +225,22 @@ export function useUnarchiveProject() {
   })
 }
 
+// Destructive single-project delete (Task 6). Refreshes the projects list
+// and the feed: the daemon drops the project's state, so both surfaces
+// change. Never optimistic -- a shared project's delete can legitimately be
+// refused by the role gate, and the row must stay until the daemon confirms.
+export function useDeleteProject() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (projectPath: string) => c.deleteProject(projectPath),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      qc.invalidateQueries({ queryKey: ['feed'] })
+    },
+  })
+}
+
 // No cache to invalidate -- copying a digest to the clipboard changes
 // nothing server-side. Callers read `.data` for the copied text (e.g. to
 // confirm what landed on the clipboard) and `.isPending` for button state.

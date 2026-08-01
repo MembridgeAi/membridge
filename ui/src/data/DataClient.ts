@@ -49,6 +49,13 @@ export interface DataClient {
   // entries drop and the next sync re-adds the block.
   archiveProject(projectPath: string): Promise<void>
   unarchiveProject(projectPath: string): Promise<void>
+  // Destructive, single-project only (POST /api/team/archive-project): wipes
+  // .membridge/, strips the context-file blocks and prunes the team archive.
+  // Routed through the daemon's SHARED-gated handler (archiveSharedProject),
+  // so a shared project keeps today's owner/manager gate: a plain member's
+  // delete only unlinks their own machine. An unlinked path falls back to a
+  // plain local delete server-side.
+  deleteProject(projectPath: string): Promise<void>
   copyForAI(projectPath: string): Promise<string>
 
   getProjectAccess(projectPath: string): Promise<{ members: { memberId: string; canSee: boolean }[]; defaultAccess: boolean }>

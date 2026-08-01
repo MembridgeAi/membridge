@@ -499,6 +499,19 @@ describe('LocalDaemonClient archive endpoints', () => {
     expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ path: '/Users/x/membridge' })
   })
 
+  // Task 6: delete goes through the SHARED-gated endpoint
+  // (/api/team/archive-project, lib/server.js archiveSharedProject), never
+  // the ungated /api/projects/delete -- that is what keeps today's
+  // owner/manager gate on a shared project's delete.
+  it('deleteProject POSTs the path to /api/team/archive-project (the role-gated endpoint)', async () => {
+    const fetchMock = stubPost({ path: '/x', scope: 'local', deleted: true })
+    await new LocalDaemonClient().deleteProject('/Users/x/sublease')
+    const call = fetchMock.mock.calls.find(([url]) => String(url) === '/api/team/archive-project')
+    expect(call).toBeTruthy()
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ path: '/Users/x/sublease' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/projects/delete')).toBe(false)
+  })
+
   it('unarchiveProject POSTs the path to /api/projects/unarchive', async () => {
     const fetchMock = stubPost({ path: '/x', archived: false })
     await new LocalDaemonClient().unarchiveProject('/Users/x/membridge')

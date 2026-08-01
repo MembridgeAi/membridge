@@ -407,6 +407,21 @@
   white-space: nowrap;
 }
 
+/* Row actions: Open plus the single-project Delete (never in select mode). */
+.row-actions {
+  white-space: nowrap;
+}
+.row-actions .proj-btn + .proj-btn {
+  margin-left: 6px;
+}
+.proj-btn-delete {
+  color: var(--red);
+  border-color: var(--line2);
+}
+.proj-btn-delete:hover {
+  background: var(--red-dim);
+}
+
 .projects-foot {
   padding: 8px 16px;
   margin: 0;

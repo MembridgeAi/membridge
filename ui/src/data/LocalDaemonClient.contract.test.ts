@@ -51,6 +51,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   setProjectPaused: c => c.setProjectPaused('/x', true),
   archiveProject: c => c.archiveProject('/x'),
   unarchiveProject: c => c.unarchiveProject('/x'),
+  deleteProject: c => c.deleteProject('/x'),
   copyForAI: c => c.copyForAI('/x'),
   getProjectAccess: c => c.getProjectAccess('/x'),
   setProjectAccess: c => c.setProjectAccess('/x', 'm1', true),

@@ -191,6 +191,15 @@ export class LocalDaemonClient implements DataClient {
     await post('/api/projects/unarchive', { path: projectPath })
   }
 
+  // Deliberately NOT /api/projects/delete: the team-archive route
+  // (lib/server.js archiveSharedProject) is what enforces the owner/manager
+  // gate on a shared project and falls back to a plain local delete for an
+  // unlinked path -- the ungated endpoint would let any member's UI delete a
+  // shared project's local state with no role check at all.
+  async deleteProject(projectPath: string): Promise<void> {
+    await post('/api/team/archive-project', { path: projectPath })
+  }
+
   async copyForAI(projectPath: string): Promise<string> {
     const r = await post<{ text?: string }>('/api/projects/copy', { path: projectPath })
     return r.text || ''

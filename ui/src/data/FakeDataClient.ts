@@ -290,6 +290,7 @@ export class FakeDataClient implements DataClient {
   // can mockImplementation per-path for partial-failure scenarios.
   archiveProject(_projectPath: string) { return this.guard<void>(undefined) }
   unarchiveProject(_projectPath: string) { return this.guard<void>(undefined) }
+  deleteProject(_projectPath: string) { return this.guard<void>(undefined) }
   copyForAI() { return this.guard('digest text') }
   getProjectAccess() {
     return this.guard({
