@@ -7967,6 +7967,127 @@ async function main() {
       fs.writeFileSync(util.statePath(), savedState);
     }
   });
+  // ---- deterministic tokenization (measured-savings spec, Task 3) ----
+  // chars/4 is not merely imprecise, it is BIASED, and the bias runs the wrong
+  // way for the thing being measured: it understates real source by roughly 8%
+  // and understates multibyte source by three or four times. Every one of the
+  // golden counts below was taken from an independent reference implementation
+  // (js-tiktoken's Tiktoken driving the same published vocabulary), not from
+  // the implementation under test, so they pin agreement with Anthropic's own
+  // BPE rather than agreement with ourselves.
+  {
+    const tokenEstimate = require('../lib/token-estimate');
+    const { estimateTokens } = tokenEstimate;
+
+    check('tokens: estimateTokens returns real BPE counts, not chars/4', () => {
+      // chars/4 would say 3, 9 and 2 respectively. BPE says 2, 14 and 6.
+      assert.strictEqual(estimateTokens('hello world'), 2);
+      assert.strictEqual(estimateTokens('function add(a, b) { return a + b; }'), 14);
+      assert.strictEqual(estimateTokens('Привет мир'), 6);
+      // Long runs collapse hard, which chars/4 cannot represent at all.
+      assert.strictEqual(estimateTokens('a'.repeat(100)), 7);
+      assert.strictEqual(estimateTokens('   '.repeat(20)), 2);
+      assert.strictEqual(estimateTokens(''), 0);
+    });
+
+    check('tokens: multibyte source is counted by bytes-through-BPE, not by characters', () => {
+      // The documented bias this replaces (lib/recall.js): one side of the
+      // comparison counted BYTES/4 while estimateTokens counted CHARS/4, so
+      // CJK and emoji source drifted by a factor of three or more. These are
+      // the reference counts; chars/4 would have said 4, 4 and 5.
+      assert.strictEqual(estimateTokens('日本語のテキストをトークン化する'), 15);
+      assert.strictEqual(estimateTokens('絵文字 🎉🚀 mixed'), 9);
+      assert.strictEqual(estimateTokens('café naïve résumé'), 8);
+    });
+
+    check('tokens: the estimate is deterministic and repeatable across calls', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'usage-normalize.js'), 'utf8');
+      const first = estimateTokens(src);
+      assert.ok(first > 0);
+      // Same input, same answer, every time -- including after the internal
+      // per-piece cache has been populated by the other fixtures above.
+      for (let i = 0; i < 5; i++) assert.strictEqual(estimateTokens(src), first);
+      // And it is genuinely tokenizing, not falling back to chars/4 silently.
+      assert.notStrictEqual(first, Math.ceil(src.length / 4));
+      assert.strictEqual(tokenEstimate.estimateDegraded(), false,
+        'the vendored vocabulary must load in a normal checkout');
+    });
+
+    check('tokens: a missing vocabulary falls back to chars/4 and marks the estimate degraded, never throws', () => {
+      // MEMBRIDGE_TOKENIZER_VOCAB points the loader at a path that does not
+      // exist, which is the same failure mode as a packaging miss or a
+      // truncated install -- the case the spec requires to degrade rather
+      // than throw into the recall hot path.
+      const script = `
+        process.env.MEMBRIDGE_TOKENIZER_VOCAB = ${JSON.stringify(path.join(ROOT, 'no-such-vocab.bin'))};
+        const te = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'token-estimate.js'))});
+        const s = 'function add(a, b) { return a + b; }';
+        console.log(JSON.stringify({
+          n: te.estimateTokens(s),
+          expected: Math.ceil(s.length / 4),
+          degraded: te.estimateDegraded(),
+          multibyte: te.estimateTokens('日本語'),
+        }));`;
+      const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env } });
+      assert.strictEqual(out.status, 0, `the missing-vocabulary path must not throw: ${out.stderr}`);
+      const got = JSON.parse(out.stdout.trim());
+      assert.strictEqual(got.n, got.expected, 'it must fall back to exactly chars/4');
+      assert.strictEqual(got.degraded, true, 'and say so, so the payload can mark the estimate degraded');
+      assert.strictEqual(got.multibyte, 1, 'the fallback stays chars/4 for multibyte too, rather than half-tokenizing');
+    });
+
+    check('tokens: a corrupt or truncated vocabulary degrades exactly like a missing one', () => {
+      const bad = path.join(ROOT, 'corrupt-vocab.bin');
+      fs.writeFileSync(bad, Buffer.from('not a vocabulary file at all, but long enough to read'));
+      const script = `
+        process.env.MEMBRIDGE_TOKENIZER_VOCAB = ${JSON.stringify(bad)};
+        const te = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'token-estimate.js'))});
+        const s = 'hello world';
+        console.log(JSON.stringify({ n: te.estimateTokens(s), expected: Math.ceil(s.length / 4), degraded: te.estimateDegraded() }));`;
+      const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env } });
+      assert.strictEqual(out.status, 0, `a corrupt vocabulary must not throw: ${out.stderr}`);
+      const got = JSON.parse(out.stdout.trim());
+      assert.strictEqual(got.n, got.expected);
+      assert.strictEqual(got.degraded, true);
+    });
+
+    check('tokens: the vocabulary is loaded LAZILY -- requiring the module reads no file', () => {
+      // The module is on the PreToolUse hot path. An install that never
+      // estimates must never pay the vocabulary's load cost, so the read has
+      // to happen on first use, not at require time.
+      const script = `
+        const fs = require('fs');
+        let reads = 0;
+        const realRead = fs.readFileSync;
+        fs.readFileSync = function (p, ...rest) {
+          if (typeof p === 'string' && /claude-bpe|vocab/i.test(p)) reads++;
+          return realRead.call(this, p, ...rest);
+        };
+        const te = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'token-estimate.js'))});
+        const afterRequire = reads;
+        te.estimateTokens('hello world');
+        console.log(JSON.stringify({ afterRequire, afterUse: reads }));`;
+      const out = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env } });
+      assert.strictEqual(out.status, 0, out.stderr);
+      const got = JSON.parse(out.stdout.trim());
+      assert.strictEqual(got.afterRequire, 0, 'requiring token-estimate.js must not read the vocabulary');
+      assert.strictEqual(got.afterUse, 1, 'the first estimate loads it, exactly once');
+    });
+
+    check('tokens: the vendored vocabulary ships with the package and carries its licence', () => {
+      const root = path.join(__dirname, '..');
+      const vocab = path.join(root, 'vendor', 'tokenizer', 'claude-bpe.bin');
+      assert.ok(fs.existsSync(vocab), 'vendor/tokenizer/claude-bpe.bin missing -- every estimate would degrade to chars/4');
+      const licence = path.join(root, 'vendor', 'tokenizer', 'LICENSE-claude-tokenizer.txt');
+      assert.ok(fs.existsSync(licence), 'a redistributed third-party vocabulary must ship its licence');
+      assert.ok(/Anthropic/i.test(fs.readFileSync(licence, 'utf8')), 'the licence must name its copyright holder');
+      // `vendor` is already in package.json's files list, which is what makes
+      // the npm tarball carry it.
+      const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+      assert.ok(pkg.files.includes('vendor'), 'vendor/ must stay in the published files list');
+    });
+  }
+
   // ---- sufficiency gate + USD integrity (measured-savings spec, Task 2) ----
   // A day-one install returns avoided.tokens: 0, which is indistinguishable
   // from a MEASURED zero. The gate exists so the payload can say "not enough
