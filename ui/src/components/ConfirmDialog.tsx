@@ -19,8 +19,8 @@ interface ConfirmDialogProps {
 /**
  * A confirm/cancel overlay, shared across every feature that needs one
  * (Members: remove/transfer; Settings: leave team; Projects: delete). The one
- * place in this system allowed a subtle shadow (see components.css `.dialog`)
- * — every resting surface elsewhere stays flat; the exception is reserved for
+ * place in this system allowed a subtle shadow (see components.css `.dialog`):
+ * every resting surface elsewhere stays flat; the exception is reserved for
  * true overlays. Each caller renders at most one instance at a time.
  *
  * Modal behavior (focus into the panel, Tab trap, Escape cancels, focus
