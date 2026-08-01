@@ -1,245 +1,203 @@
 # Operational state
 
-Written 2026-07-31. Every number below came from a command run against this
-checkout on that date. Where a command could not be run, that is called out in
-place rather than filled in from memory.
+**Verified against `802d366` on 2026-08-01, end of day.** Every number below came
+from a command run at that commit. Where a command could not be run, that is
+called out in place rather than filled in from memory.
 
 This file and `decisions.md` live in the repo. The repo is canonical and the
 Claude Project is the mirror, not the other way round. If the Project copy and
 this file disagree, this file wins.
 
+Read this first. `decisions.md` holds the reasoning behind the choices below.
+
+---
+
+## One-line status
+
+Master is green on both suites and on every CI leg that still exists. v0.2.3 is
+tagged but **not published**, which is the one thing genuinely waiting on a
+human.
+
+---
+
 ## Where the code is
 
 | Thing | Value |
 | --- | --- |
-| Branch | `master` |
-| Measured against | `fbd1aed303e5c76ad52488b4cc409adbe453cc7f` |
-| `upstream/master` at measurement time | `fbd1aed303e5c76ad52488b4cc409adbe453cc7f` (identical, nothing unpushed) |
+| `upstream/master` | `802d366` |
+| Remote that matters | `upstream` = `github.com/MembridgeAi/membridge` |
+| Fork | `origin` and `andrewb` both = `andrewb-eng/membridge`, master at `b297527`, far behind. **Nothing from today was pushed there.** Verified: fork master is an ancestor of upstream master. |
+| Root suite | **1313/1313 checks passed**, from a clean `npm ci` |
+| UI suite | **513 tests, 34 files passed**, from a clean `npm ci` |
+| `tsc --noEmit` | clean |
+| Package version | `0.2.3`, root and `app/` in lockstep, pinned by a check |
+| `engines.node` | `>=18`. Deliberate. See the CI section. |
 
-Everything below was measured at `fbd1aed`. Two documentation-only commits
-landed on top of it while this was being written, one of them this file. If
-`git log` shows commits above `fbd1aed`, check whether they touch code before
-assuming any figure here is stale. At the time of writing they did not.
-| Working tree | clean apart from the untracked agent worktree dir `.claude/worktrees/` |
-| Package | `@membridgeai/membridge` `0.2.2` |
-| `engines.node` on master | `">=18"` |
+## Release: v0.2.3 is tagged, NOT published
 
-Last fifteen commits, newest first:
+The tag points at `802d366`, which is `upstream/master` itself. Verified as an
+ancestor, not a dangling tag.
 
-```
-fbd1aed fix(auth): bind the OAuth callback to the request that started it
-138188b fix(test): resolve the dependency closure the way require() does (CI)
-3c6dc47 fix(test): make source-shape checks line-ending agnostic (Windows CI)
-7e9c330 Merge pull request #12 from MembridgeAi/fix/teamsync-duplicate-upsert
-77bd410 fix(server): delete now prunes config.exclude too, not just config.archived
-888e45e docs: security audit and remediation plan (2026-08-01)
-b39dd8f feat(server): sufficiency gate, stop persisting USD
-5f19869 feat(server): measured token spend from vendor-reported usage
-a636d3c fix: fail closed on an unrecognized delete body, log a failed archived-prune
-e495198 fix(ui,server): a member's delete of a shared project pruned their team archive and reported success
-e5f9ad9 style: drop an em dash from the ConfirmDialog comment (house style)
-f5678a9 fix(ui): a shared project opens shared, with every author's sessions
-c0c0da9 feat(ui): delete requires a typed confirmation and leaves bulk
-69fc89d feat(ui): select mode, bulk archive, archived section
-99c6ea2 feat(ui): one Access column with an admin-gated popover
-```
+Publishing is a human step at
+`https://github.com/MembridgeAi/membridge/releases/new?tag=v0.2.3`, selecting the
+existing tag. Publishing fires `release: published`, which is the only event that
+makes the `Attach to release` steps run. **A tag alone attaches nothing.**
 
-## Test suites, as measured
+Expect exactly five assets:
 
-Both were run locally on Node `v24.16.0`.
+- `MemBridge-0.2.3-arm64.dmg`
+- `MemBridge-0.2.3-arm64.zip`
+- `MemBridge-arm64.dmg` (unversioned alias, what the site download button
+  resolves through)
+- `MemBridge-0.2.3-win.zip`
+- `MemBridge-win.zip` (unversioned alias)
 
-| Suite | Command | Result |
+**The two Windows files are the ones to check for.** v0.2.2 carries only the
+three mac assets, because the windows job failed before packaging on every prior
+run. On `802d366` the windows job including `npm run dist:win` is green, so
+0.2.3 should be the first release with a Windows build.
+
+Verify assets by **content type, not status code**. A missing GitHub asset
+redirects to HTML and still returns 200.
+
+### install.sh is pinned to 0.2.2, and that is currently correct
+
+Live `install.sh` pins `VERSION="0.2.2"` and that asset still resolves
+(`application/octet-stream`), so new installs work today.
+
+**It cannot be regenerated until v0.2.3 publishes.** `scripts/install/gen-install.js`
+hashes a local `dist/` build, and signed macOS binaries are not byte
+reproducible, so a local zip has a different hash than the one CI attaches. The
+only correct source is the published asset. Sequence: publish, let CI attach,
+download the published zip, regenerate through the generator, deploy.
+
+**Do not re-run CI against the v0.2.2 tag.** `--clobber` would replace the
+attached asset with a freshly signed one carrying a different hash, and the live
+`install.sh` is SHA pinned to the current one. Every new `curl | sh` install
+would hard fail.
+
+## CI
+
+On `802d366`:
+
+- **Build app**: mac success, windows success. `npm run dist:win` ran and
+  succeeded. `Attach to release` shows skipped because `github.event_name` is
+  not `release`. Publishing flips that.
+- **CI**: five of six legs pass. One failure, `node 20 on macos-latest`, at
+  `redact: a 200-event render stays well under 200ms`, reporting 229ms.
+
+### The 229ms failure is a flake, not a regression
+
+Measured directly, benchmarking the same render at today's starting commit
+versus now:
+
+| | `a70fd32` (this morning) | `802d366` (now) |
 | --- | --- | --- |
-| Root | `node test/run-tests.js` | **1313 / 1313 checks passed** |
-| UI | `cd ui && npm test` (vitest 4.1.10) | **34 files, 513 tests, all passed** |
+| median | 11 ms | 10 ms |
+| min | 10 ms | 9 ms |
+| cold first run | 48 ms | 23 ms |
 
-Both suites are green locally. Local green does not mean CI green. See below.
+The render is marginally faster than it was this morning and its cold path is
+less than half. The preceding commit `bb64d39` had a fully green CI run
+including this check. The real defect is that the assertion takes a **single
+sample** against a 200ms bound on a shared runner.
 
-## Release topology
+**Proposed fix, awaiting approval:** sample three times, assert the minimum. A
+real regression raises the floor, so sensitivity is unchanged; runner noise only
+inflates slower samples. Widening the bound was considered and rejected as it
+would weaken the check.
 
-Published GitHub release, latest first:
+### Node 18: the matrix and `engines` disagree on purpose
 
-- **v0.2.2**, published 2026-07-31. Assets, exactly three:
-  - `MemBridge-0.2.2-arm64.dmg`
-  - `MemBridge-0.2.2-arm64.zip`
-  - `MemBridge-arm64.dmg`
-- Earlier tags with releases: v0.2.1, MemBridge 0.2.0, v0.1.2, v0.1.1.
+Node 18 was removed from the CI matrix. It cannot **build** the UI:
+`vite@8.1.5` resolves `rolldown@1.1.5`, which imports `styleText` from
+`node:util`, added in Node 20; both declare `engines: ^20.19.0 || >=22.12.0`.
+Reproduced on real Node 18.20.8. Every CI run since the React UI landed on
+2026-07-29 failed, and on the runs checked leg by leg, the Node 18 legs failed
+at `npm run build` on all three operating systems and never reached the tests.
 
-Read this carefully: **v0.2.2 has no Windows asset and no macOS x64 asset.**
-Every published artifact is macOS arm64. The Windows packaging job failed
-before it produced anything, so there is nothing to download for Windows users
-on the current release. The npm package is the only install path that works
-everywhere.
+**`engines.node` stays at `>=18`, and that is correct.** `engines` is a claim
+about the runtime. The tarball's `files` field is `bin`, `lib`, `vendor`,
+`README.md`, `LICENSE`, so a consumer never runs vite. Verified rather than
+assumed: a packed 0.2.3 tarball in a clean directory under real Node 18.20.8 ran
+the CLI, started the daemon serving `/api/status` with a real payload, and
+initialized MCP with all six tools. No Node 20+ API appears in `lib/` or `bin/`.
 
-npm says:
+The reason is recorded beside the matrix in `.github/workflows/ci.yml`.
 
-```
-@membridgeai/membridge dist-tags -> { latest: '0.2.2' }
-```
+## What an npm install actually gives you
 
-So npm `latest` and the GitHub release tag agree at 0.2.2. The desktop app
-assets are the piece that is incomplete, not the CLI.
+Verified against a packed tarball in a clean directory with no repo present:
 
-Mac builds are signed **and** notarized in CI. `.github/workflows/build-app.yml`
-gates notarization on the `APPLE_API_KEY` / `APPLE_API_KEY_ID` /
-`APPLE_API_ISSUER` trio being present and deliberately leaves `notarize` unset
-so that "notarize exactly when signing happened" is the behavior. This was
-log-verified earlier in the session. I confirmed the workflow shape but did not
-re-read a CI log myself, because the API quota was gone (see the caveat below).
+| Surface | Result |
+| --- | --- |
+| Tarball size | 784 KB |
+| `membridge --version` | `0.2.3` |
+| `membridge status` | full output |
+| Daemon | starts, `/api/status` returns 200 with a real payload |
+| MCP | initializes, lists all six tools |
+| **Dashboard** | **503, `UI not built. Run: cd ui && npm run build`** |
 
-## CI: currently failing
+**An npm-only install has no working dashboard.** The tarball ships no `ui/dist`
+and no build toolchain, and the failure is presented as developer instructions
+telling a user to build in a directory they do not have. `/app` redirects to `/`,
+which is the 503.
 
-The CI badge for `ci.yml` reads **failing**.
+Decided: `ui/dist` goes into the tarball in **0.2.4**, not 0.2.3. The live site
+copy implying npm gives Windows and Linux users the full product is a separate
+false claim being fixed independently.
 
-Verified run history, newest first:
+## Merged today
 
-| Run | Commit | Result |
-| --- | --- | --- |
-| 197 | `fbd1aed` OAuth state binding | in progress at time of check |
-| 196 | `138188b` dependency closure fix | failed |
-| 195 | `3c6dc47` CRLF fix | failed |
-| 194 | `7e9c330` merge PR #12 | failed |
-| 193 | `77bd410` delete prunes exclude | failed |
-| 192 | `888e45e` security plan doc | failed |
-| 191 | `a636d3c` fail closed on delete body | failed |
-| 190 | `docs: split the six-document work bundle` | failed |
-| 189 | `fix(app): child windows inherit the navigation guards` | failed |
-| 188 | `docs: split the 2026-07-31 UI bundle` | failed |
+Session detail page, projects tab archive work, measured savings Tier 1 and the
+sufficiency gate, OAuth state binding with PKCE, the Windows CRLF CI fix, the
+npm hoisting CI fix, eight Electron shell defects, a sudo free installer with
+launch at login, plus the docs and these ops files.
 
-Nine consecutive failed runs. The matrix in `.github/workflows/ci.yml` is
-`os: [ubuntu-latest, windows-latest, macos-latest]` crossed with
-`node: [18, 20, 22]`, so nine legs per run.
+## Not done, in priority order
 
-### The one live cause: Node 18 cannot build the UI
+1. **Publish v0.2.3.** Human step. Blocks the install.sh regeneration.
+2. **USD persistence revert.** `lib/ledger-fold.js` still implements a reversed
+   instruction and persists no USD. The decision is to keep it persisted. Both
+   plans say `REVERT REQUIRED`; the code does not match. Not small: it is two
+   files plus a test.
+3. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
+   a live sign-in and a replayed callback, has not happened.
+4. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
+5. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
+   into the recalibration.
+6. **The 229ms flake**, per the proposal above.
 
-This is the remaining failure and it is not a product bug.
+## Parked, preserved off-laptop
 
-Verified from the installed tree in `ui/node_modules`:
+The BPE tokenizer work is on branch **`wip/bpe-tokenizer`** on upstream. It does
+**not** pass the suite by design: it puts `MIN_COMPRESSION` on mismatched units,
+so recall serves 19 files where it served 21, and the intended end state is 24.
+Do not merge before the recalibration.
 
-- `vite` `8.1.5`, `engines: {"node":"^20.19.0 || >=22.12.0"}`
-- `rolldown` `1.1.5`, `engines: {"node":"^20.19.0 || >=22.12.0"}`
-- `rolldown/dist/shared/rolldown-build-*.mjs` and `rolldown/dist/cli.mjs`
-  contain literally `import { formatWithOptions, styleText } from "node:util"`
+## Known issues not fixed
 
-`styleText` does not exist in `node:util` before Node 20. Vite 8 builds through
-rolldown, so the UI build cannot run on Node 18 at all. Both packages declare
-engines that exclude 18. The three Node 18 legs have failed on every run since
-the React UI landed on 2026-07-29.
+- **`npm audit` reports 3 vulnerabilities** at the root, 1 moderate and 2 high:
+  `brace-expansion` and `tar` under `electron-builder` (devDependency, never
+  ships), and `fast-uri` under `@modelcontextprotocol/sdk` (**does** ship).
+  `ui/` reports zero. Not fixed here because `npm audit fix` rewrites the
+  lockfile broadly, which is not a sleeping-hours change.
+- **Local tags diverge from upstream** for `v0.1.0`, `v0.1.1`, `v0.2.0` and
+  `v0.2.1`. Local copies are pre-launch era; upstream is authoritative. Cleanup
+  is `git tag -d` those four then `git fetch upstream --tags`. **Never run
+  `git push --tags` from this checkout**, which would try to publish stale local
+  tags over correct upstream ones.
+- `archive/multidevice-e2e` points at a commit not on master. Deliberate archive
+  tag, not a problem.
+- The daemon prunes before it checks authorization on shared project delete and
+  returns 200 for an authorization failure. The UI path is closed; other callers
+  are not. Rated HIGH, queued as security Task 2b.
+- Six branches exist on the fork but not upstream, all pre-launch era. Harmless
+  while nothing pushes there.
 
-`engines.node` on master still says `">=18"`. **That is a false claim in the
-published manifest.** It promises a runtime the dependency tree does not
-support.
+## Secrets
 
-The fix already exists and is not merged. Branch `fix/release-pipeline` is one
-commit ahead of master at `da584f4`, "chore(ci): drop Node 18, engines >=20 and
-remove it from the CI matrix". It changes `package.json` `engines.node` to
-`">=20"` and removes 18 from the CI matrix, keeping all three operating
-systems. Merging it is the agreed next step. See `decisions.md`.
-
-Caveat on my own verification: I could not re-run the Node 18 failure myself,
-because no Node 18 is installed on this machine (only `v24.16.0`). The runtime
-reproduction on Node 18.20.8 was done earlier in the session. What I verified
-independently is the static evidence: the declared engines and the `styleText`
-import. That evidence is sufficient on its own.
-
-### Two CI failures already fixed, do not re-diagnose them
-
-Both landed today and neither was a product bug:
-
-1. `3c6dc47` source-shape checks in `test/run-tests.js` did not tolerate CRLF,
-   so they failed on the Windows checkout.
-2. `138188b` a test assumed npm hoisting, which broke under
-   `npm ci --omit=dev` on every Node 20 and Node 22 leg.
-
-If a Node 20 or 22 leg fails again, it is something new, not these.
-
-## Done, in flight, parked, broken
-
-### Done and on master
-
-- Session detail page.
-- Projects tab archive work, including bulk archive, the archived section, the
-  typed delete confirmation, and one Access column with an admin-gated popover.
-- Measured savings Tier 1: measured token spend from vendor-reported usage
-  (`5f19869`), plus the sufficiency gate (`b39dd8f`).
-- `deleteProject` prunes both `config.archived` and `config.exclude`
-  (`77bd410`, code at `lib/server.js:1367` onward).
-- OAuth state binding with PKCE (`fbd1aed`), which is Task 1 of the security
-  plan.
-
-### In flight
-
-- **Merge `fix/release-pipeline` (`da584f4`) into master** to move
-  `engines.node` to `>=20` and drop 18 from the CI matrix. This is what unblocks
-  CI. Nothing else is waiting on anything.
-- CI run 197 on `fbd1aed` was still running when this was written. Its result is
-  unknown. Expect the three Node 18 legs to fail regardless.
-
-### Parked, explicitly not done
-
-- **Measured savings Tier 2, the BPE tokenizer.** `lib/token-estimate.js` is
-  still the chars/4 heuristic: `Math.ceil(String(str).length / 4)`. The work is
-  uncommitted and sits in the agent worktree
-  `.claude/worktrees/agent-ab35bd88006c82de8` (based on `b39dd8f`), with
-  modifications to `lib/token-estimate.js` and `test/run-tests.js` and untracked
-  `scripts/build-tokenizer-vocab.js` and `vendor/tokenizer/`. It is blocked on
-  the `MIN_COMPRESSION` recalibration decision, not on code. `MIN_COMPRESSION`
-  is `2.25` at `lib/recall.js:41`. See `decisions.md`.
-- **Counters opt-in.** Contested, on hold, not decided. Counters are opt-out
-  today: `countersEnabled()` in `lib/counters.js` defers wholesale to
-  `diagnostics.diagnosticsEnabled(config)`, with `MEMBRIDGE_NO_DIAGNOSTICS=1` as
-  the single kill switch for the family. Do not change this without reading the
-  entry in `decisions.md` first, both positions are recorded there.
-
-### Broken right now
-
-1. **CI is red on master**, cause understood, fix sitting unmerged on
-   `fix/release-pipeline`.
-2. **`engines.node` claims `>=18` and that is untrue.** Users on Node 18 get a
-   silent failure later instead of an install-time warning.
-3. **v0.2.2 ships no Windows asset.** Windows users have no desktop download.
-4. **Security remediation is 1 of 10 tasks done.** Plan is at
-   `docs/superpowers/plans/2026-08-01-security-audit-and-remediation.md`. It has
-   ten task headings, Task 0 through Task 9. Task 1 is merged as `fbd1aed`.
-   Tasks 2 through 9 are not started. Note that no checkbox in that file is
-   ticked, including Task 1's, so the file's checkboxes are not a reliable
-   progress signal. Use git history instead.
-5. **Task 1 is not fully proven.** Its own plan text requires a live human
-   sign-in test: start a sign-in, complete it, replay the same callback URL, and
-   confirm the replay is rejected. That has not happened. The automated proof
-   ran against a mocked Supabase.
-
-## A code and comment mismatch worth knowing before you touch the ledger
-
-The standing decision is that USD stays persisted in the ledger, so that a
-user-supplied-rate feature can work later without re-folding history, and that
-the persisted figure must never be served. See `decisions.md`.
-
-The code on master does not match that decision. `lib/ledger-fold.js` around
-lines 289 to 297 says the opposite in a deliberate comment and implements the
-opposite: no USD is computed into the ledger, nothing is written down, and a
-legacy ledger's `inCost` / `outCost` are dropped on the next fold. A matching
-comment sits at `lib/server.js:496`, which is the comment referred to elsewhere
-as being at `:471`; the line moved when `fbd1aed` landed.
-
-So both the code and the comments currently implement "stop persisting", while
-the ratified decision is "keep persisting, never serve". Reconcile these before
-building anything on top of the ledger. Do not assume the comment is the only
-thing that is wrong.
-
-## What I could not verify, and why
-
-- **Per-leg CI results.** The unauthenticated GitHub API quota was fully
-  exhausted at check time: `rate_limit` reported `0 of 60` remaining, and the
-  `gh` CLI is installed but not logged in to any host. Run-level pass and fail
-  and the workflow badge came from the public HTML and Atom endpoints, which are
-  not rate limited. Which specific legs failed inside runs 188 through 196 could
-  not be enumerated. The per-leg attribution above is inferred from the matrix
-  definition plus the reproduced dependency evidence, and from the two leg
-  causes fixed earlier today.
-- **The release asset list** likewise came from the public releases page and
-  Atom feed, not from the API. Asset names are exact; byte sizes and upload
-  timestamps were not retrieved.
-- **The Node 18 runtime failure**, for the reason given above: no Node 18 on
-  this machine. Static evidence verified instead.
-- **CI run 197's outcome**, because it had not finished.
+Today's full diff (`a70fd32..802d366`) was grepped for `sk-`, `AKIA`, `ghp_`,
+`eyJ` and `-----BEGIN`. **Zero credential-shaped tokens were added.** The only
+matches are plan prose describing a test that plants a fake `sk-` value to prove
+redaction works.
