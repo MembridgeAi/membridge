@@ -5209,8 +5209,15 @@ async function main() {
     assert.strictEqual(next.version, require('../lib/ledger-fold').LEDGER_VERSION, 'stamped with the current version');
     assert.strictEqual(next.requests, 900, 'requests must not be zeroed by the key-shape migration');
     assert.strictEqual(next.volume, 54000000, 'volume must not be zeroed by the key-shape migration');
-    assert.strictEqual(next.inCost, 12.5, 'inCost must not be zeroed by the key-shape migration');
-    assert.strictEqual(next.outCost, 3.1, 'outCost must not be zeroed by the key-shape migration');
+    // inCost/outCost USED to be asserted here as "must not be zeroed by the
+    // key-shape migration", back when the ledger persisted a USD total. That
+    // total is gone by design (measured-savings spec: no dollar figure is
+    // written to disk at all), so the invariant flips: the migration must
+    // DROP a legacy ledger's dollar fields rather than carry them forward.
+    // This is a strengthening, not a relaxation -- the old assertion required
+    // a priced field to survive, and the rule now forbids it from existing.
+    assert.strictEqual(next.inCost, undefined, 'a legacy USD total must be dropped, never migrated forward');
+    assert.strictEqual(next.outCost, undefined, 'a legacy USD total must be dropped, never migrated forward');
     assert.strictEqual(next.sessions, 4, 'the session total must not be zeroed by the key-shape migration');
     assert.deepStrictEqual(next.sessionIds, ['a', 'b'], 'sessionIds evidence must survive the key-shape migration');
     assert.deepStrictEqual(next.reads, { first: 300, sameSession: 400, crossSession: 200 },
@@ -7960,6 +7967,127 @@ async function main() {
       fs.writeFileSync(util.statePath(), savedState);
     }
   });
+  // ---- sufficiency gate + USD integrity (measured-savings spec, Task 2) ----
+  // A day-one install returns avoided.tokens: 0, which is indistinguishable
+  // from a MEASURED zero. The gate exists so the payload can say "not enough
+  // evidence yet" in its own words instead of leaving the UI to guess, and so
+  // a null effect is never rendered as a confident 0%.
+  {
+    const foldLib = require('../lib/ledger-fold');
+
+    const withSavingsLedger = (name, led, fn) => {
+      const store = require('../lib/ledger-store');
+      const proj = path.join(ROOT, name);
+      fs.mkdirSync(proj, { recursive: true });
+      store.writeLedger(proj, led);
+      const savedState = read(util.statePath());
+      try {
+        util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [proj]: { name, events: [] } } });
+        return fn(proj);
+      } finally {
+        fs.writeFileSync(util.statePath(), savedState);
+      }
+    };
+    const baseLedger = holdout => ({
+      updatedAt: new Date().toISOString(), sessions: 2, requests: 10, volume: 5000,
+      reads: { first: 3, sameSession: 2, crossSession: 5 }, hotPaths: [],
+      avoided: { tokens: 3830, serves: 4, tierA: 0, tierB: 4, partialWins: 0, netNegatives: 0 },
+      holdout,
+      seenKeys: [], readKeys: [], sessionIds: ['s1', 's2'], fileReaders: {},
+    });
+
+    check('savings-gate: below the threshold the payload reports counts and a NULL effect, never a zero', () => {
+      const payload = withSavingsLedger('gate-thin',
+        baseLedger({ skips: 2, callTokens: 900 }), () => savingsPayload());
+      const m = payload.measurement;
+      assert.ok(m, 'the payload must carry an explicit availability state');
+      assert.strictEqual(m.state, 'measuring');
+      assert.strictEqual(m.holdoutCount, 2, 'it reports how much evidence it actually has');
+      assert.strictEqual(m.minHoldoutCount, foldLib.MIN_HOLDOUT_FOR_EFFECT);
+      // The distinction this whole gate exists for. `0` is a measured claim
+      // that MemBridge saved nothing; `null` is the truthful "not yet known".
+      assert.strictEqual(m.effect, null, 'an unmeasured effect must be null');
+      assert.notStrictEqual(m.effect, 0, 'a null effect must never be reported as zero');
+    });
+
+    check('savings-gate: at the threshold boundary the state flips to sufficient', () => {
+      const at = foldLib.MIN_HOLDOUT_FOR_EFFECT;
+      const below = withSavingsLedger('gate-below',
+        baseLedger({ skips: at - 1, callTokens: 900 }), () => savingsPayload());
+      assert.strictEqual(below.measurement.state, 'measuring', 'one short of the threshold is still measuring');
+      const boundary = withSavingsLedger('gate-at',
+        baseLedger({ skips: at, callTokens: 900 }), () => savingsPayload());
+      assert.strictEqual(boundary.measurement.state, 'sufficient', 'the threshold itself is sufficient');
+      assert.strictEqual(boundary.measurement.holdoutCount, at);
+    });
+
+    check('savings-gate: the availability state rides the wire without disturbing the pinned shapes', () => {
+      const payload = withSavingsLedger('gate-shape',
+        baseLedger({ skips: 1, callTokens: 100 }), () => savingsPayload());
+      assert.deepStrictEqual(Object.keys(payload).sort(), ['measurement', 'projects', 'totals'],
+        'the /api/savings top-level shape must stay exactly this set');
+      assert.deepStrictEqual(Object.keys(payload.measurement).sort(),
+        ['effect', 'holdoutCount', 'minHoldoutCount', 'state']);
+      // The gate must not smuggle a priced figure onto a payload whose whole
+      // rule is tokens only.
+      assert.ok(!/inCost|outCost|usd/i.test(JSON.stringify(payload.measurement)),
+        'the availability state must never carry a dollar figure');
+    });
+
+    check('savings-usd: no dollar figure is written to the ledger ON DISK', () => {
+      const store = require('../lib/ledger-store');
+      const proj = path.join(ROOT, 'usd-on-disk');
+      fs.mkdirSync(proj, { recursive: true });
+      // Real priced traffic: a model pricing.js knows, so a cost would
+      // genuinely be computed for these requests if anything still persisted
+      // one. A fixture with no recognised model could pass by accident.
+      const events = [
+        { kind: 'usage', ts: '2026-07-30T10:00:00Z', session: 's1', messageId: 'm1',
+          source: 'Claude Code', model: 'claude-opus-4-6',
+          usage: { input_tokens: 5000, cache_creation_input_tokens: 1000,
+            cache_read_input_tokens: 20000, output_tokens: 900 } },
+        { kind: 'usage', ts: '2026-07-30T10:01:00Z', session: 's1', messageId: 'm2',
+          source: 'Claude Code', model: 'claude-opus-4-6',
+          usage: { input_tokens: 6000, output_tokens: 800 } },
+      ];
+      const built = store.foldProjectLedger(null, events);
+      const p = store.writeLedger(proj, built);
+      const rawOnDisk = fs.readFileSync(p, 'utf8');
+      const parsed = JSON.parse(rawOnDisk);
+      assert.strictEqual(parsed.inCost, undefined, 'no USD may be written to the ledger on disk');
+      assert.strictEqual(parsed.outCost, undefined, 'no USD may be written to the ledger on disk');
+      assert.ok(!/inCost|outCost|usd/i.test(rawOnDisk),
+        'the ledger file must contain no priced field at all -- the rate table goes stale on disk');
+      // The token totals it exists to keep must be untouched by the removal.
+      assert.strictEqual(parsed.requests, 2);
+      assert.ok(parsed.volume > 0, 'token volume still accumulates');
+    });
+
+    check('savings-usd: a legacy ledger carrying USD does not resurrect it through the fold', () => {
+      const store = require('../lib/ledger-store');
+      const proj = path.join(ROOT, 'usd-legacy');
+      fs.mkdirSync(proj, { recursive: true });
+      // Every existing install has inCost/outCost sitting in ledger.json
+      // already. Folding one must drop them, not carry them forward.
+      const prev = {
+        version: foldLib.LEDGER_VERSION, updatedAt: '2026-01-01T00:00:00.000Z',
+        sessions: 4, requests: 900, volume: 54000000, inCost: 12.5, outCost: 3.1,
+        reads: { first: 300, sameSession: 400, crossSession: 200 }, hotPaths: [],
+        seenKeys: ['k1'], readKeys: [], sessionIds: ['a', 'b'], fileReaders: {},
+      };
+      const next = store.foldProjectLedger(prev, []);
+      assert.strictEqual(next.inCost, undefined, 'a legacy USD figure must not survive the fold');
+      assert.strictEqual(next.outCost, undefined, 'a legacy USD figure must not survive the fold');
+      const p = store.writeLedger(proj, next);
+      assert.ok(!/inCost|outCost/.test(fs.readFileSync(p, 'utf8')),
+        'and it must not be rewritten to disk');
+      // The cumulative token totals still survive the same fold, which is the
+      // invariant the migration tests above defend.
+      assert.strictEqual(next.requests, 900);
+      assert.strictEqual(next.volume, 54000000);
+    });
+  }
+
   // ---- Tier 1: measured spend (measured-savings spec, Task 1) ----
   // The whole point of this payload is that NOTHING in it is estimated. Every
   // number traces to a vendor-reported `message.usage` the adapters already
