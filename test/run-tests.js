@@ -1697,6 +1697,107 @@ async function main() {
       assert.ok(/summaries\.jsonl/.test(entry), `help does not name what is deleted: ${entry}`);
       assert.ok(/cannot be undone/i.test(entry), `help never says the deletion is irreversible: ${entry}`);
     });
+
+    // --- F2: `membridge add`, the missing enrollment path ---
+    // CRITICAL (alpha readiness, F2): there was no CLI command to enroll a
+    // project at all. The ingestion gate (isTrackedProject) only keeps events
+    // whose project is a state.projects key or already has a .membridge/
+    // directory, and nothing in the daemon discovers a new root. The one
+    // enrollment path in the codebase was POST /api/projects/adopt, a
+    // dashboard action, which combined with F1 shipping no dashboard left an
+    // npm user with no way in short of planting a .membridge/ by hand.
+    {
+      const addHome = path.join(ROOT, 'add-cli-home');
+      const addEnv = { ...process.env, MEMBRIDGE_HOME: addHome };
+      const runAdd = (...argv) =>
+        spawnSync(process.execPath, [BIN, 'add', ...argv], { encoding: 'utf8', env: addEnv });
+      const addState = () => {
+        try { return JSON.parse(read(path.join(addHome, 'state.json'))); } catch { return { projects: {} }; }
+      };
+      // Compare canonically: cmdAdd realpaths its targets (see the dual-key
+      // check below), and on macOS the suite's ROOT is under /var, a symlink
+      // to /private/var. Comparing the raw fixture path would never match.
+      const canon = p => { try { return util.normPath(fs.realpathSync(p)); } catch { return util.normPath(p); } };
+      const tracked = p =>
+        Object.keys(addState().projects || {}).some(k => canon(k) === canon(p));
+
+      const addProj = path.join(ROOT, 'projects', 'cli-adopt-me');
+      fs.mkdirSync(addProj, { recursive: true });
+
+      check('add: `membridge add <dir>` enrolls the directory as a tracked project', () => {
+        const out = runAdd(addProj);
+        assert.strictEqual(out.status, 0,
+          `\`membridge add\` did not succeed: status ${out.status}, stdout ${out.stdout}, stderr ${out.stderr}`);
+        assert.ok(tracked(addProj),
+          `add left no state.projects key for ${addProj}: ${JSON.stringify(addState().projects)}`);
+      });
+
+      check('add: with no argument it adopts the current directory', () => {
+        const cwdProj = path.join(ROOT, 'projects', 'cli-adopt-cwd');
+        fs.mkdirSync(cwdProj, { recursive: true });
+        const out = spawnSync(process.execPath, [BIN, 'add'], { encoding: 'utf8', env: addEnv, cwd: cwdProj });
+        assert.strictEqual(out.status, 0, `bare \`membridge add\` failed: ${out.stderr || out.stdout}`);
+        assert.ok(tracked(cwdProj), `bare add did not adopt its cwd: ${JSON.stringify(addState().projects)}`);
+      });
+
+      check('add: reports adopted, already tracked and skipped per path, and takes several at once', () => {
+        const a = path.join(ROOT, 'projects', 'cli-adopt-multi-a');
+        const b = path.join(ROOT, 'projects', 'cli-adopt-multi-b');
+        fs.mkdirSync(a, { recursive: true });
+        fs.mkdirSync(b, { recursive: true });
+        const missing = path.join(ROOT, 'projects', 'cli-adopt-nope');
+        // addProj is already tracked by the first check above.
+        const out = runAdd(a, b, addProj, missing);
+        assert.ok(tracked(a) && tracked(b), 'a multi-path add did not adopt every good path');
+        const s = out.stdout;
+        assert.ok(s.includes(a) && s.includes(b) && s.includes(addProj) && s.includes(missing),
+          `every path should be named in the output, got: ${s}`);
+        assert.ok(/already tracked/i.test(s), `the already-tracked path is not reported as such: ${s}`);
+        assert.ok(/not a directory/i.test(s), `the bad path's reason is not reported: ${s}`);
+        // One bad path must not abandon the rest, which is a guarantee
+        // adoptProjects already makes and this must not reimplement.
+        assert.ok(/adopted/i.test(s), `nothing was reported as adopted: ${s}`);
+      });
+
+      check('add: an explicit path and the same dir as cwd produce ONE project key, not two', () => {
+        // addProject keys on path.resolve(), which does not follow symlinks,
+        // while process.cwd() is already resolved. On macOS the suite's own
+        // ROOT lives under /var -> /private/var, so without canonicalizing in
+        // cmdAdd the two spellings of one directory become two tracked
+        // projects and findProjectKey never matches across the pair. This is
+        // the check that caught it.
+        const dual = path.join(ROOT, 'projects', 'cli-adopt-dual');
+        fs.mkdirSync(dual, { recursive: true });
+        const before = Object.keys(addState().projects || {}).length;
+        assert.strictEqual(runAdd(dual).status, 0, 'explicit-path add failed');
+        const out = spawnSync(process.execPath, [BIN, 'add'], { encoding: 'utf8', env: addEnv, cwd: dual });
+        assert.strictEqual(out.status, 0, `cwd add failed: ${out.stderr || out.stdout}`);
+        const after = Object.keys(addState().projects || {}).length;
+        assert.strictEqual(after - before, 1,
+          `one directory adopted two ways produced ${after - before} keys: `
+          + JSON.stringify(Object.keys(addState().projects || {})));
+        assert.ok(/already tracked/i.test(out.stdout),
+          `the second add should report the project as already tracked: ${out.stdout}`);
+      });
+
+      check('add: the help text carries it in the top block, beside scan and sync', () => {
+        const help = spawnSync(process.execPath, [BIN, 'help'], { encoding: 'utf8' });
+        assert.strictEqual(help.status, 0, help.stderr);
+        const lines = help.stdout.split('\n');
+        const at = n => lines.findIndex(l => new RegExp(`^\\s{2}${n}\\b`).test(l));
+        const addAt = at('add');
+        assert.ok(addAt !== -1, `no add entry in the help text: ${help.stdout}`);
+        const scanAt = at('scan');
+        const syncAt = at('sync');
+        assert.ok(syncAt !== -1 && scanAt !== -1, 'sync/scan vanished from the help');
+        // "top block, not buried": within a few lines of the scan/sync pair.
+        assert.ok(Math.abs(addAt - scanAt) <= 4,
+          `add is not beside scan and sync (add at ${addAt}, scan at ${scanAt}, sync at ${syncAt})`);
+        // The pair must be discoverable from each other.
+        const entry = lines.slice(addAt, addAt + 3).join('\n');
+        assert.ok(/remove/.test(entry), `add's help does not cross-reference remove: ${entry}`);
+      });
+    }
   }
 
   // ===== Regression: a clean project's lastSync must keep moving =====

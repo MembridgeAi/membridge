@@ -25,7 +25,13 @@ const util = require('../lib/util');
 const { scanAll, syncOnce, getAdapters, findProjectKey } = require('../lib/scan');
 const digest = require('../lib/digest');
 const memorydb = require('../lib/memorydb');
-const { startServer } = require('../lib/server');
+// adoptProjects comes from the same module as startServer, which this file
+// already loads unconditionally, so reaching it costs nothing extra. The plan
+// allowed moving these out of lib/server.js "so the CLI can reach them without
+// pulling in the whole server"; that move would buy nothing while line 28
+// requires the server anyway, and it would churn a file three other branches
+// are editing. Revisit if the CLI ever stops loading the server eagerly.
+const { startServer, adoptProjects } = require('../lib/server');
 const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
 const hooks = require('../lib/hooks');
@@ -395,6 +401,44 @@ const REMOVED_MEMORY_CONTENTS = 'memory.json, ledger.json, summaries.jsonl, comm
 // and uninstall flows call it non-interactively), and blocking on a prompt
 // would hang every one of those callers. Announcing plus an opt-out is the
 // non-breaking way to make it honest.
+// `membridge add [path...]` -- enroll a project so the ingestion gate starts
+// keeping its sessions. Before this existed there was no CLI enrollment path
+// at all: isTrackedProject only keeps events for a state.projects key or a
+// directory that already has a .membridge/, nothing in the daemon discovers a
+// new root, and the sole way in was a dashboard button.
+//
+// Defaults to the cwd, because `cd my-project && membridge add` is the motion
+// a new user actually makes. Takes several paths so adopting a handful of
+// repos is one command.
+//
+// The per-path adopted/already-tracked/skipped-with-reason accounting is
+// adoptProjects' own, reused verbatim rather than reimplemented: the dashboard
+// and the CLI must not be able to disagree about what happened to a path.
+function cmdAdd() {
+  util.ensureConfig();
+  const paths = args.slice(1).filter(a => !a.startsWith('--'));
+  // Canonicalize before adopting. addProject keys state.projects on
+  // path.resolve(), which does NOT follow symlinks, while process.cwd()
+  // hands back an already-resolved path. On macOS that alone is enough to
+  // key the SAME directory twice: `membridge add /var/foo` stores
+  // /var/foo and `cd /var/foo && membridge add` stores /private/var/foo,
+  // and findProjectKey's existing-project check never matches across the
+  // pair. realpath here makes both spellings land on one key.
+  //
+  // Failures pass through untouched: a path that does not exist cannot be
+  // realpathed, and adoptProjects already reports it as "not a directory",
+  // which is the message the user should get.
+  const targets = (paths.length ? paths : [process.cwd()]).map(p => {
+    try { return fs.realpathSync(p); } catch { return p; }
+  });
+  const r = adoptProjects(targets);
+  for (const p of r.adopted) console.log(`  adopted: ${p}`);
+  for (const s of r.skipped) console.log(`  skipped: ${s.path} (${s.reason})`);
+  console.log(r.adoptedCount
+    ? `${r.adoptedCount} project(s) adopted. Memory lands on the next sync; run \`membridge sync\` to not wait.`
+    : 'Nothing adopted.');
+}
+
 function cmdRemove() {
   const state = util.loadState();
   const config = util.getConfig();
@@ -981,6 +1025,8 @@ Usage: membridge <command>
   dashboard           open the local web dashboard (starts daemon if needed)
   sync [--dry-run] [--project <path>]   one sync pass right now
   scan                read-only: show which tools/projects were discovered
+  add [<path>...]     start tracking a project (defaults to the current
+                      directory). The reverse is \`remove --project <path>\`.
   remove [--project <path>] [--keep-memory]
                       strip injected memory blocks AND permanently delete each
                       project's local memory history in .membridge/
@@ -1049,6 +1095,7 @@ Docs:   https://github.com/MembridgeAi/membridge#readme`);
 }
 
 const commands = {
+  add: cmdAdd,
   sync: cmdSync,
   scan: cmdScan,
   why: cmdWhy,
