@@ -49,6 +49,10 @@ export interface LiveSession {
   projectName: string
   startedAt: string
   intent: string | null      // the captured opening ask, verbatim; never inferred
+  // What the session has landed so far (headline, else the summary's first
+  // sentence). The row's fallback when no intent was captured: a teammate who
+  // does not share prompts otherwise renders as a bare name and a clock.
+  outcome: string | null
 }
 
 // "Happening now" row shape: one entry per person+project GOAL, not per
@@ -66,6 +70,7 @@ export interface LiveSessionGroup {
   startedAt: string
   sessionCount: number
   intent: string | null
+  outcome: string | null
 }
 
 // One file's change model (lib/changes.js deriveChanges: status + line counts
@@ -113,6 +118,30 @@ export interface StreamEntry {
 export interface FeedEntry extends StreamEntry {
   project: string
   projectPath: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Search (GET /api/search, lib/activity.js searchMemory): the SAME ranked
+// corpus the MCP tools answer from, so a person and their agent searching one
+// machine can never be told different things. Reaches further back than the
+// feed does -- the feed pages a working cache, search also reads the durable
+// per-project team archive.
+// ---------------------------------------------------------------------------
+export interface SearchResult extends FeedEntry {
+  /** lib/search.js's weighted score. Ordering only -- never rendered as a
+   *  number, which would imply a precision this does not have. */
+  score: number
+  /** Which fields the query actually hit ('decisions', 'files', ...). This is
+   *  the "why is this row here" answer for a result whose visible outcome
+   *  line does not contain the query at all. */
+  matched: string[]
+}
+
+export interface SearchPage {
+  query: string
+  /** Matches before the page limit -- the count the UI reports. */
+  total: number
+  results: SearchResult[]
 }
 
 // ---------------------------------------------------------------------------

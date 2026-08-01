@@ -19,6 +19,7 @@ import { ROUTES } from './routes'
 // of removing it.
 const TodayPage = lazy(() => import('../features/today/TodayPage').then(m => ({ default: m.TodayPage })))
 const FeedPage = lazy(() => import('../features/feed/FeedPage').then(m => ({ default: m.FeedPage })))
+const SearchPage = lazy(() => import('../features/search/SearchPage').then(m => ({ default: m.SearchPage })))
 const ProjectsPage = lazy(() => import('../features/projects/ProjectsPage').then(m => ({ default: m.ProjectsPage })))
 const ProjectPage = lazy(() => import('../features/project/ProjectPage').then(m => ({ default: m.ProjectPage })))
 const SessionPage = lazy(() => import('../features/session/SessionPage').then(m => ({ default: m.SessionPage })))
@@ -61,6 +62,7 @@ export function App() {
           <Switch>
             <Route path={ROUTES.today}><TodayPage /></Route>
             <Route path={ROUTES.feed}><FeedPage /></Route>
+            <Route path={ROUTES.search}><SearchPage /></Route>
             <Route path={ROUTES.projects}><ProjectsPage /></Route>
             <Route path={ROUTES.project}>
               {(params) => <ProjectPage slug={params.slug} />}

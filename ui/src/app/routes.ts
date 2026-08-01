@@ -6,7 +6,7 @@
  *  project name still accepted for old deep links; ProjectPage owns the
  *  decode + lookup. */
 export const ROUTES = {
-  today: '/', feed: '/feed', projects: '/projects', project: '/projects/:slug',
+  today: '/', feed: '/feed', search: '/search', projects: '/projects', project: '/projects/:slug',
   session: '/sessions/:sessionId',
   members: '/team/members', insights: '/team/insights', settings: '/settings',
 } as const

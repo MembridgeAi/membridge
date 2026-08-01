@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf,
   latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
-  memberActivity, memberIdsFor, outcomeOf, streamEntryId,
+  memberActivity, memberIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import type { LiveSession, StreamEntry } from './types'
@@ -57,6 +57,59 @@ describe('mapStreamEntry brief fields (session detail page, Task 2)', () => {
     expect(intentOf(entry({ goal: null, ask: '(not captured)' }))).toBeNull()
     expect(outcomeOf(entry({ headline: 'Payments wired', summary: 'longer text' }))).toBe('Payments wired')
     expect(outcomeOf(entry({ headline: null, summary: 'longer text' }))).toBe('longer text')
+  })
+})
+
+// A list row is scannable or it is nothing. Measured on live data: only 4 of
+// 21 rows pulled from one teammate carry a headline, so the summary fallback
+// IS the common path -- and those summaries run 750-1000 characters.
+describe('outcomeOf: the one-line budget', () => {
+  const paragraph =
+    'The gh CLI v2.97.0 is installed at ~/.local/bin/gh from the official release zip, ' +
+    'with no Homebrew and no sudo, but GitHub login is still not done: the device code ' +
+    'expired before the browser flow was completed.'
+
+  it('prefers the first sentence over the whole paragraph', () => {
+    const out = outcomeOf(entry({ headline: null, summary: paragraph }))
+    expect(out.length).toBeLessThanOrEqual(OUTCOME_MAX + 1) // +1 for the ellipsis
+    expect(out).not.toContain('device code')
+  })
+
+  it('never truncates mid-word', () => {
+    const out = outcomeOf(entry({ headline: null, summary: paragraph }))
+    expect(out.endsWith('…')).toBe(true)
+    expect(out.slice(0, -1).trim()).toBe(out.slice(0, -1).trimEnd())
+    expect(paragraph).toContain(out.slice(0, -1).trimEnd())
+  })
+
+  it('leaves a headline untouched -- it is already the one-line form', () => {
+    const headline = 'gh CLI installed without Homebrew; GitHub login still not completed'
+    expect(outcomeOf(entry({ headline, summary: paragraph }))).toBe(headline)
+  })
+
+  it('does not treat a dot inside a path or version as a sentence end', () => {
+    const out = outcomeOf(entry({ headline: null, summary: 'Fixed lib/feed.js so v0.2.3 stops dropping rows.' }))
+    expect(out).toBe('Fixed lib/feed.js so v0.2.3 stops dropping rows.')
+  })
+
+  it('keeps a short summary exactly as written', () => {
+    expect(outcomeOf(entry({ headline: null, summary: 'Master repaired and green.' }))).toBe('Master repaired and green.')
+  })
+
+  it('is empty when there is nothing to say', () => {
+    expect(outcomeOf(entry({ headline: null, summary: null }))).toBe('')
+  })
+})
+
+describe('clipWords', () => {
+  it('returns short text untouched, with no ellipsis', () => {
+    expect(clipWords('short enough', 40)).toBe('short enough')
+  })
+  it('cuts on a word boundary and marks the cut', () => {
+    expect(clipWords('alpha beta gamma delta', 14)).toBe('alpha beta…')
+  })
+  it('falls back to a hard cut when one word exceeds the budget', () => {
+    expect(clipWords('supercalifragilistic', 10)).toBe('supercalif…')
   })
 })
 
@@ -265,7 +318,7 @@ describe('dedupeLiveSessions and mapLiveSession', () => {
 describe('groupLiveSessions', () => {
   const live = (overrides: Partial<LiveSession> = {}): LiveSession => ({
     id: 's1', author: 'You', authorId: 'me', tool: 'Claude Code', projectName: 'membridge',
-    startedAt: '2026-07-29T20:00:00Z', intent: null, ...overrides,
+    startedAt: '2026-07-29T20:00:00Z', intent: null, outcome: null, ...overrides,
   })
 
   it('collapses nine same-person, same-project sessions with no intent into one group with no intent', () => {

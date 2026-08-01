@@ -80,6 +80,7 @@ export function Shell({ children }: ShellProps) {
         <div className="nav">
           <NavLink to={ROUTES.today} label="Today" icon="⌂" />
           <NavLink to={ROUTES.feed} label="Feed" icon="☰" />
+          <NavLink to={ROUTES.search} label="Search" icon="⌕" />
           <NavLink to={ROUTES.projects} label="Projects" icon="▦" />
 
           {showTeamNav && (

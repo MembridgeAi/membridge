@@ -1,0 +1,133 @@
+/* Search page — imported once from SearchPage.tsx (per-feature CSS, same
+ * precedent as feed.css/today.css). A result row is deliberately NOT an
+ * .entry-row: a feed row answers "what happened", a result row answers "why
+ * am I being shown this", so it carries a match-centred snippet and the
+ * fields that matched instead of a file list. Tokens from styles/tokens.css. */
+
+.search-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.search-header {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-4) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .search-header { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+.search-title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
+}
+
+.search-input {
+  margin: var(--sp-4) var(--sp-4) 0;
+  padding: 10px 12px;
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.search-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.search-filters select {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.search-resting,
+.search-count,
+.search-error {
+  margin: 0;
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+  color: var(--text3);
+  font-size: var(--fs-sm);
+}
+.search-resting { max-width: 60ch; }
+.search-error { color: var(--danger, var(--text)); }
+
+.search-result {
+  display: block;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+.search-result-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.search-result-link:hover { background: var(--surface2); }
+.search-result-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.search-result-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.search-result-author {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+.search-result-meta {
+  color: var(--text3);
+  font-size: var(--fs-xs);
+}
+
+.search-result-outcome {
+  margin-top: 3px;
+  font-size: var(--fs-md);
+}
+
+/* The snippet is supporting evidence, not the headline: one notch down in
+ * size and colour, and capped at two lines so a long decision cannot turn a
+ * result list back into a wall of prose. */
+.search-result-snippet {
+  margin: 3px 0 0;
+  color: var(--text2);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.search-result-snippet mark {
+  background: transparent;
+  color: var(--text);
+  font-weight: var(--fw-medium);
+}
+
+.search-result-matched {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.search-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text3);
+  font-size: 10px;
+  text-transform: lowercase;
+}

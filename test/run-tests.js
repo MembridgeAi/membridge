@@ -1958,6 +1958,30 @@ async function main() {
       assert.ok(Array.isArray(feedWindow.entries), 'entries is an array');
       assert.ok(feedWindow.entries.length >= 1, 'window must never return fewer than limit entries');
     });
+    // /api/search: the dashboard answers from the SAME machine-local corpus and
+    // scorer the MCP tools use (lib/activity.js), so a person and an agent
+    // searching one machine can never be told different things.
+    const searchHit = await (await fetch(`${base}/api/search?q=webhook&limit=5`)).json();
+    check('/api/search returns ranked results from the shared corpus', () => {
+      assert.ok(Array.isArray(searchHit.results), 'results is an array');
+      assert.strictEqual(searchHit.query, 'webhook', 'query not echoed back');
+      assert.ok(typeof searchHit.total === 'number', 'total missing');
+      assert.ok(searchHit.results.every(r => 'origin' in r && 'author' in r),
+        'results are not feed-normalized entries');
+    });
+    const searchEmpty = await (await fetch(`${base}/api/search?q=`)).json();
+    check('/api/search answers an empty query with an empty result set, never an error', () => {
+      assert.deepStrictEqual(searchEmpty, { query: '', total: 0, results: [] });
+    });
+    const searchFiltered = await (await fetch(`${base}/api/search?q=webhook&author=nobody-by-this-name`)).json();
+    check('/api/search applies filters before ranking', () => {
+      assert.deepStrictEqual(searchFiltered.results, [], 'author filter did not narrow the corpus');
+    });
+    const searchCap = await (await fetch(`${base}/api/search?q=webhook&limit=99999`)).json();
+    check('/api/search clamps limit rather than honoring an unbounded page', () => {
+      assert.ok(searchCap.results.length <= 100, `limit not clamped: ${searchCap.results.length}`);
+    });
+
     const beforeTs = '2099-01-01T00:00:00Z';
     const feedBefore = await (await fetch(`${base}/api/feed?before=${encodeURIComponent(beforeTs)}&limit=50`)).json();
     check('/api/feed before= filters local entries inclusively by ts', () => {
@@ -11670,6 +11694,20 @@ async function main() {
       assert.ok(row.gotchas && row.gotchas.includes('pre-migration backend'), `gotchas was: ${row.gotchas}`);
     });
 
+    // A real captured decision measures ~560 chars at the median and 1030 at
+    // the longest. The wire used to clip these at 240 while shipping the
+    // summary beside them at 4000, so a teammate got the majority of every
+    // note truncated mid-word — long enough to bait, too short to answer.
+    setSummaryEntry(50, 'ssess-long', 'Wire up a long decision',
+      'D'.repeat(900) + ' END-OF-DECISION', 'G'.repeat(900) + ' END-OF-GOTCHA');
+    await teamsync.syncTeams({ project: projS });
+    check('teamsync: a full-length decision/gotcha survives the wire, not a 240-char stub', () => {
+      const row = mockS.entries.find(e => e.session === 'ssess-long');
+      assert.ok(row, 'entry not pushed');
+      assert.ok(row.decisions.includes('END-OF-DECISION'), `decisions truncated at ${row.decisions.length} chars`);
+      assert.ok(row.gotchas.includes('END-OF-GOTCHA'), `gotchas truncated at ${row.gotchas.length} chars`);
+    });
+
     // Second identity joins the team and pulls Summarizer's rows back.
     const projSB = path.join(ROOT, 'projects-sb', 'summary-app');
     fs.mkdirSync(projSB, { recursive: true });
@@ -12223,6 +12261,38 @@ async function main() {
       assert.ok(!gatedLine.includes('undefined') && !/\bnull\b/.test(gatedLine), `null leaked into the line: ${gatedLine}`);
       assert.ok(md.includes('capped backoff'), 'summary Result line missing for the gated entry');
       assert.ok(md.includes('Ship the billing exporter'), 'opted-in ask missing from the pull');
+    });
+
+    // A NEW install shares prompts; an EXISTING config must never be flipped by
+    // an update. The split is load-bearing: getConfig deep-merges DEFAULT_CONFIG
+    // into whatever is on disk, so putting the default there instead of in
+    // freshInstallConfig would silently start uploading the verbatim prompts of
+    // every user who installed under the old off-by-default.
+    check('privacy: a fresh install ships sharePrompts on, written into its own config', () => {
+      const homeNew = path.join(ROOT, 'home-fresh-share');
+      const env = { ...process.env, MEMBRIDGE_HOME: homeNew };
+      const r = spawnSync(process.execPath, ['-e', "require(process.argv[1]).ensureConfig()", path.join(__dirname, '..', 'lib', 'util.js')], { env, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      const written = JSON.parse(read(path.join(homeNew, 'config.json')));
+      assert.strictEqual(written.team.sharePrompts, true, 'a fresh config did not opt in');
+      assert.strictEqual(util.freshInstallConfig().team.sharePrompts, true, 'freshInstallConfig lost the flag');
+    });
+
+    check('privacy: an existing config without the flag is NOT flipped by the shipped defaults', () => {
+      assert.strictEqual(util.DEFAULT_CONFIG.team.sharePrompts, undefined,
+        'the default leaked into DEFAULT_CONFIG, which getConfig merges into every existing config');
+      const homeOld = path.join(ROOT, 'home-legacy-share');
+      fs.mkdirSync(homeOld, { recursive: true });
+      // A pre-existing config that predates the flag entirely.
+      fs.writeFileSync(path.join(homeOld, 'config.json'), JSON.stringify({ team: { url: '', anonKey: '' } }));
+      const env = { ...process.env, MEMBRIDGE_HOME: homeOld };
+      const r = spawnSync(process.execPath, ['-e',
+        "const u=require(process.argv[1]);u.ensureConfig();process.stdout.write(JSON.stringify({merged:u.getConfig().team.sharePrompts,onDisk:u.loadUserConfig().team.sharePrompts}))",
+        path.join(__dirname, '..', 'lib', 'util.js')], { env, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      const seen = JSON.parse(r.stdout);
+      assert.notStrictEqual(seen.merged, true, 'an update flipped prompt sharing on for an existing user');
+      assert.notStrictEqual(seen.onDisk, true, 'an update rewrote an existing config to share prompts');
     });
 
     check('privacy: CLI team share-prompts toggles the config flag', () => {
@@ -14225,16 +14295,63 @@ async function main() {
       assert.ok(!JSON.stringify(recent2).includes('_highlights'), '_highlights leaked');
     });
     check('mcp: buildEntries on the MCP path defers git-change derivation', () => {
-      // The per-project entry assembly moved to lib/activity.js when the
-      // PreToolUse search hook needed the same entries without dragging in the
-      // MCP SDK, so the deferral now lives THERE while the derive-for-
-      // survivors pass stays here. Both halves are still required: deferring
-      // without deriving would silently drop change notes, and deriving
-      // without deferring re-introduces a git subprocess per entry per project.
-      const src = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
-      const activitySrc = readSource(path.join(__dirname, '..', 'lib', 'activity.js'));
-      assert.ok(activitySrc.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
+      // The corpus builder moved to lib/activity.js when the dashboard's
+      // /api/search started answering from it too; the invariant is unchanged
+      // and belongs to whichever file owns allActivity/deriveDeferred.
+      const src = readSource(path.join(__dirname, '..', 'lib', 'activity.js'));
+      assert.ok(src.includes('deferChanges: true'), 'MCP path still derives changes eagerly for every project');
       assert.ok(src.includes('deriveEntryChanges'), 'no derive-for-survivors pass');
+      const mcpSrc = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
+      assert.ok(/require\('\.\/activity'\)/.test(mcpSrc), 'lib/mcp.js no longer routes through the shared corpus');
+    });
+
+    check('corpus invariant: the hook, the MCP tools and /api/search share ONE assembly and ONE scorer', () => {
+      // lib/activity.js was extracted out of lib/mcp.js TWICE, independently:
+      // once on master (78 lines, for the PreToolUse search hook) and once on
+      // a feature branch (315 lines, for the dashboard's /api/search). Both
+      // extractions were reasonable and they disagreed. Reconciling them
+      // restored the sharing; this check is what stops a third extraction, or
+      // a well-meaning inline "just this once", from splitting the corpus
+      // again. It is deliberately source-level: the failure it guards against
+      // is two code paths that each work correctly in isolation and quietly
+      // answer differently, which no behavioral assertion catches.
+      const activitySrc = readSource(path.join(__dirname, '..', 'lib', 'activity.js'));
+      const hookSrc = readSource(path.join(__dirname, '..', 'lib', 'hooks-search.js'));
+      const mcpSrc = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
+      const serverSrc = readSource(path.join(__dirname, '..', 'lib', 'server.js'));
+
+      // ONE entry assembly. The hook calls projectEntries directly; allActivity
+      // must call it too rather than repeating memorydb.buildEntries +
+      // feed.normalizeLocal in its own loop, which is exactly what the branch
+      // version did.
+      assert.ok(/activity\.projectEntries\(/.test(hookSrc),
+        'the search hook no longer builds entries through projectEntries');
+      assert.ok(/module\.exports[\s\S]*projectEntries/.test(activitySrc),
+        'lib/activity.js stopped exporting projectEntries, which the hook needs');
+      const allActivityBody = activitySrc.slice(
+        activitySrc.indexOf('function allActivity'),
+        activitySrc.indexOf('function deriveDeferred'));
+      assert.ok(allActivityBody.includes('projectEntries('),
+        'allActivity no longer delegates to projectEntries');
+      assert.ok(!/buildEntries\(/.test(allActivityBody),
+        'allActivity re-inlined the per-project assembly instead of calling projectEntries; '
+        + 'that is the split this module exists to prevent');
+
+      // ONE scorer. rankWithFallback holds the strict-then-relaxed policy, so
+      // "no results" means the same thing on every surface. A direct
+      // rankEntries call from a search surface silently opts out of it.
+      for (const [name, src] of [['lib/activity.js', activitySrc], ['lib/hooks-search.js', hookSrc]]) {
+        assert.ok(/rankWithFallback\(/.test(src), `${name} does not rank through rankWithFallback`);
+        assert.ok(!/searchLib\.rankEntries\(/.test(src),
+          `${name} calls rankEntries directly, bypassing the shared strict/relaxed policy`);
+      }
+
+      // ONE search. Both the MCP tool and the dashboard endpoint delegate
+      // rather than each assembling and ranking their own corpus.
+      assert.ok(/activity\.searchMemory\(/.test(mcpSrc),
+        'lib/mcp.js stopped delegating search_memory to the shared corpus');
+      assert.ok(/activity\.searchMemory\(/.test(serverSrc),
+        'lib/server.js stopped answering /api/search from the shared corpus');
     });
 
     check('mcp: team rows carry session/goal/decisions/gotchas/headline through to activity', () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { EntryRow, HOVER_PREVIEW_DELAY_MS } from './EntryRow'
+import { EntryRow, HOVER_PREVIEW_DELAY_MS, PATH_MAX, ROW_FILE_LIMIT, rowFiles, shortPath } from './EntryRow'
 import { sessionHref } from '../app/routes'
 import type { StreamEntry } from '../data/types'
 
@@ -184,5 +184,84 @@ describe('EntryRow hover preview (Task 6)', () => {
     act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
     const preview = document.querySelector('.entry-row-preview')!
     expect(preview.querySelectorAll('a, button, input, [tabindex]')).toHaveLength(0)
+  })
+})
+
+// One live row named 16 files, wrapping to three lines of mono text that
+// out-shouted the outcome above it. The row states blast radius; the session
+// page holds the inventory.
+describe('the row\'s file line', () => {
+  const many = [
+    'docs/superpowers/specs/2026-07-31-session-detail-page-design.md',
+    'lib/server.js',
+    '.github/workflows/ci.yml',
+    'ui/src/data/queries.ts',
+    'claude/ops/state.md',
+    'lib/feed.js',
+  ]
+
+  it('names at most ROW_FILE_LIMIT paths and counts the rest', () => {
+    const { shown, more } = rowFiles(many)
+    expect(shown).toHaveLength(ROW_FILE_LIMIT)
+    expect(more).toBe(many.length - ROW_FILE_LIMIT)
+  })
+
+  it('ranks source ahead of docs/specs/CI churn', () => {
+    const { shown } = rowFiles(many)
+    expect(shown).toEqual(['lib/feed.js', 'lib/server.js', 'ui/src/data/queries.ts'])
+  })
+
+  it('does not mutate the entry\'s own file list', () => {
+    const original = [...many]
+    rowFiles(many)
+    expect(many).toEqual(original)
+  })
+
+  it('renders the count, not the wall', () => {
+    render(<EntryRow entry={entry({ files: many })} />)
+    expect(screen.getByText(/\+3 more/)).toBeInTheDocument()
+    expect(screen.queryByText(/session-detail-page-design/)).toBeNull()
+  })
+
+  it('keeps the count out of the clipped element, so it survives long paths', () => {
+    render(<EntryRow entry={entry({ files: many })} />)
+    const count = screen.getByText(/\+3 more/)
+    expect(count.closest('.entry-row-files-list')).toBeNull()
+    expect(count.closest('.entry-row-files')).not.toBeNull()
+  })
+
+  it('shows no count when everything fits', () => {
+    render(<EntryRow entry={entry({ files: ['lib/hooks.js', 'lib/feed.js'] })} />)
+    expect(screen.queryByText(/more/)).toBeNull()
+  })
+})
+
+// Live paths are worktree-nested and run past 90 characters. Clipped from the
+// right (which is what CSS does), every one of them renders as the same
+// indistinguishable prefix -- the filename, the only identifying part, is
+// exactly what gets eaten.
+describe('shortPath', () => {
+  const LONG = '.claude/worktrees/prompt-sharing-mcp-visibility-26de91/ui/src/features/search/snippet.ts'
+
+  it('leaves a short path exactly as written', () => {
+    expect(shortPath('lib/feed.js')).toBe('lib/feed.js')
+  })
+
+  it('keeps the filename and its directory when the path is too long', () => {
+    const out = shortPath(LONG)
+    expect(out.endsWith('search/snippet.ts')).toBe(true)
+    expect(out.startsWith('…/')).toBe(true)
+    expect(out.length).toBeLessThanOrEqual(PATH_MAX)
+  })
+
+  it('never mangles a path with no directories to drop', () => {
+    const single = 'a-very-long-single-file-name-with-no-directories.ts'
+    expect(shortPath(single)).toBe(single)
+  })
+
+  it('renders the shortened form in the row', () => {
+    render(<EntryRow entry={entry({ files: [LONG] })} />)
+    expect(screen.getByText(/search\/snippet\.ts/)).toBeInTheDocument()
+    expect(screen.queryByText(/prompt-sharing-mcp-visibility/)).toBeNull()
   })
 })

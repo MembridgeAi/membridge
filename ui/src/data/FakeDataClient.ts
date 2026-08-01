@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
   AccessMatrix, AssistsStats, AuditEvent, DeleteProjectResult, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, LiveSession, McpRegisterResult, Member, Project, Role, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 export interface FakeOptions {
@@ -243,8 +243,8 @@ export class FakeDataClient implements DataClient {
   }
   getLiveSessions() {
     return this.guard<LiveSession[]>(this.opts.empty ? [] : [
-      { id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:36:00Z', intent: 'make the summary hook fire on session boundaries, not only on stop' },
-      { id: 's2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up' },
+      { id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:36:00Z', intent: 'make the summary hook fire on session boundaries, not only on stop', outcome: null },
+      { id: 's2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up', outcome: null },
     ])
   }
   // null for an unknown id -- FakeDataClient must model the real client's
@@ -282,6 +282,30 @@ export class FakeDataClient implements DataClient {
     const page = entries.slice(0, opts.limit)
     const nextBefore = entries.length > opts.limit ? page[page.length - 1].at : null
     return this.guard<FeedPage>({ entries: page, nextBefore })
+  }
+  // The demo/test transport's search: the same fixture rows, filtered by a
+  // plain case-insensitive substring over the fields the real scorer weights
+  // highest. No ranking model here on purpose -- the fixture is for driving
+  // the UI's states (results / empty / typing), and duplicating lib/search.js
+  // in TypeScript would create a second scorer to keep in sync.
+  search(query: string, filters: FeedFilters, limit: number) {
+    const q = query.trim().toLowerCase()
+    if (!q || this.opts.empty) return this.guard<SearchPage>({ query: q, total: 0, results: [] })
+    const hits = this.feedFixture()
+      .filter(e => !filters.author || e.authorId === filters.author)
+      .filter(e => !filters.project || e.projectPath === filters.project)
+      .filter(e => !filters.source || e.tool === filters.source)
+      .map(e => {
+        const matched: string[] = []
+        if (e.outcome.toLowerCase().includes(q)) matched.push('summary')
+        if ((e.intent || '').toLowerCase().includes(q)) matched.push('ask')
+        if (e.files.some(f => f.toLowerCase().includes(q))) matched.push('files')
+        if (e.author.toLowerCase().includes(q)) matched.push('author')
+        return { ...e, score: matched.length, matched }
+      })
+      .filter(e => e.matched.length > 0)
+      .sort((a, b) => (b.score - a.score) || b.at.localeCompare(a.at))
+    return this.guard<SearchPage>({ query: q, total: hits.length, results: hits.slice(0, limit) })
   }
   syncProject() { return this.guard<void>(undefined) }
   syncAll() { return this.guard<void>(undefined) }

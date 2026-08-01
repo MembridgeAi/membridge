@@ -46,6 +46,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   getProjectStream: c => c.getProjectStream('/x'),
   getFeed: c => c.getFeed({ author: null, project: null, source: null }, { limit: 10, before: null }),
   getSession: c => c.getSession('s1'),
+  search: c => c.search('vault rotation', { author: null, project: null, source: null }, 25),
   syncProject: c => c.syncProject('/x'),
   syncAll: c => c.syncAll(),
   setProjectPaused: c => c.setProjectPaused('/x', true),
