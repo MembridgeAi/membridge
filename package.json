@@ -25,13 +25,15 @@
   "files": [
     "bin",
     "lib",
+    "ui/dist",
     "vendor",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node test/run-tests.js",
-    "prepublishOnly": "npm test",
+    "build:ui": "npm ci --prefix ui && npm run build --prefix ui",
+    "prepublishOnly": "npm run build:ui && npm test",
     "start": "node bin/membridge.js start",
     "app": "node scripts/prepare-app.js && electron app",
     "dist:mac": "node scripts/prepare-app.js && electron-builder --mac --publish never",

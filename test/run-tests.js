@@ -823,6 +823,58 @@ async function main() {
     assert.ok(vendoredWasm.length >= 4,
       `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
   });
+  check('F1: the npm tarball ships ui/dist, so an npm-only install has a dashboard', () => {
+    // CRITICAL (alpha readiness, F1): package.json's "files" whitelist omitted
+    // ui/dist, so `membridge dashboard` returned 503 "UI not built. Run: cd ui
+    // && npm run build" for EVERY npm install -- telling a user to build in a
+    // directory the tarball does not contain. The Electron app was the only
+    // working surface, and it is Apple Silicon only.
+    //
+    // This packs for real and extracts, rather than trusting `npm pack
+    // --dry-run --json` like C1 above. The dry-run file list is computed from
+    // the "files" globs and is happy to list a directory that does not exist
+    // on disk at pack time, which is exactly the failure mode once the UI
+    // build moves into a lifecycle script: the manifest would look correct and
+    // the tarball would still be empty. Only the extracted bytes prove it.
+    const packDir = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-pack-'));
+    try {
+      const out = spawnSync('npm', ['pack', '--pack-destination', packDir], {
+        cwd: path.join(__dirname, '..'), encoding: 'utf8',
+        // Same npm.cmd/EINVAL and ENOBUFS reasoning as C1 above.
+        shell: process.platform === 'win32',
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      assert.strictEqual(out.status, 0,
+        `npm pack failed: ${out.error ? out.error.message : (out.stderr || `status ${out.status}`)}`);
+      const tarballs = fs.readdirSync(packDir).filter(f => f.endsWith('.tgz'));
+      assert.strictEqual(tarballs.length, 1,
+        `expected exactly one packed tarball, got ${JSON.stringify(tarballs)}`);
+      // bsdtar ships in Windows 10 1803+ and on the windows-latest runner, so
+      // this needs no platform branch and no tar dependency.
+      const untar = spawnSync('tar', ['-xzf', path.join(packDir, tarballs[0]), '-C', packDir], {
+        encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+      });
+      assert.strictEqual(untar.status, 0,
+        `extracting the tarball failed: ${untar.error ? untar.error.message : (untar.stderr || `status ${untar.status}`)}`);
+      const shell = path.join(packDir, 'package', 'ui', 'dist', 'index.html');
+      assert.ok(fs.existsSync(shell),
+        'the packed tarball has no ui/dist/index.html, so `membridge dashboard` '
+        + 'serves the 503 for every npm install');
+      // An index.html that ships without its hashed bundle is a white screen,
+      // which reads as "works" to a status-code check and as "broken" to a
+      // human. Assert the shell actually references an asset that is present.
+      const html = read(shell);
+      const refs = [...html.matchAll(/(?:src|href)="\/(assets\/[^"]+)"/g)].map(m => m[1]);
+      assert.ok(refs.length > 0,
+        `the packed index.html references no /assets/* bundle: ${html.slice(0, 400)}`);
+      for (const ref of refs) {
+        assert.ok(fs.existsSync(path.join(packDir, 'package', 'ui', 'dist', ref)),
+          `packed index.html references ${ref}, which is not in the tarball`);
+      }
+    } finally {
+      fs.rmSync(packDir, { recursive: true, force: true });
+    }
+  });
 
   // --- 1. fresh sync ---
   const r1 = syncOnce();
