@@ -9969,6 +9969,75 @@ async function main() {
     }
   }
 
+  // Regression, seen wedging a real install for a week: two locally captured
+  // entries can share a millisecond AND a source -- sessions backfilled from a
+  // single clock read do exactly this -- so two payload rows collide on
+  // memory_entries' on_conflict key (project_id, author_id, ts, source).
+  // Postgres aborts that entire upsert with SQLSTATE 21000;
+  // `Prefer: resolution=ignore-duplicates` cannot save it, since that governs
+  // conflicts with rows ALREADY in the table, not duplicates within the
+  // statement. The push then threw past the pull, so one unpushable local
+  // entry blacked out ALL teammate activity -- the product's whole point.
+  {
+    const mockDup = createMockSupabase();
+    await new Promise(r => mockDup.server.listen(P(93), '127.0.0.1', r));
+    process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(93)}`;
+    process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+    try {
+      const projDup = path.join(ROOT, 'projects', 'dup-key-push');
+      fs.mkdirSync(projDup, { recursive: true });
+      await teamsync.signup(util.getConfig(), 'dup@test.dev', 'pw-dup', 'Dup');
+      const teamDup = await teamsync.createTeam(util.getConfig(), 'DupTeam');
+      await teamsync.linkProject(util.getConfig(), projDup, teamDup.team_id, 'DupTeam');
+      const linkDup = teamsync.loadTeamLink(projDup);
+      const collide = new Date(Date.now() - 90 * 1000).toISOString();
+      const stDup = util.loadState();
+      stDup.projects[projDup] = { events: [
+        { ts: collide, source: 'Codex', kind: 'prompt', session: 'sA', text: 'first backfilled ask' },
+        { ts: collide, source: 'Codex', kind: 'prompt', session: 'sB', text: 'second backfilled ask' },
+      ] };
+      util.saveState(stDup);
+
+      await check('teamsync: two entries sharing a ts+source upload without tripping ON CONFLICT (21000)', async () => {
+        await teamsync.syncTeams({ project: projDup });
+        const landed = mockDup.entries.filter(e => e.ts === collide && e.source === 'Codex');
+        assert.strictEqual(landed.length, 1, 'the self-conflicting batch never landed (whole push aborted)');
+      });
+
+      // The isolation property, independent of the duplicate-key bug above:
+      // whatever goes wrong on the way UP, teammate activity must still come
+      // DOWN. Reading the team is not conditional on publishing to it.
+      await check('teamsync: a failing push still lets the pull bring teammate activity down', async () => {
+        mockDup.entries.push({
+          project_id: linkDup.projectId, author_id: 'user-mate', author_name: 'Mate',
+          ts: new Date(Date.now() - 30 * 1000).toISOString(), source: 'Claude Code',
+          session: 'sMate', ask: null, summary: 'what the teammate is doing right now',
+          distilled: false, files: [], changes: null, goal: null, decisions: null,
+          gotchas: null, headline: null, id: 9401,
+          created_at: new Date(Date.now() + 5000).toISOString(),
+        });
+        // Something unpushed locally, so the push actually runs and fails.
+        const st2 = util.loadState();
+        st2.projects[projDup].events.push(
+          { ts: new Date().toISOString(), source: 'Codex', kind: 'prompt', session: 'sC', text: 'a later ask' });
+        util.saveState(st2);
+        mockDup.flags.failEntryInserts = true;
+        try {
+          await teamsync.syncTeams({ project: projDup });
+        } finally {
+          mockDup.flags.failEntryInserts = false;
+        }
+        const pulled = (util.loadState().projects[projDup].teamEntries || []);
+        assert.ok(pulled.some(e => e.summary === 'what the teammate is doing right now'),
+          'the pull was skipped because the push threw — teammate activity never arrived');
+      });
+    } finally {
+      delete process.env.MEMBRIDGE_TEAM_URL;
+      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      await new Promise(r => mockDup.server.close(r));
+    }
+  }
+
   // Task 7 (backfill history older than the cursor): existing installs have
   // teamPullTs far past their team's origin, so history below that cursor was
   // pulled once (if at all) and never revisited by the forward pull. The
