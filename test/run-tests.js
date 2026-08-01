@@ -2490,6 +2490,42 @@ async function main() {
       assert.ok(fs.existsSync(path.join(proj1, 'AGENTS.md')), 'AGENTS.md not recreated after unarchive + sync');
     });
 
+    // Review follow-up (part 5): the failed-strip path was only ever exercised
+    // through the exported function, so its HTTP STATUS was never pinned. The
+    // `base` daemon above is a spawned child process, so a stub in this
+    // process cannot reach it -- run this one against an in-process server on
+    // the same MEMBRIDGE_HOME, injecting the fault through the digest module
+    // object (the same seam updateCheck.check uses).
+    {
+      const ARCH_PORT = P(75);
+      const archSrv = startServer(ARCH_PORT, { retries: 0 });
+      const archBase = `http://127.0.0.1:${ARCH_PORT}`;
+      await waitForHttp(`${archBase}/api/status`);
+      const realRemoveBlock = digest.removeBlock;
+      let stripFailRes, stripFailBody;
+      try {
+        digest.removeBlock = () => { throw new Error('disk on fire'); };
+        stripFailRes = await post(`${archBase}/api/projects/archive`, { path: proj1 });
+        stripFailBody = await stripFailRes.json().catch(() => null);
+      } finally {
+        digest.removeBlock = realRemoveBlock;
+      }
+      check('POST /api/projects/archive answers 500 with a JSON body when the strip fails after a persisted pause', () => {
+        assert.strictEqual(stripFailRes.status, 500, `expected 500, got ${stripFailRes.status}`);
+        assert.ok(stripFailBody && stripFailBody.error, 'the 500 must carry a JSON error body');
+        assert.notStrictEqual(stripFailBody.archived, true, 'a failed archive must never report archived over HTTP');
+        const cfg = util.loadUserConfig();
+        assert.ok(cfg.exclude.includes(proj1), 'the persisted pause must survive an HTTP-level failure');
+        assert.ok((cfg.archived || []).includes(proj1), 'the archived entry must survive an HTTP-level failure');
+      });
+      const httpRecover = await (await post(`${archBase}/api/projects/unarchive`, { path: proj1 })).json();
+      check('the HTTP-level failed archive is recoverable by a plain unarchive', () => {
+        assert.strictEqual(httpRecover.archived, false, `unarchive said: ${JSON.stringify(httpRecover)}`);
+      });
+      await new Promise(r => archSrv.close(r));
+      await post(`${base}/api/sync`, { project: proj1 });
+    }
+
     // Task 2: projectsPayload reports archived state as a FLAG on the one
     // list. The UI sections on it; it never re-fetches a second list, and a
     // vanished folder is reported (missing), never omitted or thrown on.
@@ -2523,6 +2559,30 @@ async function main() {
       assert.ok(!(util.loadUserConfig().archived || []).includes(ghostDir), 'archived entry not removed');
     });
     await post(`${base}/api/projects/delete`, { path: ghostDir });
+
+    // Review follow-up (part 6): deleting an ARCHIVED project must drop its
+    // config.archived entry too. Otherwise re-adding the same path later
+    // brings it back already archived (hidden in the Archived section) with
+    // no way for the user to connect the two.
+    const pruneDir = path.join(ROOT, 'projects', 'prune-app');
+    fs.mkdirSync(pruneDir, { recursive: true });
+    await post(`${base}/api/projects/add`, { path: pruneDir });
+    await post(`${base}/api/projects/archive`, { path: pruneDir });
+    await post(`${base}/api/projects/delete`, { path: pruneDir });
+    check('deleting an archived project prunes its config.archived entry', () => {
+      const cfg = util.loadUserConfig();
+      assert.ok(!(cfg.archived || []).includes(pruneDir),
+        'a deleted project must not stay in config.archived (re-adding it would resurrect it archived)');
+    });
+    await post(`${base}/api/projects/add`, { path: pruneDir });
+    const afterReAdd = await (await fetch(`${base}/api/projects`)).json();
+    check('re-adding a previously archived-then-deleted path comes back visible, not archived', () => {
+      const p = afterReAdd.find(x => x.path.toLowerCase() === pruneDir.toLowerCase());
+      assert.ok(p, 're-added project missing from /api/projects');
+      assert.notStrictEqual(p.archived, true, 're-added project came back archived');
+    });
+    await post(`${base}/api/projects/delete`, { path: pruneDir });
+
     await post(`${base}/api/projects/unarchive`, { path: proj1 });
     await post(`${base}/api/sync`, { project: proj1 });
     check('fixture restored: proj1 unarchived with its block back before the delete tests', () => {

@@ -192,6 +192,16 @@ export function ProjectsPage() {
 
   const teamSize = membersQuery.data?.length ?? matrixQuery.data?.members.length ?? 0
 
+  // Deleting a SHARED project is manager-only on the daemon
+  // (lib/server.js archiveSharedProject: a non-manager's request is REFUSED,
+  // and refused only after unlinkProject has already pruned that machine's
+  // durable teammate archive), so the control must not be offered to someone
+  // it is going to refuse. Same gate the access popover uses, not a second
+  // permission concept; a member keeps Delete on their own private projects.
+  function canDeleteProject(project: Project): boolean {
+    return !project.shared || canEditAccess
+  }
+
   // Who can see this project: the access matrix's row for an admin (the
   // authoritative grant list), the project's own member roster otherwise.
   function rosterFor(project: Project): AccessMemberRef[] {
@@ -319,7 +329,9 @@ export function ProjectsPage() {
                 selected: selected.has(project.path),
                 onToggle: isSelected => toggleSelected(project.path, isSelected),
               } : null}
-              onDelete={selectMode ? null : () => { deleteProject.reset(); setDeleteFor(project.path) }}
+              onDelete={selectMode || !canDeleteProject(project)
+                ? null
+                : () => { deleteProject.reset(); setDeleteFor(project.path) }}
             />
           ))}
           {ready && filtered.length === 0 && (

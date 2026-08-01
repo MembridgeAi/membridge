@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
-  AccessMatrix, AssistsStats, AuditEvent, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights, Invite, LiveSession,
-  McpRegisterResult, Member, Project, Role, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AssistsStats, AuditEvent, DeleteProjectResult, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
+  Invite, LiveSession, McpRegisterResult, Member, Project, Role, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 export interface FakeOptions {
@@ -290,7 +290,11 @@ export class FakeDataClient implements DataClient {
   // can mockImplementation per-path for partial-failure scenarios.
   archiveProject(_projectPath: string) { return this.guard<void>(undefined) }
   unarchiveProject(_projectPath: string) { return this.guard<void>(undefined) }
-  deleteProject(_projectPath: string) { return this.guard<void>(undefined) }
+  // Defaults to a real local delete. Tests override with a refusal body
+  // ({ archived: false, message }) to drive the refused-delete path.
+  deleteProject(projectPath: string) {
+    return this.guard<DeleteProjectResult>({ path: projectPath, scope: 'local', deleted: true })
+  }
   copyForAI() { return this.guard('digest text') }
   getProjectAccess() {
     return this.guard({

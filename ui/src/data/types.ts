@@ -342,6 +342,26 @@ export interface Settings {
   contextFiles: { targets: string[]; extraTargets: Record<string, boolean>; extraTargetFiles: Record<string, string> }
 }
 
+// POST /api/team/archive-project's body (lib/server.js archiveSharedProject).
+// This endpoint answers 200 even when it REFUSED to delete: a plain member
+// deleting a shared project gets { archived: false, unlinked, message } after
+// their local team link and durable teammate archive were already pruned, and
+// the project itself still exists. Callers must read this body -- treating the
+// 200 as success tells the user a destruction they typed a name to confirm
+// happened when it did not.
+//   scope 'team'  -> archived for the whole team (owner/manager path)
+//   scope 'local' -> local-only outcome: `deleted` true is a real delete of an
+//                    unlinked project; `archived: false` with a `message` is a
+//                    refusal.
+export interface DeleteProjectResult {
+  path?: string
+  scope?: 'team' | 'local'
+  archived?: boolean
+  deleted?: boolean
+  unlinked?: boolean
+  message?: string
+}
+
 export interface AccessMatrix {
   members: { id: string; name: string }[]
   rows: { projectPath: string; projectName: string; shared: boolean; access: Record<string, boolean> }[]

@@ -1,6 +1,6 @@
 import type {
-  AccessMatrix, AuditEvent, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
-  Session, Settings, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  Member, Project, Role, Session, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -55,7 +55,11 @@ export interface DataClient {
   // so a shared project keeps today's owner/manager gate: a plain member's
   // delete only unlinks their own machine. An unlinked path falls back to a
   // plain local delete server-side.
-  deleteProject(projectPath: string): Promise<void>
+  //
+  // Resolves with the daemon's BODY, never void: that handler answers 200 on
+  // a refusal too (see DeleteProjectResult), so a caller that discards the
+  // body cannot tell a completed delete from a refused one.
+  deleteProject(projectPath: string): Promise<DeleteProjectResult>
   copyForAI(projectPath: string): Promise<string>
 
   getProjectAccess(projectPath: string): Promise<{ members: { memberId: string; canSee: boolean }[]; defaultAccess: boolean }>

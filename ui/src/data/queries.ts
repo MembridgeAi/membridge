@@ -5,7 +5,7 @@
 // document.hidden and blanked the dashboard mid screen-recording).
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDataClient } from './DataClientProvider'
-import type { AccessMatrix, FeedFilters, Role } from './types'
+import type { AccessMatrix, DeleteProjectResult, FeedFilters, Role } from './types'
 
 const LIVE = { refetchInterval: 10_000, refetchIntervalInBackground: false } as const
 
@@ -225,15 +225,41 @@ export function useUnarchiveProject() {
   })
 }
 
+// Did the daemon actually delete anything? POST /api/team/archive-project
+// answers 200 on a REFUSAL as well as on a success (lib/server.js
+// archiveSharedProject: a plain member deleting a shared project gets
+// { archived: false, unlinked, message } after their local team link and
+// durable teammate archive have already been pruned, with the project itself
+// left intact). Returns the refusal reason, or null when the delete really
+// happened. Success is asserted positively -- an unrecognized body is treated
+// as "not confirmed" rather than assumed to have worked.
+export function deleteRefusalOf(result: DeleteProjectResult): string | null {
+  if (result.deleted === true || result.archived === true) return null
+  if (result.message) return result.message
+  if (result.archived === false) return 'The daemon did not delete this project.'
+  return null
+}
+
 // Destructive single-project delete (Task 6). Refreshes the projects list
 // and the feed: the daemon drops the project's state, so both surfaces
 // change. Never optimistic -- a shared project's delete can legitimately be
 // refused by the role gate, and the row must stay until the daemon confirms.
+//
+// A refusal is turned into a REJECTION here, so every consumer's success path
+// (the cache invalidations below, and the caller's own onSuccess that closes
+// the confirmation dialog) is structurally unreachable unless the destruction
+// actually happened. This is the fix for a refusal being reported to the user
+// as a completed delete.
 export function useDeleteProject() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (projectPath: string) => c.deleteProject(projectPath),
+    mutationFn: async (projectPath: string) => {
+      const result = await c.deleteProject(projectPath)
+      const refusal = deleteRefusalOf(result)
+      if (refusal) throw new Error(refusal)
+      return result
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['projects'] })
       qc.invalidateQueries({ queryKey: ['feed'] })

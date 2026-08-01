@@ -3,8 +3,8 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AuditEvent, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult, Member, Project, Role,
-  Session, Settings, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  Member, Project, Role, Session, Settings, SkeletonStats, Status, StreamEntry,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -196,8 +196,13 @@ export class LocalDaemonClient implements DataClient {
   // gate on a shared project and falls back to a plain local delete for an
   // unlinked path -- the ungated endpoint would let any member's UI delete a
   // shared project's local state with no role check at all.
-  async deleteProject(projectPath: string): Promise<void> {
-    await post('/api/team/archive-project', { path: projectPath })
+  //
+  // The body is RETURNED, not discarded: that handler answers 200 with
+  // { archived: false, message } when it refuses a member's delete of a
+  // shared project, and post() only throws on !res.ok -- so discarding it
+  // reported a refusal as a completed destruction.
+  async deleteProject(projectPath: string): Promise<DeleteProjectResult> {
+    return post<DeleteProjectResult>('/api/team/archive-project', { path: projectPath })
   }
 
   async copyForAI(projectPath: string): Promise<string> {
