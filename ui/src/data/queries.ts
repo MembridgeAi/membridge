@@ -237,7 +237,11 @@ export function deleteRefusalOf(result: DeleteProjectResult): string | null {
   if (result.deleted === true || result.archived === true) return null
   if (result.message) return result.message
   if (result.archived === false) return 'The daemon did not delete this project.'
-  return null
+  // Fail closed. Every branch the daemon ships today sets one of the fields
+  // above, so this is unreachable now, but a body we do not recognize must
+  // never be read as a completed destruction: a future fourth branch would
+  // otherwise close the dialog and report success for work that never ran.
+  return 'The daemon did not confirm this delete.'
 }
 
 // Destructive single-project delete (Task 6). Refreshes the projects list
