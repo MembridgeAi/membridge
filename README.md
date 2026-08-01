@@ -1,48 +1,86 @@
 <p align="center">
-  <img src="docs/brand/svg/membridge-mark-blue.svg" width="72" alt="MemBridge">
+  <img src="docs/brand/svg/membridge-mark-blue.svg" width="76" alt="MemBridge">
 </p>
 
-<h1 align="center">Your team shares a codebase.<br>Now your AI shares a memory.</h1>
+<h1 align="center">MemBridge</h1>
+
+<p align="center">
+  <b>Shared memory for Claude Code, Codex, Cursor and every other AI coding agent on your team.</b><br>
+  <sub>Your teammates' agents already know what yours figured out.</sub>
+</p>
 
 <p align="center">
   <a href="https://github.com/MembridgeAi/membridge/actions/workflows/ci.yml"><img src="https://github.com/MembridgeAi/membridge/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg" alt="node >= 18"></a>
+  <a href="https://www.npmjs.com/package/@membridgeai/membridge"><img src="https://img.shields.io/npm/v/@membridgeai/membridge?style=flat-square&color=0052FF&label=npm" alt="npm"></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/node-%E2%89%A518-0052FF?style=flat-square" alt="node >= 18"></a>
+  <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-64748B?style=flat-square" alt="platforms">
+  <img src="https://img.shields.io/badge/MCP-ready-0D9673?style=flat-square" alt="MCP ready">
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-64748B?style=flat-square" alt="license"></a>
 </p>
 
-MemBridge is a menu-bar app and CLI for teams that code with AI. A tiny
-local daemon watches the session logs your tools already write, distills
-each one into a small per-project memory, and injects it into the context
-files every agent reads at startup.
+<p align="center">
+  <a href="#the-hand-off">Live hand-off</a> ·
+  <a href="#three-moments-one-of-them-is-ours-alone">How it works</a> ·
+  <a href="#ask-the-question-youd-have-interrupted-someone-with">Team search</a> ·
+  <a href="#the-app">The app</a> ·
+  <a href="#privacy">Privacy</a> ·
+  <a href="docs/guide.md">Docs</a> ·
+  <a href="https://membridge.app">membridge.app</a>
+</p>
+
+---
+
+MemBridge is a menu-bar app and CLI for teams that code with AI. A tiny local
+daemon watches the session logs your tools already write, distills each one
+into a small per-project memory, and gets it to everyone else's agents — at
+startup, mid-session, and on demand over MCP.
 
 ```sh
 curl -fsSL https://membridge.app/install.sh | sh
 ```
 
-<p align="center"><sub><code>local-first · no account · no API keys</code></sub></p>
+<p align="center"><sub><code>local-first · no account · no API keys · about two minutes</code></sub></p>
 
-The one-liner is macOS (Apple Silicon). Everywhere else:
-`npm install -g @membridgeai/membridge && membridge start`. Every install option, the
-full CLI, configuration, and the FAQ live in **[the guide](docs/guide.md)**.
-This page also has an animated twin at
-**[docs/readme.html](docs/readme.html)** ([membridge.app](https://membridge.app)).
+<p align="center"><sub>The one-liner is macOS (Apple Silicon). Everywhere else: <code>npm i -g @membridgeai/membridge &amp;&amp; membridge start</code> — see <a href="#install">Install</a>.</sub></p>
 
-## One session ends. Every agent remembers.
+<br>
 
-When Andrew's Codex refactors checkout validation, a redacted digest syncs
-to the team. Next time you open the project, your Claude Code already knows.
+## The hand-off
 
-<img src="docs/readme-sync.svg" width="100%" alt="Animated demo: andrew's Codex session ends and its memory is distilled; a dot carries the digest across the MemBridge tile; your Claude Code answers from project memory: andrew capped retries at 3 with exponential backoff in checkout/validate.ts, two hours ago.">
+When Andrew's Codex refactors checkout validation, a redacted digest syncs to
+the team. Next time you open the project, your Claude Code already knows.
 
-## Three quiet steps
+<img src="docs/readme-sync.svg" width="100%" alt="Animated demo: Andrew's Codex session ends and its memory is distilled; a dot carries the digest across the MemBridge tile; your Claude Code answers from project memory: Andrew capped retries at 3 with exponential backoff in checkout/validate.ts, two hours ago.">
 
-| 01 · Watch: **Session logs** | 02 · Distill: **Per-project memory** | 03 · Inject: **Context files** |
-| --- | --- | --- |
-| A tiny local daemon tails the JSONL session logs that Claude Code, Codex, Gemini CLI, and any other JSONL logger already write. | Each session is distilled into a small per-project memory: decisions made, gotchas found, who owns what. | The memory lands between markers in `CLAUDE.md`, `AGENTS.md` and `GEMINI.md`, the files every tool reads at startup. |
+> ### Why this is worth a daemon
+>
+> We measured how much re-orientation actually costs. Across **6,104 real agent
+> sessions from 310 developers**, the median developer spends **31% of their
+> tokens** getting an agent back up to speed in code it has already seen — and
+> most of that ground was already covered by somebody else on the team.
+>
+> — [The Context Ledger](https://membridge.app/context-ledger/), our open study
+
+<br>
+
+## Three moments, one of them is ours alone
+
+Most memory tools stop at writing a file. The useful part is what happens
+*after* the session has already started — and months later, when nobody
+remembers who made the call.
+
+| When | What happens |
+| :-- | :-- |
+| **01 · At startup**<br><sub>Every session opens briefed</sub> | What the team's agents worked out is written into the instruction files your agents already read — `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` — attributed by person. Nobody writes a doc. Nobody re-explains the architecture. |
+| **02 · Mid-session**<br><sub>Nobody else does this</sub> | Your agent opens a file a teammate's agent made a call about, and that call enters the *running* session. Once, exactly when it matters. No doc, no Slack, no human relaying it. |
+| **03 · On demand**<br><sub>Scoped to your team's real work</sub> | A ranked search over what every agent on the team has actually done, exposed over MCP so any agent can query it directly. The useful answer is usually months old. |
+
+<br>
 
 ## A memory block, between markers
 
 MemBridge owns only what sits between its markers. The rest of your file is
-never touched.
+never touched, and removing the block restores the file exactly.
 
 ```markdown
 <!-- membridge:begin -->
@@ -54,31 +92,185 @@ andrew owns the pricing service; ask before touching rate tables    ← new
 <!-- membridge:end -->
 ```
 
-## Small surface, sharp edges
+<br>
 
-- **Team feed.** A redacted digest syncs to your team, and only if you
-  opt in. Everything starts local: no cloud, no account, no API keys until
-  you join one.
-- **Summaries by the agent itself.** Session summaries are written by the
-  agent that did the work, not reconstructed by a heuristic after the fact.
-- **Provenance.** `membridge why <file>` lists the AI sessions that edited
-  a file, newest first; add `:<line>` to trace a single line to the one
-  session behind it. `membridge churn` reports how much of a session's
-  committed work still survives in `HEAD`.
-- **Copy-for-AI digest.** One click copies a compact project digest for
-  any chat window that can't read your files.
-- **MCP server.** Project memory is also exposed over MCP, for tools that
-  would rather query than read a file.
-- **Custom adapters.** Point MemBridge at any tool that logs JSONL with a
-  small adapter. If it writes sessions, it can share them.
-- **Secret redaction.** Keys, tokens and private paths are scrubbed before
-  anything leaves your machine.
+## Ask the question you'd have interrupted someone with
 
-There's more in **[the guide](docs/guide.md)**: the dashboard tour with
-screenshots, session summaries and the Stop hook, team sync and privacy,
-self-hosting, BYOK roadmaps, the CLI table, custom adapter config, and
-development docs.
+Not keyword matching over a digest. `search_memory` ranks across the decisions
+people made, the gotchas they hit, what they were trying to do and the files
+they touched — filterable by teammate, project, file or date, over your team's
+full synced history.
+
+```
+search_memory("auth rotation")                                    · via MCP
+3 results from 2 teammates, across 4 months
+
+  Priya settled this on 14 June.
+  JWT rotation happens in vault, never in app config. The app-config path
+  was tried in March and reverted after an incident. Marcus then moved
+  session refresh behind the gateway so the SDK never sees a raw token.
+  You tried per-service key caching in May and abandoned it, because
+  rotation invalidation got unmanageable.
+```
+
+Ranked by relevance, not recency — cross-teammate overlap has no recency
+correlation, so work from months ago surfaces when it answers the question.
+
+**Provenance, too.** `membridge why <file>` lists the AI sessions that edited a
+file, newest first; add `:<line>` to trace a single line to the one session
+behind it.
+
+```
+$ membridge why lib/teamsync.js
+Why lib/teamsync.js — 2 session(s), newest first:
+
+2026-07-29 09:14 · marco · Claude Code
+  Ask: Find out why team sync is broken and fix it
+  Did: Rows are deduped inside upsertEntries, so one self-conflicting
+  pair can no longer black out all teammate activity.
+```
+
+<br>
+
+## The app
+
+What the team looks like from the outside: every agent session, who can see
+which project, and where knowledge is concentrated in one person's head.
+
+<p align="center">
+  <img src="docs/screenshots/activity-feed.png" width="100%" alt="MemBridge feed: a chronological list of agent sessions across the team, each with the person, the tool (Claude Code or Codex), the project, the intent, a one-line summary of what was worked out, and the files touched.">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/project-page.png" width="100%" alt="MemBridge project page for shop-app: session history on the left; on the right, per-person access toggles, memory delivery status, and sync status showing end-to-end encryption on.">
+</p>
+
+<br>
+
+## Supported tools
+
+| Tool | Support | How |
+| --- | --- | --- |
+| **Claude Code** | Built in | Reads `~/.claude/projects` transcripts, writes `CLAUDE.md` |
+| **Codex** (OpenAI) | Built in | Reads `~/.codex/sessions` rollouts, writes `AGENTS.md` |
+| **Gemini CLI** | Custom adapter | Point an adapter at its logs, add `GEMINI.md` to targets |
+| **Cursor, opencode, Copilot CLI, …** | Custom adapter | Any tool that logs sessions as JSONL — no code required |
+| **Claude Desktop, and any MCP client** | Built in | `membridge mcp` — registered automatically at install |
+
+One memory across all of them, so switching tools mid-task doesn't reset
+anything. Adapter config is in [the guide](docs/guide.md#supported-tools).
+
+<br>
+
+## Privacy
+
+Everything starts local. No cloud, no account, no API keys until you join a
+team — and the team layer is opt-in per project.
+
+- **End-to-end encrypted.** Team content is secretbox-encrypted with a per-team
+  key sealed to each member's public key. The server stores ciphertext only.
+  Private keys never leave the macOS Keychain.
+- **Fail-closed.** When encryption can't run, sync **holds and pauses** rather
+  than degrading to plaintext.
+- **Secret redaction.** AWS, GitHub, Google, Slack, OpenAI and Anthropic keys,
+  tokens and private paths are scrubbed before anything leaves your machine.
+- **Your prompts stay local** by default. Your source code is never
+  transmitted — only distilled summaries.
+- **Per-project access control**, roles (owner / admin / member), and a 30-day
+  audit trail. Tick a cell to grant or revoke.
+
+<br>
+
+## Install
+
+| Platform | How |
+| --- | --- |
+| **macOS** (Apple Silicon) | `curl -fsSL https://membridge.app/install.sh \| sh` — installs the menu-bar app |
+| **macOS** (Intel), **Windows**, **Linux** | `npm i -g @membridgeai/membridge && membridge start` |
+| **Headless / CI boxes** | Same npm install; `membridge start` runs the daemon with no UI |
+
+Then `membridge status` to confirm, or open the dashboard at
+`http://127.0.0.1:7437`. `membridge enable-autostart` makes it run at login.
+
+<details>
+<summary><b>The CLI, in full</b></summary>
+
+<br>
+
+The app and the CLI are the same daemon with the same features, so headless
+boxes and terminal-first teammates aren't second-class.
+
+| Command | What it does |
+| --- | --- |
+| `membridge start` / `stop` / `status` | Manage the background daemon |
+| `membridge dashboard` | Open the web UI at `http://127.0.0.1:7437` |
+| `membridge sync [--dry-run] [--project <path>]` | One sync pass right now |
+| `membridge scan` | Read-only report of discovered tools and projects |
+| `membridge remove [--project <path>]` | Strip injected memory blocks |
+| `membridge enable-autostart` / `disable-autostart` | Run at login |
+| `membridge setup-hooks` / `remove-hooks` | Session summary + recall hooks |
+| `membridge signup` / `login` / `logout` | Team account |
+| `membridge join <link-or-code>` | Accept an invite (creates the account if needed) |
+| `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
+| `membridge team link` / `unlink` / `list` | Share or stop sharing a project |
+| `membridge team setup` | Point at a self-hosted backend |
+| `membridge why <file>[:<line>]` | Which AI sessions edited a file, newest first |
+| `membridge churn [--session <id>] [--since <Nd>]` | Diagnostic: how much of a session's committed work survives in `HEAD` |
+| `membridge mcp` | Read-only MCP server over stdio |
+
+</details>
+
+<details>
+<summary><b>FAQ</b></summary>
+
+<br>
+
+**Do I need the terminal?** No. Installing, creating a team, inviting, sharing
+projects, and every setting are in the UI. The CLI exists for Linux, headless
+machines, and people who prefer it.
+
+**Do I need an account or API key?** Only for the team layer (an account).
+Syncing your own tools with each other needs neither, and never touches the
+network.
+
+**Will it mess up my existing `CLAUDE.md` / `AGENTS.md`?** No. Only the content
+between the `<!-- membridge -->` markers is rewritten, and removing the block
+restores your file exactly.
+
+**Does my whole team need it installed?** Everyone whose AI activity should
+sync runs MemBridge. People who just want to watch can use the web workspace
+from a browser.
+
+**How much overhead does it add?** Near zero. It reads only the bytes appended
+since the last pass, sleeps between syncs (60s default), and its runtime
+dependency list is deliberately short: encryption (`libsodium-wrappers`), code
+parsing (`web-tree-sitter`), and the MCP server (`@modelcontextprotocol/sdk`,
+`zod`).
+
+**What happens when someone leaves?** Revoke them in Members. Their access ends
+at the next sync; their past contributions stay with the team.
+
+</details>
+
+<br>
+
+## Docs
+
+**[The full guide →](docs/guide.md)** — install options, the dashboard tour,
+session summaries and the Stop hook, team sync and privacy, self-hosting,
+configuration, custom adapters, and development docs.
+
+- [Encryption spec](docs/ENCRYPTION-SPEC.md) · [Auth setup](docs/AUTH-SETUP.md) · [Changelog](CHANGELOG.md)
+- [The Context Ledger](https://membridge.app/context-ledger/) — the study behind the 31% number
+- This page also has an animated twin at [docs/readme.html](docs/readme.html)
+
+## Contributing
+
+Issues and PRs welcome. `npm test` runs the suite; please keep it green.
+Node ≥ 18.
 
 ---
 
-<p align="center"><sub><code>source-available · free core, four runtime dependencies · <a href="https://membridge.app">membridge.app</a></code></sub></p>
+<p align="center">
+  <sub>Built by <a href="https://github.com/MembridgeAi">Andrew Brown &amp; Marco Melika</a> · source-available under <a href="LICENSE.md">FSL-1.1-ALv2</a> (Apache 2.0 after two years) · <a href="https://membridge.app">membridge.app</a></sub>
+</p>
