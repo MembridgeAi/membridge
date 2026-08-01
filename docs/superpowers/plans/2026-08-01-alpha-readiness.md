@@ -10,7 +10,7 @@ These were argued through. If you think one is wrong, stop and say so rather tha
 2. **`add` backfills by default.** A `--no-backfill` flag exists for the rare case, but the default is the behavior a new user expects. An adoption that shows nothing is worse than a slow adoption.
 3. **Backfill is scoped to the adopted root, not global.** Resetting all offsets would re-inject every project. Reset only `state.files` entries whose events home to the newly adopted path.
 4. **The duplicate-daemon fix is a liveness check, not a lockfile.** Read the pid, check the process is alive and is actually MemBridge, exit with a clear message if so. A real lockfile is a larger change and this is an alpha.
-5. **Secret handling for alpha is a boundary plus a control, not better detection.** Document what redaction does and does not catch, and make the control visible. Do not attempt to solve prose-password detection.
+5. **SUPERSEDED. Secret handling is now a default change plus two deterministic layers, not documentation alone.** This decision originally read "a boundary plus a control, not better detection". It was made before the prompt-sharing branch merged and turned sharing on for every fresh install, which moved the default across the boundary the documentation was going to describe. Task 5 was rewritten in full and carries its own locked decisions. Prose-password detection is still not attempted, and that limit is still documented; what changed is that the default no longer uploads verbatim prompts, and two deterministic layers (env-value deny-list, carrier-phrase capture) now sit in front of it.
 6. **`install.sh` is verified before it is touched.** F7 is a suspicion. Confirm or kill it with a real fetch first.
 
 ## Task 1: ship the UI in the npm tarball
@@ -64,14 +64,213 @@ Tasks 1 to 3 plus 3b are one shippable unit. Stop here and report before startin
 - [ ] If the pid file is stale (process dead, or alive but not MemBridge), take it over and log that you did.
 - [ ] Leave the existing `cleanup` handler's `readPid() === process.pid` guard alone. It is already correct.
 
-## Task 5: secret handling boundary
+## Task 5: prompt sharing that survives a security review
 
-No detection changes. Document and control.
+**This replaces the original Task 5 in full.** That version said "document the
+boundary, do not attempt better detection." It was written before the
+prompt-sharing branch merged and made sharing the default for fresh installs.
+Documenting a boundary is no longer sufficient when the default walks users
+across it.
 
-- [ ] Write `docs/security/redaction-boundary.md`: what `DEFAULT_PATTERNS` catches, what the entropy heuristic catches and its `ENTROPY_MIN_LEN`/`ENTROPY_THRESHOLD` thresholds, and the explicit statement that a password typed in prose is not caught.
-- [ ] Confirm whether prompt capture is opt-in or opt-out today, and whether `team share-prompts` defaults to off. Report what you find; do not change the default in this task.
-- [ ] Surface the boundary where it matters: the prompt-sharing setting in the dashboard and the `team share-prompts` CLI help both need one plain sentence about what redaction does not catch.
-- [ ] Add a test asserting a known-format key is redacted and a prose password is not, with a comment naming this as documented behavior rather than a bug. This makes the boundary a tested contract instead of an accident.
+**Do this after Task 3b, not before.** It is not an alpha blocker the way the
+enroll path is, but it is the thing most likely to end a conversation with a
+company, so it ships before anyone is pitched.
+
+### The problem, stated precisely
+
+`lib/redact.js` catches secrets by shape. `DEFAULT_PATTERNS` matches known key
+formats, and `redactHighEntropy` catches anything with at least
+`ENTROPY_MIN_LEN` characters at `ENTROPY_THRESHOLD` bits per character.
+
+A password typed in prose has neither property. `hunter2corgi` is a short,
+low-entropy string with no recognizable prefix. It is not distinguishable from
+a project name by any threshold that does not also destroy normal text. This is
+not an implementation gap. It is undecidable from the string alone.
+
+Meanwhile `lib/teamsync.js` uploads `ask` at 400 characters and `goal` at 200
+when sharing is on, and after the prompt-sharing merge, sharing is on for every
+fresh install.
+
+So the current alpha default is: a company installs MemBridge, an engineer types
+a credential into a prompt, and it lands in Supabase without anyone having
+chosen that.
+
+Three changes, in order of value. All three ship together.
+
+### Decisions already made
+
+Do not implement variations of these. If you think one is wrong, stop and say
+so.
+
+1. **Distilled intent is the default sharing mode, not verbatim prompts.**
+   Verbatim remains available as an explicit opt-in.
+2. **Nobody's existing setting changes.** A user who chose verbatim sharing
+   keeps verbatim sharing. The same reasoning the prompt-sharing branch used for
+   keeping `sharePrompts` out of `DEFAULT_CONFIG` applies here with more force.
+3. **The env deny-list never persists the values it reads.** Compiled in
+   memory, used, discarded. A file on disk containing a user's secrets, created
+   by the tool that was supposed to protect them, is worse than the original
+   problem.
+4. **There stays exactly one redaction pipeline.** `lib/digest.js` calls its
+   `redactText` "THE single redaction pipeline" and `lib/recall-store.js`
+   documents its backstop as depending on that. Every addition here goes through
+   it. Two redactors that disagree is the same class of defect as the two
+   `lib/activity.js` extractions.
+5. **Carrier-phrase matching redacts the captured secret, not the surrounding
+   sentence.** "the staging password is [redacted:phrase]" keeps its meaning.
+   "[redacted:phrase]" does not.
+
+### Task 5A: share distilled intent by default
+
+Establish the facts first, before writing any code.
+
+- [ ] `lib/teamsync.js` around line 803 uploads both `ask` and `goal`. Determine
+      and report the provenance of each: which one is the raw user prompt text
+      and which is agent-written, and whether `goal` is populated on every entry
+      or only on distilled ones. `lib/digest.js` `pickSummary` and the two
+      adapters' harvested-summary fallback are the places to look.
+- [ ] **Do not proceed on the assumption that `goal` is distilled.** If both are
+      raw, or if `goal` is frequently absent, this task changes shape. Come back
+      with what you found before continuing.
+
+**Failing test first.** Assert that with fresh-install defaults, a pushed entry
+carries no verbatim prompt text. Run it. Watch it fail.
+
+- [ ] Widen `team.sharePrompts` from a boolean to `'off' | 'distilled' |
+      'verbatim'`, accepting the boolean for back-compat.
+- [ ] Back-compat mapping, exactly: `true` maps to `'verbatim'`, `false` maps to
+      `'off'`, absent stays absent. An existing user's behavior does not change.
+- [ ] `freshInstallConfig` sets `'distilled'`, replacing the current
+      on-by-default.
+- [ ] At the upload site, `'distilled'` sends the agent-written field and sends
+      the verbatim field as `null`. Keep the existing explicit-null convention;
+      the comment near line 789 explains why `undefined` is wrong here.
+- [ ] Check `shouldSharePrompts` around line 1196 and the per-project override
+      around 1229. Both need to understand three states, and the legacy boolean
+      fallback has to keep working for projects untouched by the migration.
+- [ ] Update `membridge team share-prompts` to take `off|distilled|verbatim`,
+      keeping `on` and `off` as aliases for verbatim and off so no one's muscle
+      memory or script breaks. Update the help text.
+- [ ] Update the dashboard setting to three options, with one plain sentence
+      each on what actually leaves the machine.
+- [ ] Test that a distilled-mode push carries a **readable** row. The whole
+      justification for the prompt-sharing branch was that rows without intent
+      are a name and a timestamp. If distilled mode reproduces that emptiness,
+      this task has failed even with a green suite. Measure it against real
+      captured data and report the number, the same way the branch reported 13
+      of 21.
+
+### Task 5B: environment-value deny-list
+
+Redact any literal string that appears as a value in the project's own env
+files, wherever that string shows up in captured text. Deterministic, no
+heuristics, and it catches the realistic case, which is someone pasting a
+credential they already have on disk rather than inventing one in chat.
+
+**Failing test first.** Fixture project with a `.env` containing a known value,
+a captured prompt containing that value verbatim, assert it is redacted. Run it.
+Watch it fail.
+
+- [ ] Read `.env`, `.env.local`, `.env.development`, `.env.production` and
+      `.env.*.local` from the tracked project root only. Never walk upward,
+      never follow symlinks out of the root.
+- [ ] Explicitly exclude `.env.example`, `.env.sample`, `.env.template` and
+      anything matching `*.example`. Those hold placeholders, and redacting
+      placeholder text would corrupt normal prose.
+- [ ] Parse values only. Keys are not secrets and redacting them destroys
+      readability.
+- [ ] Minimum value length of 8 characters, and skip a stop-list of obvious
+      non-secrets: `true`, `false`, `localhost`, bare integers, `development`,
+      `production`, `test`, and anything that is only digits or only a URL
+      scheme and host.
+- [ ] Match **literally, not as a regex**. Escape every metacharacter. A value
+      like `p@ss.w+rd` compiled as a pattern would silently redact unrelated
+      text.
+- [ ] Case-sensitive. Secrets are.
+- [ ] Emit `[redacted:env]` so a reader can tell why something disappeared.
+- [ ] Never write the compiled values to disk, to logs, to `state.json`, or to
+      an error message. Add a test that greps every artifact the fixture run
+      produces for the known value and fails if it appears anywhere.
+- [ ] Cache the compiled matcher per project with an mtime check, so this is not
+      a file read on every event.
+
+**One design question to answer, not guess.** `compileRedactions` in
+`lib/digest.js` takes config and has no project context, but this deny-list is
+inherently per project. Decide how project scope reaches the pipeline without
+creating a second pipeline, and write the reasoning in the commit. If the honest
+answer is that it requires a signature change across several callers, do that
+rather than adding a parallel path.
+
+### Task 5C: carrier-phrase detection
+
+Match the sentence that introduces a secret rather than the secret itself.
+
+**Failing test first.** Assert that `the staging password is hunter2corgi` has
+the value redacted and the sentence preserved. Run it. Watch it fail.
+
+- [ ] Cover the common carriers: `password`, `passwd`, `pwd`, `passphrase`,
+      `secret`, `token`, `api key`, `apikey`, `access key`, `credential`,
+      `creds`, `auth`, followed by `is`, `are`, `was`, `=`, `:` or `->`, then
+      the value.
+- [ ] Redact only the captured value. Check whether the `DEFAULT_PATTERNS`
+      mechanism supports capture-group replacement. If it replaces matches
+      wholesale, that mechanism needs extending, and that is part of this task.
+- [ ] Emit `[redacted:phrase]`.
+- [ ] Skip captures that are obviously not secrets: `empty`, `blank`,
+      `required`, `wrong`, `incorrect`, `correct`, `missing`, `null`,
+      `undefined`, `set`, `unset`, and any capture under 4 characters. "the
+      password field is empty" must survive intact.
+- [ ] Handle quoted values, since `password: "hunter2corgi"` is at least as
+      common as the bare form. Redact inside the quotes and keep the quotes.
+- [ ] **Measure the false-positive rate before calling this done.** Run it
+      across the existing captured corpus on this machine, count how many
+      redactions fire, and hand-check a sample. Report the number. If it is
+      redacting ordinary prose at a noticeable rate, tighten it and say what you
+      tightened.
+- [ ] It lands in `DEFAULT_PATTERNS`, so `config.redactDefaults: false` turns it
+      off along with everything else. That is the correct escape hatch and no
+      separate flag is needed.
+
+### Task 5D: the boundary document
+
+Still required. It is now shorter, because the boundary moved.
+
+- [ ] Write `docs/security/redaction-boundary.md`: what each layer catches, in
+      order, with the entropy thresholds named. What the three sharing modes
+      actually put on the wire. What is still not caught after all three
+      changes, stated plainly rather than softened.
+- [ ] Keep the test from the original Task 5 asserting that a novel prose secret
+      with no carrier phrase and no env presence is **not** caught, commented as
+      documented behavior rather than a bug. That test is the honest part of the
+      document and it should exist in code.
+- [ ] Surface one sentence of it in the dashboard sharing setting and in the
+      `team share-prompts` help.
+
+### Task 5E: report, do not implement
+
+- [ ] With distilled mode as the fresh-install default, say whether a first-run
+      choice is still warranted, and identify the exact surface where it would
+      appear. Propose the smallest version. Andrew decides; do not implement it
+      in this branch.
+
+### Verification for the whole task
+
+- [ ] A single fixture run with all three layers active, containing a shaped API
+      key, an env-file value, a carrier-phrase password, and a novel prose
+      password. Assert the first three are redacted, the fourth is not, and the
+      surrounding text is readable.
+- [ ] Confirm the redaction runs **before** clipping. `lib/digest.js` already
+      carries the comment explaining why truncation must not sever a pattern's
+      anchor. These additions must not break that ordering.
+- [ ] Report both suite counts and any test that disappeared.
+- [ ] The `lib/teamsync.js` line references above were taken before the NUL-byte
+      fix and may have drifted. Verify against the current tree.
+
+### Not in scope
+
+Lowering the entropy threshold. An LLM redaction pass. Retroactive scrubbing of
+already-uploaded rows, which is a real question but a separate one, and the
+number of affected rows comes before that decision.
 
 ## Task 6: remove the duplicated function
 
