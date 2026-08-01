@@ -2386,6 +2386,110 @@ async function main() {
       assert.ok(fs.existsSync(path.join(proj1, 'AGENTS.md')), 'AGENTS.md not recreated after sync');
     });
 
+    // Archive: remove the project from the list and stop watching it while
+    // destroying nothing. Composes the pause (config.exclude) and the block
+    // strip, in that order: removeBlockFromProject's own contract says a sync
+    // re-adds the block unless the project is paused first.
+    {
+      const serverLib = require('../lib/server');
+      // Sequence assertion (spy, not a comment): the pause must be PERSISTED
+      // before the strip runs, or a concurrent sync can re-inject the block
+      // into a file the strip just cleaned.
+      check('archive: pause is persisted before the block strip (order spy)', () => {
+        const seqCalls = [];
+        const seqResult = serverLib.archiveProject(proj1, {
+          pause: (p) => {
+            seqCalls.push('pause');
+            return serverLib.toggleProject(p);
+          },
+          strip: (p) => {
+            seqCalls.push('strip');
+            assert.ok(util.loadUserConfig().exclude.includes(proj1),
+              'pause must be persisted to config BEFORE the block strip runs');
+            return serverLib.removeBlockFromProject(p);
+          },
+        });
+        assert.deepStrictEqual(seqCalls, ['pause', 'strip'], `call order was ${JSON.stringify(seqCalls)}`);
+        assert.strictEqual(seqResult.archived, true, `archive said: ${JSON.stringify(seqResult)}`);
+      });
+
+      // A failed strip after a persisted pause is reported as a FAILURE and
+      // leaves a recoverable state (still paused + archived, unarchive works).
+      // First unarchive so the fixture is clean, then re-archive with a strip
+      // that throws.
+      await post(`${base}/api/projects/unarchive`, { path: proj1 });
+      await post(`${base}/api/sync`, { project: proj1 });
+      check('archive: a failed strip after a persisted pause reports failure, never partial success', () => {
+        const failResult = serverLib.archiveProject(proj1, {
+          strip: () => { throw new Error('disk on fire'); },
+        });
+        assert.ok(failResult.error, `a failed strip must surface an error, got ${JSON.stringify(failResult)}`);
+        assert.notStrictEqual(failResult.archived, true, 'a failed archive must not be reported as archived');
+        const cfg = util.loadUserConfig();
+        assert.ok(cfg.exclude.includes(proj1), 'the persisted pause must survive the failure (recoverable)');
+        assert.ok((cfg.archived || []).includes(proj1), 'the archived entry must survive the failure (recoverable)');
+      });
+      const recover = await (await post(`${base}/api/projects/unarchive`, { path: proj1 })).json();
+      check('archive: the failed-strip state is recoverable by a plain unarchive', () => {
+        assert.strictEqual(recover.archived, false, `unarchive said: ${JSON.stringify(recover)}`);
+        const cfg = util.loadUserConfig();
+        assert.ok(!cfg.exclude.includes(proj1), 'exclude entry must be gone after recovery');
+        assert.ok(!(cfg.archived || []).includes(proj1), 'archived entry must be gone after recovery');
+      });
+      await post(`${base}/api/sync`, { project: proj1 });
+    }
+
+    const archRes = await (await post(`${base}/api/projects/archive`, { path: proj1 })).json();
+    check('POST /api/projects/archive pauses and strips but destroys nothing', () => {
+      assert.strictEqual(archRes.archived, true, `archive said: ${JSON.stringify(archRes)}`);
+      const cfg = util.loadUserConfig();
+      assert.ok((cfg.archived || []).includes(proj1), 'path missing from config.archived');
+      assert.ok(cfg.exclude.includes(proj1), 'path missing from config.exclude (archive implies paused)');
+      const md = claudeMd();
+      assert.ok(!md.includes(digest.BEGIN), 'block not stripped from CLAUDE.md');
+      assert.ok(md.startsWith('# Shop app'), 'original heading lost');
+      assert.ok(!fs.existsSync(path.join(proj1, 'AGENTS.md')), 'block-only AGENTS.md not deleted');
+      assert.ok(fs.existsSync(path.join(proj1, '.membridge', 'memory.json')), '.membridge/memory.json was destroyed');
+      assert.ok(fs.existsSync(path.join(proj1, '.membridge', 'memory.md')), '.membridge/memory.md was destroyed');
+      const state = util.loadState();
+      const key = Object.keys(state.projects).find(k => k.toLowerCase() === proj1.toLowerCase());
+      assert.ok(key && state.projects[key].events.length, 'state.projects entry was wiped');
+    });
+
+    const archAgain = await (await post(`${base}/api/projects/archive`, { path: proj1 })).json();
+    check('archiving an already-archived path is idempotent, never an unpause or an error', () => {
+      assert.strictEqual(archAgain.archived, true, `second archive said: ${JSON.stringify(archAgain)}`);
+      const cfg = util.loadUserConfig();
+      assert.strictEqual(cfg.exclude.filter(p => p === proj1).length, 1, 'exclude entry duplicated or toggled away');
+      assert.strictEqual((cfg.archived || []).filter(p => p === proj1).length, 1, 'archived entry duplicated');
+      assert.ok(cfg.exclude.includes(proj1), 'second archive must not unpause (toggle misuse)');
+    });
+
+    const archBad = await post(`${base}/api/projects/archive`, { path: path.join(ROOT, 'no-such-dir') });
+    const archBadBody = await archBad.json().catch(() => null);
+    check('archiving an untracked path returns 404 with a JSON body, never a 500', () => {
+      assert.strictEqual(archBad.status, 404, `expected 404, got ${archBad.status}`);
+      assert.ok(archBadBody && archBadBody.error, 'the 404 must carry a JSON error body');
+    });
+
+    const unarchRes = await (await post(`${base}/api/projects/unarchive`, { path: proj1 })).json();
+    check('POST /api/projects/unarchive drops both config entries and leaves memory intact', () => {
+      assert.strictEqual(unarchRes.archived, false, `unarchive said: ${JSON.stringify(unarchRes)}`);
+      const cfg = util.loadUserConfig();
+      assert.ok(!cfg.exclude.includes(proj1), 'exclude entry not removed');
+      assert.ok(!(cfg.archived || []).includes(proj1), 'archived entry not removed');
+      assert.ok(fs.existsSync(path.join(proj1, '.membridge', 'memory.md')), 'memory lost across the round trip');
+    });
+    const unarchBad = await post(`${base}/api/projects/unarchive`, { path: path.join(ROOT, 'no-such-dir') });
+    check('unarchiving an untracked path returns 404 with a JSON body', () => {
+      assert.strictEqual(unarchBad.status, 404, `expected 404, got ${unarchBad.status}`);
+    });
+    await post(`${base}/api/sync`, { project: proj1 });
+    check('sync after unarchive re-adds the block (unarchive is total)', () => {
+      assert.ok(claudeMd().includes(digest.BEGIN), 'block not re-added after unarchive + sync');
+      assert.ok(fs.existsSync(path.join(proj1, 'AGENTS.md')), 'AGENTS.md not recreated after unarchive + sync');
+    });
+
     const delRes = await (await post(`${base}/api/projects/delete`, { path: proj1 })).json();
     const afterDel = await (await fetch(`${base}/api/projects`)).json();
     check('delete project strips blocks, memory and state', () => {
