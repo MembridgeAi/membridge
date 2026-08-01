@@ -5,7 +5,7 @@ import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { SyncStateView } from '../../components/SyncState'
 import { useDataClient } from '../../data/DataClientProvider'
 import { relativeAgo } from '../../data/relativeTime'
-import { useAccessMatrix, useMembers, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject } from '../../data/queries'
+import { useAccessMatrix, useArchiveProject, useMembers, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
 import { AccessPopover } from './AccessPopover'
 import { AccessSummary, type AccessMemberRef } from './AccessSummary'
@@ -29,11 +29,24 @@ interface ProjectTableRowProps {
   /** True while THIS row's sync request is in flight (Fix 9). */
   syncPending: boolean
   onOpenAccess: () => void
+  /** Select mode: when non-null, a checkbox gutter leads the row. */
+  selection: { selected: boolean; onToggle: (selected: boolean) => void } | null
 }
 
-function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPending, onOpenAccess }: ProjectTableRowProps) {
+function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPending, onOpenAccess, selection }: ProjectTableRowProps) {
   return (
     <tr data-testid={`project-row-${project.name}`}>
+      {selection && (
+        <td className="select-gutter">
+          <input
+            type="checkbox"
+            className="access-cell"
+            checked={selection.selected}
+            aria-label={`Select ${project.name}`}
+            onChange={e => selection.onToggle(e.target.checked)}
+          />
+        </td>
+      )}
       <td className="proj-name">
         {project.name} <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>{project.shared ? 'Shared' : 'Private'}</span>
         <span className="mono proj-path">{project.path}</span>
@@ -74,6 +87,12 @@ export function ProjectsPage() {
   const [showAddProject, setShowAddProject] = useState(false)
   // The project path whose access popover is open, or null.
   const [accessFor, setAccessFor] = useState<string | null>(null)
+  // Select mode (spec section 3): a checkbox gutter plus a sticky action bar
+  // whose ONLY bulk action is Archive. Delete is deliberately absent here.
+  const [selectMode, setSelectMode] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkReport, setBulkReport] = useState<string | null>(null)
+  const [archivedOpen, setArchivedOpen] = useState(false)
 
   const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
@@ -96,11 +115,49 @@ export function ProjectsPage() {
   const membersQuery = useMembers(!solo)
   const setAccess = useSetProjectAccess()
   const syncProject = useSyncProject()
+  const archiveProject = useArchiveProject()
+  const unarchiveProject = useUnarchiveProject()
 
   const projects = projectsQuery.data ?? []
+  // Archived rows leave the main table and live in the collapsed section at
+  // the bottom (same payload, sectioned on the flag -- never a re-fetch).
+  const activeProjects = projects.filter(p => !p.archived)
+  const archivedProjects = projects.filter(p => p.archived)
   const filtered = filter.trim()
-    ? projects.filter(p => p.name.toLowerCase().includes(filter.trim().toLowerCase()))
-    : projects
+    ? activeProjects.filter(p => p.name.toLowerCase().includes(filter.trim().toLowerCase()))
+    : activeProjects
+
+  function exitSelectMode() {
+    setSelectMode(false)
+    setSelected(new Set())
+    setBulkReport(null)
+  }
+
+  function toggleSelected(path: string, isSelected: boolean) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (isSelected) next.add(path)
+      else next.delete(path)
+      return next
+    })
+  }
+
+  // Bulk archive is per-project and reports per-project (spec error
+  // handling): a partial failure names the rows that failed and never rolls
+  // back the ones that worked -- the failed rows stay selected for a retry.
+  async function archiveSelected() {
+    const paths = [...selected]
+    if (paths.length === 0) return
+    const results = await Promise.allSettled(paths.map(p => archiveProject.mutateAsync(p)))
+    const failedPaths = paths.filter((_, i) => results[i].status === 'rejected')
+    if (failedPaths.length === 0) {
+      exitSelectMode()
+      return
+    }
+    const names = failedPaths.map(p => projects.find(x => x.path === p)?.name ?? p)
+    setBulkReport(`Archived ${paths.length - failedPaths.length} of ${paths.length}. Failed: ${names.join(', ')}.`)
+    setSelected(new Set(failedPaths))
+  }
   const matrixByPath = useMemo(() => {
     const map = new Map<string, AccessMatrix['rows'][number]>()
     for (const row of matrixQuery.data?.rows ?? []) map.set(row.projectPath, row)
@@ -147,8 +204,8 @@ export function ProjectsPage() {
     && settingsQuery.data !== undefined && (!canEditAccess || matrixQuery.data !== undefined)
     && (solo || membersQuery.data !== undefined)
 
-  const sharedCount = projects.filter(p => p.shared).length
-  const columnCount = showAccess ? COLUMN_COUNT : COLUMN_COUNT - 1
+  const sharedCount = activeProjects.filter(p => p.shared).length
+  const columnCount = (showAccess ? COLUMN_COUNT : COLUMN_COUNT - 1) + (selectMode ? 1 : 0)
 
   const accessProject = accessFor ? projects.find(p => p.path === accessFor) ?? null : null
   const accessRoster = accessProject ? rosterFor(accessProject) : []
@@ -176,20 +233,35 @@ export function ProjectsPage() {
       {syncProject.isError && (
         <p className="projects-error" role="alert">Couldn't sync. {errorMessage(syncProject.error)}</p>
       )}
+      {unarchiveProject.isError && (
+        <p className="projects-error" role="alert">Couldn't unarchive. {errorMessage(unarchiveProject.error)}</p>
+      )}
       <div className="projects-header">
         <h1 className="projects-title">Projects</h1>
-        <span className="mono projects-count">{projects.length} watched · {sharedCount} shared</span>
+        <span className="mono projects-count">{activeProjects.length} watched · {sharedCount} shared</span>
         <div className="projects-header-right">
-          <input
-            className="projects-search"
-            placeholder="Filter projects…"
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-            aria-label="Filter projects"
-          />
-          <button type="button" className="projects-btn-add" onClick={() => setShowAddProject(true)}>
-            Add project
-          </button>
+          {/* Select mode collapses the header controls to a single Done. */}
+          {selectMode ? (
+            <button type="button" className="projects-btn-add" onClick={exitSelectMode}>
+              Done
+            </button>
+          ) : (
+            <>
+              <input
+                className="projects-search"
+                placeholder="Filter projects…"
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+                aria-label="Filter projects"
+              />
+              <button type="button" className="projects-btn-select" onClick={() => setSelectMode(true)}>
+                Select
+              </button>
+              <button type="button" className="projects-btn-add" onClick={() => setShowAddProject(true)}>
+                Add project
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -199,6 +271,7 @@ export function ProjectsPage() {
       <table className="projects-table">
         <thead>
           <tr>
+            {selectMode && <th scope="col" className="select-gutter" aria-hidden="true" />}
             <th scope="col">Project</th>
             <th scope="col">Sessions · 7d</th>
             <th scope="col">Last activity</th>
@@ -221,6 +294,10 @@ export function ProjectsPage() {
               onSync={() => syncProject.mutate(project.path)}
               syncPending={syncProject.isPending && syncProject.variables === project.path}
               onOpenAccess={() => setAccessFor(project.path)}
+              selection={selectMode ? {
+                selected: selected.has(project.path),
+                onToggle: isSelected => toggleSelected(project.path, isSelected),
+              } : null}
             />
           ))}
           {ready && filtered.length === 0 && (
@@ -232,6 +309,59 @@ export function ProjectsPage() {
           )}
         </tbody>
       </table>
+      {ready && archivedProjects.length > 0 && (
+        <section className="archived-section">
+          <button
+            type="button"
+            className="archived-toggle"
+            aria-expanded={archivedOpen}
+            onClick={() => setArchivedOpen(open => !open)}
+          >
+            Archived ({archivedProjects.length})
+          </button>
+          {archivedOpen && (
+            <ul className="archived-list">
+              {archivedProjects.map(p => (
+                <li key={p.path} className="archived-row" data-testid={`archived-row-${p.name}`}>
+                  <span className="archived-name">{p.name}</span>
+                  <span className="mono proj-path">{p.path}</span>
+                  {p.missing && <span className="archived-missing">folder missing</span>}
+                  <button
+                    type="button"
+                    className="proj-btn archived-unarchive"
+                    onClick={() => unarchiveProject.mutate(p.path)}
+                    aria-label={`Unarchive ${p.name}`}
+                  >
+                    Unarchive
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+      {selectMode && (
+        <div className="select-bar" data-testid="select-bar">
+          <span className="select-count mono">{selected.size} selected</span>
+          {/* The blast radius in one line, including the traced teamsync
+              consequence (see archiveProject in lib/server.js): pausing via
+              config.exclude also stops pulling teammates' entries. */}
+          <span className="select-note">
+            Archiving stops watching and new capture, and a shared project also stops receiving teammates' new activity.
+            Nothing is deleted: history stays in the Feed, and Unarchive restores everything.
+          </span>
+          {bulkReport && <span className="select-report" role="alert">{bulkReport}</span>}
+          <button type="button" className="proj-btn" onClick={exitSelectMode}>Cancel</button>
+          <button
+            type="button"
+            className="projects-btn-add"
+            disabled={selected.size === 0 || archiveProject.isPending}
+            onClick={() => { void archiveSelected() }}
+          >
+            Archive {selected.size} projects
+          </button>
+        </div>
+      )}
       {showAccess && canEditAccess && (
         <p className="projects-foot">
           Click a project's Access cell to change who can see it.

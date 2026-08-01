@@ -286,8 +286,10 @@ export class FakeDataClient implements DataClient {
   syncProject() { return this.guard<void>(undefined) }
   syncAll() { return this.guard<void>(undefined) }
   setProjectPaused() { return this.guard<void>(undefined) }
-  archiveProject() { return this.guard<void>(undefined) }
-  unarchiveProject() { return this.guard<void>(undefined) }
+  // The path parameters are declared (unlike the sync stubs above) so tests
+  // can mockImplementation per-path for partial-failure scenarios.
+  archiveProject(_projectPath: string) { return this.guard<void>(undefined) }
+  unarchiveProject(_projectPath: string) { return this.guard<void>(undefined) }
   copyForAI() { return this.guard('digest text') }
   getProjectAccess() {
     return this.guard({
