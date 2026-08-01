@@ -1,8 +1,10 @@
 # Operational state
 
-**Verified against `802d366` on 2026-08-01, end of day.** Every number below came
+**Verified against `16f4c0b` on 2026-08-01, end of day.** Every number below came
 from a command run at that commit. Where a command could not be run, that is
 called out in place rather than filled in from memory.
+
+**Read the two warnings directly below before doing anything else.**
 
 This file and `decisions.md` live in the repo. The repo is canonical and the
 Claude Project is the mirror, not the other way round. If the Project copy and
@@ -12,11 +14,30 @@ Read this first. `decisions.md` holds the reasoning behind the choices below.
 
 ---
 
+## Two warnings
+
+**1. Do NOT publish v0.2.3 as it is tagged right now.** The tag still points at
+`802d366`, which predates the USD revert, so publishing it would ship a build
+that drops user cost history. The tag was deliberately not moved. See the
+release section.
+
+**2. PR #6 was merged into master at 04:40 by mmelika and it broke the repo.**
+The `build/signed-dmg` merge (`539ffda`) wrote a duplicated `entitlementsInherit`
+key with no separating comma, so `package.json` stopped being valid JSON for
+roughly twenty five minutes. Nothing that reads it worked. It also reintroduced
+`"notarize": false`, which is the reason PR #6 was closed earlier the same day.
+Repaired in `16f4c0b`: the duplicate key removed, `notarize` returned to unset.
+**Unset is correct.** It means electron-builder notarizes exactly when Apple
+credentials are present, which lets forks and PR builds pass with no secrets
+while real releases get notarized. Setting it false short circuits before the
+credentials are read and silently ships signed-but-unnotarized builds.
+
+This needs a conversation with Marco, not just a fix.
+
 ## One-line status
 
-Master is green on both suites and on every CI leg that still exists. v0.2.3 is
-tagged but **not published**, which is the one thing genuinely waiting on a
-human.
+Master is green on both suites after the repair. v0.2.3 is tagged but **not
+published**, and its tag needs moving before it is.
 
 ---
 
@@ -24,7 +45,7 @@ human.
 
 | Thing | Value |
 | --- | --- |
-| `upstream/master` | `802d366` |
+| `upstream/master` | `16f4c0b` |
 | Remote that matters | `upstream` = `github.com/MembridgeAi/membridge` |
 | Fork | `origin` and `andrewb` both = `andrewb-eng/membridge`, master at `b297527`, far behind. **Nothing from today was pushed there.** Verified: fork master is an ancestor of upstream master. |
 | Root suite | **1313/1313 checks passed**, from a clean `npm ci` |
@@ -33,10 +54,22 @@ human.
 | Package version | `0.2.3`, root and `app/` in lockstep, pinned by a check |
 | `engines.node` | `>=18`. Deliberate. See the CI section. |
 
-## Release: v0.2.3 is tagged, NOT published
+## Release: v0.2.3 is tagged, NOT published, and the tag needs to move first
 
-The tag points at `802d366`, which is `upstream/master` itself. Verified as an
-ancestor, not a dangling tag.
+The tag points at `802d366`. That commit is clean and on master, but it
+**predates the USD revert**, so publishing it would ship a build that drops
+user cost history. It also predates the `package.json` repair.
+
+The tag was deliberately not moved, even though moving it was authorized,
+because the corrected commit now sits on top of Marco's PR #6 merge and that
+merge has not been reviewed. Moving a release tag onto an unreviewed merge is
+not a call to make unattended.
+
+Two ways forward, both quick:
+
+- Move the tag onto the repaired tip:
+  `git push upstream :refs/tags/v0.2.3 && git tag -fa v0.2.3 -m v0.2.3 16f4c0b && git push upstream v0.2.3`
+- Or revert `539ffda` first, then tag.
 
 Publishing is a human step at
 `https://github.com/MembridgeAi/membridge/releases/new?tag=v0.2.3`, selecting the
@@ -86,7 +119,7 @@ On `802d366`:
 - **CI**: five of six legs pass. One failure, `node 20 on macos-latest`, at
   `redact: a 200-event render stays well under 200ms`, reporting 229ms.
 
-### The 229ms failure is a flake, not a regression
+### The 229ms failure was a flake, not a regression. Fixed.
 
 Measured directly, benchmarking the same render at today's starting commit
 versus now:
@@ -102,10 +135,11 @@ less than half. The preceding commit `bb64d39` had a fully green CI run
 including this check. The real defect is that the assertion takes a **single
 sample** against a 200ms bound on a shared runner.
 
-**Proposed fix, awaiting approval:** sample three times, assert the minimum. A
-real regression raises the floor, so sensitivity is unchanged; runner noise only
-inflates slower samples. Widening the bound was considered and rejected as it
-would weaken the check.
+**Fixed:** the check now samples three times and asserts the minimum. A real
+regression raises the floor, so sensitivity is unchanged; runner noise only
+inflates slower samples, which the minimum discards. Widening the bound was
+considered and rejected as it would weaken the check. Proven still non-vacuous
+by injecting a 250ms stall into the timed region: it fails at 261ms best-of-3.
 
 ### Node 18: the matrix and `engines` disagree on purpose
 
@@ -156,17 +190,16 @@ launch at login, plus the docs and these ops files.
 
 ## Not done, in priority order
 
-1. **Publish v0.2.3.** Human step. Blocks the install.sh regeneration.
-2. **USD persistence revert.** `lib/ledger-fold.js` still implements a reversed
-   instruction and persists no USD. The decision is to keep it persisted. Both
-   plans say `REVERT REQUIRED`; the code does not match. Not small: it is two
-   files plus a test.
+1. **Talk to Marco about PR #6.** It was closed with a written reason and
+   merged anyway, and the merge broke the manifest. That is a process question,
+   not a code one.
+2. **Move the v0.2.3 tag, then publish.** Human step. Blocks the install.sh
+   regeneration.
 3. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
    a live sign-in and a replayed callback, has not happened.
 4. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
 5. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
    into the recalibration.
-6. **The 229ms flake**, per the proposal above.
 
 ## Parked, preserved off-laptop
 
@@ -180,8 +213,17 @@ Do not merge before the recalibration.
 - **`npm audit` reports 3 vulnerabilities** at the root, 1 moderate and 2 high:
   `brace-expansion` and `tar` under `electron-builder` (devDependency, never
   ships), and `fast-uri` under `@modelcontextprotocol/sdk` (**does** ship).
-  `ui/` reports zero. Not fixed here because `npm audit fix` rewrites the
-  lockfile broadly, which is not a sleeping-hours change.
+  `ui/` reports zero.
+
+  **No clean fix exists.** `@modelcontextprotocol/sdk@1.30.0` is already the
+  latest and pulls `ajv@8.20.0`, also the latest, which declares
+  `fast-uri: ^3.0.1`. The fixed version is `fast-uri@4.1.2`, a major outside
+  that caret range, so nothing short of an `overrides` block forcing ajv onto an
+  undeclared major would move it. This waits on ajv widening its range.
+
+  Real exposure looks nil: the advisory is host confusion in URI parsing, and
+  our MCP schemas contain zero `format: uri`, `$ref` or `$id` constructs, so
+  ajv never asks `fast-uri` to parse anything.
 - **Local tags diverge from upstream** for `v0.1.0`, `v0.1.1`, `v0.2.0` and
   `v0.2.1`. Local copies are pre-launch era; upstream is authoritative. Cleanup
   is `git tag -d` those four then `git fetch upstream --tags`. **Never run
