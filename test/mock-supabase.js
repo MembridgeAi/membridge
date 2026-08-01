@@ -10,6 +10,11 @@ function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
   const refreshTokens = new Map();  // refreshToken -> userId
+  // PKCE auth codes: authCode -> { userId, challenge }. GoTrue hands one of
+  // these to the redirect target when the authorize request carried a
+  // code_challenge, and only trades it for a session against the matching
+  // verifier. Seeded by tests, since the GitHub round trip has no stand-in.
+  const authCodes = new Map();
   const teams = new Map();          // teamId -> { id, name, inviteCode }
   const members = [];               // { teamId, userId, displayName, role }
   const projects = [];              // { id, teamId, name, repoUrl }
@@ -51,7 +56,7 @@ function createMockSupabase() {
       access_token: access,
       refresh_token: refresh,
       expires_in: 3600,
-      user: { id: user.id, email: user.email },
+      user: { id: user.id, email: user.email, user_metadata: user.metadata || {} },
     };
   }
 
@@ -366,6 +371,20 @@ function createMockSupabase() {
         return json(res, 200, { id: user.id, email: user.email, user_metadata: user.metadata || {} });
       }
       if (url.pathname === '/auth/v1/token') {
+        if (url.searchParams.get('grant_type') === 'pkce') {
+          // The PKCE exchange. The code alone is worthless: the caller must
+          // present the verifier whose s256 hash is the challenge that was
+          // sent with the authorize request.
+          const rec = authCodes.get(body.auth_code);
+          if (!rec) return json(res, 400, { error_description: 'invalid auth code' });
+          const digest = crypto.createHash('sha256').update(String(body.code_verifier || '')).digest('base64url');
+          if (digest !== rec.challenge) {
+            return json(res, 400, { error_description: 'code challenge does not match' });
+          }
+          authCodes.delete(body.auth_code); // single use, as GoTrue does
+          const codeUser = [...users.values()].find(u => u.id === rec.userId);
+          return json(res, 200, newSession(codeUser));
+        }
         if (url.searchParams.get('grant_type') === 'password') {
           const user = users.get(body.email);
           if (!user || user.password !== body.password) {
@@ -585,7 +604,7 @@ function createMockSupabase() {
     });
   });
 
-  return { server, users, sessions, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags };
+  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags };
 }
 
 module.exports = { createMockSupabase };

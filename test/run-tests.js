@@ -149,9 +149,10 @@ const PORT_BASE = (() => {
   const start = 17900 + ((process.pid % 40) * 100);
   for (let i = 0; i < 40; i++) {
     const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
-    // 41 and 92 bracket the range actually used (Task 17 pushed the high end
-    // from 85 to 92); a block free at both ends is in practice a free block.
-    if (free(base + 41) && free(base + 92)) return base;
+    // 41 and 96 bracket the range actually used (Task 17 pushed the high end
+    // from 85 to 92; the OAuth state tests took it to 96); a block free at
+    // both ends is in practice a free block.
+    if (free(base + 41) && free(base + 96)) return base;
   }
   return start; // nothing free anywhere: proceed and let the real bind report it
 })();
@@ -3059,6 +3060,276 @@ async function main() {
       assert.ok(rejected, 'unissued token was accepted');
     });
     teamsync.clearCredentials();
+  }
+
+  // =====================================================================
+  // SECURITY (audit F1): the OAuth callback is bound to the request that
+  // started it. Before this, /team/oauth/callback was a token-injection sink:
+  // any page the user visited could navigate the browser to the loopback
+  // callback carrying its OWN fragment, and the page would forward those
+  // tokens to /api/team/oauth-complete. Every existing gate passed -- Host
+  // really was 127.0.0.1, the CSRF gates are skipped on a GET navigation, and
+  // the follow-up POST was genuinely same-origin with the right content type.
+  // loginWithTokens then verified the token, which proves it is AUTHENTIC and
+  // says nothing about whose it is, and the daemon adopted the attacker's
+  // session.
+  //
+  // The tests below run the actual attack rather than asserting on shape.
+  // =====================================================================
+  {
+    const OAUTH_PORT = P(96);
+    // The attacker's own, entirely genuine, Supabase session. This is the
+    // point of the finding: nothing about these tokens is forged.
+    const attackerUser = {
+      id: 'attacker-user-1', email: 'attacker@evil.example', metadata: { user_name: 'attacker' },
+    };
+    mock.users.set(attackerUser.email, attackerUser);
+    mock.sessions.set('at-attacker-injected', attackerUser.id);
+    // A real user, for the legitimate flows that must keep working.
+    const victimUser = { id: 'victim-user-1', email: 'victim@test.dev', metadata: { user_name: 'victim' } };
+    mock.users.set(victimUser.email, victimUser);
+
+    const srvOauth = startServer(OAUTH_PORT, { retries: 0 });
+    try {
+      const base = `http://127.0.0.1:${OAUTH_PORT}`;
+      await waitForHttp(`${base}/api/status`);
+
+      // Posts exactly what the callback page posts: same-origin, JSON.
+      const complete = (body, headers) => fetch(`${base}/api/team/oauth-complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: base, ...(headers || {}) },
+        body: JSON.stringify(body),
+      });
+      const storedCreds = () => {
+        try { return JSON.parse(read(teamsync.credentialsPath())); } catch { return null; }
+      };
+      // Walks the first leg the way a browser does, and reports the state the
+      // daemon minted for it. The state rides in redirect_to, so it comes back
+      // whatever the provider chooses to echo.
+      const startSignIn = async () => {
+        const r = await fetch(`${base}/team/oauth/github`, { redirect: 'manual' });
+        const authorize = new URL(r.headers.get('location'));
+        const back = new URL(authorize.searchParams.get('redirect_to'));
+        return { authorize, state: back.searchParams.get('state') };
+      };
+
+      check('security(F1): the authorize URL carries a state parameter', () => {
+        const u = new URL(teamsync.oauthAuthorizeUrl(util.getConfig(), `${base}/team/oauth/callback`));
+        assert.ok(u.searchParams.get('state'), 'no state parameter on the authorize URL');
+        const back = new URL(u.searchParams.get('redirect_to'));
+        assert.ok(back.searchParams.get('state'), 'no state carried through redirect_to');
+        assert.strictEqual(back.searchParams.get('state'), u.searchParams.get('state'),
+          'the state on the authorize URL and the one in redirect_to must be the same value');
+      });
+
+      check('security(F1): each authorize request mints a fresh unguessable state', () => {
+        const a = new URL(teamsync.oauthAuthorizeUrl(util.getConfig(), `${base}/team/oauth/callback`));
+        const b = new URL(teamsync.oauthAuthorizeUrl(util.getConfig(), `${base}/team/oauth/callback`));
+        const sa = a.searchParams.get('state'), sb = b.searchParams.get('state');
+        assert.notStrictEqual(sa, sb, 'two authorize requests reused the same state');
+        assert.ok(sa.length >= 32, `state is too short to be unguessable: ${sa.length} chars`);
+      });
+
+      // ---- THE ATTACK ----------------------------------------------------
+      // A GET navigation to the callback route carrying an attacker fragment,
+      // then the same-origin POST the callback page performs. Pre-fix this
+      // ends with the attacker's session in credentials.json.
+      teamsync.clearCredentials();
+      const navigated = await fetch(`${base}/team/oauth/callback`);
+      await navigated.text();
+      const injected = await complete({
+        accessToken: 'at-attacker-injected',
+        refreshToken: 'rt-attacker-injected',
+        expiresIn: 3600,
+      });
+      const afterInjection = storedCreds();
+      await check('security(F1): an injected callback fragment cannot log the daemon in as the attacker', () => {
+        assert.strictEqual(navigated.status, 200, 'the callback page itself should still serve');
+        assert.notStrictEqual(injected.status, 200,
+          'the daemon ACCEPTED tokens from a sign-in it never started: ' + JSON.stringify(afterInjection));
+        assert.strictEqual(afterInjection, null,
+          'credentials.json was written from an unsolicited callback: ' + JSON.stringify(afterInjection));
+      });
+
+      // ---- The four state rejections, asserted separately ----------------
+      teamsync.clearCredentials();
+      const noState = await complete({
+        accessToken: 'at-attacker-injected', refreshToken: 'rt-x', expiresIn: 3600,
+      });
+      await check('security(F1): oauth-complete rejects a callback whose state is absent', () => {
+        assert.strictEqual(noState.status, 403);
+        assert.strictEqual(storedCreds(), null, 'credentials written despite a missing state');
+      });
+
+      const unknownState = await complete({
+        state: 'a-state-this-daemon-never-issued',
+        accessToken: 'at-attacker-injected', refreshToken: 'rt-x', expiresIn: 3600,
+      });
+      await check('security(F1): oauth-complete rejects a state it never issued', () => {
+        assert.strictEqual(unknownState.status, 403);
+        assert.strictEqual(storedCreds(), null, 'credentials written despite an unknown state');
+      });
+
+      const aged = await startSignIn();
+      // Age it past the five minute TTL rather than sleeping through it.
+      teamsync._oauthStates.get(aged.state).expiresAt = Date.now() - 1;
+      const expiredState = await complete({
+        state: aged.state,
+        accessToken: 'at-attacker-injected', refreshToken: 'rt-x', expiresIn: 3600,
+      });
+      await check('security(F1): oauth-complete rejects a state past its five minute TTL', () => {
+        assert.strictEqual(expiredState.status, 403);
+        assert.strictEqual(storedCreds(), null, 'credentials written despite an expired state');
+      });
+
+      const spent = await startSignIn();
+      teamsync._oauthStates.delete(spent.state); // stand-in for "already consumed"
+      const consumedState = await complete({
+        state: spent.state,
+        accessToken: 'at-attacker-injected', refreshToken: 'rt-x', expiresIn: 3600,
+      });
+      await check('security(F1): oauth-complete rejects a state that was already consumed', () => {
+        assert.strictEqual(consumedState.status, 403);
+        assert.strictEqual(storedCreds(), null, 'credentials written despite a consumed state');
+      });
+
+      // ---- Single use, proved through a real sign-in ---------------------
+      // The legitimate leg must still work, and the exact same callback URL
+      // replayed a second time must not. This is the human review step, run
+      // by machine.
+      teamsync.clearCredentials();
+      mock.sessions.set('at-victim-real', victimUser.id);
+      const real = await startSignIn();
+      const firstUse = await complete({
+        state: real.state, accessToken: 'at-victim-real', refreshToken: 'rt-victim-real', expiresIn: 3600,
+      });
+      const afterFirstUse = storedCreds();
+      const firstUseBody = await firstUse.text();
+      const replay = await complete({
+        state: real.state, accessToken: 'at-victim-real', refreshToken: 'rt-victim-real', expiresIn: 3600,
+      });
+      await check('security(F1): a genuine sign-in completes, and the same state replayed is refused', () => {
+        assert.strictEqual(firstUse.status, 200, 'the legitimate sign-in was broken: ' + firstUseBody);
+        assert.ok(afterFirstUse && afterFirstUse.userId === victimUser.id, 'the real sign-in stored no credentials');
+        assert.strictEqual(replay.status, 403, 'the state was accepted twice');
+      });
+
+      // ---- Origin, tightened for THIS endpoint only ----------------------
+      teamsync.clearCredentials();
+      const originless = await startSignIn();
+      const noOrigin = await fetch(`${base}/api/team/oauth-complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state: originless.state, accessToken: 'at-attacker-injected', refreshToken: 'rt-x', expiresIn: 3600,
+        }),
+      });
+      await check('security(F1): oauth-complete refuses a POST with no Origin header', () => {
+        assert.strictEqual(noOrigin.status, 403);
+        assert.strictEqual(storedCreds(), null, 'credentials written by an Origin-less POST');
+      });
+
+      // The global rule is deliberately NOT changed: sameOrigin() allows an
+      // absent Origin because the CLI and the tests post without one. Only the
+      // sign-in adoption endpoint is tightened. This pins that.
+      const otherNoOrigin = await fetch(`${base}/api/projects/add`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      await check('security(F1): the global absent-Origin rule is untouched for other endpoints', () => {
+        assert.strictEqual(otherNoOrigin.status, 400,
+          'tightening oauth-complete must not have changed sameOrigin() for every route');
+      });
+
+      // ---- PKCE: the code never becomes a session without the verifier ---
+      teamsync.clearCredentials();
+      const pkce = await startSignIn();
+      await check('security(F1/PKCE): the authorize URL requests a code challenge', () => {
+        assert.strictEqual(pkce.authorize.searchParams.get('flow_type'), 'pkce');
+        assert.strictEqual(pkce.authorize.searchParams.get('code_challenge_method'), 's256');
+        assert.ok(pkce.authorize.searchParams.get('code_challenge'), 'no code_challenge on the authorize URL');
+      });
+      // Supabase hands back an auth code bound to that challenge.
+      mock.authCodes.set('auth-code-victim', {
+        userId: victimUser.id, challenge: pkce.authorize.searchParams.get('code_challenge'),
+      });
+      const pkceOk = await complete({ state: pkce.state, code: 'auth-code-victim' });
+      const afterPkce = storedCreds();
+      await check('security(F1/PKCE): a code plus the daemon-held verifier completes the sign-in', () => {
+        assert.strictEqual(pkceOk.status, 200, 'the PKCE exchange failed');
+        assert.ok(afterPkce && afterPkce.userId === victimUser.id, 'PKCE stored no credentials');
+        assert.ok(afterPkce.accessToken && afterPkce.refreshToken, 'PKCE stored an incomplete session');
+      });
+
+      // A stolen code is worthless on its own: the verifier never leaves the
+      // daemon, and the state that holds it is already spent.
+      teamsync.clearCredentials();
+      mock.authCodes.set('auth-code-stolen', {
+        userId: attackerUser.id, challenge: 'not-the-challenge-we-issued',
+      });
+      const stolenCode = await complete({ state: pkce.state, code: 'auth-code-stolen' });
+      await check('security(F1/PKCE): a stolen auth code without the matching verifier is refused', () => {
+        assert.notStrictEqual(stolenCode.status, 200);
+        assert.strictEqual(storedCreds(), null, 'a mismatched code minted credentials');
+      });
+
+      // ---- The callback page clears the fragment -------------------------
+      // Runs the page's real inline script against stub browser objects, so
+      // this asserts behavior rather than the presence of a string.
+      await check('security(F1): the callback page clears the fragment after reading it', async () => {
+        const vm = require('vm');
+        const { oauthCallbackPage } = require('../lib/server');
+        const src = oauthCallbackPage().match(/<script>([\s\S]*?)<\/script>/)[1];
+        let posted = null;
+        const location = {
+          pathname: '/team/oauth/callback',
+          search: '?state=st-123',
+          hash: '#access_token=at-secret&refresh_token=rt-secret&expires_in=3600',
+        };
+        const els = {};
+        const sandbox = {
+          window: {
+            location,
+            close() {},
+            history: {
+              replaceState(_s, _t, urlStr) {
+                // Whatever the page replaces the URL with is what the address
+                // bar and history keep.
+                const u = new URL(urlStr, 'http://127.0.0.1:7437');
+                location.pathname = u.pathname; location.search = u.search; location.hash = u.hash;
+              },
+            },
+          },
+          document: {
+            getElementById(id) {
+              els[id] = els[id] || { id, style: {}, textContent: '' };
+              return els[id];
+            },
+          },
+          URLSearchParams,
+          URL,
+          setTimeout: fn => fn(),
+          fetch: (u, opts) => {
+            posted = { url: u, body: JSON.parse(opts.body) };
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ email: 'v@test.dev' }) });
+          },
+        };
+        sandbox.history = sandbox.window.history;
+        vm.createContext(sandbox);
+        vm.runInContext(src, sandbox);
+        await new Promise(r => setImmediate(r));
+        assert.ok(posted, 'the callback page never posted anything');
+        assert.strictEqual(posted.body.accessToken, 'at-secret',
+          'the page must read the fragment BEFORE clearing it');
+        assert.strictEqual(posted.body.state, 'st-123', 'the page must forward the state');
+        assert.strictEqual(location.hash, '',
+          `the fragment was left in the address bar: ${location.hash}`);
+      });
+    } finally {
+      if (srvOauth) await new Promise(r => srvOauth.close(r));
+      teamsync.clearCredentials();
+      mock.users.delete('attacker@evil.example');
+      mock.users.delete('victim@test.dev');
+    }
   }
 
   try {
