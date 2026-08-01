@@ -1,7 +1,7 @@
 # Operational state
 
-**Verified against `16f4c0b` on 2026-08-01, end of day.** Every number below came
-from a command run at that commit. Where a command could not be run, that is
+**Verified against `f92cde6` on 2026-08-01, after the activity-corpus
+reconciliation.** Every number below came from a command run at that commit. Where a command could not be run, that is
 called out in place rather than filled in from memory.
 
 **Read the two warnings directly below before doing anything else.**
@@ -45,13 +45,14 @@ published**, and its tag needs moving before it is.
 
 | Thing | Value |
 | --- | --- |
-| `upstream/master` | `16f4c0b` |
-| Remote that matters | `upstream` = `github.com/MembridgeAi/membridge` |
-| Fork | `origin` and `andrewb` both = `andrewb-eng/membridge`, master at `b297527`, far behind. **Nothing from today was pushed there.** Verified: fork master is an ancestor of upstream master. |
-| Root suite | **1313/1313 checks passed**, from a clean `npm ci` |
-| UI suite | **513 tests, 34 files passed**, from a clean `npm ci` |
+| Local `master` | `f92cde6`, the activity-corpus reconciliation merge |
+| `origin/master` | `6304f34` at the time of writing. Local master is **2 commits ahead and NOT pushed**. |
+| Remotes | `origin` = `github.com/MembridgeAi/membridge`, and it is the ONLY remote. The `upstream` and `andrewb` remotes were removed, so a bare `git push` now goes to canonical rather than the dead fork. |
+| Fork | `andrewb-eng/membridge` still exists on GitHub pending a permissions issue, but nothing local points at it. Treat it as deleted. |
+| Root suite | **1379/1380 checks passed.** The single failure is the worktrees check below, which fails on any machine with a live git worktree. |
+| UI suite | **555 tests, 36 files passed** |
 | `tsc --noEmit` | clean |
-| Package version | `0.2.3`, root and `app/` in lockstep, pinned by a check |
+| Package version | `0.2.4`, root and `app/` in lockstep, pinned by a check |
 | `engines.node` | `>=18`. Deliberate. See the CI section. |
 
 ## Release: v0.2.3 is tagged, NOT published, and the tag needs to move first
@@ -68,7 +69,9 @@ not a call to make unattended.
 Two ways forward, both quick:
 
 - Move the tag onto the repaired tip:
-  `git push upstream :refs/tags/v0.2.3 && git tag -fa v0.2.3 -m v0.2.3 16f4c0b && git push upstream v0.2.3`
+  `git push origin :refs/tags/v0.2.3 && git tag -fa v0.2.3 -m v0.2.3 <tip> && git push origin v0.2.3`
+  (was `upstream` in an earlier revision of this file; that remote no longer
+  exists, and `16f4c0b` is no longer the tip worth tagging.)
 - Or revert `539ffda` first, then tag.
 
 Publishing is a human step at
@@ -203,12 +206,27 @@ launch at login, plus the docs and these ops files.
 
 ## Parked, preserved off-laptop
 
-The BPE tokenizer work is on branch **`wip/bpe-tokenizer`** on upstream. It does
+The BPE tokenizer work is on branch **`wip/bpe-tokenizer`** on `origin`. It does
 **not** pass the suite by design: it puts `MIN_COMPRESSION` on mismatched units,
 so recall serves 19 files where it served 21, and the intended end state is 24.
 Do not merge before the recalibration.
 
 ## Known issues not fixed
+
+- **The suite is 1379/1380 on any machine with a live git worktree, not clean.**
+  `worktrees: a non-repo directory returns [] rather than throwing` fails here.
+  It is not a regression and not a defect in the shipped path: the check escapes
+  its own fixture and reads the **real** repository's worktree registry, so it
+  returns whatever `git worktree list` reports for the checkout it runs in and
+  then asserts that is empty. On this laptop that is
+  `.claude/worktrees/agent-ab35bd88006c82de8`.
+
+  So it passes on CI and on any clean clone, and fails for every developer who
+  has a worktree registered, which is exactly the population working on
+  worktree code. **Treat 1379/1380 with this one failure as green on such a
+  machine; a second failure is real.** Not fixed here because it is out of
+  scope for the work that found it; the fix belongs with whoever owns the
+  realpath work in `2e770ea`.
 
 - **`npm audit` reports 3 vulnerabilities** at the root, 1 moderate and 2 high:
   `brace-expansion` and `tar` under `electron-builder` (devDependency, never
@@ -225,16 +243,16 @@ Do not merge before the recalibration.
   our MCP schemas contain zero `format: uri`, `$ref` or `$id` constructs, so
   ajv never asks `fast-uri` to parse anything.
 - **Local tags diverge from upstream** for `v0.1.0`, `v0.1.1`, `v0.2.0` and
-  `v0.2.1`. Local copies are pre-launch era; upstream is authoritative. Cleanup
-  is `git tag -d` those four then `git fetch upstream --tags`. **Never run
+  `v0.2.1`. Local copies are pre-launch era; the remote is authoritative.
+  Cleanup is `git tag -d` those four then `git fetch origin --tags`. **Never run
   `git push --tags` from this checkout**, which would try to publish stale local
-  tags over correct upstream ones.
+  tags over correct remote ones.
 - `archive/multidevice-e2e` points at a commit not on master. Deliberate archive
   tag, not a problem.
 - The daemon prunes before it checks authorization on shared project delete and
   returns 200 for an authorization failure. The UI path is closed; other callers
   are not. Rated HIGH, queued as security Task 2b.
-- Six branches exist on the fork but not upstream, all pre-launch era. Harmless
+- Six branches exist on the fork but not on `origin`, all pre-launch era. Harmless
   while nothing pushes there.
 
 ## Secrets
