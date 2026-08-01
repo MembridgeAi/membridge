@@ -14,39 +14,48 @@ describe('ProjectsPage', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
-  it('disables access cells for a private project', async () => {
+  // The redesign removed the dead dashed cells outright (spec: a private
+  // row renders no checkbox at all, not a restyled disabled one).
+  it('renders no access control at all for a private project', async () => {
     renderApp({}, <ProjectsPage />)
     const row = await screen.findByTestId('project-row-sublease')
-    for (const cell of within(row).getAllByRole('checkbox')) {
-      if (cell.getAttribute('data-self') !== 'true') expect(cell).toBeDisabled()
-    }
+    expect(within(row).queryAllByRole('checkbox')).toHaveLength(0)
+    expect(within(row).getByText(/only you/i)).toBeInTheDocument()
   })
 
-  it("shows only the viewer's own access column to a member", async () => {
-    renderApp({ role: 'member' }, <ProjectsPage />)
+  it('shows one Access column and no per-member columns, to a member and to an admin alike', async () => {
+    const member = renderApp({ role: 'member' }, <ProjectsPage />)
     await screen.findByText('membridge')
+    expect(screen.getByRole('columnheader', { name: 'Access' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /Andrew/ })).toBeNull()
+    member.unmount()
+
+    renderApp({}, <ProjectsPage />)
+    await screen.findByText('membridge')
+    expect(screen.getByRole('columnheader', { name: 'Access' })).toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: /Andrew/ })).toBeNull()
   })
 
-  it('never scrolls the page sideways', async () => {
-    renderApp({}, <ProjectsPage />)
-    const wrap = await screen.findByTestId('projects-scroll')
-    expect(wrap.className).toContain('scroll-x')
+  it('never scrolls the page sideways: the constant-width table needs no scroll wrapper', async () => {
+    const { container } = renderApp({ teamSize: 30 }, <ProjectsPage />)
+    await screen.findByTestId('project-row-membridge')
+    expect(container.querySelector('.scroll-x')).toBeNull()
   })
 
   // Finding 2: asserting only the cell's rendered `checked` state would still
   // pass for a component that flipped local UI state without ever calling
   // setProjectAccess -- so this spies on the client call itself, and on the
   // exact (projectPath, memberId, canSee) it was invoked with.
-  it('calls setProjectAccess with the project, member, and new value when a cell is toggled', async () => {
+  it('calls setProjectAccess with the project, member, and new value when a popover toggle is flipped', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'setProjectAccess')
     renderWith(client, <ProjectsPage />)
     const row = await screen.findByTestId('project-row-membridge')
+    await userEvent.click(within(row).getByRole('button', { name: /access for membridge/i }))
+    const popover = await screen.findByRole('dialog')
     // membridge is shared, and Sarah starts checked=true in the fixture --
-    // an enabled, non-self cell whose click has a determinate before/after.
-    const cell = within(row).getByRole('checkbox', { name: /Sarah/ })
-    await userEvent.click(cell)
+    // an enabled, non-self toggle whose click has a determinate before/after.
+    await userEvent.click(within(popover).getByRole('checkbox', { name: /Sarah/ }))
     expect(spy).toHaveBeenCalledWith('/Users/x/membridge', 'sarah', false)
   })
 
@@ -58,14 +67,16 @@ describe('ProjectsPage', () => {
   // mockRejectedValueOnce) so the optimistic-flip state is actually
   // observable instead of racing straight through to the rollback in the
   // same tick.
-  it('reverts an optimistic toggle when setProjectAccess rejects', async () => {
+  it('reverts an optimistic popover toggle when setProjectAccess rejects', async () => {
     const client = new FakeDataClient()
     let rejectWrite!: (err: Error) => void
     const write = new Promise<void>((_, reject) => { rejectWrite = reject })
     vi.spyOn(client, 'setProjectAccess').mockReturnValue(write)
     renderWith(client, <ProjectsPage />)
     const row = await screen.findByTestId('project-row-membridge')
-    const cell = within(row).getByRole('checkbox', { name: /Sarah/ }) as HTMLInputElement
+    await userEvent.click(within(row).getByRole('button', { name: /access for membridge/i }))
+    const popover = await screen.findByRole('dialog')
+    const cell = within(popover).getByRole('checkbox', { name: /Sarah/ }) as HTMLInputElement
     expect(cell.checked).toBe(true)
 
     await userEvent.click(cell)
@@ -82,7 +93,9 @@ describe('ProjectsPage', () => {
     vi.spyOn(client, 'setProjectAccess').mockRejectedValue(new Error('access write rejected'))
     renderWith(client, <ProjectsPage />)
     const row = await screen.findByTestId('project-row-membridge')
-    await userEvent.click(within(row).getByRole('checkbox', { name: /Sarah/ }))
+    await userEvent.click(within(row).getByRole('button', { name: /access for membridge/i }))
+    const popover = await screen.findByRole('dialog')
+    await userEvent.click(within(popover).getByRole('checkbox', { name: /Sarah/ }))
     const alert = await screen.findByText(/couldn't change access/i)
     expect(alert).toHaveAttribute('role', 'alert')
     expect(alert.textContent).toContain('access write rejected')
@@ -105,13 +118,18 @@ describe('ProjectsPage', () => {
   // user id looks like 'usr_9f2a'), so the guard silently never activated in
   // production. This drives the fixture with a REALISTIC id to prove the
   // guard now reads settings.viewerId instead of that sentinel.
-  it('disables the viewer’s own access cell using the real viewerId, not a hardcoded placeholder', async () => {
+  it('guards the viewer’s own row using the real viewerId, not a hardcoded placeholder', async () => {
     const client = new FakeDataClient({ viewerId: 'usr_9f2a' })
     renderWith(client, <ProjectsPage />)
     const row = await screen.findByTestId('project-row-membridge')
-    const cell = within(row).getByRole('checkbox', { name: /Marco/i })
-    expect(cell).toBeDisabled()
-    expect(cell.getAttribute('data-self')).toBe('true')
+    await userEvent.click(within(row).getByRole('button', { name: /access for membridge/i }))
+    const popover = await screen.findByRole('dialog')
+    // Marco is the viewer (usr_9f2a): listed, but never a toggle. Sarah is
+    // another member and stays toggleable, proving the guard keys off the
+    // real id rather than disabling everyone.
+    expect(within(popover).getByText(/Marco/)).toBeInTheDocument()
+    expect(within(popover).queryByRole('checkbox', { name: /Marco/i })).toBeNull()
+    expect(within(popover).getByRole('checkbox', { name: /Sarah/i })).toBeInTheDocument()
   })
 
   it('adds a project through a real DataClient call', async () => {

@@ -71,18 +71,11 @@
   font-size: 12px;
 }
 
-/* The one horizontal-scroll boundary in this screen: the table can be wider
- * than the viewport (one column per member), but the PAGE never scrolls
- * sideways -- scrollbar-gutter keeps the reserved space stable on Windows
- * so the table doesn't jump when the scrollbar appears/disappears. */
-.scroll-x {
-  overflow-x: auto;
-  scrollbar-gutter: stable;
-}
-
+/* No scroll boundary anymore: the column set is fixed (one Access cell per
+ * row instead of one column per member), so the table's width is independent
+ * of team size and nothing here ever scrolls sideways. */
 .projects-table {
   width: 100%;
-  min-width: 660px;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -198,6 +191,106 @@
 .access-cell-na {
   border-style: dashed;
   opacity: 0.4;
+}
+
+/* One Access cell per row (constant-width grid): a stacked avatar group, a
+ * +N chip and a short count label, the whole cell one button. */
+.access-td {
+  white-space: nowrap;
+}
+.access-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 2px;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text2);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.access-summary:hover {
+  background: var(--panel2);
+  border-color: var(--line2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .access-summary { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+}
+.access-avatars {
+  display: inline-flex;
+}
+.access-avatars .avatar:not(:first-child) {
+  margin-left: -6px;
+}
+.access-more {
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 600;
+}
+.access-label {
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.access-private {
+  color: var(--text3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* The access popover: shares the dialog chrome (components.css .dialog); the
+ * rules below only cover its member list. */
+.access-popover {
+  min-width: 300px;
+}
+.access-search {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  color: var(--text2);
+}
+.access-note {
+  margin: 0 0 8px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.access-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.access-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.access-row:last-child {
+  border-bottom: none;
+}
+.access-name {
+  flex: 1;
+  color: var(--text2);
+}
+.access-self-note {
+  color: var(--text3);
+  font-size: 10px;
+}
+.access-empty {
+  color: var(--text3);
+  justify-content: center;
+}
+.access-shortcuts {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
 }
 
 .proj-btn {

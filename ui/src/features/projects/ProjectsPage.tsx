@@ -1,14 +1,14 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
-import { Avatar } from '../../components/Avatar'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { SyncStateView } from '../../components/SyncState'
 import { useDataClient } from '../../data/DataClientProvider'
 import { relativeAgo } from '../../data/relativeTime'
-import { useAccessMatrix, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject } from '../../data/queries'
+import { useAccessMatrix, useMembers, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
-import { AccessCell } from './AccessCell'
+import { AccessPopover } from './AccessPopover'
+import { AccessSummary, type AccessMemberRef } from './AccessSummary'
 import { AddProjectDialog } from './AddProjectDialog'
 import './projects.css'
 
@@ -16,20 +16,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
+// The fixed column set (spec: Project · Sessions 7d · Last activity · Sync ·
+// Access · Open). Width is independent of team size by construction.
+const COLUMN_COUNT = 6
+
 interface ProjectTableRowProps {
   project: Project
-  matrixRow: AccessMatrix['rows'][number] | undefined
-  members: AccessMatrix['members']
-  showMatrix: boolean
-  showSelfColumn: boolean
-  viewerId: string | null
+  roster: AccessMemberRef[]
+  teamSize: number
+  showAccess: boolean
   onSync: () => void
   /** True while THIS row's sync request is in flight (Fix 9). */
   syncPending: boolean
-  onToggleAccess: (memberId: string, canSee: boolean) => void
+  onOpenAccess: () => void
 }
 
-function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColumn, viewerId, onSync, syncPending, onToggleAccess }: ProjectTableRowProps) {
+function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPending, onOpenAccess }: ProjectTableRowProps) {
   return (
     <tr data-testid={`project-row-${project.name}`}>
       <td className="proj-name">
@@ -39,24 +41,16 @@ function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColu
       <td className="mono num">{project.sessionsThisWeek}</td>
       <td className="mono num">{project.lastActivity ? relativeAgo(project.lastActivity) : 'never'}</td>
       <td><SyncStateView state={project.sync} onSync={project.sync.state === 'behind' ? onSync : undefined} syncPending={syncPending} /></td>
-      {showMatrix && members.map(member => (
-        <td className="who" key={member.id}>
-          <AccessCell
-            memberName={member.name}
-            checked={matrixRow?.access[member.id] ?? false}
-            disabled={!project.shared || member.id === viewerId}
-            isSelf={member.id === viewerId}
-            onToggle={checked => onToggleAccess(member.id, checked)}
-          />
-        </td>
-      ))}
-      {showSelfColumn && (
-        <td className="who">
-          {/* A member's own visibility isn't editable from this grid (the
-              write endpoint is manager-only and 403s for a member anyway),
-              and it's trivially true -- getProjects() already only returns
-              projects this viewer can see. */}
-          <AccessCell memberName="You" checked disabled isSelf onToggle={() => {}} />
+      {showAccess && (
+        <td className="access-td">
+          {project.shared ? (
+            <AccessSummary projectName={project.name} roster={roster} teamSize={teamSize} onOpen={onOpenAccess} />
+          ) : (
+            // A private project renders NO control here at all (spec: the
+            // dead dashed cells are removed, not restyled) -- nobody else
+            // can be granted access until the project is shared.
+            <span className="access-private"><span aria-hidden="true">🔒</span> Only you</span>
+          )}
         </td>
       )}
       {/* Route on the encoded PATH, never the raw name: two projects can
@@ -68,9 +62,9 @@ function ProjectTableRow({ project, matrixRow, members, showMatrix, showSelfColu
   )
 }
 
-/** The projects grid: one row per project, one column per member for an
- *  owner/admin (bulk access editing), or a single "You" column for a member.
- *  Matches projects-list-v2.html. */
+/** The projects grid: one row per project and ONE Access cell per row at any
+ *  team size (spec: constant-width access). Editing lives in the
+ *  admin-gated AccessPopover; a member gets the same popover read-only. */
 export function ProjectsPage() {
   const client = useDataClient()
   const projectsQuery = useProjects()
@@ -78,12 +72,17 @@ export function ProjectsPage() {
   const settingsQuery = useSettings()
   const [filter, setFilter] = useState('')
   const [showAddProject, setShowAddProject] = useState(false)
+  // The project path whose access popover is open, or null.
+  const [accessFor, setAccessFor] = useState<string | null>(null)
 
   const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
-  const showMatrix = !solo && client.capabilities.teamAdminSupported && isTeamAdmin
-  const showSelfColumn = !solo && !showMatrix
+  // The SAME gate the old member-column grid used -- reused, not reinvented:
+  // owner/admin get live toggles in the popover, everyone else a read-only
+  // roster.
+  const canEditAccess = !solo && client.capabilities.teamAdminSupported && isTeamAdmin
+  const showAccess = !solo
   // Task 18: the real viewer id (settings.viewerId, from GET /api/team),
   // never a hardcoded two-letter placeholder -- a sentinel like that never
   // matches a real user id, which silently disabled the self-revoke guard
@@ -91,7 +90,10 @@ export function ProjectsPage() {
   // never sends).
   const viewerId = settingsQuery.data?.viewerId ?? null
 
-  const matrixQuery = useAccessMatrix(showMatrix)
+  const matrixQuery = useAccessMatrix(canEditAccess)
+  // Names for the roster and the popover, at every role (GET /api/team/members
+  // is not admin-gated the way the access matrix is).
+  const membersQuery = useMembers(!solo)
   const setAccess = useSetProjectAccess()
   const syncProject = useSyncProject()
 
@@ -99,17 +101,35 @@ export function ProjectsPage() {
   const filtered = filter.trim()
     ? projects.filter(p => p.name.toLowerCase().includes(filter.trim().toLowerCase()))
     : projects
-  const members = matrixQuery.data?.members ?? []
   const matrixByPath = useMemo(() => {
     const map = new Map<string, AccessMatrix['rows'][number]>()
     for (const row of matrixQuery.data?.rows ?? []) map.set(row.projectPath, row)
     return map
   }, [matrixQuery.data])
+  const nameById = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const m of matrixQuery.data?.members ?? []) map.set(m.id, m.name)
+    for (const m of membersQuery.data ?? []) map.set(m.id, m.name)
+    return map
+  }, [matrixQuery.data, membersQuery.data])
+
+  const teamSize = membersQuery.data?.length ?? matrixQuery.data?.members.length ?? 0
+
+  // Who can see this project: the access matrix's row for an admin (the
+  // authoritative grant list), the project's own member roster otherwise.
+  function rosterFor(project: Project): AccessMemberRef[] {
+    if (!project.shared) return []
+    const row = matrixByPath.get(project.path)
+    if (canEditAccess && row) {
+      return (matrixQuery.data?.members ?? []).filter(m => row.access[m.id]).map(m => ({ id: m.id, name: m.name }))
+    }
+    return project.memberIds.map(id => ({ id, name: nameById.get(id) ?? (id === viewerId ? 'You' : id) }))
+  }
 
   // Full error page only for a first-load failure (no data at all); a failed
   // refetch with cached data degrades to the inline banner below instead of
   // blanking a populated grid every time the daemon hiccups mid-poll.
-  const daemonError = daemonErrorOf([projectsQuery, statusQuery, settingsQuery, ...(showMatrix ? [matrixQuery] : [])])
+  const daemonError = daemonErrorOf([projectsQuery, statusQuery, settingsQuery, ...(canEditAccess ? [matrixQuery] : [])])
   if (daemonError?.blocking) {
     return (
       <div className="projects-page">
@@ -119,15 +139,29 @@ export function ProjectsPage() {
   }
 
   // A row must not appear until its FINAL shape is known -- role gating
-  // decides whether it gets member columns at all, and (for an owner/admin)
+  // decides whether the Access cell is editable, and (for an owner/admin)
   // the matrix request is a separate fetch that starts only once role
-  // gating resolves showMatrix=true. Rendering rows earlier would flash a
-  // row with no access columns and then pop them in a moment later.
+  // gating resolves canEditAccess=true. Rendering rows earlier would flash
+  // a roster that pops in a moment later.
   const ready = projectsQuery.data !== undefined && statusQuery.data !== undefined
-    && settingsQuery.data !== undefined && (!showMatrix || matrixQuery.data !== undefined)
+    && settingsQuery.data !== undefined && (!canEditAccess || matrixQuery.data !== undefined)
+    && (solo || membersQuery.data !== undefined)
 
   const sharedCount = projects.filter(p => p.shared).length
-  const columnCount = 5 + (showMatrix ? members.length : showSelfColumn ? 1 : 0)
+  const columnCount = showAccess ? COLUMN_COUNT : COLUMN_COUNT - 1
+
+  const accessProject = accessFor ? projects.find(p => p.path === accessFor) ?? null : null
+  const accessRoster = accessProject ? rosterFor(accessProject) : []
+  // An admin's popover lists the whole team (grant and revoke); a member's
+  // read-only popover lists exactly who can see the project.
+  const popoverMembers: AccessMemberRef[] = canEditAccess
+    ? (matrixQuery.data?.members ?? []).map(m => ({ id: m.id, name: m.name }))
+    : accessRoster
+  const popoverAccess: Record<string, boolean> = accessProject
+    ? (canEditAccess
+      ? matrixByPath.get(accessProject.path)?.access ?? {}
+      : Object.fromEntries(accessRoster.map(m => [m.id, true])))
+    : {}
 
   return (
     <div className="projects-page">
@@ -159,60 +193,61 @@ export function ProjectsPage() {
         </div>
       </div>
 
-      <div className="scroll-x" data-testid="projects-scroll">
-        <table className="projects-table">
-          <thead>
+      {/* No scroll-x wrapper anymore: the column set is fixed (one Access
+          cell instead of one column per member), so the table's width no
+          longer grows with the team and the page never scrolls sideways. */}
+      <table className="projects-table">
+        <thead>
+          <tr>
+            <th scope="col">Project</th>
+            <th scope="col">Sessions · 7d</th>
+            <th scope="col">Last activity</th>
+            <th scope="col">Sync</th>
+            {showAccess && <th scope="col">Access</th>}
+            <th scope="col" aria-hidden="true" />
+          </tr>
+        </thead>
+        <tbody>
+          {!ready && (
+            <tr><td className="projects-empty-note" colSpan={columnCount}>Loading…</td></tr>
+          )}
+          {ready && filtered.map(project => (
+            <ProjectTableRow
+              key={project.path}
+              project={project}
+              roster={rosterFor(project)}
+              teamSize={teamSize}
+              showAccess={showAccess}
+              onSync={() => syncProject.mutate(project.path)}
+              syncPending={syncProject.isPending && syncProject.variables === project.path}
+              onOpenAccess={() => setAccessFor(project.path)}
+            />
+          ))}
+          {ready && filtered.length === 0 && (
             <tr>
-              <th scope="col">Project</th>
-              <th scope="col">Sessions · 7d</th>
-              <th scope="col">Last activity</th>
-              <th scope="col">Sync</th>
-              {showMatrix && members.map(member => (
-                <th className="who" key={member.id} scope="col">
-                  <Avatar id={member.id} name={member.name} size={19} />
-                </th>
-              ))}
-              {showSelfColumn && (
-                <th className="who" scope="col">
-                  <Avatar id={viewerId ?? 'you'} name="You" size={19} />
-                </th>
-              )}
-              <th scope="col" aria-hidden="true" />
+              <td className="projects-empty-note" colSpan={columnCount}>
+                No projects match "{filter}".
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {!ready && (
-              <tr><td className="projects-empty-note" colSpan={columnCount}>Loading…</td></tr>
-            )}
-            {ready && filtered.map(project => (
-              <ProjectTableRow
-                key={project.path}
-                project={project}
-                matrixRow={matrixByPath.get(project.path)}
-                members={members}
-                showMatrix={showMatrix}
-                showSelfColumn={showSelfColumn}
-                viewerId={viewerId}
-                onSync={() => syncProject.mutate(project.path)}
-                syncPending={syncProject.isPending && syncProject.variables === project.path}
-                onToggleAccess={(memberId, canSee) => setAccess.mutate({ projectPath: project.path, memberId, canSee })}
-              />
-            ))}
-            {ready && filtered.length === 0 && (
-              <tr>
-                <td className="projects-empty-note" colSpan={columnCount}>
-                  No projects match "{filter}".
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      {showMatrix && (
+          )}
+        </tbody>
+      </table>
+      {showAccess && canEditAccess && (
         <p className="projects-foot">
-          Dashed boxes are private projects — nobody else can be given access until you share the project.
+          Click a project's Access cell to change who can see it.
           Changes apply immediately; every change is recorded in the team audit trail.
         </p>
+      )}
+      {accessProject && (
+        <AccessPopover
+          projectName={accessProject.name}
+          members={popoverMembers}
+          access={popoverAccess}
+          canEdit={canEditAccess}
+          viewerId={viewerId}
+          onToggle={(memberId, canSee) => setAccess.mutate({ projectPath: accessProject.path, memberId, canSee })}
+          onClose={() => setAccessFor(null)}
+        />
       )}
       {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} />}
     </div>
