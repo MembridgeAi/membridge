@@ -3,6 +3,7 @@
 **Date:** 2026-08-01
 **Status:** proposed
 **Repo state at audit:** `master` at `2e770ea`, tag `v0.2.3` at `802d366`, npm `latest` at `0.2.2`
+**References re-verified against `2e770ea` on 2026-08-01.** Six had drifted and are corrected in place; the drifted values are noted where they were wrong enough to mislead.
 
 ## Problem
 
@@ -35,7 +36,7 @@ Consequence: every user who installs the documented way gets a product with no i
 
 ### F2 (CRITICAL): there is no CLI command to enroll a project
 
-The `commands` table in `bin/membridge.js` (around line 1046) has no `add`, `init`, `adopt` or `track`. Neither does the help text at line 976. The only enrollment path in the codebase is `POST /api/adopt` (`lib/server.js:2520`), which is a dashboard action.
+The `commands` table in `bin/membridge.js` (line 1051) has no `add`, `init`, `adopt` or `track`. Neither does the help text at line 976. The only enrollment path in the codebase is `POST /api/projects/adopt` (matched at `lib/server.js:2516`, handler at `2520`), which is a dashboard action.
 
 `adoptProjects` and `addProject` exist only in `lib/server.js` (1291, 1315) and are not reachable from the CLI.
 
@@ -45,12 +46,12 @@ Consequence: F1 and F2 together mean an npm user has no enrollment path at all. 
 
 ### F3 (HIGH): adopting a project never backfills its history
 
-In `syncOnce` (`lib/scan.js:638`), the order is:
+In `syncOnce` (`lib/scan.js:639`), the order is:
 
 ```
-const scanned = filterScratchpadResidue(scanAll(state, config));   // :647 advances offsets
-projectResolve.rehomeEvents(scanned, trackedRoots(state));         // :648
-const events = filterTrackedSessions(scanned, trackedRoots(state)); // :649 drops untracked
+const scanned = filterScratchpadResidue(scanAll(state, config));   // :648 advances offsets
+projectResolve.rehomeEvents(scanned, trackedRoots(state));         // :649
+const events = filterTrackedSessions(scanned, trackedRoots(state)); // :650 drops untracked
 ```
 
 `scanAll` mutates `state.files` read offsets for every session file it touches, including files belonging to untracked projects. The tracking filter runs after. So every daemon tick consumes transcript bytes for projects that are not yet adopted, and those bytes are never re-read.
@@ -81,7 +82,7 @@ Consequence: nondeterministic state corruption during exactly the period an eval
 
 ### F6 (LOW): `adoptProjects` is defined twice
 
-`lib/server.js:1315` and `lib/server.js:1347`. The bodies are byte-identical, so the second silently shadows the first and behavior is unchanged. The duplicate block also displaced `deleteProject`'s doc comment, which now sits orphaned at line 1339 above the wrong function.
+`lib/server.js:1315` and `lib/server.js:1347`. The bodies are byte-identical (both md5 `08e38450a77247e4f01b784f41751609`, measured), so the second silently shadows the first and behavior is unchanged. The duplicate block also displaced `deleteProject`'s doc comment, which now sits orphaned at line 1338 above the wrong function.
 
 Consequence: no runtime effect. It is evidence a merge landed badly, which matters more than the dead code does.
 
@@ -116,7 +117,7 @@ Reviewed and deliberately left alone:
 - **Loopback binding, `Host` validation on GETs, zero CORS headers.** DNS rebinding defenses. Keep.
 - **`/api/open` argv-array `spawnSync` with realpath containment.** Correct.
 - **`contextIsolation: true`, `nodeIntegration: false`, denied window-open handler** in `app/main.js`. Correct.
-- **Offsets advancing only once.** The dirty-flag comment at `lib/scan.js:651` explains why. F3's fix must be a scoped reset at adoption time, not a change to that invariant.
+- **Offsets advancing only once.** The dirty-flag comment at `lib/scan.js:654` explains why. F3's fix must be a scoped reset at adoption time, not a change to that invariant.
 
 ## Non-goals for alpha
 
