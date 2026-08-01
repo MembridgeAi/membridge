@@ -130,8 +130,13 @@ Files recently modified by AI tools: src/cart.js, test/cart.test.js
 ```
 
 Only the content between the markers is ever rewritten. The **Remove block**
-button (or `membridge remove`) strips it cleanly and restores your file
-byte-for-byte.
+button strips it cleanly and restores your file byte-for-byte, and leaves your
+local memory alone.
+
+`membridge remove` does the same to the block, but it *also* permanently
+deletes that project's `.membridge/` folder — its whole local memory history,
+which nothing rebuilds. Use `membridge remove --keep-memory` if you only want
+the blocks gone.
 
 Each project also gets a structured memory database in `.membridge/`:
 `memory.json` (every update as a structured entry, plus an ignore-aware index
@@ -169,6 +174,32 @@ Codex and other `AGENTS.md` readers have no hook, so the injected block
 carries a standing instruction to append the same line on completion.
 Well-behaved agents comply; when they don't, MemBridge falls back to the
 harvested summary.
+
+## Memory in front of a search
+
+Session summaries answer "what happened". This is the other direction: when
+an agent starts digging through a tracked project, MemBridge's memory of the
+same ground is put in front of it before the search runs.
+
+`setup-hooks` registers a second [PreToolUse hook](https://docs.claude.com/en/docs/claude-code/hooks)
+on `Grep` and `Glob`. The search pattern is reduced to the words a person
+actually meant (regex and glob syntax is stripped), those words are run
+through the same relevance ranking `search_memory` uses, and up to three
+matching past sessions -- yours and your teammates' -- are handed to the
+agent alongside its results. It never answers or blocks the search: the Grep
+runs exactly as written, with the memory beside it.
+
+It is deliberately quiet. A pattern with nothing specific in it is rejected
+before anything is read from disk, a search with no relevant memory prints
+nothing at all, and memory already given to a session is never repeated in
+it. The injected block is hard-capped so it stays a small fraction of the
+search results it rides on. Like every other hook here it is strictly
+fail-open, and a paused or excluded project is skipped entirely.
+
+This one is Claude Code only, because it is the only tool with a hook that
+fires before a search. Codex and other `AGENTS.md` readers are covered the
+same way they are for summaries: by the standing instruction in the injected
+block.
 
 ## Team sync and privacy
 
@@ -282,7 +313,7 @@ boxes and terminal-first teammates aren't second-class:
 | `membridge dashboard` | Open the web UI at `http://127.0.0.1:7437` |
 | `membridge sync [--dry-run] [--project <path>]` | One sync pass right now |
 | `membridge scan` | Read-only report of discovered tools and projects |
-| `membridge remove [--project <path>]` | Strip injected memory blocks |
+| `membridge remove [--project <path>] [--keep-memory]` | Strip injected memory blocks **and delete `.membridge/` local memory history** (irreversible); `--keep-memory` strips the blocks only |
 | `membridge enable-autostart` / `disable-autostart` | Run at login |
 | `membridge setup-hooks` / `remove-hooks` | Session summary hook |
 | `membridge signup` / `login` / `logout` | Team account |

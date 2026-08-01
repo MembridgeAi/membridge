@@ -231,16 +231,30 @@ export interface AuditEvent {
 export type SkeletonStats = { available: false } | { available: true; repeatOpens: number; answeredFirst: number }
 
 // Every discrete instance where memory actually helped -- recall serving a
-// file, a teammate note landing in a session, an MCP memory query -- broader
-// than SkeletonStats above, which only ever covered the first channel.
-// Counting an instance is not a token-avoidance claim (spec §9 stays intact:
-// see lib/server.js above savingsPayload), so `total` is a plain count, never
-// tokens and never a dollar figure. `byKind` is what makes the headline
-// auditable rather than a magic number. `available: false` on a daemon whose
-// /api/savings predates the notes-injection COUNT field.
+// file, a teammate note landing in a session -- broader than SkeletonStats
+// above, which only ever covered the first channel. Counting an instance is
+// not a token-avoidance claim (spec §9 stays intact: see lib/server.js above
+// savingsPayload), so `total` is a plain count, never tokens and never a
+// dollar figure. `byKind` is what makes the headline auditable rather than a
+// magic number.
+//
+// `mcpTools` is deliberately NOT part of `total` and not a channel of
+// `byKind`. The daemon's tally records which memory MCP tools have seen use,
+// never how often (lib/mcp-usage.js, a privacy stance), so `inUse` is capped
+// by `total` -- the size of the tool allowlist -- however many calls happen.
+// It is a coverage fraction, and summing it into a per-instance total made
+// that total meaningless.
+//
+// `available: false` on a daemon whose /api/savings predates the
+// notes-injection COUNT field.
 export type AssistsStats =
   | { available: false }
-  | { available: true; total: number; byKind: { recallServed: number; teammateNotes: number; mcpQueries: number } }
+  | {
+      available: true
+      total: number
+      byKind: { recallServed: number; teammateNotes: number }
+      mcpTools: { inUse: number; total: number }
+    }
 
 export type Severity = 'broken' | 'minor'
 
@@ -304,6 +318,11 @@ export interface HookUpdateOutcome {
 export interface HookUpdateResult {
   stop: HookUpdateOutcome
   recall: HookUpdateOutcome
+  // The PreToolUse Grep/Glob search hook (lib/hooks-search.js). Reported
+  // separately for the same reason recall is: "Update hooks" reconciles it
+  // too, so a failure there must be visible rather than hiding behind two
+  // green chips.
+  search: HookUpdateOutcome
 }
 
 export interface Settings {

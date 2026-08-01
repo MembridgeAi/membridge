@@ -29,14 +29,16 @@ interface UpdateHooksControlProps {
 }
 
 /**
- * "Update hooks" -- force-rewrites the Stop and recall hooks to the current
+ * "Update hooks" -- force-rewrites the Stop, recall and search hooks to the current
  * build (POST /api/hooks/update -> lib/hooks.js's forceUpdateHooks), always
  * callable regardless of the reported vintage -- the same "not gated on the
  * current state" shape as McpRegisterControl's Re-register. Two vintage
  * chips (one per hook) render honestly from Settings.hooksVersion up front;
  * after a click, each hook's own ok/detail renders as its own chip too, so a
- * Stop-hook failure can never hide behind a successful recall result or a
- * generic "done".
+ * Stop-hook failure can never hide behind a successful recall/search result
+ * or a generic "done". There is deliberately no search VINTAGE chip: the
+ * search hook is reconciled on every daemon launch (hooks.ensureInstalled), so
+ * a stale one self-heals without the user ever being asked to act on it.
  */
 export function UpdateHooksControl({ hooksVersion }: UpdateHooksControlProps) {
   const updateHooks = useUpdateHooks()
@@ -65,6 +67,9 @@ export function UpdateHooksControl({ hooksVersion }: UpdateHooksControlProps) {
           </StateChip>
           <StateChip tone={result.recall.ok ? 'ok' : 'bad'} glyph={result.recall.ok ? '✓' : '✕'}>
             {`Recall: ${result.recall.detail}`}
+          </StateChip>
+          <StateChip tone={result.search.ok ? 'ok' : 'bad'} glyph={result.search.ok ? '✓' : '✕'}>
+            {`Search: ${result.search.detail}`}
           </StateChip>
         </>
       )}

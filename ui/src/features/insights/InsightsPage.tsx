@@ -84,7 +84,10 @@ export function buildCsv(insights: Insights): string {
     toCsvRow(['memory_assists_total', insights.assists.available ? insights.assists.total : 'pending']),
     toCsvRow(['assists_recall_served', insights.assists.available ? insights.assists.byKind.recallServed : 'pending']),
     toCsvRow(['assists_teammate_notes', insights.assists.available ? insights.assists.byKind.teammateNotes : 'pending']),
-    toCsvRow(['assists_mcp_queries', insights.assists.available ? insights.assists.byKind.mcpQueries : 'pending']),
+    // Exported as its own pair, outside the assist total, because that is
+    // what it is: a coverage fraction over the memory-tool allowlist.
+    toCsvRow(['mcp_tools_in_use', insights.assists.available ? insights.assists.mcpTools.inUse : 'pending']),
+    toCsvRow(['mcp_tools_available', insights.assists.available ? insights.assists.mcpTools.total : 'pending']),
     '',
     toCsvRow(['person', 'sessions', 'shared']),
     ...insights.perPerson.map(p => toCsvRow([p.name, p.sessions, p.shared])),
