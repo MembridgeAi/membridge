@@ -38,6 +38,22 @@
   font-weight: var(--fw-bold);
   letter-spacing: -0.01em;
 }
+/* The shared project's member stack (spec section 4): overlapping avatars
+ * plus a +N chip, read-only, visible at every role. */
+.project-member-stack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.project-member-stack .avatar:not(:first-child) {
+  margin-left: -6px;
+}
+.project-member-more {
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 600;
+}
+
 .project-header-actions {
   margin-left: auto;
   display: flex;

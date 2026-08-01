@@ -9,6 +9,7 @@ import {
   useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useStatus, useSyncProject,
 } from '../../data/queries'
 import type { StreamEntry as StreamEntryData } from '../../data/types'
+import { Avatar } from '../../components/Avatar'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { EntryRow } from '../../components/EntryRow'
 import { SyncStateView } from '../../components/SyncState'
@@ -111,6 +112,11 @@ export function ProjectPage({ slug }: ProjectPageProps) {
     return () => clearTimeout(id)
   }, [copyStatus])
 
+  const memberNameById = useMemo(
+    () => new Map((membersQuery.data ?? []).map(m => [m.id, m.name])),
+    [membersQuery.data],
+  )
+
   const accessRows: AccessRow[] = useMemo(() => {
     if (!accessQuery.data || !membersQuery.data) return []
     const membersById = new Map(membersQuery.data.map(m => [m.id, m]))
@@ -181,6 +187,20 @@ export function ProjectPage({ slug }: ProjectPageProps) {
         <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
           {project.shared ? 'Shared' : 'Private'}
         </span>
+        {/* Spec section 4: a shared project shows WHO shares it, at every
+            role -- the read-only avatar stack is not gated the way the
+            admin access panel is. Names resolve via getMembers(); an id
+            with no member row (left the team) still gets an avatar. */}
+        {project.shared && project.memberIds.length > 0 && (
+          <span className="project-member-stack" data-testid="project-member-stack">
+            {project.memberIds.slice(0, 4).map(id => (
+              <Avatar key={id} id={id} name={memberNameById.get(id) ?? id} size={19} />
+            ))}
+            {project.memberIds.length > 4 && (
+              <span className="project-member-more">+{project.memberIds.length - 4}</span>
+            )}
+          </span>
+        )}
         <SyncStateView state={project.sync} />
         <div className="project-header-actions">
           <button type="button" className="project-btn project-btn-ghost" onClick={handleCopy} disabled={copyForAI.isPending}>

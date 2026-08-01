@@ -116,3 +116,38 @@ describe('ProjectPage', () => {
     expect(row!.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-e1')}`)
   })
 })
+
+// Task 7 (projects tab scale and archive, spec section 4): a shared project
+// must OPEN shared -- the Shared badge from the team link, a stream carrying
+// every author's sessions, and the member avatar stack.
+describe('a shared project opens shared', () => {
+  it('renders the Shared badge, never Private, for a project with a team link', async () => {
+    renderApp({}, <ProjectPage slug="membridge" />)
+    await screen.findByText(/Hook ownership/)
+    expect(screen.getByText('Shared')).toBeInTheDocument()
+    expect(screen.queryByText('Private')).toBeNull()
+  })
+
+  it('streams every author: a teammate-authored row is present (the actual defect)', async () => {
+    renderApp({}, <ProjectPage slug="membridge" />)
+    await screen.findByText(/Hook ownership/)
+    // The fixture stream entry is authored by Andrew, not the viewer -- it
+    // must render as a stream row, not be self-filtered away.
+    const authors = screen.getAllByText('Andrew')
+    expect(authors.some(el => el.className.includes('entry-row-who'))).toBe(true)
+  })
+
+  it('renders the member avatar stack for a shared project, at every role', async () => {
+    const member = renderApp({ role: 'member' }, <ProjectPage slug="membridge" />)
+    await screen.findByText(/Hook ownership/)
+    const stack = screen.getByTestId('project-member-stack')
+    expect(stack.querySelectorAll('.avatar').length).toBeGreaterThanOrEqual(3)
+    member.unmount()
+  })
+
+  it('renders no member stack for a private project', async () => {
+    renderApp({}, <ProjectPage slug="sublease" />)
+    await screen.findByText(/sublease/)
+    expect(screen.queryByTestId('project-member-stack')).toBeNull()
+  })
+})
