@@ -18882,10 +18882,16 @@ const repoRoot = require('../lib/repo-root');
   // is the worktree reads the worktree. Measured live: a worktree session was
   // handed the HOME project's block (zero teammate entries) while the repo
   // root's block carried four current ones.
+  // Compared through realpathSync.native everywhere below: on Windows the
+  // suite's own paths come from os.tmpdir() in 8.3 short form (RUNNER~1) while
+  // git records the long form (runneradmin). Both name one directory, and only
+  // the native realpath spells them the same way.
+  const canon = p => { try { return (fs.realpathSync.native || fs.realpathSync)(p); } catch { return path.resolve(p); } };
+
   check('worktrees: a main repo lists its linked worktrees', () => {
-    const found = repoRoot.linkedWorktreesOf(mono).map(p => path.resolve(p));
-    assert.ok(found.includes(path.resolve(wt)),
-      `expected ${wt} in ${JSON.stringify(found)}`);
+    const found = repoRoot.linkedWorktreesOf(mono).map(canon);
+    assert.ok(found.includes(canon(wt)),
+      `expected ${canon(wt)} in ${JSON.stringify(found)}`);
   });
 
   check('worktrees: a worktree has none of its own (no infinite fan-out)', () => {
@@ -18918,9 +18924,8 @@ const repoRoot = require('../lib/repo-root');
     // git's own (symlink-resolved) path. On macOS the suite's ROOT is under
     // /var/... while git records /private/var/... — the same directory, and
     // only realpath makes that comparison honest.
-    const real = p => fs.realpathSync(p);
-    const found = repoRoot.linkedWorktreesOf(mono).map(real);
-    assert.ok(found.includes(real(far)), 'a worktree outside the main repo must still be found');
+    const found = repoRoot.linkedWorktreesOf(mono).map(canon);
+    assert.ok(found.includes(canon(far)), 'a worktree outside the main repo must still be found');
     spawnSync('git', ['-C', mono, 'worktree', 'remove', '--force', far], { encoding: 'utf8' });
   });
 
@@ -18931,8 +18936,13 @@ const repoRoot = require('../lib/repo-root');
     const ghost = path.join(ROOT, 'projects', 'ghost-wt');
     spawnSync('git', ['-C', mono, 'worktree', 'add', '-q', '-b', 'ghost-x', ghost], { encoding: 'utf8' });
     fs.rmSync(ghost, { recursive: true, force: true });
-    const found = repoRoot.linkedWorktreesOf(mono).map(p => path.resolve(p));
-    assert.ok(!found.includes(path.resolve(ghost)), 'a deleted worktree must not be an injection target');
+    // Matched on BASENAME, not on a full-path comparison: canon() cannot
+    // canonicalize a path that no longer exists, so on Windows the deleted
+    // path and the listed entries could be spelled differently and a
+    // full-path !includes would pass without proving anything.
+    const found = repoRoot.linkedWorktreesOf(mono);
+    assert.ok(!found.some(p => path.basename(p) === 'ghost-wt'),
+      `a deleted worktree must not be an injection target: ${JSON.stringify(found)}`);
     assert.ok(!fs.existsSync(ghost), 'listing a stale entry must not recreate its directory');
     spawnSync('git', ['-C', mono, 'worktree', 'prune'], { encoding: 'utf8' });
   });
