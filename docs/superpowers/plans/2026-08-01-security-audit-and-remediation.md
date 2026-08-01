@@ -138,6 +138,10 @@ Commit each item separately.
 - [ ] Re-run two checks by hand: grep the repo for `Access-Control` (expect zero), and confirm the new CI guard catches a `drop function` with no sibling grant.
 - [ ] Human pass: sign in with both providers on a clean machine; confirm a replayed callback is rejected; confirm a project with `default_access` off is genuinely unreadable from a second account; confirm `membridge status` shows the keychain warning on a platform without one.
 
+## Post-release
+
+- [ ] **After v0.2.3 publishes, open "Check for updates" WITHOUT reinstalling and confirm it OFFERS the update.** This is the only test that discriminates. Today the checker says "you are up to date, v0.2.2 is latest", which is correct today and therefore proves nothing: an installed-equals-latest machine produces the identical dialog whether the checker works or is broken. Marco's July 26 finding was an update checker that told everyone they were current while they sat two releases behind, and that is precisely the state a not-yet-updated install is in the moment v0.2.3 goes out. Do not substitute a fresh install for this check; reinstalling puts the machine back into the state that cannot tell the two cases apart.
+
 ## Out of scope
 
 - The three queued UI work streams (`session-detail-page`, `projects-tab-scale-and-archive`, `measured-savings`).
