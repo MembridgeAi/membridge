@@ -1794,7 +1794,7 @@ async function main() {
         assert.ok(Math.abs(addAt - scanAt) <= 4,
           `add is not beside scan and sync (add at ${addAt}, scan at ${scanAt}, sync at ${syncAt})`);
         // The pair must be discoverable from each other.
-        const entry = lines.slice(addAt, addAt + 6).join('\n');
+        const entry = lines.slice(addAt, addAt + 8).join('\n');
         assert.ok(/remove/.test(entry), `add's help does not cross-reference remove: ${entry}`);
       });
     }
@@ -1934,6 +1934,87 @@ async function main() {
         const mdC = fs.existsSync(path.join(projC, 'CLAUDE.md')) ? read(path.join(projC, 'CLAUDE.md')) : '';
         assert.ok(!mdC.includes('migration rollback plan'),
           `--no-backfill still recovered prior history:\n${mdC}`);
+      });
+
+      // A deliberately deleted project must NOT come back on re-add. The CLI
+      // help for `remove` tells the user their memory history is permanently
+      // deleted and that it cannot be undone; after F3 that promise was
+      // breakable from a dashboard checkbox, by accident. Delete is also the
+      // only purge a user has for a credential captured into a prompt, and a
+      // purge that silently reverses is not a purge.
+      check('tombstone: re-adding a deliberately deleted project does NOT restore its history', () => {
+        const serverLib = require('../lib/server');
+        const projD = path.join(ROOT, 'projects', 'backfill-d');
+        fs.mkdirSync(projD, { recursive: true });
+        fs.writeFileSync(path.join(bfDir, 'sess-d.jsonl'), jsonl([
+          { type: 'user', message: { role: 'user', content: 'Rotate the vault signing key' }, cwd: rp(projD), timestamp: '2026-07-01T09:30:00.000Z' },
+        ]));
+        const prevHome = process.env.MEMBRIDGE_HOME;
+        const prevClaude = process.env.MEMBRIDGE_CLAUDE_DIR;
+        const prevCodex = process.env.MEMBRIDGE_CODEX_DIR;
+        process.env.MEMBRIDGE_HOME = bfHome;
+        process.env.MEMBRIDGE_CLAUDE_DIR = bfClaude;
+        process.env.MEMBRIDGE_CODEX_DIR = bfCodex;
+        try {
+          serverLib.addProject(rp(projD));
+          syncOnce();
+          assert.ok(read(path.join(projD, 'CLAUDE.md')).includes('vault signing key'),
+            'setup: D should have its history before it is deleted');
+          const del = serverLib.deleteProject(rp(projD));
+          assert.ok(del.deleted, `setup: delete failed: ${JSON.stringify(del)}`);
+          // Re-add, exactly as a dashboard checkbox would.
+          const re = serverLib.addProject(rp(projD));
+          assert.ok(re.added, `re-add failed: ${JSON.stringify(re)}`);
+          assert.strictEqual(re.previouslyDeleted, true,
+            'the re-add did not recognise this project as previously deleted');
+          assert.strictEqual(re.backfilled, 0,
+            'the re-add backfilled a deliberately deleted project');
+          syncOnce();
+          const md = fs.existsSync(path.join(projD, 'CLAUDE.md')) ? read(path.join(projD, 'CLAUDE.md')) : '';
+          assert.ok(!md.includes('vault signing key'),
+            `a deleted project's purged history came back on re-add:\n${md}`);
+        } finally {
+          process.env.MEMBRIDGE_HOME = prevHome;
+          process.env.MEMBRIDGE_CLAUDE_DIR = prevClaude;
+          process.env.MEMBRIDGE_CODEX_DIR = prevCodex;
+        }
+      });
+
+      check('tombstone: --backfill forces restoration despite the tombstone, and clears it', () => {
+        const serverLib = require('../lib/server');
+        const projE = path.join(ROOT, 'projects', 'backfill-e');
+        fs.mkdirSync(projE, { recursive: true });
+        fs.writeFileSync(path.join(bfDir, 'sess-e.jsonl'), jsonl([
+          { type: 'user', message: { role: 'user', content: 'Chart the invoice aging buckets' }, cwd: rp(projE), timestamp: '2026-07-01T09:40:00.000Z' },
+        ]));
+        const prevHome = process.env.MEMBRIDGE_HOME;
+        const prevClaude = process.env.MEMBRIDGE_CLAUDE_DIR;
+        const prevCodex = process.env.MEMBRIDGE_CODEX_DIR;
+        process.env.MEMBRIDGE_HOME = bfHome;
+        process.env.MEMBRIDGE_CLAUDE_DIR = bfClaude;
+        process.env.MEMBRIDGE_CODEX_DIR = bfCodex;
+        try {
+          serverLib.addProject(rp(projE));
+          syncOnce();
+          assert.ok(read(path.join(projE, 'CLAUDE.md')).includes('invoice aging'), 'setup: E needs history');
+          serverLib.deleteProject(rp(projE));
+          const re = serverLib.addProject(rp(projE), { backfill: true });
+          assert.strictEqual(re.previouslyDeleted, true, 'the tombstone should still be reported');
+          assert.ok(re.backfilled > 0, 'explicit --backfill did not override the tombstone');
+          syncOnce();
+          assert.ok(read(path.join(projE, 'CLAUDE.md')).includes('invoice aging'),
+            'explicit --backfill did not restore the history');
+          // Consumed, not sticky: a second delete-and-re-add behaves the same
+          // way rather than inheriting a stale tombstone.
+          const st = JSON.parse(read(path.join(bfHome, 'state.json')));
+          const tombs = Object.keys(st.deletedProjects || {});
+          assert.ok(!tombs.some(k => util.normPath(k) === util.normPath(rp(projE))),
+            `the tombstone survived the re-add: ${JSON.stringify(tombs)}`);
+        } finally {
+          process.env.MEMBRIDGE_HOME = prevHome;
+          process.env.MEMBRIDGE_CLAUDE_DIR = prevClaude;
+          process.env.MEMBRIDGE_CODEX_DIR = prevCodex;
+        }
       });
 
       check('backfill: the steady state still advances offsets only once', () => {
@@ -3055,8 +3136,8 @@ async function main() {
 
     // The ingestion gate means a deleted project stays deleted: new activity
     // in its (now untracked) cwd is dropped, never auto-revived. Re-adding the
-    // project through the dashboard brings it back, and since F3 that re-add
-    // BACKFILLS like any other adoption.
+    // project through the dashboard brings it back, but NOT the history the
+    // delete purged (see the tombstone in deleteProject).
     fs.appendFileSync(
       path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-shop-app', 'sess1.jsonl'),
       JSON.stringify({ type: 'user', message: { role: 'user', content: 'Dropped while deleted' }, cwd: proj1, timestamp: '2026-07-09T12:00:00.000Z' }) + '\n',
@@ -3074,24 +3155,17 @@ async function main() {
     );
     await post(`${base}/api/sync`);
     const afterRevive = await (await fetch(`${base}/api/projects`)).json();
-    check('re-added project picks up new activity again, and backfills what the gate dropped', () => {
+    check('re-added project picks up new activity again', () => {
       const p = afterRevive.find(x => x.path.toLowerCase() === proj1.toLowerCase());
       assert.ok(p, 'deleted project did not reappear');
       assert.ok(p.prompts.some(e => e.text.includes('Ship the checkout flow')), 'new prompt missing');
-      // CHANGED BY F3, deliberately. This used to assert the gate-dropped
-      // prompt stayed gone, which was a consequence of consumed offsets rather
-      // than a designed guarantee: F3 cites deleteProject's own "only future
-      // activity revives it" line as the defect. deleteProject's other comment
-      // is the one that settles it, and it was already there: a re-add "is a
-      // fresh decision to track it, and it starts capturing like any other
-      // newly added project". Any other newly added project now backfills.
-      //
-      // What delete destroys is MemBridge's own memory: the .membridge history
-      // and the injected blocks, and that really is unrecoverable. What comes
-      // back here is re-derived from Claude Code's transcript, which MemBridge
-      // never owned and never deleted.
-      assert.ok(p.prompts.some(e => e.text.includes('Dropped while deleted')),
-        'the re-add did not backfill the history the gate dropped while the project was untracked');
+      // STILL TRUE AFTER F3, and now for a designed reason rather than an
+      // accidental one. F3's backfill would have resurfaced this, so a
+      // tombstone written by deleteProject suppresses it: `membridge remove`
+      // promises the deletion cannot be undone, and delete is the only purge a
+      // user has for a credential captured into a prompt. `add --backfill`
+      // overrides it explicitly.
+      assert.ok(!p.prompts.some(e => e.text.includes('Dropped while deleted')), 'gate-dropped prompt resurfaced');
     });
 
     process.env.MEMBRIDGE_API_BASE = `http://127.0.0.1:${P(44)}`; // in-process advisor -> the same mock
