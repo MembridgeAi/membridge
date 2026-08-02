@@ -431,7 +431,9 @@ function cmdAdd() {
   const targets = (paths.length ? paths : [process.cwd()]).map(p => {
     try { return fs.realpathSync(p); } catch { return p; }
   });
-  const r = adoptProjects(targets);
+  // Backfill is the default: an adoption that shows nothing is worse than a
+  // slow one, and prior history is the whole reason to adopt.
+  const r = adoptProjects(targets, { backfill: !flag('--no-backfill') });
   for (const p of r.adopted) console.log(`  adopted: ${p}`);
   for (const s of r.skipped) console.log(`  skipped: ${s.path} (${s.reason})`);
   console.log(r.adoptedCount
@@ -1025,8 +1027,11 @@ Usage: membridge <command>
   dashboard           open the local web dashboard (starts daemon if needed)
   sync [--dry-run] [--project <path>]   one sync pass right now
   scan                read-only: show which tools/projects were discovered
-  add [<path>...]     start tracking a project (defaults to the current
-                      directory). The reverse is \`remove --project <path>\`.
+  add [<path>...] [--no-backfill]
+                      start tracking a project (defaults to the current
+                      directory). Existing AI history for it is recovered on
+                      the next sync; --no-backfill registers it without
+                      re-reading. The reverse is \`remove --project <path>\`.
   remove [--project <path>] [--keep-memory]
                       strip injected memory blocks AND permanently delete each
                       project's local memory history in .membridge/
