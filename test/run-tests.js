@@ -818,7 +818,16 @@ async function main() {
     // that case instead of the old `undefined`, which hid the real cause.
     assert.strictEqual(out.status, 0,
       `npm pack --dry-run failed: ${out.error ? out.error.message : (out.stderr || `status ${out.status}`)}`);
-    const [{ files }] = JSON.parse(out.stdout);
+    // npm is free to change this payload's shape and did: up to npm 11.13 it
+    // is an ARRAY of one manifest, and a later npm returns the manifest as a
+    // bare OBJECT. The old `const [{ files }] =` destructure threw "object is
+    // not iterable" on the newer one and failed the release publish. Accept
+    // both rather than pinning npm, since the thing under test is the tarball
+    // contents, not npm's reporting format.
+    const packed = JSON.parse(out.stdout);
+    const manifest = Array.isArray(packed) ? packed[0] : packed;
+    const files = (manifest && manifest.files) || [];
+    assert.ok(files.length, `npm pack --json returned no file list: ${out.stdout.slice(0, 300)}`);
     const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
     assert.ok(vendoredWasm.length >= 4,
       `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
