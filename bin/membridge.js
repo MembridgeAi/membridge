@@ -431,8 +431,18 @@ function cmdAdd() {
   const targets = (paths.length ? paths : [process.cwd()]).map(p => {
     try { return fs.realpathSync(p); } catch { return p; }
   });
-  const r = adoptProjects(targets);
-  for (const p of r.adopted) console.log(`  adopted: ${p}`);
+  // Backfill is the default: an adoption that shows nothing is worse than a
+  // slow one, and prior history is the whole reason to adopt. Undefined rather
+  // than true when neither flag is given, so addProject can still withhold it
+  // for a project that was deliberately deleted.
+  const backfill = flag('--backfill') ? true : flag('--no-backfill') ? false : undefined;
+  const r = adoptProjects(targets, { backfill });
+  const withheld = new Set(r.historyWithheld || []);
+  for (const p of r.adopted) {
+    console.log(withheld.has(p)
+      ? `  adopted: ${p} (history not restored, this project was previously deleted; \`--backfill\` restores it)`
+      : `  adopted: ${p}`);
+  }
   for (const s of r.skipped) console.log(`  skipped: ${s.path} (${s.reason})`);
   console.log(r.adoptedCount
     ? `${r.adoptedCount} project(s) adopted. Memory lands on the next sync; run \`membridge sync\` to not wait.`
@@ -477,6 +487,19 @@ function cmdRemove() {
       n++;
       wiped++;
     }
+  }
+  // Tombstone every path whose memory history this actually purged, so a later
+  // re-add cannot restore it from the transcripts. `remove` promises the
+  // deletion cannot be undone; without this, adoption's backfill would undo it.
+  // --keep-memory purges nothing, so it lays no tombstone.
+  if (wiped) {
+    const st = util.loadState();
+    st.deletedProjects = st.deletedProjects || {};
+    for (const key of keys) {
+      if (fs.existsSync(path.join(key, memorydb.DIR_NAME))) continue; // nothing was wiped here
+      st.deletedProjects[key] = new Date().toISOString();
+    }
+    util.saveState(st);
   }
   const wipedNote = wiped ? ` Local memory history deleted in ${wiped} project(s).` : '';
   const keptNote = keepMemory ? ' Local memory history kept (--keep-memory).' : '';
@@ -1025,8 +1048,13 @@ Usage: membridge <command>
   dashboard           open the local web dashboard (starts daemon if needed)
   sync [--dry-run] [--project <path>]   one sync pass right now
   scan                read-only: show which tools/projects were discovered
-  add [<path>...]     start tracking a project (defaults to the current
-                      directory). The reverse is \`remove --project <path>\`.
+  add [<path>...] [--backfill|--no-backfill]
+                      start tracking a project (defaults to the current
+                      directory). Existing AI history for it is recovered on
+                      the next sync, EXCEPT for a project you deleted on
+                      purpose, whose history stays deleted; --backfill
+                      restores it anyway, --no-backfill registers without
+                      re-reading. The reverse is \`remove --project <path>\`.
   remove [--project <path>] [--keep-memory]
                       strip injected memory blocks AND permanently delete each
                       project's local memory history in .membridge/

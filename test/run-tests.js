@@ -1794,8 +1794,237 @@ async function main() {
         assert.ok(Math.abs(addAt - scanAt) <= 4,
           `add is not beside scan and sync (add at ${addAt}, scan at ${scanAt}, sync at ${syncAt})`);
         // The pair must be discoverable from each other.
-        const entry = lines.slice(addAt, addAt + 3).join('\n');
+        const entry = lines.slice(addAt, addAt + 8).join('\n');
         assert.ok(/remove/.test(entry), `add's help does not cross-reference remove: ${entry}`);
+      });
+    }
+
+    // --- F3: adopting a project backfills the history that predates it ---
+    // HIGH (alpha readiness, F3): scanAll advances state.files read offsets for
+    // EVERY session file it touches, including files belonging to projects that
+    // are not tracked yet, and the tracking filter runs afterwards. So every
+    // daemon tick consumed transcript bytes for un-adopted projects and never
+    // re-read them. deleteProject's own comment states the consequence
+    // plainly: "Transcript offsets stay consumed, so only future activity
+    // revives it." A user with three weeks of history adopts their project,
+    // syncs, and sees an empty memory block, at the exact moment the product's
+    // value proposition is retroactive memory.
+    {
+      const bfHome = path.join(ROOT, 'backfill-home');
+      const bfClaude = path.join(ROOT, 'backfill-claude');
+      // Its OWN codex dir too. Writing a rollout into the SHARED
+      // MEMBRIDGE_CODEX_DIR puts a fixture in front of every other test that
+      // scans it, which hung the suite outright the first time.
+      const bfCodex = path.join(ROOT, 'backfill-codex');
+      const bfEnv = {
+        ...process.env,
+        MEMBRIDGE_HOME: bfHome,
+        MEMBRIDGE_CLAUDE_DIR: bfClaude,
+        MEMBRIDGE_CODEX_DIR: bfCodex,
+      };
+      const projA = path.join(ROOT, 'projects', 'backfill-a');
+      const projB = path.join(ROOT, 'projects', 'backfill-b');
+
+      // B is tracked from the start (a .membridge marker is what the ingestion
+      // gate accepts on sight). A is NOT tracked, so its transcript bytes get
+      // consumed by the pre-adoption sync below and are what backfill must
+      // recover.
+      for (const p of [projA, projB]) fs.mkdirSync(p, { recursive: true });
+      fs.mkdirSync(path.join(projB, '.membridge'), { recursive: true });
+      // A transcript records the cwd node reports, which is realpath'd (see
+      // lib/project-resolve.js's canonical-spelling comment). ROOT is under
+      // /var on macOS, a symlink to /private/var, and an ADOPTED project has no
+      // .membridge marker to fall back on -- it matches only through the
+      // tracked-roots set. Writing the unresolved spelling here would test a
+      // transcript no tool actually produces.
+      const rp = p => { try { return fs.realpathSync(p); } catch { return p; } };
+      const cwdA = rp(projA);
+      const cwdB = rp(projB);
+      const bfDir = path.join(bfClaude, 'slug-backfill');
+      fs.mkdirSync(bfDir, { recursive: true });
+      fs.writeFileSync(path.join(bfDir, 'sess-a.jsonl'), jsonl([
+        { type: 'user', message: { role: 'user', content: 'Wire up the payment retry queue' }, cwd: cwdA, timestamp: '2026-07-01T09:00:00.000Z' },
+        { type: 'user', message: { role: 'user', content: 'Add a dead-letter table for failed charges' }, cwd: cwdA, timestamp: '2026-07-01T09:05:00.000Z' },
+      ]));
+      fs.writeFileSync(path.join(bfDir, 'sess-b.jsonl'), jsonl([
+        { type: 'user', message: { role: 'user', content: 'Rename the settings drawer to preferences' }, cwd: cwdB, timestamp: '2026-07-01T09:10:00.000Z' },
+      ]));
+      // A Codex rollout for B as well. Codex persists the cwd in rec.data (its
+      // session_meta header precedes the user messages, so the adapter has to),
+      // which makes its files the attributable case the keep-set protects.
+      const bfCodexDir = path.join(bfCodex, '2026', '07', '01');
+      fs.mkdirSync(bfCodexDir, { recursive: true });
+      fs.writeFileSync(path.join(bfCodexDir, 'rollout-b.jsonl'), jsonl([
+        { timestamp: '2026-07-01T09:11:00.000Z', type: 'session_meta', payload: { id: 'bfb', cwd: cwdB } },
+        { timestamp: '2026-07-01T09:12:00.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Tighten the preferences validation' }] } },
+      ]));
+
+      const bfCli = (...argv) => spawnSync(process.execPath, [BIN, ...argv], { encoding: 'utf8', env: bfEnv });
+      let stateAfterAdd = null;
+
+      // Pre-adoption sync: consumes BOTH files' bytes. A is untracked so its
+      // events are dropped after the offsets have already moved, which is the
+      // whole defect.
+      bfCli('sync');
+      const blockB_before = read(path.join(projB, 'CLAUDE.md'));
+
+      check('backfill: adopting a project recovers the history that predates the adopt', () => {
+        assert.ok(!fs.existsSync(path.join(projA, 'CLAUDE.md')),
+          'project A should have no memory block before it is adopted');
+        assert.strictEqual(bfCli('add', projA).status, 0, 'add failed');
+        // Snapshot BETWEEN the adopt and the sync. After the sync every file
+        // has been re-read and its offset is positive again, so a scope error
+        // is invisible by then; this is the only moment it shows.
+        stateAfterAdd = JSON.parse(read(path.join(bfHome, 'state.json')));
+        bfCli('sync');
+        const mdA = fs.existsSync(path.join(projA, 'CLAUDE.md')) ? read(path.join(projA, 'CLAUDE.md')) : '';
+        assert.ok(mdA.includes('payment retry queue'),
+          `A's pre-adoption history is missing after adopt+sync. Block was:\n${mdA}`);
+        assert.ok(mdA.includes('dead-letter table'),
+          `only part of A's pre-adoption history came back:\n${mdA}`);
+      });
+
+      check('backfill: adopting A leaves B\'s memory block byte-identical', () => {
+        const after = read(path.join(projB, 'CLAUDE.md'));
+        assert.strictEqual(after, blockB_before,
+          'adopting A changed B\'s memory block, so the offset reset is scoped too wide');
+      });
+
+      check('backfill: adopting A does not reset an already-tracked project\'s offsets', () => {
+        // The byte-identical check above is necessary but NOT sufficient, and
+        // measuring that was the point: with the reset deliberately widened to
+        // clear every file, B's block STAYS byte-identical, because mergeEvents
+        // dedupes on eventKey seeded from what is already stored. The rendered
+        // output simply cannot see the difference while B's events are still in
+        // its window.
+        //
+        // What the widened reset does change is B's offset going back to zero
+        // and its whole transcript being re-read. That is the scope error, and
+        // this is the assertion that catches it. Re-reading is not free: on a
+        // real machine with many tracked projects it is the difference between
+        // adopting one project and re-ingesting every project's full history,
+        // and if any of those events HAVE aged out of the window they come back
+        // as duplicates.
+        assert.ok(stateAfterAdd, 'the post-adopt snapshot was never taken');
+        const files = stateAfterAdd.files || {};
+        // The ATTRIBUTABLE case. A Codex rollout carries its project in
+        // rec.data.cwd, so the reset can see it belongs to already-tracked B
+        // and must leave it alone. Widening the reset drops this record, which
+        // is what makes this check non-vacuous where the byte-comparison above
+        // is not.
+        const bCodex = Object.keys(files).find(f => f.endsWith('rollout-b.jsonl'));
+        assert.ok(bCodex,
+          `B's attributable Codex record was cleared by adopting A, so the reset is scoped too wide: ${JSON.stringify(Object.keys(files))}`);
+        assert.ok(files[bCodex].offset > 0,
+          `B's Codex offset was reset to ${files[bCodex].offset} by adopting A`);
+        // A's own record must be gone, which is the backfill itself.
+        const aFile = Object.keys(files).find(f => f.endsWith('sess-a.jsonl'));
+        assert.ok(!aFile, `A's offset survived the adopt, so nothing was backfilled: ${JSON.stringify(Object.keys(files))}`);
+      });
+
+      check('backfill: --no-backfill adopts without recovering prior history', () => {
+        const projC = path.join(ROOT, 'projects', 'backfill-c');
+        fs.mkdirSync(projC, { recursive: true });
+        fs.writeFileSync(path.join(bfDir, 'sess-c.jsonl'), jsonl([
+          { type: 'user', message: { role: 'user', content: 'Draft the migration rollback plan' }, cwd: rp(projC), timestamp: '2026-07-01T09:20:00.000Z' },
+        ]));
+        bfCli('sync'); // consume C's bytes while it is still untracked
+        assert.strictEqual(bfCli('add', projC, '--no-backfill').status, 0, 'add --no-backfill failed');
+        bfCli('sync');
+        const mdC = fs.existsSync(path.join(projC, 'CLAUDE.md')) ? read(path.join(projC, 'CLAUDE.md')) : '';
+        assert.ok(!mdC.includes('migration rollback plan'),
+          `--no-backfill still recovered prior history:\n${mdC}`);
+      });
+
+      // A deliberately deleted project must NOT come back on re-add. The CLI
+      // help for `remove` tells the user their memory history is permanently
+      // deleted and that it cannot be undone; after F3 that promise was
+      // breakable from a dashboard checkbox, by accident. Delete is also the
+      // only purge a user has for a credential captured into a prompt, and a
+      // purge that silently reverses is not a purge.
+      check('tombstone: re-adding a deliberately deleted project does NOT restore its history', () => {
+        const serverLib = require('../lib/server');
+        const projD = path.join(ROOT, 'projects', 'backfill-d');
+        fs.mkdirSync(projD, { recursive: true });
+        fs.writeFileSync(path.join(bfDir, 'sess-d.jsonl'), jsonl([
+          { type: 'user', message: { role: 'user', content: 'Rotate the vault signing key' }, cwd: rp(projD), timestamp: '2026-07-01T09:30:00.000Z' },
+        ]));
+        const prevHome = process.env.MEMBRIDGE_HOME;
+        const prevClaude = process.env.MEMBRIDGE_CLAUDE_DIR;
+        const prevCodex = process.env.MEMBRIDGE_CODEX_DIR;
+        process.env.MEMBRIDGE_HOME = bfHome;
+        process.env.MEMBRIDGE_CLAUDE_DIR = bfClaude;
+        process.env.MEMBRIDGE_CODEX_DIR = bfCodex;
+        try {
+          serverLib.addProject(rp(projD));
+          syncOnce();
+          assert.ok(read(path.join(projD, 'CLAUDE.md')).includes('vault signing key'),
+            'setup: D should have its history before it is deleted');
+          const del = serverLib.deleteProject(rp(projD));
+          assert.ok(del.deleted, `setup: delete failed: ${JSON.stringify(del)}`);
+          // Re-add, exactly as a dashboard checkbox would.
+          const re = serverLib.addProject(rp(projD));
+          assert.ok(re.added, `re-add failed: ${JSON.stringify(re)}`);
+          assert.strictEqual(re.previouslyDeleted, true,
+            'the re-add did not recognise this project as previously deleted');
+          assert.strictEqual(re.backfilled, 0,
+            'the re-add backfilled a deliberately deleted project');
+          syncOnce();
+          const md = fs.existsSync(path.join(projD, 'CLAUDE.md')) ? read(path.join(projD, 'CLAUDE.md')) : '';
+          assert.ok(!md.includes('vault signing key'),
+            `a deleted project's purged history came back on re-add:\n${md}`);
+        } finally {
+          process.env.MEMBRIDGE_HOME = prevHome;
+          process.env.MEMBRIDGE_CLAUDE_DIR = prevClaude;
+          process.env.MEMBRIDGE_CODEX_DIR = prevCodex;
+        }
+      });
+
+      check('tombstone: --backfill forces restoration despite the tombstone, and clears it', () => {
+        const serverLib = require('../lib/server');
+        const projE = path.join(ROOT, 'projects', 'backfill-e');
+        fs.mkdirSync(projE, { recursive: true });
+        fs.writeFileSync(path.join(bfDir, 'sess-e.jsonl'), jsonl([
+          { type: 'user', message: { role: 'user', content: 'Chart the invoice aging buckets' }, cwd: rp(projE), timestamp: '2026-07-01T09:40:00.000Z' },
+        ]));
+        const prevHome = process.env.MEMBRIDGE_HOME;
+        const prevClaude = process.env.MEMBRIDGE_CLAUDE_DIR;
+        const prevCodex = process.env.MEMBRIDGE_CODEX_DIR;
+        process.env.MEMBRIDGE_HOME = bfHome;
+        process.env.MEMBRIDGE_CLAUDE_DIR = bfClaude;
+        process.env.MEMBRIDGE_CODEX_DIR = bfCodex;
+        try {
+          serverLib.addProject(rp(projE));
+          syncOnce();
+          assert.ok(read(path.join(projE, 'CLAUDE.md')).includes('invoice aging'), 'setup: E needs history');
+          serverLib.deleteProject(rp(projE));
+          const re = serverLib.addProject(rp(projE), { backfill: true });
+          assert.strictEqual(re.previouslyDeleted, true, 'the tombstone should still be reported');
+          assert.ok(re.backfilled > 0, 'explicit --backfill did not override the tombstone');
+          syncOnce();
+          assert.ok(read(path.join(projE, 'CLAUDE.md')).includes('invoice aging'),
+            'explicit --backfill did not restore the history');
+          // Consumed, not sticky: a second delete-and-re-add behaves the same
+          // way rather than inheriting a stale tombstone.
+          const st = JSON.parse(read(path.join(bfHome, 'state.json')));
+          const tombs = Object.keys(st.deletedProjects || {});
+          assert.ok(!tombs.some(k => util.normPath(k) === util.normPath(rp(projE))),
+            `the tombstone survived the re-add: ${JSON.stringify(tombs)}`);
+        } finally {
+          process.env.MEMBRIDGE_HOME = prevHome;
+          process.env.MEMBRIDGE_CLAUDE_DIR = prevClaude;
+          process.env.MEMBRIDGE_CODEX_DIR = prevCodex;
+        }
+      });
+
+      check('backfill: the steady state still advances offsets only once', () => {
+        // The scoped reset must not turn into "re-read everything every pass".
+        // Two syncs with no new bytes must leave A's block unchanged.
+        const before = read(path.join(projA, 'CLAUDE.md'));
+        bfCli('sync');
+        bfCli('sync');
+        assert.strictEqual(read(path.join(projA, 'CLAUDE.md')), before,
+          'a steady-state sync changed the block, so offsets are being reset repeatedly');
       });
     }
   }
@@ -2907,7 +3136,8 @@ async function main() {
 
     // The ingestion gate means a deleted project stays deleted: new activity
     // in its (now untracked) cwd is dropped, never auto-revived. Re-adding the
-    // project through the dashboard, plus fresh activity, brings it back.
+    // project through the dashboard brings it back, but NOT the history the
+    // delete purged (see the tombstone in deleteProject).
     fs.appendFileSync(
       path.join(process.env.MEMBRIDGE_CLAUDE_DIR, 'slug-shop-app', 'sess1.jsonl'),
       JSON.stringify({ type: 'user', message: { role: 'user', content: 'Dropped while deleted' }, cwd: proj1, timestamp: '2026-07-09T12:00:00.000Z' }) + '\n',
@@ -2929,6 +3159,12 @@ async function main() {
       const p = afterRevive.find(x => x.path.toLowerCase() === proj1.toLowerCase());
       assert.ok(p, 'deleted project did not reappear');
       assert.ok(p.prompts.some(e => e.text.includes('Ship the checkout flow')), 'new prompt missing');
+      // STILL TRUE AFTER F3, and now for a designed reason rather than an
+      // accidental one. F3's backfill would have resurfaced this, so a
+      // tombstone written by deleteProject suppresses it: `membridge remove`
+      // promises the deletion cannot be undone, and delete is the only purge a
+      // user has for a credential captured into a prompt. `add --backfill`
+      // overrides it explicitly.
       assert.ok(!p.prompts.some(e => e.text.includes('Dropped while deleted')), 'gate-dropped prompt resurfaced');
     });
 
