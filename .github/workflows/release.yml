@@ -34,10 +34,13 @@ jobs:
           # Never cache in a release build: a stale cache is how a publish ends
           # up shipping something other than what the tag contains.
           package-manager-cache: false
-      # Trusted publishing needs npm >= 11.5.1. Node 24 ships npm 11, but pin
-      # the floor explicitly rather than inheriting whatever the runner image
-      # happens to bundle this month.
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm >= 11.5.1, so the runner's bundled npm is
+      # not assumed. PINNED, not @latest: @latest pulled an npm whose
+      # `npm pack --json` returns an object keyed by package name instead of an
+      # array of manifests, which broke the tarball check and blocked the
+      # publish twice. A release pipeline must not change behavior because npm
+      # shipped that morning. Raise this deliberately, with the suite green.
+      - run: npm install -g npm@11.13.0
       # Prod deps from the lockfile, which now includes the MCP SDK + zod.
       # No side-install — mirrors ci.yml.
       - run: npm ci --omit=dev --no-audit --no-fund

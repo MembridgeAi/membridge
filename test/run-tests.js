@@ -818,16 +818,25 @@ async function main() {
     // that case instead of the old `undefined`, which hid the real cause.
     assert.strictEqual(out.status, 0,
       `npm pack --dry-run failed: ${out.error ? out.error.message : (out.stderr || `status ${out.status}`)}`);
-    // npm is free to change this payload's shape and did: up to npm 11.13 it
-    // is an ARRAY of one manifest, and a later npm returns the manifest as a
-    // bare OBJECT. The old `const [{ files }] =` destructure threw "object is
-    // not iterable" on the newer one and failed the release publish. Accept
-    // both rather than pinning npm, since the thing under test is the tarball
-    // contents, not npm's reporting format.
-    const packed = JSON.parse(out.stdout);
-    const manifest = Array.isArray(packed) ? packed[0] : packed;
-    const files = (manifest && manifest.files) || [];
-    assert.ok(files.length, `npm pack --json returned no file list: ${out.stdout.slice(0, 300)}`);
+    // npm keeps changing this payload's shape, so stop matching on shape and
+    // go find the file list wherever it is. Three forms seen so far:
+    //   npm <= 11.13   [{ files: [...] }]                 array of manifests
+    //   newer          { files: [...] }                   bare manifest
+    //   newer still    { "@scope/name": { ... } }          keyed by package name
+    // The last one blocked the 0.2.4 publish twice. What this check is about is
+    // the tarball's CONTENTS; npm's reporting format is incidental.
+    const findFiles = node => {
+      if (!node || typeof node !== 'object') return null;
+      if (Array.isArray(node.files) && node.files.length && node.files[0]
+          && typeof node.files[0].path === 'string') return node.files;
+      for (const v of Array.isArray(node) ? node : Object.values(node)) {
+        const hit = findFiles(v);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const files = findFiles(JSON.parse(out.stdout));
+    assert.ok(files, `no file list anywhere in npm pack --json output: ${out.stdout.slice(0, 300)}`);
     const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
     assert.ok(vendoredWasm.length >= 4,
       `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
