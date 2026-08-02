@@ -1,6 +1,17 @@
 # Publishes to npm when a GitHub release is published.
-# Requires an npm automation token saved as the NPM_TOKEN repo secret
-# (npmjs.com -> Access Tokens -> Generate New Token -> Automation).
+#
+# Uses npm TRUSTED PUBLISHING (OIDC), not a token. npm began restricting
+# 2FA-bypass tokens in early August 2026: they can no longer change package or
+# account settings, and they lose direct-publish entirely around January 2027.
+# A token also cannot satisfy a package whose publish gate is set to require
+# 2FA, which is what blocked the 0.2.4 publish with EOTP.
+#
+# The trust relationship is configured on npmjs.com against THIS repository and
+# THIS filename (release.yml). Renaming this file breaks publishing until the
+# npm-side config is updated to match.
+#
+# No NPM_TOKEN is needed. Provenance is automatic for a public repository under
+# trusted publishing, so --provenance is not passed explicitly.
 name: Release
 
 on:
@@ -16,10 +27,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          # Never cache in a release build: a stale cache is how a publish ends
+          # up shipping something other than what the tag contains.
+          package-manager-cache: false
+      # Trusted publishing needs npm >= 11.5.1. Node 24 ships npm 11, but pin
+      # the floor explicitly rather than inheriting whatever the runner image
+      # happens to bundle this month.
+      - run: npm install -g npm@latest
       # Prod deps from the lockfile, which now includes the MCP SDK + zod.
       # No side-install — mirrors ci.yml.
       - run: npm ci --omit=dev --no-audit --no-fund
@@ -37,6 +55,4 @@ jobs:
       - run: npm run build
         working-directory: ui
       - run: node test/run-tests.js
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
