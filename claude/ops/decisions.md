@@ -10,6 +10,60 @@ and are flagged as such.
 
 ---
 
+## A deliberately deleted project does not come back on re-add
+
+**Decided 2026-08-01.** Alpha readiness F3 makes adoption backfill a project's
+history: the daemon consumes transcript bytes for projects it is not tracking
+yet, so without a reset an adopted project shows an empty block. Correct for a
+project that was never tracked. Wrong for one the user deleted on purpose.
+
+`deleteProject` and `membridge remove` now write a tombstone into
+`state.deletedProjects`. `addProject` consults it, skips the backfill, and
+clears it, so a second delete-and-re-add behaves the same way rather than
+inheriting a stale entry. `membridge add --backfill` overrides it explicitly.
+Opt-in, never default.
+
+### Why this beat the tidiness argument
+
+`deleteProject`'s own comment argues the other way, and it is a good argument:
+a re-add "is a fresh decision to track it, and it starts capturing like any
+other newly added project", and any other newly added project now backfills.
+
+It loses to the CLI help text. `membridge remove` tells the user it
+**permanently** deletes their local memory history and that **this cannot be
+undone**. After F3 that promise was breakable from a dashboard checkbox, by
+accident. A documented permanence guarantee is not something to break to avoid
+one state key.
+
+The security case is the reason rather than a tiebreaker. Delete is currently
+the only purge a user has for a credential captured into a prompt, which is the
+gap the rewritten Task 5 exists to close. A purge that silently reverses is not
+a purge.
+
+### The uncomfortable part, recorded on purpose
+
+**The transcript was never actually gone.** What `remove` deletes is
+MemBridge's own `.membridge` history and the injected blocks. The underlying
+Claude Code or Codex transcript on disk is untouched, and it is still readable
+by anything that cares to read it.
+
+Before F3 the purge held only because the scanner's read offsets had already
+been consumed, so nothing re-read the file. That is a side effect, not a
+guarantee. Anything that reset those offsets, which is exactly what F3 added,
+would have undone the purge without a single line of the deletion code
+changing.
+
+So the permanence the help text claims was always weaker than it sounded. The
+tombstone makes it deliberate rather than accidental, and that is a real
+improvement, but it still only binds MemBridge. **Someone should revisit
+whether the help text is honest**, because a user reading "permanently deleted
+and cannot be undone" is likely to believe the underlying prompt is gone from
+their machine, and it is not.
+
+Related: a credential that reached a teammate's machine through team sync is
+not covered by any of this either, which is the retroactive-scrubbing question
+Task 5 explicitly puts out of scope pending a count of affected rows.
+
 ## `lib/activity.js` is one shared corpus, reconciled from two independent extractions
 
 **Decided 2026-08-01.** `lib/activity.js` was extracted out of `lib/mcp.js`
