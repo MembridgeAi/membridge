@@ -23,6 +23,19 @@ jobs:
       # Prod deps from the lockfile, which now includes the MCP SDK + zod.
       # No side-install — mirrors ci.yml.
       - run: npm ci --omit=dev --no-audit --no-fund
+      # ui/ deps and build, in steps of their own, BEFORE the suite. Since
+      # ui/dist ships in the tarball, `npm pack` (which the suite runs) and
+      # `npm publish` below both fire prepack, and prepack builds the UI. If
+      # ui/node_modules is absent at that point, prepack's fallback runs
+      # `npm ci` INSIDE the npm lifecycle script, and that nested install
+      # inherits `omit=dev` from the parent npm process: the dev-only type
+      # packages tsconfig requires go missing and `tsc --noEmit` fails, so the
+      # publish never runs. A separate step does not inherit it, which is why
+      # ci.yml and build-app.yml were always fine and this file was not.
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
       - run: node test/run-tests.js
       - run: npm publish --provenance --access public
         env:
