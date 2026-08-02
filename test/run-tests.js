@@ -14694,7 +14694,33 @@ async function main() {
       assert.ok(/require\('\.\/activity'\)/.test(mcpSrc), 'lib/mcp.js no longer routes through the shared corpus');
     });
 
-    check('corpus invariant: the hook, the MCP tools and /api/search share ONE assembly and ONE scorer', () => {
+    check('workflows: anything that runs the suite or publishes must install ui/ deps itself', () => {
+    // The release workflow shipped nothing for 0.2.4 because of exactly this.
+    // Once ui/dist is in the tarball, `npm pack` and `npm publish` both fire
+    // prepack, which builds the UI. If the workflow has not installed ui/ deps
+    // in a step of its own, prepack's fallback runs `npm ci` INSIDE the npm
+    // lifecycle script, and that nested install inherits `omit=dev` from the
+    // parent npm process. The dev-only type packages tsconfig requires are then
+    // missing and `tsc --noEmit` fails, so the publish never happens.
+    //
+    // A separate workflow step does NOT inherit it, which is why ci.yml and
+    // build-app.yml were fine and release.yml was not. So the rule is
+    // structural: if a workflow runs the suite or publishes, it installs ui/
+    // deps explicitly first.
+    const dir = path.join(__dirname, '..', '.github', 'workflows');
+    const offenders = [];
+    for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.yml'))) {
+      const src = read(path.join(dir, f));
+      const needsUi = /run-tests\.js/.test(src) || /npm publish/.test(src);
+      if (!needsUi) continue;
+      if (!/working-directory:\s*ui/.test(src)) offenders.push(f);
+    }
+    assert.deepStrictEqual(offenders, [],
+      `these workflows run the suite or publish but never install ui/ deps, so prepack's `
+      + `nested npm ci will inherit omit=dev and the UI build will fail: ${JSON.stringify(offenders)}`);
+  });
+
+  check('corpus invariant: the hook, the MCP tools and /api/search share ONE assembly and ONE scorer', () => {
       // lib/activity.js was extracted out of lib/mcp.js TWICE, independently:
       // once on master (78 lines, for the PreToolUse search hook) and once on
       // a feature branch (315 lines, for the dashboard's /api/search). Both
