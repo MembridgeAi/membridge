@@ -50,6 +50,38 @@ something that was asked for, and neither is being fixed yet.
   in the dashboard reads it. Whatever calls that route is not the React app.
   Worth resolving before anyone is told the dashboard surfaces this.
 
+## Found 2026-08-02 while dogfooding, not yet fixed
+
+These came out of using the app rather than reading the code. Ordered by how
+much they distort what a user sees.
+
+- **Distillation stopped mid-session and nothing noticed.** Last summary written
+  to `membridge/.membridge/summaries.jsonl` is `2026-08-02T00:35:00Z`. The
+  session continued for hours past that and the Stop hook never prompted again.
+  The hook IS registered in `~/.claude/settings.json` and its script IS readable
+  (verified through Electron's fs), so the registration is not the problem. The
+  hook appears to run and emit nothing. This is the highest-value open bug: the
+  product's core loop silently stopped and the only symptom was a stale feed.
+
+- **`isHookInstalled()` reports a false negative for every Electron install.**
+  `lib/hooks.js` `commandIsLive` resolves the hook's script path with plain
+  node's `fs`. The Electron registration points inside `app.asar`, which only
+  resolves through Electron's patched `fs`, so a correct registration is judged
+  dead. `membridge status` then says "Claude Code hook not installed" and tells
+  the user to run `setup-hooks`, which would rewrite a registration that was
+  already right. The irony is that `commandIsLive`'s own comment says it exists
+  to close a hole; it opened the mirror-image one.
+
+- **A session is attributed to its cwd, even when none of its edits are there.**
+  Two days of membridge work landed under `mathetes` (270 events since Aug 2 vs
+  6 for membridge) because the Claude Code session was started from
+  `~/Desktop/mathetes`. MemBridge is doing what it was told: `cwd` is the signal
+  it has. But `lib/project-resolve.js` already has `rehomeEvents`, and every
+  edit event carries an absolute `ev.file`, so "most of this session's edits are
+  under project X while it is filed under Y" is answerable with data already on
+  hand. Do NOT auto-rehome silently. Surfacing it would have caught this on day
+  one, and it belongs in the session analytics header.
+
 ## Known failing check, not a regression
 
 `worktrees: a non-repo directory returns [] rather than throwing` fails on any
