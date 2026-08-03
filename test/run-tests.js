@@ -25848,6 +25848,38 @@ const repoRoot = require('../lib/repo-root');
       `raw NUL byte in source (use the \\x00 escape instead):\n${offenders.join('\n')}`);
   });
 
+  // Feed stylesheet invariants. These live HERE rather than in the UI suite
+  // for two reasons: jsdom does no layout, so the only real check on a
+  // CSS-only fix is the stylesheet TEXT; and reading a file needs node APIs
+  // that ui/tsconfig.json deliberately keeps out (its `types` is scoped to
+  // vite/vitest/jest-dom, with no @types/node), so the UI version type-checked
+  // only by accident of a local install and broke `tsc --noEmit` on CI's
+  // clean one. Vite's `?raw` is not an escape either: vitest stubs CSS
+  // imports, so it hands back an empty string.
+  check('feed stylesheet: a previewing row is raised above the rows below it', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'src', 'components', 'components.css'), 'utf8');
+    // Every row keeps `transform: translateY(0)` after settle-in (fill mode
+    // `both`), which makes it its own stacking context and traps the hover
+    // card's z-index inside the row -- so the next row down paints its opaque
+    // background straight over the card. Raising the ROW is the only escape.
+    const rule = css.match(/\.entry-row-previewing\s*\{[^}]*\}/);
+    assert.ok(rule, '.entry-row-previewing has no rule in components.css');
+    const zIndex = rule[0].match(/z-index:\s*(\d+)/);
+    assert.ok(zIndex, '.entry-row-previewing must set a z-index');
+    assert.ok(Number(zIndex[1]) >= 30,
+      `.entry-row-previewing z-index ${zIndex[1]} must clear the preview card's own 30`);
+  });
+
+  check('feed stylesheet: the session a Today card points at is visibly marked', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'src', 'components', 'components.css'), 'utf8');
+    const rule = css.match(/\.entry-row-targeted\s*\{[^}]*\}/);
+    assert.ok(rule, '.entry-row-targeted has no rule in components.css');
+    // Arriving from a Today card has to land somewhere visible, or the link
+    // may as well not exist. Any of these carries that on its own.
+    assert.ok(/background|box-shadow|border|outline/.test(rule[0]),
+      `.entry-row-targeted must render a visible marker, rule was: ${rule[0]}`);
+  });
+
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
   // file: these are the actual regression guards, run last so they observe
   // everything the suite did, not just one code path's isolation.

@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { EntryRow, HOVER_PREVIEW_DELAY_MS, PATH_MAX, ROW_FILE_LIMIT, rowFiles, shortPath } from './EntryRow'
@@ -204,17 +202,10 @@ describe('EntryRow hover preview (Task 6)', () => {
     expect(row.classList.contains('entry-row-previewing')).toBe(false)
   })
 
-  it('the stylesheet raises a previewing row above the rows below it', () => {
-    // Resolved from the vitest root (ui/), not import.meta.url -- vite serves
-    // test modules over a non-file scheme.
-    const css = readFileSync(resolve(process.cwd(), 'src/components/components.css'), 'utf8')
-    const rule = css.match(/\.entry-row-previewing\s*\{[^}]*\}/)
-    expect(rule, '.entry-row-previewing has no rule in components.css').not.toBeNull()
-    const zIndex = rule![0].match(/z-index:\s*(\d+)/)
-    expect(zIndex, '.entry-row-previewing must set a z-index').not.toBeNull()
-    // Strictly above the preview card's own z-index, which is scoped inside it.
-    expect(Number(zIndex![1])).toBeGreaterThanOrEqual(30)
-  })
+  // The stylesheet rule that makes the class do anything is asserted in the
+  // ROOT suite (test/run-tests.js), not here: jsdom does no layout, so the
+  // only real check is on the CSS text, and reading a file needs node APIs
+  // this project deliberately keeps out of the UI tsconfig.
 })
 
 // One live row named 16 files, wrapping to three lines of mono text that
