@@ -23,6 +23,7 @@ const SearchPage = lazy(() => import('../features/search/SearchPage').then(m => 
 const ProjectsPage = lazy(() => import('../features/projects/ProjectsPage').then(m => ({ default: m.ProjectsPage })))
 const ProjectPage = lazy(() => import('../features/project/ProjectPage').then(m => ({ default: m.ProjectPage })))
 const SessionPage = lazy(() => import('../features/session/SessionPage').then(m => ({ default: m.SessionPage })))
+const TeamPage = lazy(() => import('../features/team/TeamPage').then(m => ({ default: m.TeamPage })))
 const MembersPage = lazy(() => import('../features/members/MembersPage').then(m => ({ default: m.MembersPage })))
 const InsightsPage = lazy(() => import('../features/insights/InsightsPage').then(m => ({ default: m.InsightsPage })))
 const SettingsPage = lazy(() => import('../features/settings/SettingsPage').then(m => ({ default: m.SettingsPage })))
@@ -70,6 +71,10 @@ export function App() {
             <Route path={ROUTES.session}>
               {(params) => <SessionPage sessionId={decodeURIComponent(params.sessionId)} />}
             </Route>
+            {/* Before /team/members and /team/insights only for reading
+                order -- wouter matches these patterns exactly, so '/team'
+                never swallows the two nested paths. */}
+            <Route path={ROUTES.team}><TeamPage /></Route>
             <Route path={ROUTES.members}><MembersPage /></Route>
             <Route path={ROUTES.insights}><InsightsPage /></Route>
             <Route path={ROUTES.settings}><SettingsPage /></Route>

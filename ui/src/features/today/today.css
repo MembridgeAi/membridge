@@ -103,6 +103,18 @@
 .live-entry:hover {
   background: var(--panel2);
 }
+/* The whole card is the link. It carries no colour or underline of its own:
+   the row already reads as a unit, and styling it as a link would make the
+   most-looked-at screen look like a list of hyperlinks. */
+.live-entry-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+.live-entry-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 @media (prefers-reduced-motion: no-preference) {
   .live-entry {
     transition: background-color var(--dur-fast) var(--ease-out);

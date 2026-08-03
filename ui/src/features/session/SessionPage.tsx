@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'wouter'
 import { Avatar } from '../../components/Avatar'
 import { ROUTES } from '../../app/routes'
@@ -6,6 +7,8 @@ import { useSession } from '../../data/queries'
 import type { Session } from '../../data/types'
 import { BriefWidgets } from './BriefWidgets'
 import { PromptChain } from './PromptChain'
+import { SessionAnalytics, durationLabel } from './SessionAnalytics'
+import { distilledBullets, shortIntent } from './distill'
 import './session.css'
 
 // ---------------------------------------------------------------------------
@@ -20,21 +23,6 @@ export function firstSentences(text: string, max: number): string {
   const sentences = text.match(/[^.!?]*[.!?]+["')\]]*\s*/g)
   if (!sentences || sentences.length <= max) return text.trim()
   return sentences.slice(0, max).join('').trim()
-}
-
-/** "3h 12m" / "42m" / "under a minute" -- or null when either timestamp is
- *  missing/unparseable or the range is negative (clock skew): the eyebrow
- *  omits the duration rather than rendering NaN. */
-export function durationLabel(startedAt: string | null, endedAt: string | null): string | null {
-  if (!startedAt || !endedAt) return null
-  const start = Date.parse(startedAt)
-  const end = Date.parse(endedAt)
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
-  const minutes = Math.floor((end - start) / 60_000)
-  if (minutes < 1) return 'under a minute'
-  const h = Math.floor(minutes / 60)
-  const m = minutes % 60
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
 // The viewer's own wall clock, explicit locale (the suite pins TZ; every
@@ -86,13 +74,50 @@ function MetaRow({ s }: { s: Session }) {
   )
 }
 
+/** The intent line. Whole prompts used to render here verbatim, which pushed
+ *  everything below them off the screen -- so the line is clipped to one line
+ *  and grows a disclosure ONLY when something was actually cut. A short intent
+ *  renders exactly as before, with no control attached to it. */
+function IntentLine({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const short = shortIntent(text)
+  return (
+    <div className={`session-intent${open ? ' session-intent-open' : ''}`}>
+      <span className="session-intent-label">Intent</span>
+      <span className="session-intent-text">{open ? text : short.text}</span>
+      {short.clipped && (
+        <button
+          type="button"
+          className="session-intent-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen(v => !v)}
+        >
+          {open ? 'Show less' : 'Show full intent'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** The distilled one-liners, between the summary and the raw prompts. Absent
+ *  entirely when nothing was distilled -- absence is communicated by absence,
+ *  the same rule BriefWidgets follows. */
+function Bullets({ items }: { items: string[] }) {
+  if (items.length === 0) return null
+  return (
+    <ul className="session-bullets">
+      {items.map(text => <li key={text} className="session-bullet">{text}</li>)}
+    </ul>
+  )
+}
+
 interface SessionPageProps {
   sessionId: string
 }
 
-/** The session detail page (/sessions/:sessionId). Task 3 shell: eyebrow +
- *  header (summaryFull, 2 sentences) + Intent + meta row; widgets and the
- *  prompt chain land in their own tasks. */
+/** The session detail page (/sessions/:sessionId). Order, top to bottom:
+ *  back button, analytics header, the one-to-two sentence summary, the
+ *  distilled one-liners, the brief widgets, then the raw prompts newest-first. */
 export function SessionPage({ sessionId }: SessionPageProps) {
   const query = useSession(sessionId)
 
@@ -122,18 +147,21 @@ export function SessionPage({ sessionId }: SessionPageProps) {
 
   const header = s.summaryFull ? firstSentences(s.summaryFull, 2) : (s.summary || 'No summary yet')
   const intent = sessionIntent(s)
+  const bullets = distilledBullets(s)
 
   return (
     <div className="session-page">
+      {/* The way back, on the normal page and not only the not-found branch. */}
+      <Link href={ROUTES.feed} className="session-back">
+        <span className="session-back-chevron" aria-hidden="true">‹</span>
+        Back to the Feed
+      </Link>
       <Eyebrow s={s} />
+      <SessionAnalytics session={s} />
       <h1 className="session-header">{header}</h1>
-      {intent && (
-        <div className="session-intent">
-          <span className="session-intent-label">Intent</span>
-          {intent}
-        </div>
-      )}
+      {intent && <IntentLine text={intent} />}
       <MetaRow s={s} />
+      <Bullets items={bullets} />
       <BriefWidgets session={s} />
       <PromptChain prompts={s.prompts} checkpoints={s.checkpoints} />
     </div>

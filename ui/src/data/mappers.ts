@@ -450,6 +450,7 @@ export function groupLiveSessions(sessions: LiveSession[]): LiveSessionGroup[] {
     }
     return {
       id: key,
+      sessionId: newest.id,
       author: newest.author,
       authorId: newest.authorId,
       tool: newest.tool,

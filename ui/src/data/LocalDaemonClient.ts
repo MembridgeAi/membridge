@@ -4,7 +4,7 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type {
   AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry,
+  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -29,6 +29,33 @@ declare global {
   }
 }
 
+// GET /api/team's body, verbatim (lib/server.js teamPayload). Every field is
+// optional-tolerant at the boundary -- see teamAccountPayload() for why an
+// older daemon's narrower payload must degrade closed rather than be trusted.
+interface RawTeamPayload {
+  configured?: boolean
+  authenticated?: boolean
+  user?: { userId: string; email: string; displayName: string } | null
+  teams?: RawTeamRow[]
+  viewerId?: string | null
+  inviteCode?: string | null
+  webUrl?: string | null
+  error?: string | null
+}
+
+// The same payload after teamAccountPayload() has defaulted every field --
+// nothing downstream has to re-decide what an absent field meant.
+interface TeamPayload {
+  configured: boolean
+  authenticated: boolean
+  user: { userId: string; email: string; displayName: string } | null
+  teams: RawTeamRow[]
+  viewerId: string | null
+  inviteCode: string | null
+  webUrl: string | null
+  error: string | null
+}
+
 const BASE = '' // same origin as the daemon
 const FEED_LIMIT = 100 // covers every tracked project's latest entry in one request
 const TEAM_FEED_LIMIT = 200 // team_feed RPC's hard cap (002_team_v2.sql:320)
@@ -47,6 +74,25 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
   })
   if (!res.ok) throw new Error(`${pathAndQuery} failed: ${res.status}`)
   return (res.status === 204 ? undefined : await res.json()) as T
+}
+
+// Same POST, except the daemon's own error text is kept. The generic post()
+// above throws "<path> failed: <status>", which is all a caller needs for a
+// write it triggered itself -- but the team auth routes answer 400/500 with
+// { error } carrying the ONLY explanation the user can act on ("email and
+// password are required", "Invalid login credentials"). That text is rendered
+// as-is; nothing the user typed is ever added to it here or by the caller.
+async function postReadingError<T>(pathAndQuery: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${pathAndQuery}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  // A body that is not JSON at all (a proxy's HTML error page) must not throw
+  // a parse error over the top of the real status.
+  const data = await res.json().catch(() => null) as ({ error?: string } & T) | null
+  if (!res.ok) throw new Error((data && data.error) || `${pathAndQuery} failed: ${res.status}`)
+  return data as T
 }
 
 // TTL for the coalesced request cache below -- long enough to absorb a burst
@@ -87,21 +133,95 @@ export class LocalDaemonClient implements DataClient {
     this.requestCache.deleteMatching('feed:')
   }
 
-  private teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
-    return this.requestCache.get('team', async () => {
-      const data = await get<{ teams: RawTeamRow[]; viewerId: string | null; inviteCode: string | null; webUrl?: string | null }>('/api/team')
+  // ONE cached read of GET /api/team, shared by getSettings (which only wants
+  // teams[0] plus the meta fields) and getTeamAccount (which wants the whole
+  // account state, `authenticated` above all). Keyed 'team', the same key
+  // both used before the Team page existed, so adding a second consumer adds
+  // no second request per screen.
+  private teamAccountPayload(): Promise<TeamPayload> {
+    return this.requestCache.get('team', async (): Promise<TeamPayload> => {
+      const data = await get<RawTeamPayload>('/api/team')
       return {
-        team: data.teams[0] || null, viewerId: data.viewerId ?? null, inviteCode: data.inviteCode ?? null,
-        // Optional on the wire: an older daemon's /api/team predates webUrl
-        // entirely (Task 17 shipped viewerId/inviteCode first) -- absence maps
-        // to null (no hosted join page known), never a fabricated default.
+        // Every field defaulted rather than trusted: an older daemon's
+        // /api/team predates webUrl and even `authenticated` (Task 17 shipped
+        // viewerId/inviteCode first). Absence maps to the closed answer --
+        // not configured, not authenticated, no join page -- never a
+        // fabricated default that would claim a signed-in session.
+        configured: data.configured ?? false,
+        authenticated: data.authenticated ?? false,
+        user: data.user ?? null,
+        teams: Array.isArray(data.teams) ? data.teams : [],
+        viewerId: data.viewerId ?? null,
+        inviteCode: data.inviteCode ?? null,
         webUrl: data.webUrl ?? null,
+        error: data.error ?? null,
       }
     })
   }
 
+  private async teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
+    const data = await this.teamAccountPayload()
+    return { team: data.teams[0] || null, viewerId: data.viewerId, inviteCode: data.inviteCode, webUrl: data.webUrl }
+  }
+
   private async firstTeam(): Promise<RawTeamRow | null> {
     return (await this.teamMeta()).team
+  }
+
+  async getTeamAccount(): Promise<TeamAccount> {
+    const data = await this.teamAccountPayload()
+    return {
+      configured: data.configured,
+      authenticated: data.authenticated,
+      user: data.user,
+      teams: data.teams.map(t => ({
+        id: t.team_id,
+        name: t.team_name,
+        role: t.role,
+        memberCount: typeof t.memberCount === 'number' ? t.memberCount : null,
+      })),
+      inviteCode: data.inviteCode,
+      webUrl: data.webUrl,
+      error: data.error,
+    }
+  }
+
+  // Sign-in / sign-up / sign-out and team creation all change what
+  // /api/status, /api/settings and /api/team answer, in ways no URL-keyed
+  // rule could infer -- so each clears the whole request cache, the same
+  // wide-effect handling leaveTeam() already uses.
+  //
+  // CREDENTIALS: `credentials.password` is forwarded to the local daemon in
+  // this one request body and is never held, logged, retried, or echoed back.
+  // The resolved value is the daemon's confirmed identity only.
+  async signIn(credentials: { email: string; password: string }): Promise<{ email: string; displayName: string | null }> {
+    const r = await postReadingError<{ email: string; displayName?: string | null }>('/api/team/login', {
+      email: credentials.email, password: credentials.password,
+    })
+    this.requestCache.clear()
+    return { email: r.email, displayName: r.displayName ?? null }
+  }
+
+  async signUp(credentials: { displayName: string; email: string; password: string }): Promise<{ needsConfirmation: boolean; email: string }> {
+    const r = await postReadingError<{ needsConfirmation?: boolean; email: string }>('/api/team/signup', {
+      email: credentials.email, password: credentials.password, displayName: credentials.displayName,
+    })
+    this.requestCache.clear()
+    // Absent reads as "no confirmation needed" only when the daemon actually
+    // said so; a missing field on a signed-up-and-session-issued response is
+    // exactly that case (lib/server.js always sends the boolean).
+    return { needsConfirmation: !!r.needsConfirmation, email: r.email }
+  }
+
+  async signOut(): Promise<void> {
+    await postReadingError<{ authenticated: boolean }>('/api/team/logout')
+    this.requestCache.clear()
+  }
+
+  async createTeam(name: string): Promise<{ id: string; inviteCode: string | null }> {
+    const r = await postReadingError<{ team_id: string; invite_code?: string | null }>('/api/team/create', { name })
+    this.requestCache.clear()
+    return { id: r.team_id, inviteCode: r.invite_code ?? null }
   }
 
   getStatus(): Promise<Status> {

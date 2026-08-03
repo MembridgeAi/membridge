@@ -1,15 +1,20 @@
 import type { ReactNode } from 'react'
 import type { FileChange, Session } from '../../data/types'
 
-// The five collapsible brief widgets, native <details>/<summary> (keyboard
-// and screen-reader behavior for free). Locked decisions honored here:
-//   * fixed order Why -> Watch out -> Key files -> Changes -> Checkpoints,
-//     so the page reads the same on every session; only open state varies.
+// The collapsible brief widgets, native <details>/<summary> (keyboard and
+// screen-reader behavior for free). Locked decisions honored here:
+//   * fixed order Why -> Watch out -> Key files -> Changes, so the page reads
+//     the same on every session; only open state varies.
 //   * Why + Watch out open by default; the rest closed with a one-line
 //     truncated peek in the summary row so the reader can judge without
 //     opening.
 //   * a widget with no captured content does NOT render -- absence is
 //     communicated by absence, never a "(not captured)" placeholder row.
+//
+// The Checkpoints widget was REMOVED in the page redesign: the checkpoint
+// trail is now the distilled bullet list directly under the summary (see
+// distill.ts), and the prompt chain already renders each checkpoint against
+// the prompt it followed. A third copy on the same page was pure duplication.
 
 interface WidgetProps {
   title: string
@@ -47,7 +52,6 @@ function changeCounts(c: FileChange): ReactNode {
 export function BriefWidgets({ session }: { session: Session }) {
   const keyFiles = session.changes.filter(c => c.note)
   const changes = session.changes
-  const checkpoints = session.checkpoints
 
   return (
     <div className="session-widgets">
@@ -84,18 +88,6 @@ export function BriefWidgets({ session }: { session: Session }) {
               </li>
             ))}
           </ul>
-        </Widget>
-      )}
-      {checkpoints.length > 0 && (
-        <Widget title="Checkpoints" peek={checkpoints[checkpoints.length - 1]?.text}>
-          {/* Oldest-first: the trail reads top to bottom as the session ran. */}
-          <ol className="session-list session-checkpoints">
-            {checkpoints.map(c => (
-              <li key={`${c.ts}|${c.text}`} className="session-checkpoint">
-                <span className="session-checkpoint-text">{c.text}</span>
-              </li>
-            ))}
-          </ol>
         </Widget>
       )}
     </div>

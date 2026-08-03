@@ -312,6 +312,13 @@
   align-items: start;
   border-bottom: 1px solid var(--line);
 }
+/* The row a Today card sent the reader to. A left marker plus a tint, rather
+   than a colour change on the text: the row has to be findable at a glance
+   after the scroll without any of its content reading differently. */
+.entry-row-targeted {
+  background: var(--panel2);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .entry-row:hover {
   background: var(--panel2);
 }
@@ -390,6 +397,19 @@
 }
 .entry-row-link:hover .entry-row-affordance {
   color: var(--text2);
+}
+
+/* The row whose preview is open. THIS is what stops the card rendering
+ * broken. `.entry-row`'s settle-in animation uses fill-mode `both`, so every
+ * row retains `transform: translateY(0)` forever after it finishes, and a
+ * non-none transform makes each row its own stacking context. That scoped the
+ * card's `z-index: 30` INSIDE the hovered row, so the next row down -- later
+ * in paint order -- drew its opaque background and text straight over the
+ * card, which is the overlapping text. Raising the row itself lifts its whole
+ * stacking context above its later siblings. Only while a preview is open, so
+ * the feed's normal paint order is unchanged. */
+.entry-row-previewing {
+  z-index: 30;
 }
 
 /* Hover preview (spec Level 1.5): pointer devices only -- the (hover: hover)

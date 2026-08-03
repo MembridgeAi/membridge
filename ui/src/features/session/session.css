@@ -9,6 +9,104 @@
   max-width: 720px;
 }
 
+/* --- back button -------------------------------------------------------- */
+
+/* The way back, on the normal page. Quiet by default so it never competes
+ * with the summary below it; the chevron is the affordance. */
+.session-back {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text3);
+  text-decoration: none;
+}
+.session-back:hover {
+  color: var(--text);
+}
+.session-back-chevron {
+  font-size: var(--fs-md);
+}
+
+/* --- analytics header --------------------------------------------------- */
+
+/* Four tiles. Auto-fit rather than a fixed four-column track so a narrow
+ * window wraps instead of squeezing the file names to nothing. */
+.session-analytics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.session-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  min-width: 0;
+}
+
+.session-tile-label {
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text3);
+}
+
+.session-tile-value {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  color: var(--text);
+}
+
+/* The stand-in for "not captured" -- deliberately NOT styled like a value
+ * (smaller, muted, not bold), so it can never be misread as a measurement. */
+.session-tile-empty {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-normal);
+  color: var(--text3);
+}
+
+.session-tile-add {
+  color: var(--green);
+}
+.session-tile-del {
+  color: var(--red);
+}
+
+/* The top files under the count. One per line, each clipped from the right so
+ * a long path can never widen the tile or wrap into a paragraph. */
+.session-tile-detail {
+  min-width: 0;
+}
+.session-tile-files {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.session-tile-file {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.session-tile-file-count {
+  margin-left: 4px;
+  color: var(--text2);
+}
+
 /* --- header block ------------------------------------------------------- */
 
 .session-eyebrow {
@@ -47,6 +145,64 @@
   letter-spacing: 0.08em;
   color: var(--text3);
   flex: none;
+}
+
+/* Clipped to one line until the reader asks for the whole prompt. Wrapping is
+ * enabled only in the open state, so a captured paste cannot silently grow
+ * the header block back to full height. */
+.session-intent-text {
+  min-width: 0;
+}
+.session-intent-open .session-intent-text {
+  white-space: pre-wrap;
+}
+
+.session-intent-toggle {
+  flex: none;
+  padding: 0;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent2);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.session-intent-toggle:hover {
+  text-decoration: underline;
+}
+
+/* --- distilled bullets --------------------------------------------------- */
+
+/* The one-liners between the summary and the raw prompts: what the session
+ * actually landed, at a glance. Custom marker so the list reads as findings
+ * rather than as generic body copy. */
+.session-bullets {
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.session-bullet {
+  position: relative;
+  padding-left: var(--sp-3);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+  color: var(--text);
+}
+.session-bullet::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 0.55em;
+  width: 4px;
+  height: 4px;
+  border-radius: var(--r-sm);
+  background: var(--accent);
 }
 
 .session-meta {
@@ -224,23 +380,6 @@
 }
 .session-change-del {
   color: var(--red);
-}
-
-.session-checkpoints {
-  counter-reset: checkpoint;
-}
-.session-checkpoint {
-  display: flex;
-  gap: var(--sp-2);
-  font-size: var(--fs-sm);
-  color: var(--text2);
-}
-.session-checkpoint::before {
-  counter-increment: checkpoint;
-  content: counter(checkpoint);
-  font-family: var(--mono);
-  color: var(--text3);
-  flex: none;
 }
 
 /* --- prompt chain ------------------------------------------------------- */

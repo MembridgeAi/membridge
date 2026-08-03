@@ -2480,6 +2480,37 @@ async function main() {
         assert.ok(/Payment flow wired/.test(sess.checkpoints[0].text), 'checkpoint text must be present');
         assert.ok(/refunds both work/.test(sess.checkpoints[1].text), 'the latest checkpoint closes the trail');
       });
+      // Commits produced by the session, for the detail page's analytics
+      // header. The attribution already exists in .membridge/commits.jsonl;
+      // this is the count crossing the API. A commit attributed to ANOTHER
+      // session in the same project must not be counted, or the tile would
+      // report the project's activity as this session's.
+      {
+        const commitsLib = require('../lib/commits');
+        commitsLib.recordCommit(sessProj, {
+          sha: 'aaa1111', ts: '2026-07-20T10:12:00.000Z', project: sessProj,
+          sessions: [sid], unattributed: [],
+        });
+        commitsLib.recordCommit(sessProj, {
+          sha: 'bbb2222', ts: '2026-07-20T10:28:00.000Z', project: sessProj,
+          sessions: [sid], unattributed: [],
+        });
+        commitsLib.recordCommit(sessProj, {
+          sha: 'ccc3333', ts: '2026-07-20T11:00:00.000Z', project: sessProj,
+          sessions: ['some-other-session'], unattributed: [],
+        });
+        const withCommits = await (await fetch(`${base}/api/session?id=${encodeURIComponent(sid)}`)).json().catch(() => ({}));
+        const teamNoCommits = await (await fetch(`${base}/api/session?id=team-sess-9`)).json().catch(() => ({}));
+        check('/api/session counts the commits this session produced, and only those', () => {
+          assert.strictEqual(withCommits.commits, 2, 'both of this session\'s commits must be counted');
+        });
+        check('/api/session omits commits for a team-origin session rather than reporting zero', () => {
+          // No local commit map exists for a pulled session, and "0 commits"
+          // is a different claim from "not counted here". The page renders the
+          // absence, so it must stay absent.
+          assert.ok(!('commits' in teamNoCommits), `team-origin payload carried commits: ${teamNoCommits.commits}`);
+        });
+      }
       check('/api/session scrubs a planted secret in summaryFull AND in a prompt', () => {
         assert.ok(!JSON.stringify(sess).includes(SECRET), 'raw planted secret surfaced in /api/session');
         assert.ok(/\[redacted:/.test(sess.prompts[1].ask), 'the prompt carrying the secret must show a redaction marker');
@@ -4311,17 +4342,48 @@ async function main() {
     const inv1 = await teamsync.createInvite(util.getConfig(), team.team_id, {});
     check('invites: owner mints a short URL-safe token; URL parsing round-trips', () => {
       assert.ok(/^[A-Za-z0-9_-]{8,}$/.test(inv1.token), `token was ${inv1.token}`);
-      // lib/backend.json now bakes a real webUrl (join.membridge.me), so every
-      // build mints a real link by default -- inviteUrl() builds the legacy
-      // /join/<token> path shape (this CLI/web/app/settings consumer;
-      // unrelated to the Members-page UI's hash-based `<webUrl>/#<token>`
-      // link, minted separately via GET /api/team's plain webUrl field).
-      assert.strictEqual(inv1.url, `https://join.membridge.me/join/${inv1.token}`, 'baked webUrl produces a real default url');
+      // lib/backend.json bakes a real webUrl (join.membridge.me), so every
+      // build mints a real link by default. inviteUrl() now builds the SAME
+      // hash shape the Members-page UI mints, because that is the only form
+      // the join page reads -- the two used to disagree, and the CLI's half
+      // was the broken one. See the redeemability check below.
+      assert.strictEqual(inv1.url, `https://join.membridge.me/#${inv1.token}`, 'baked webUrl produces a real default url');
       assert.strictEqual(teamsync.parseInviteToken(`https://app.membridge.dev/join/${inv1.token}`), inv1.token);
       assert.strictEqual(teamsync.parseInviteToken(`  ${inv1.token}  `), inv1.token);
       process.env.MEMBRIDGE_TEAM_WEB_URL = 'https://app.membridge.dev/';
-      assert.strictEqual(teamsync.inviteUrl(util.getConfig(), inv1.token), `https://app.membridge.dev/join/${inv1.token}`);
+      assert.strictEqual(teamsync.inviteUrl(util.getConfig(), inv1.token), `https://app.membridge.dev/#${inv1.token}`);
       delete process.env.MEMBRIDGE_TEAM_WEB_URL;
+    });
+
+    check('invites: the minted link is the shape the join page can actually redeem', () => {
+      // The hosted join page reads its token from the FRAGMENT and nowhere
+      // else (cloudflare/join/public/index.html, readFragment():
+      // `location.hash.slice(1)`). It is a static site with no worker and no
+      // _redirects, so the old `<webUrl>/join/<token>` path was served by the
+      // SPA fallback (a real 200) and the token was silently ignored: the
+      // invited person landed on the join page with nothing to accept.
+      // `membridge join <token>`, printed beneath it, was the only thing that
+      // worked. This is the one place the link is built for the CLI, the app
+      // and Settings, so it is fixed here rather than at each caller.
+      process.env.MEMBRIDGE_TEAM_WEB_URL = 'https://app.membridge.dev/';
+      const url = teamsync.inviteUrl(util.getConfig(), inv1.token);
+      assert.strictEqual(url, `https://app.membridge.dev/#${inv1.token}`, 'the minted link must carry the token in the fragment');
+      // Exactly what the join page does with it.
+      assert.strictEqual(new URL(url).hash.slice(1), inv1.token, 'readFragment must recover the token from the minted link');
+      delete process.env.MEMBRIDGE_TEAM_WEB_URL;
+    });
+
+    check('invites: parseInviteToken accepts the new hash link and every link already in the wild', () => {
+      // Links minted before this fix are out there in chat logs and emails,
+      // and they still name a real, unexpired invite. Refusing them would
+      // break redemption for exactly the people who were invited earliest.
+      assert.strictEqual(teamsync.parseInviteToken(`https://app.membridge.dev/#${inv1.token}`), inv1.token, 'hash form');
+      assert.strictEqual(teamsync.parseInviteToken(`https://app.membridge.dev/join/${inv1.token}`), inv1.token, 'legacy path form');
+      assert.strictEqual(teamsync.parseInviteToken(`https://app.membridge.dev/join/${inv1.token}/`), inv1.token, 'legacy path with a trailing slash');
+      assert.strictEqual(teamsync.parseInviteToken(`  ${inv1.token}  `), inv1.token, 'a bare token, whitespace trimmed');
+      // A fragment that is a query string, the other shape readFragment
+      // handles, must not be mistaken for a token.
+      assert.strictEqual(teamsync.parseInviteToken('https://app.membridge.dev/#access_token=abc&type=recovery'), 'https://app.membridge.dev/#access_token=abc&type=recovery', 'a non-token fragment is left alone');
     });
 
     // A plain member cannot mint one.
@@ -6799,6 +6861,47 @@ async function main() {
     assert.strictEqual(typeof tierA.callTokens, 'number');
     assert.strictEqual(typeof tierA.skeletonTokens, 'number');
     assert.strictEqual(tierA.savedTokens, undefined, 'savedTokens must not survive under its old name');
+
+    // 3b. A RANGED read is never intercepted, at any tier. The ledger records
+    // that a session read a PATH, never which lines it got back, so tier A's
+    // "you already read this" is a claim the evidence cannot support once the
+    // call names an offset: asking for lines 23510-23551 of a 24k-line file
+    // after reading lines 9200-9319 is a request for content that was never
+    // served. Found by dogfooding: a real ranged read of an unread region of
+    // test/run-tests.js was answered with the tier A pointer, and the caller
+    // had to shell out to sed to get the lines.
+    const rangedTierA = recall.decide(base({
+      offset: 23510,
+      limit: 42,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(rangedTierA.serve, false, 'a ranged read must never be answered from the cache');
+    assert.strictEqual(rangedTierA.reason, 'ranged-read');
+    // Tier B is refused for the same reason: a structural skeleton is not the
+    // specific lines the caller asked for either.
+    const rangedTierB = recall.decide(base({
+      offset: 500,
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['someone-else'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'someone-else' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(rangedTierB.serve, false, 'a ranged read must not be answered with a skeleton either');
+    assert.strictEqual(rangedTierB.reason, 'ranged-read');
+    // offset 0 and a bare limit are NOT ranged: both start at the top of the
+    // file, which is what an unqualified read returns anyway. Interception
+    // there is unchanged, so the headline does not quietly collapse.
+    const offsetZeroStillServed = recall.decide(base({
+      offset: 0,
+      limit: 100,
+      ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
+      storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
+      fileStat: { size: 4000, hash: 'HASH1' },
+    }));
+    assert.strictEqual(offsetZeroStillServed.serve, true, 'offset 0 reads from the top and stays interceptable');
+    assert.strictEqual(offsetZeroStillServed.tier, 'A');
 
     // 4. Tier A refused: same session read it, but the file changed since.
     const tierAMismatch = recall.decide(base({
@@ -12318,6 +12421,38 @@ async function main() {
     assert.strictEqual(hooks.countSummaryLines(projCk, 'nope'), 0);
     assert.strictEqual(hooks.hasSummaryLine(projCk, 'ck1'), true);
   });
+  check('checkpoint: lastSummaryTs returns the newest line for the session only', () => {
+    fs.writeFileSync(ckSummaries,
+      'not json {\n' +
+      JSON.stringify({ session: 'ck1', ts: ckTs(3), did: 'second real checkpoint' }) + '\n' +
+      JSON.stringify({ session: 'other', ts: ckTs(9), did: 'a different session' }) + '\n' +
+      JSON.stringify({ session: 'ck1', ts: ckTs(2), did: '   ' }) + '\n' +
+      JSON.stringify({ session: 'ck1', ts: ckTs(1), did: 'first real checkpoint' }) + '\n');
+    // Newest wins regardless of file order; a blank did is not a checkpoint;
+    // another session's later line must never move this session's cursor.
+    assert.strictEqual(hooks.lastSummaryTs(projCk, 'ck1'), ckTs(3));
+    assert.strictEqual(hooks.lastSummaryTs(projCk, 'nope'), null);
+    assert.strictEqual(hooks.lastSummaryTs(path.join(ROOT, 'projects', 'no-such-app'), 'ck1'), null);
+  });
+
+  check('checkpoint: the gate measures edits SINCE the last checkpoint, not a cumulative total', () => {
+    const editTs = n => Array.from({ length: n }, (_, i) => ckTs(10 + i));
+    // First checkpoint of a session: minEdits, nothing written yet.
+    assert.strictEqual(hooks.isCheckpointDue({ editTs: [], lastCheckpointTs: null, minEdits: 1, every: 12 }), false);
+    assert.strictEqual(hooks.isCheckpointDue({ editTs: editTs(1), lastCheckpointTs: null, minEdits: 1, every: 12 }), true);
+    // Not due until `every` NEW edits land past the last checkpoint.
+    assert.strictEqual(hooks.isCheckpointDue({ editTs: editTs(11), lastCheckpointTs: ckTs(9), minEdits: 1, every: 12 }), false);
+    assert.strictEqual(hooks.isCheckpointDue({ editTs: editTs(12), lastCheckpointTs: ckTs(9), minEdits: 1, every: 12 }), true);
+    // Edits at or before the checkpoint are already summarized and never recount.
+    assert.strictEqual(hooks.isCheckpointDue({ editTs: editTs(12), lastCheckpointTs: ckTs(30), minEdits: 1, every: 12 }), false);
+    // The regression this exists for, in the numbers that produced it: session
+    // b6202e6a had 29 edits and 8 checkpoints on disk, so the old cumulative
+    // gate (minEdits + n * every) demanded 97 edits and could never be met
+    // again. Distillation for that session was dead, silently and permanently.
+    // Twelve edits past the last checkpoint is due, whatever n has reached.
+    assert.strictEqual(hooks.isCheckpointDue({ editTs: editTs(29), lastCheckpointTs: ckTs(26), minEdits: 1, every: 12 }), true);
+  });
+
   const HOOK_SCRIPT = path.join(__dirname, '..', 'lib', 'membridge-hook.js');
   const runAppendCli = args => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', ...args], { encoding: 'utf8' });
   check('append: writes one validated line, creates .membridge, never truncates', () => {
@@ -23506,6 +23641,36 @@ const repoRoot = require('../lib/repo-root');
         'a durable install must reclaim the registration from a transient one');
     });
 
+    check('hooks: a script inside an app.asar archive is durable, not dead', () => {
+      // The packaged app registers its hook at a path INSIDE app.asar. That
+      // archive is a single file: only Electron's patched fs can stat a path
+      // within it, and the hook liveness check runs under plain node too (the
+      // CLI, `membridge status`, the dashboard). Judging by plain existsSync
+      // called every Electron install's correct registration dead, so
+      // `membridge status` told users with a working hook to run setup-hooks,
+      // which would have rewritten a registration that was already right.
+      const asarDir = path.join(ROOT, 'asar-install', 'Contents', 'Resources');
+      fs.mkdirSync(asarDir, { recursive: true });
+      const archive = path.join(asarDir, 'app.asar');
+      fs.writeFileSync(archive, 'pretend archive bytes\n'); // a FILE, as on disk
+      const inside = path.join(archive, 'lib', 'membridge-hook.js');
+      assert.strictEqual(fs.existsSync(inside), false,
+        'fixture sanity: plain node must not see inside the archive');
+      assert.strictEqual(hooks.installKind(inside), 'durable',
+        'a hook inside an existing app.asar is a real app-bundle install');
+      // The archive itself is what must exist. No archive, still dead.
+      const noArchive = path.join(ROOT, 'asar-missing', 'app.asar', 'lib', 'membridge-hook.js');
+      assert.strictEqual(hooks.installKind(noArchive), 'dead',
+        'a path inside an archive that is not there is still dead');
+      // .asar as a plain directory name (unpacked builds) keeps working.
+      const unpackedDir = path.join(ROOT, 'asar-unpacked', 'app.asar', 'lib');
+      fs.mkdirSync(unpackedDir, { recursive: true });
+      const unpacked = path.join(unpackedDir, 'membridge-hook.js');
+      fs.writeFileSync(unpacked, '// stand-in for an unpacked build\n');
+      assert.strictEqual(hooks.installKind(unpacked), 'durable',
+        'an unpacked app.asar directory is durable on its own terms');
+    });
+
     check('hooks: a dead registration is always healed, whoever finds it', () => {
       const goneScript = path.join(ROOT, 'deleted-install', 'lib', 'membridge-hook.js');
       const goneCmd = `"${process.execPath}" "${goneScript}"`;
@@ -25644,6 +25809,44 @@ const repoRoot = require('../lib/repo-root');
         'fingerprints must be hashed, never the verbatim ask');
     });
   }
+
+  // A raw 0x00 byte in a source file is invisible in every editor and costs
+  // an entire investigation. `file` reports the file as "data", and grep /
+  // ripgrep classify it as binary and silently skip it: on macOS
+  // `grep -n credentials lib/teamsync.js` printed NOTHING AT ALL -- not even
+  // the "Binary file matches" notice -- so the whole team sync implementation
+  // was invisible to code search unless someone thought to pass -a. That is
+  // exactly what happened while chasing a team-auth question. The runtime
+  // string is identical either way, so the escape (\x00) is free; only the
+  // raw byte is harmful. Deliberately reads BYTES, not readSource() -- the
+  // subject is the literal on-disk encoding, and a Buffer scan is immune to
+  // the CRLF normalisation readSource exists for.
+  check('no committed source or doc carries a raw NUL byte (it makes grep skip the file as binary)', () => {
+    const repo = path.join(__dirname, '..');
+    // Hand-written source and docs only. vendor/, ui/dist and app/ are
+    // third-party or build output -- nobody greps them to understand this
+    // codebase, and a minified bundle is not ours to police. docs/ IS in
+    // scope: the same defect hid a whole plan document, because a fenced
+    // code block quoting the offending line carried the raw byte too.
+    const walk = (dir, out = []) => {
+      if (!fs.existsSync(dir)) return out;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === 'node_modules') continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p, out);
+        else if (/\.(js|mjs|cjs|md)$/.test(e.name)) out.push(p);
+      }
+      return out;
+    };
+    const files = ['bin', 'lib', 'test', 'scripts', 'docs'].flatMap(d => walk(path.join(repo, d)));
+    assert.ok(files.length > 50,
+      `only ${files.length} source files scanned -- the walk is broken and this check is vacuous`);
+    const offenders = files
+      .filter(f => fs.readFileSync(f).includes(0))
+      .map(f => path.relative(repo, f));
+    assert.deepStrictEqual(offenders, [],
+      `raw NUL byte in source (use the \\x00 escape instead):\n${offenders.join('\n')}`);
+  });
 
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
   // file: these are the actual regression guards, run last so they observe

@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry,
+  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -75,6 +75,27 @@ export interface DataClient {
   // Manager-only; a member's write attempt rejects.
   setProjectAccessDefault(projectPath: string, defaultAccess: boolean): Promise<void>
   getAccessMatrix(): Promise<AccessMatrix>
+
+  // Account state for the Team page (GET /api/team, read whole rather than
+  // squeezed through Settings.team). This is the ONLY method that can tell a
+  // signed-out machine from a signed-in machine with no team: Settings.team
+  // is null for both.
+  getTeamAccount(): Promise<TeamAccount>
+  // POST /api/team/login. The password is handed straight to the local daemon
+  // and is never stored, logged, put in a URL, or read back out of here --
+  // the resolved value deliberately carries only the identity the daemon
+  // confirmed.
+  signIn(credentials: { email: string; password: string }): Promise<{ email: string; displayName: string | null }>
+  // POST /api/team/signup. `needsConfirmation: true` means the account exists
+  // but the email must be confirmed before a sign-in can succeed -- a real
+  // state, not a failure, and callers MUST say so (silence there reads as a
+  // rejected sign-up).
+  signUp(credentials: { displayName: string; email: string; password: string }): Promise<{ needsConfirmation: boolean; email: string }>
+  // POST /api/team/logout -- clears this machine's stored credentials.
+  signOut(): Promise<void>
+  // POST /api/team/create. Resolves the created team's id and its standing
+  // invite code (lib/teamsync.js createTeam returns { team_id, invite_code }).
+  createTeam(name: string): Promise<{ id: string; inviteCode: string | null }>
 
   getMembers(): Promise<Member[]>
   // No daemon endpoint can LIST pending invites yet -- LocalDaemonClient

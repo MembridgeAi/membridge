@@ -257,7 +257,7 @@ function createMockSupabase() {
       if (url.searchParams.has('on_conflict')) {
         const seen = new Set();
         for (const r of rows) {
-          const k = [r.project_id, r.author_id, r.ts, r.source].join(' ');
+          const k = [r.project_id, r.author_id, r.ts, r.source].join('\x00');
           if (seen.has(k)) {
             return json(res, 400, {
               code: '21000',

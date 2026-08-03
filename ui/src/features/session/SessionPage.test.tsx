@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { screen, cleanup } from '@testing-library/react'
+import { screen, cleanup, fireEvent } from '@testing-library/react'
 import { renderApp } from '../../test/renderApp'
 import { ROUTES } from '../../app/routes'
 
@@ -58,6 +58,15 @@ describe('session route + page shell (Task 3)', () => {
     expect(link.getAttribute('href')).toBe(ROUTES.feed)
   })
 
+  it('the NORMAL page has a back button, not only the not-found branch', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const back = screen.getByRole('link', { name: 'Back to the Feed' })
+    expect(back.getAttribute('href')).toBe(ROUTES.feed)
+    expect(back.classList.contains('session-back')).toBe(true)
+  })
+
   it('a fetch failure renders a role="alert" error, not a redirect', async () => {
     visit('/sessions/s-f2')
     renderApp({ failWith: 'daemon unreachable' })
@@ -65,5 +74,74 @@ describe('session route + page shell (Task 3)', () => {
     expect(alerts.some(a => /Couldn't load this session/.test(a.textContent || ''))).toBe(true)
     // Still on the session route -- an error must never redirect.
     expect(window.location.pathname).toBe('/sessions/s-f2')
+  })
+})
+
+describe('session page redesign: order, analytics, bullets, intent', () => {
+  it('reads back button, analytics, summary, bullets, prompts -- top to bottom', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const page = document.querySelector('.session-page')!
+    const order = ['.session-back', '.session-analytics', '.session-header', '.session-bullets', '.session-chain']
+    const positions = order.map(sel => {
+      const el = page.querySelector(sel)
+      expect(el, `${sel} is missing from the page`).not.toBeNull()
+      return [...page.querySelectorAll('*')].indexOf(el as Element)
+    })
+    expect(positions).toEqual([...positions].sort((a, b) => a - b))
+  })
+
+  it('the distilled bullets render as a list of one-liners above the raw prompts', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const bullets = [...document.querySelectorAll('.session-bullet')].map(el => el.textContent)
+    // s-f2's second checkpoint repeats the header, so only the first survives.
+    expect(bullets).toEqual(['Gate extracted; stop path green.'])
+  })
+
+  it('a session with nothing distilled renders no bullet list at all', async () => {
+    visit('/sessions/s-f3')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    expect(document.querySelector('.session-bullets')).toBeNull()
+  })
+
+  it('the analytics header sits on the page with its four tiles', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const labels = [...document.querySelectorAll('.session-tile-label')].map(el => el.textContent)
+    expect(labels).toEqual(['Files touched', 'Lines', 'Commits', 'Duration'])
+  })
+
+  it('a long intent is clipped with a disclosure that reveals the whole prompt', async () => {
+    visit('/sessions/s-f5')
+    renderApp()
+    const row = (await screen.findByText('Intent')).closest('.session-intent')!
+    const long = 'please do the thing '.repeat(40)
+    expect(row.textContent).not.toContain(long)
+    expect(row.textContent).toContain('…')
+    fireEvent.click(screen.getByRole('button', { name: 'Show full intent' }))
+    const opened = screen.getByText('Intent').closest('.session-intent')!
+    expect(opened.textContent).toContain(long.trim())
+    expect(screen.getByRole('button', { name: 'Show less' })).toBeInTheDocument()
+  })
+
+  it('a short intent renders whole, with no disclosure control', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    const row = (await screen.findByText('Intent')).closest('.session-intent')!
+    expect(row.textContent).toContain('make the summary hook fire on session boundaries')
+    expect(row.querySelector('button')).toBeNull()
+  })
+
+  it('checkpoints are not duplicated as a widget now that they are the bullets', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const titles = [...document.querySelectorAll('.session-widget-title')].map(el => el.textContent)
+    expect(titles).not.toContain('Checkpoints')
   })
 })

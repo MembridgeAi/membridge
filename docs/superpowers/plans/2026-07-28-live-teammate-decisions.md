@@ -625,7 +625,7 @@ const str = v => (typeof v === 'string' ? v : '');
 // Stable across rebuilds: the index is rewritten on every team pull, and an id
 // that changed would re-deliver everything already marked seen.
 function noteId(author, ts, text) {
-  return crypto.createHash('sha1').update(`${author} ${ts} ${text}`).digest('hex').slice(0, 16);
+  return crypto.createHash('sha1').update(`${author}\x00${ts}\x00${text}`).digest('hex').slice(0, 16);
 }
 
 function emptyIndex() {

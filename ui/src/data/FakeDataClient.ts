@@ -2,6 +2,7 @@ import type { DataClient, Capabilities } from './DataClient'
 import type {
   AccessMatrix, AssistsStats, AuditEvent, DeleteProjectResult, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
   Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  TeamAccount,
 } from './types'
 
 export interface FakeOptions {
@@ -47,6 +48,12 @@ export interface FakeOptions {
   // appears only above 8. The shared project's roster stays a strict subset
   // (6 of N) so the "+N chip and count label" case is real, not "whole team".
   teamSize?: number
+  // Whether this machine has credentials at all (GET /api/team's
+  // `authenticated`). Defaults true, because every fixture that predates the
+  // Team page models a signed-in machine; pass false for the signed-out
+  // state, which is a DIFFERENT state from solo (no team) and used to be
+  // indistinguishable from it in the UI.
+  authenticated?: boolean
   // Adds two archived rows to getProjects(): one whose folder exists and one
   // whose folder is gone (missing) -- the Archived section's two render
   // states. Opt-in so fixtures that predate archiving are untouched.
@@ -136,6 +143,26 @@ const SESSION_FIXTURES: Record<string, Session> = {
     changes: [{ file: 'test/run-tests.js', status: 'edited', add: 30, del: 30, note: 'port rotation', dep: false }],
     checkpoints: [],
     prompts: longPromptChain(60),
+  },
+  // The intent-too-long case: a whole pasted prompt captured as the goal.
+  // Real sessions carry these routinely, and rendering one verbatim as the
+  // intent line is what pushed the rest of the page off the screen.
+  's-f5': {
+    session: 's-f5', project: 'membridge', projectPath: '/Users/x/membridge',
+    author: 'Andrew', authorId: 'andrew', source: 'Claude Code',
+    startedAt: '2026-07-28T14:00:00Z', endedAt: '2026-07-28T15:05:00Z', live: false,
+    summary: 'Rate limit raised and the date fixed.',
+    summaryFull: 'Rate limit raised and the date fixed.',
+    goal: `${'please do the thing '.repeat(40)}now`,
+    headline: 'Rate limit raised and the date fixed.',
+    decisions: null, gotchas: null,
+    files: ['ui/src/features/feed/FeedPage.tsx'],
+    changes: [{ file: 'ui/src/features/feed/FeedPage.tsx', status: 'edited', add: 12, del: 4, note: null, dep: false }],
+    checkpoints: [
+      { ts: '2026-07-28T14:30:00Z', text: 'Fixed the date in the UI.' },
+      { ts: '2026-07-28T15:00:00Z', text: 'Raised the rate limit from 3 to 10 seconds.' },
+    ],
+    prompts: [{ ts: '2026-07-28T14:00:00Z', ask: 'start', files: ['ui/src/features/feed/FeedPage.tsx'] }],
   },
 }
 
@@ -345,6 +372,39 @@ export class FakeDataClient implements DataClient {
   // and anything joining those against getMembers() silently dropped him.
   getMembers() {
     return this.guard<Member[]>(this.teamMembers())
+  }
+  // The Team page's state source. Reads the SAME opts the settings fixture
+  // reads (solo, role, webUrl, viewerId) so the two surfaces can never
+  // disagree about whether this machine is on a team; `authenticated` is the
+  // one fact only this payload carries.
+  getTeamAccount() {
+    const authenticated = this.opts.authenticated ?? true
+    const onTeam = authenticated && !this.opts.solo
+    return this.guard<TeamAccount>({
+      configured: true,
+      authenticated,
+      user: authenticated ? { userId: this.viewerId, email: 'marco@melika.com', displayName: 'Marco' } : null,
+      teams: onTeam ? [{ id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length }] : [],
+      inviteCode: onTeam ? 'INV-7F3K9Q' : null,
+      webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
+      error: null,
+    })
+  }
+  // Resolves the identity the daemon confirmed, never the password it was
+  // given -- the fixture models the real contract, where the password exists
+  // only for the duration of the request.
+  signIn(credentials: { email: string; password: string }) {
+    return this.guard<{ email: string; displayName: string | null }>({ email: credentials.email, displayName: 'Andrew' })
+  }
+  // needsConfirmation: true is the DEFAULT fixture answer on purpose -- it is
+  // what a real Supabase project with email confirmation on returns, and the
+  // state a UI is most likely to forget to render.
+  signUp(credentials: { displayName: string; email: string; password: string }) {
+    return this.guard<{ needsConfirmation: boolean; email: string }>({ needsConfirmation: true, email: credentials.email })
+  }
+  signOut() { return this.guard<void>(undefined) }
+  createTeam(name: string) {
+    return this.guard<{ id: string; inviteCode: string | null }>({ id: 'team-new', inviteCode: `INV-${name.slice(0, 3).toUpperCase()}` })
   }
   getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
   createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }

@@ -50,10 +50,64 @@ something that was asked for, and neither is being fixed yet.
   in the dashboard reads it. Whatever calls that route is not the React app.
   Worth resolving before anyone is told the dashboard surfaces this.
 
+## Fixed 2026-08-03, in the working tree, not yet committed
+
+The three items below this section were worked in one session. All four fixes
+are uncommitted on `fix/pin-npm-and-harden-pack-check`; Andrew reviews and
+commits. Suite is 1398/1399, the one failure being the known worktree check.
+
+- **Distillation.** Root cause was the checkpoint gate, not the hook. It read
+  `edits >= minEdits + n * checkpointEvery`, where `n` is the count of lines
+  already in `summaries.jsonl`. That counter only grows, nothing prunes it, and
+  the edit count it was compared against does not grow in step, so the two
+  diverge and the bar becomes unreachable. Session `b6202e6a` reached n=8 with
+  29 edits attributed to it, so it was being asked for 97 and had been dead for
+  26 hours. Silent by construction: failing the gate is a plain `return`.
+  Replaced by `hooks.isCheckpointDue`, a pure function measuring edits SINCE the
+  last checkpoint, with `hooks.lastSummaryTs` reading the cursor off the file.
+- **`isHookInstalled()`.** Root cause was `installKind`, which judged liveness
+  with plain `fs.existsSync`. A path inside `app.asar` cannot be stat'd by plain
+  node, only by Electron's patched fs, so every Electron install's correct
+  registration read as dead. `installKind` now resolves the archive FILE when a
+  path component ends in `.asar`. Verified against the real install: both
+  `isHookInstalled()` and `isRecallHookInstalled()` flipped false to true, and
+  `membridge status` now prints "Claude Code hook installed".
+- **Recall hook answered a ranged read it had never served.** A `Read` of lines
+  23510-23551 of `test/run-tests.js`, by a session that had earlier read lines
+  9200-9319 of the same file, was answered with the tier A pointer, "this
+  session already read it". The caller had to shell out to `sed`. Cause:
+  `decide()` accepted `offset` in its input contract (the hook passes it, see
+  `lib/hooks-recall.js:363`) and never read it, and the ledger's `fileReaders`
+  records that a session read a PATH, never which lines came back, so tier A's
+  claim is unsupportable for a ranged call. `decide()` now refuses any call with
+  a positive offset, reason `ranged-read`. Tier B is refused too: a skeleton is
+  not the lines that were asked for. offset 0 and a bare `limit` are unaffected.
+  Recording served ranges properly would mean changing the ledger and the fold,
+  which is not worth this narrow hole; refusing is the honest floor.
+- **`commits` on `GET /api/session`**, so the session detail page's analytics
+  header can show commits produced. Counts only commits attributed to that
+  session, and is ABSENT rather than 0 when the map cannot be read, because a
+  session that genuinely produced no commits is a real 0.
+
+## Found 2026-08-03, not yet fixed
+
+- **The invite URL the CLI prints cannot be redeemed.** `teamsync.inviteUrl`
+  builds `<webUrl>/join/<token>`, but the hosted join page reads its token from
+  the fragment only (`location.hash.slice(1)`,
+  `cloudflare/join/public/index.html:107`). There is no worker and no
+  `_redirects` under `cloudflare/join`, so `/join/<token>` is served by the SPA
+  fallback (probed live: 200 text/html) and the token is simply ignored. The
+  `membridge join <token>` line printed beneath it works, and the dashboard's
+  MembersPage mints the hash form itself, so invites are not dead, but the
+  clickable link a user would paste to a colleague is. Fix is `inviteUrl`
+  returning the `#<token>` form. Deferred only because `lib/teamsync.js` was
+  being edited by a parallel session.
+
 ## Found 2026-08-02 while dogfooding, not yet fixed
 
 These came out of using the app rather than reading the code. Ordered by how
-much they distort what a user sees.
+much they distort what a user sees. The first two are FIXED, see the section
+above; they are left here for the reasoning that led to them.
 
 - **Distillation stopped mid-session and nothing noticed.** Last summary written
   to `membridge/.membridge/summaries.jsonl` is `2026-08-02T00:35:00Z`. The

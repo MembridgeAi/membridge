@@ -509,3 +509,29 @@ describe('mapMember', () => {
     expect(m.lastSharedAt).toBeNull()
   })
 })
+
+// A Today card has to be able to take you somewhere. The group keeps the
+// NEWEST session's id, matching how author/tool/projectName are already taken
+// from `newest` -- the row describes the most recent session in the group, so
+// its link must land on that same one.
+describe('groupLiveSessions session target', () => {
+  const live = (overrides: Partial<LiveSession> = {}): LiveSession => ({
+    id: 's1', author: 'You', authorId: 'me', tool: 'Claude Code', projectName: 'membridge',
+    startedAt: '2026-07-29T20:00:00Z', intent: null, outcome: null, ...overrides,
+  })
+
+  it('carries the newest session id in the group, not the oldest and not the group key', () => {
+    const groups = groupLiveSessions([
+      live({ id: 'older', startedAt: '2026-07-29T19:00:00Z' }),
+      live({ id: 'newest', startedAt: '2026-07-29T21:00:00Z' }),
+      live({ id: 'middle', startedAt: '2026-07-29T20:00:00Z' }),
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].sessionId).toBe('newest')
+    expect(groups[0].id).not.toBe('newest')
+  })
+
+  it('gives a single-session group that session id', () => {
+    expect(groupLiveSessions([live({ id: 'only-one' })])[0].sessionId).toBe('only-one')
+  })
+})

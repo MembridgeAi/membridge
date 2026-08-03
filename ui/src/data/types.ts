@@ -63,6 +63,10 @@ export interface LiveSession {
 // sessions are folded into this row (the UI shows it only when > 1).
 export interface LiveSessionGroup {
   id: string
+  // The NEWEST session in the group, so the card can link at it. The row
+  // already describes that session (author, tool, project all come from it),
+  // so anything else would send you somewhere the card is not about.
+  sessionId: string
   author: string
   authorId: string
   tool: string
@@ -194,6 +198,17 @@ export interface Session {
   changes: FileChange[]
   checkpoints: SessionCheckpoint[]
   prompts: SessionPrompt[]
+  // How many commits this session produced. NOT SERVED YET: lib/server.js's
+  // sessionPayload does not carry it, so on a real daemon this is always
+  // undefined and the analytics header's Commits tile degrades to a muted
+  // dash. Optional rather than `number | null` precisely so the absence is a
+  // shape difference the compiler keeps honest.
+  //
+  // The attribution already exists server-side (lib/commits.js attributes a
+  // commit's changed files to the session that last edited them, and
+  // .membridge/commits.jsonl is the durable map) -- it needs plumbing onto the
+  // payload, not new invention. See the note in SessionAnalytics.tsx.
+  commits?: number
 }
 
 // `/api/feed` query params (server.js: author/project/source/before/limit).
@@ -352,6 +367,47 @@ export interface HookUpdateResult {
   // too, so a failure there must be visible rather than hiding behind two
   // green chips.
   search: HookUpdateOutcome
+}
+
+// GET /api/team, read as the ACCOUNT state rather than the settings state.
+// Settings.team only ever answers "which team is this machine on", which a
+// signed-out machine and a signed-in machine with no team answer identically
+// (null) -- the exact ambiguity that let a silent sign-out look like nothing
+// was wrong. `authenticated` is the field that separates them, so the Team
+// page reads this payload instead.
+export interface TeamAccount {
+  // Does this BUILD have a backend baked in at all (teamsync.isConfigured)?
+  // False on a self-hosted build with an empty lib/backend.json, where no
+  // sign-in could succeed however correct the credentials are.
+  configured: boolean
+  // Are there credentials on this machine right now (teamsync.loadCredentials)?
+  authenticated: boolean
+  user: { userId: string; email: string; displayName: string } | null
+  // One team per user in the product today (see lib/api-access.js's identical
+  // teams[0] simplification), but carried as the list the daemon actually
+  // sends rather than pre-collapsed here.
+  teams: TeamSummary[]
+  // teams[0]'s standing invite code, never rotated by reading it. Null when
+  // signed out or between teams.
+  inviteCode: string | null
+  // Base URL of the hosted join page (teamsync.webUrl). Null on a build with
+  // none configured -- the invite control degrades to the standing code.
+  webUrl: string | null
+  // GET /api/team answers 200 with this set when it is signed in but could
+  // not LIST the teams (teamPayload catches listTeams' failure). Carried
+  // rather than dropped: without it, a failed listing is indistinguishable
+  // from genuinely having no team, and the page would invite the user to
+  // create a second one.
+  error: string | null
+}
+
+export interface TeamSummary {
+  id: string
+  name: string
+  role: Role
+  // Null when the daemon's row carries no member_count (an older backend),
+  // never a fabricated 0 -- "unknown" and "empty" are different facts.
+  memberCount: number | null
 }
 
 export interface Settings {

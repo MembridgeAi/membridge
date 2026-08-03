@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { EntryRow, HOVER_PREVIEW_DELAY_MS, PATH_MAX, ROW_FILE_LIMIT, rowFiles, shortPath } from './EntryRow'
@@ -184,6 +186,34 @@ describe('EntryRow hover preview (Task 6)', () => {
     act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
     const preview = document.querySelector('.entry-row-preview')!
     expect(preview.querySelectorAll('a, button, input, [tabindex]')).toHaveLength(0)
+  })
+
+  // The overlap bug: `.entry-row`'s settle-in animation uses fill-mode `both`,
+  // so every row KEEPS `transform: translateY(0)` after it finishes. A
+  // non-none transform makes each row its own stacking context, which traps
+  // the preview's z-index inside the hovered row -- the next row down then
+  // paints its opaque background and text straight over the card. The row
+  // itself has to be raised, so the marker goes on the row, not the card.
+  it('marks the row while its preview is open so the card cannot be painted over', () => {
+    render(<EntryRow entry={rich()} />)
+    const row = hoverRow()
+    expect(row.classList.contains('entry-row-previewing')).toBe(false)
+    act(() => { vi.advanceTimersByTime(HOVER_PREVIEW_DELAY_MS) })
+    expect(row.classList.contains('entry-row-previewing')).toBe(true)
+    fireEvent.mouseLeave(row)
+    expect(row.classList.contains('entry-row-previewing')).toBe(false)
+  })
+
+  it('the stylesheet raises a previewing row above the rows below it', () => {
+    // Resolved from the vitest root (ui/), not import.meta.url -- vite serves
+    // test modules over a non-file scheme.
+    const css = readFileSync(resolve(process.cwd(), 'src/components/components.css'), 'utf8')
+    const rule = css.match(/\.entry-row-previewing\s*\{[^}]*\}/)
+    expect(rule, '.entry-row-previewing has no rule in components.css').not.toBeNull()
+    const zIndex = rule![0].match(/z-index:\s*(\d+)/)
+    expect(zIndex, '.entry-row-previewing must set a z-index').not.toBeNull()
+    // Strictly above the preview card's own z-index, which is scoped inside it.
+    expect(Number(zIndex![1])).toBeGreaterThanOrEqual(30)
   })
 })
 

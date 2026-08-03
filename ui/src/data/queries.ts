@@ -178,6 +178,15 @@ export function useSettings() {
   return useQuery({ queryKey: ['settings'], queryFn: () => c.getSettings(), staleTime: STANDARD_STALE_MS })
 }
 
+// The Team page's state source (GET /api/team). Separate from useSettings()
+// because `authenticated` is the fact Settings cannot carry: Settings.team is
+// null both when signed out and when signed in with no team, and the app used
+// to render those two identically.
+export function useTeamAccount() {
+  const c = useDataClient()
+  return useQuery({ queryKey: ['teamAccount'], queryFn: () => c.getTeamAccount(), staleTime: STANDARD_STALE_MS })
+}
+
 // ---------------------------------------------------------------------------
 // Mutations. Every mutation invalidates the queries its change affects.
 // ---------------------------------------------------------------------------
@@ -377,6 +386,65 @@ export function useCreateInviteLink() {
   const c = useDataClient()
   return useMutation({
     mutationFn: (teamId: string) => c.createInviteLink(teamId),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Account mutations (Team page). All four change what /api/team, /api/status
+// and /api/settings answer, so each refreshes the same three caches -- the
+// rail's team switcher, the solo CTA and every role gate read from them, and
+// a stale read there is exactly what makes a sign-out invisible.
+//
+// CREDENTIALS: `password` travels from the submit handler through
+// mutationFn into DataClient and no further. It is never placed in a query
+// key (which react-query keeps in its cache), never retried, and never part
+// of any resolved value.
+// ---------------------------------------------------------------------------
+function accountRefresh(qc: ReturnType<typeof useQueryClient>): void {
+  qc.invalidateQueries({ queryKey: ['teamAccount'] })
+  qc.invalidateQueries({ queryKey: ['settings'] })
+  qc.invalidateQueries({ queryKey: ['status'] })
+}
+
+export function useSignIn() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (credentials: { email: string; password: string }) => c.signIn(credentials),
+    onSuccess: () => accountRefresh(qc),
+  })
+}
+
+export function useSignUp() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (credentials: { displayName: string; email: string; password: string }) => c.signUp(credentials),
+    // Refreshed on success even for needsConfirmation, where nothing changed
+    // server-side: a sign-up that DID issue a session (confirmation off) must
+    // not leave the rail still reading signed-out.
+    onSuccess: () => accountRefresh(qc),
+  })
+}
+
+export function useSignOut() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => c.signOut(),
+    onSuccess: () => accountRefresh(qc),
+  })
+}
+
+export function useCreateTeam() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => c.createTeam(name),
+    onSuccess: () => {
+      accountRefresh(qc)
+      qc.invalidateQueries({ queryKey: ['members'] })
+    },
   })
 }
 

@@ -58,6 +58,13 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   setProjectAccess: c => c.setProjectAccess('/x', 'm1', true),
   getAccessMatrix: c => c.getAccessMatrix(),
   getMembers: c => c.getMembers(),
+  // Account state and the four account writes (Team page). The password here
+  // is a fixture literal for a stubbed fetch -- it reaches no network.
+  getTeamAccount: c => c.getTeamAccount(),
+  signIn: c => c.signIn({ email: 'a@b.dev', password: 'fixture-only' }),
+  signUp: c => c.signUp({ displayName: 'A', email: 'a@b.dev', password: 'fixture-only' }),
+  signOut: c => c.signOut(),
+  createTeam: c => c.createTeam('Acme AI'),
   getInvites: c => c.getInvites(),
   createInviteLink: c => c.createInviteLink('team-1'),
   revokeInvite: c => c.revokeInvite('i1'),

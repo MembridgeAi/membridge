@@ -1,3 +1,5 @@
+import { Link } from 'wouter'
+import { feedSessionHref } from '../../app/routes'
 import { Avatar } from '../../components/Avatar'
 import { elapsedShort } from '../../data/relativeTime'
 import type { LiveSessionGroup } from '../../data/types'
@@ -26,6 +28,7 @@ interface LiveEntryProps {
  *  ACTUAL change, not the last poll -- a real regression, not a safe skip. */
 export function LiveEntry({ group }: LiveEntryProps) {
   return (
+    <Link href={feedSessionHref(group.sessionId)} className="live-entry-link">
     <div className="live-entry" data-testid="live-entry">
       <span className="live-entry-avatar">
         <span className="live-dot" role="img" aria-label="Live" />
@@ -51,5 +54,6 @@ export function LiveEntry({ group }: LiveEntryProps) {
         <div className="live-entry-outcome">{group.outcome}</div>
       ) : null}
     </div>
+    </Link>
   )
 }

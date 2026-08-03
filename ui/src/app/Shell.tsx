@@ -83,16 +83,25 @@ export function Shell({ children }: ShellProps) {
           <NavLink to={ROUTES.search} label="Search" icon="⌕" />
           <NavLink to={ROUTES.projects} label="Projects" icon="▦" />
 
+          {/* Team is UNCONDITIONAL, unlike Members/Insights below it: it is
+              the screen that says whether this machine is even signed in,
+              and gating it on being on a team is what left a signed-out (or
+              teamless) user with nowhere to go. */}
+          <div className="nav-group-label">Team</div>
+          <NavLink to={ROUTES.team} label="Team" icon="◈" />
+
           {showTeamNav && (
             <>
-              <div className="nav-group-label">Team</div>
               <NavLink to={ROUTES.members} label="Members" icon="◎" />
               <NavLink to={ROUTES.insights} label="Insights" icon="✦" />
             </>
           )}
 
+          {/* Now lands on the Team page, which actually has a create-a-team
+              form. It used to navigate to Settings, whose only team control
+              is "Leave team" -- a dead end. */}
           {showCreateTeam && (
-            <button type="button" className="create-team" onClick={() => navigate(ROUTES.settings)}>
+            <button type="button" className="create-team" onClick={() => navigate(ROUTES.team)}>
               + Create a team
             </button>
           )}

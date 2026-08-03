@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react'
+import { useSearch } from 'wouter'
+import { FEED_SESSION_PARAM } from '../../app/routes'
 import { EntryRow } from '../../components/EntryRow'
 import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
@@ -65,6 +67,18 @@ function dedupeById(entries: FeedEntry[]): FeedEntry[] {
 export function FeedPage() {
   const statusQuery = useStatus()
   const solo = statusQuery.data?.solo ?? true
+
+  // Arriving from a Today card: `?session=<id>` names the row you were sent
+  // to. Read defensively -- a malformed query string must degrade to "no
+  // target" rather than throw into this render path.
+  const search = useSearch()
+  const targetSession = useMemo(() => {
+    try {
+      return new URLSearchParams(search).get(FEED_SESSION_PARAM) || null
+    } catch {
+      return null
+    }
+  }, [search])
 
   const [author, setAuthor] = useState('')
   const [project, setProject] = useState('')
@@ -133,7 +147,13 @@ export function FeedPage() {
         <div key={group.day}>
           <div className="feed-day">{group.day}</div>
           {group.entries.map(entry => (
-            <EntryRow key={entry.id} entry={entry} project={entry.project} showAvatar={!solo} />
+            <EntryRow
+              key={entry.id}
+              entry={entry}
+              project={entry.project}
+              showAvatar={!solo}
+              targeted={!!targetSession && entry.session === targetSession}
+            />
           ))}
         </div>
       ))}

@@ -249,3 +249,45 @@ describe('FeedPage', () => {
     expect(rows.map(r => r.textContent)).toEqual(['newer session outcome', 'older session outcome'])
   })
 })
+
+// Arriving from a Today card: the feed has to say WHICH row you were sent to,
+// or the link may as well not exist. `?session=` is the target.
+describe('feed: a session targeted by ?session=', () => {
+  const client = () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'e1', session: 'sess-a', outcome: 'the targeted work' }),
+        entry({ id: 'e2', session: 'sess-b', outcome: 'some other work' }),
+      ],
+      nextCursor: null,
+    } as never)
+    return c
+  }
+
+  it('marks the matching row, and only that row', async () => {
+    window.history.replaceState({}, '', '/feed?session=sess-a')
+    const { container } = renderWith(client(), <FeedPage />)
+    await screen.findByText('the targeted work')
+    const targeted = container.querySelectorAll('.entry-row-targeted')
+    expect(targeted).toHaveLength(1)
+    expect(targeted[0].textContent).toContain('the targeted work')
+  })
+
+  it('renders the feed normally when the target is not on the loaded pages', async () => {
+    // The feed is paged; a live session can easily sit past the first page.
+    // Degrading to a plain feed is the only honest option, and it must never
+    // throw into the render path.
+    window.history.replaceState({}, '', '/feed?session=sess-not-loaded')
+    const { container } = renderWith(client(), <FeedPage />)
+    await screen.findByText('the targeted work')
+    expect(container.querySelectorAll('.entry-row-targeted')).toHaveLength(0)
+  })
+
+  it('marks nothing when there is no session param at all', async () => {
+    window.history.replaceState({}, '', '/feed')
+    const { container } = renderWith(client(), <FeedPage />)
+    await screen.findByText('the targeted work')
+    expect(container.querySelectorAll('.entry-row-targeted')).toHaveLength(0)
+  })
+})

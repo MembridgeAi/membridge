@@ -362,3 +362,20 @@ describe('TodayPage', () => {
     expect(screen.queryByTestId('project-row')).toBeNull()
   })
 })
+
+// The card is the most-looked-at thing on the most-looked-at screen, and it
+// was a dead end: it named a person and their work and went nowhere.
+describe('Happening now: the card links to that session in the feed', () => {
+  it('links to the feed targeting the newest session in the group', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getLiveSessions').mockResolvedValue([
+      liveSession({ id: 'sess-older', author: 'Marco', authorId: 'marco', startedAt: '2026-07-29T19:00:00Z' }),
+      liveSession({ id: 'sess-newest', author: 'Marco', authorId: 'marco', startedAt: '2026-07-29T21:00:00Z' }),
+    ])
+    renderWith(client, <TodayPage />)
+    const row = await screen.findByTestId('live-entry')
+    const link = row.closest('a') || row.querySelector('a')
+    expect(link).not.toBeNull()
+    expect(link!.getAttribute('href')).toBe('/feed?session=sess-newest')
+  })
+})

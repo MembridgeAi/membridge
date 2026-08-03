@@ -1,0 +1,179 @@
+/* Team page -- imported once from TeamPage.tsx (per-feature CSS, same
+ * precedent as members.css/settings.css/today.css). Same rules as every other
+ * stylesheet here: one --r radius everywhere, no shadows on resting content,
+ * no gradients, hover changes background/border only. Type/spacing/motion
+ * tokens from styles/tokens.css; settle-in keyframe from styles/base.css. */
+
+.team-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.team-title {
+  margin: 0;
+  padding: var(--sp-4) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .team-title { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+
+.team-loading {
+  margin: 0;
+  padding: var(--sp-4);
+  color: var(--text3);
+  font-size: var(--fs-sm);
+}
+
+/* One card per state. Max-width keeps the forms readable instead of stretched
+   across a wide window; the page itself stays full width. */
+.team-card {
+  margin: var(--sp-4);
+  padding: var(--sp-4);
+  max-width: 560px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+}
+.team-card + .team-card {
+  margin-top: 0;
+}
+.team-card-title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+}
+
+.team-signed-out {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--amber);
+  border-radius: var(--r);
+  background: var(--amber-dim);
+  color: var(--text);
+  font-size: var(--fs-base);
+  line-height: var(--lh-snug);
+}
+
+.team-note {
+  margin: 0 0 var(--sp-3);
+  color: var(--text2);
+  font-size: var(--fs-base);
+  line-height: var(--lh-snug);
+}
+.team-notice {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: var(--fs-base);
+  line-height: var(--lh-snug);
+}
+.team-error {
+  margin: 0 0 var(--sp-3);
+  color: var(--red);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+.team-page > .team-error {
+  padding: 0 var(--sp-4);
+}
+
+.team-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.team-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.team-field label {
+  color: var(--text2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+.team-field input {
+  padding: 7px 10px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  background: var(--panel2);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: var(--fs-base);
+}
+.team-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.team-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.team-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text2);
+  font-family: var(--ui);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+.team-btn:hover {
+  background: var(--panel2);
+}
+.team-btn:disabled {
+  opacity: 0.5;
+}
+.team-btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.team-btn-primary:hover {
+  border-color: var(--accent2);
+  background: var(--accent2);
+}
+
+.team-account {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.team-account-name {
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+}
+.team-account-email {
+  color: var(--text3);
+  font-size: var(--fs-sm);
+}
+.team-account .team-btn {
+  margin-left: auto;
+}
+
+/* The minted invite value. Wraps rather than truncating: a link the viewer
+   cannot read in full is a link they cannot copy by hand when the clipboard
+   write failed, which is exactly when this is on screen. */
+.team-share-value {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

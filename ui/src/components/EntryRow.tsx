@@ -86,6 +86,11 @@ interface EntryRowProps {
    *  nothing to distinguish -- absent, not disabled/greyed. Defaults true
    *  for every existing single-project caller. */
   showAvatar?: boolean
+  /** This row is the one a Today card sent the reader to (FeedPage reads
+   *  ?session=). Marks it and scrolls it into view. Purely presentational:
+   *  a miss is a plain false, never an error, because the feed is paged and
+   *  the target may sit past the pages that are loaded. */
+  targeted?: boolean
 }
 
 /** The row's unchanged anatomy, shared by both shells below (link and plain
@@ -167,9 +172,19 @@ function HoverPreview({ entry }: { entry: StreamEntry }) {
  *  session-less row (bare plumbing) keeps the non-interactive markup --
  *  there is no page to link to. Nothing expands inside the feed; the row's
  *  height is invariant (the preview is absolutely positioned). */
-export function EntryRow({ entry, project, showAvatar = true }: EntryRowProps) {
+export function EntryRow({ entry, project, showAvatar = true, targeted = false }: EntryRowProps) {
   const [previewOpen, setPreviewOpen] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const rowRef = useRef<HTMLAnchorElement | null>(null)
+
+  // Bring the targeted row into view once it exists. Guarded: jsdom and
+  // older engines have no scrollIntoView, and a missing one must not throw
+  // into the render path.
+  useEffect(() => {
+    if (!targeted || !rowRef.current) return
+    if (typeof rowRef.current.scrollIntoView !== 'function') return
+    rowRef.current.scrollIntoView({ block: 'center' })
+  }, [targeted])
 
   const clearTimer = () => {
     if (timer.current !== null) {
@@ -209,9 +224,18 @@ export function EntryRow({ entry, project, showAvatar = true }: EntryRowProps) {
   }
 
   return (
+    // `entry-row-previewing` is what keeps the open card on top. Every row
+    // keeps `transform: translateY(0)` after its settle-in animation (fill
+    // mode `both`), and a non-none transform makes the row its own stacking
+    // context -- which traps the card's own z-index inside the row, so the
+    // next row down painted its opaque background straight over the card.
+    // Raising the ROW is the only thing that escapes that, and it is scoped to
+    // while a preview is actually open so the feed's paint order is otherwise
+    // untouched.
     <Link
+      ref={rowRef}
       href={sessionHref(entry.session)}
-      className="entry-row entry-row-link"
+      className={`entry-row entry-row-link${previewOpen ? ' entry-row-previewing' : ''}${targeted ? ' entry-row-targeted' : ''}`}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
     >

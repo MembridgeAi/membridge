@@ -29,15 +29,15 @@ function widgetTitles(): string[] {
 }
 
 describe('BriefWidgets (Task 4)', () => {
-  it('renders the five widgets in the locked fixed order', () => {
+  it('renders the widgets in the locked fixed order', () => {
     render(<BriefWidgets session={session()} />)
-    expect(widgetTitles()).toEqual(['Why', 'Watch out', 'Key files', 'Changes', 'Checkpoints'])
+    expect(widgetTitles()).toEqual(['Why', 'Watch out', 'Key files', 'Changes'])
   })
 
-  it('Why and Watch out are open by default; the other three are closed', () => {
+  it('Why and Watch out are open by default; the other two are closed', () => {
     render(<BriefWidgets session={session()} />)
     const details = [...document.querySelectorAll('details.session-widget')] as HTMLDetailsElement[]
-    expect(details.map(d => d.open)).toEqual([true, true, false, false, false])
+    expect(details.map(d => d.open)).toEqual([true, true, false, false])
   })
 
   it('a widget with no captured content is ABSENT from the DOM -- no placeholder row', () => {
@@ -76,11 +76,13 @@ describe('BriefWidgets (Task 4)', () => {
     expect(changes.textContent).toContain('-2')
   })
 
-  it('Checkpoints renders the trail oldest-first', () => {
+  // The checkpoint trail is the page's distilled bullet list now (distill.ts),
+  // and the prompt chain renders each checkpoint against the prompt it
+  // followed. A third copy here was duplication, so the widget is gone.
+  it('does not render a Checkpoints widget, even for a session with a full trail', () => {
     render(<BriefWidgets session={session()} />)
-    const checkpoints = screen.getByText('Checkpoints').closest('details')!
-    const texts = [...checkpoints.querySelectorAll('.session-checkpoint-text')].map(el => el.textContent)
-    expect(texts).toEqual(['Gate extracted; stop path green.', 'Hook ownership decided by durability.'])
+    expect(screen.queryByText('Checkpoints')).toBeNull()
+    expect(document.querySelector('.session-checkpoint-text')).toBeNull()
   })
 
   it('a closed widget summary row carries a one-line truncated peek', () => {
