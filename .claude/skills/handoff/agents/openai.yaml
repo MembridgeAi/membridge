@@ -1,5 +1,5 @@
 interface:
   display_name: "Handoff"
-  short_description: "Compact a conversation into a handoff"
+  short_description: "Post an end-of-session handoff to Andrew in #handoffs and #brief"
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true
