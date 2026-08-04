@@ -6,10 +6,15 @@ import { FakeDataClient } from '../../data/FakeDataClient'
 import { SearchPage } from './SearchPage'
 
 // Every result assertion waits out the input debounce (SEARCH_DEBOUNCE_MS)
-// plus a query round trip. The default 1s findBy budget is close enough to
-// that sum to fail under load, which is a flaky test, not a real signal --
-// so the waits here are given explicit room.
-const SETTLED = { timeout: 4000 }
+// plus a query round trip -- close enough to the default findBy budget to
+// fail under load, which is a flaky test, not a real signal, so the waits
+// here are given explicit room.
+//
+// Must stay ABOVE the suite-wide asyncUtilTimeout (vitest.setup.ts, 5s), not
+// the 1s Testing Library default it was originally written against: an
+// explicit timeout BELOW the global one silently makes these waits shorter
+// than every other wait in the suite, which is the opposite of the intent.
+const SETTLED = { timeout: 8000 }
 
 // Enter the query as ONE input event (paste), never keystroke by keystroke.
 // Typing restarts the debounce per character, so under load the run becomes a
