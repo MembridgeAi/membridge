@@ -148,6 +148,68 @@ async function main() {
       assert.ok(many <= base * 1.5 + 1e-9, `the boost is unbounded (${base} -> ${many})`);
     });
 
+    // --- the strict/relaxed policy, in the form the FTS5 index consumes ---
+    // rankWithFallback holds this policy for in-memory scoring; searchPasses
+    // is the SAME policy expressed as query passes, so the index-backed
+    // surfaces cannot drift into a different definition of "no results".
+
+    check('search: searchPasses strict pass is a MAJORITY of terms, matching scoreEntry', () => {
+      // Not "all terms". scoreEntry's strict gate is floor(n/2)+1, and a pass
+      // that required every term would drop the partial matches the harness
+      // scenario "old exact beats recent partial" depends on being returned.
+      const passes = search.searchPasses('vault rotation epochs');
+      assert.strictEqual(passes.length, 2);
+      assert.deepStrictEqual(passes[0], { terms: ['vault', 'rotation', 'epochs'], minTerms: 2 });
+      assert.deepStrictEqual(passes[1], { terms: ['vault', 'rotation', 'epochs'], minTerms: 1 });
+    });
+
+    check('search: the strict majority matches rankEntries term-for-term', () => {
+      // Pinned against the in-memory scorer directly, so the two definitions of
+      // "strict" cannot drift apart silently.
+      // Multi-character terms on purpose: tokenize drops anything shorter than
+      // two characters, so single letters would make every query empty here.
+      for (const q of ['aa bb', 'aa bb cc', 'aa bb cc dd', 'aa bb cc dd ee']) {
+        const terms = [...new Set(search.tokenize(q))];
+        assert.strictEqual(search.searchPasses(q)[0].minTerms, Math.floor(terms.length / 2) + 1,
+          `strict pass disagrees with scoreEntry's gate for "${q}"`);
+      }
+    });
+
+    check('search: matchedFields names the fields a term actually hit', () => {
+      // The index ranks by BM25 and cannot say WHICH field matched, but the
+      // result contract has always carried that. Derived here, from the same
+      // FIELD_WEIGHTS keys and the same tokenizer the scorer uses, so the two
+      // surfaces cannot disagree about what "matched" means.
+      const e = {
+        headline: 'rewrote token refresh',
+        summary: 'unrelated prose',
+        files: ['lib/token-refresh.js'],
+      };
+      assert.deepStrictEqual(search.matchedFields(e, ['token']), ['headline', 'files']);
+      assert.deepStrictEqual(search.matchedFields(e, ['nothinghere']), []);
+      assert.deepStrictEqual(search.matchedFields({}, ['token']), []);
+    });
+
+    check('search: matchedFields agrees with scoreEntry on the same entry', () => {
+      const e = { ts: '2026-01-01', decisions: 'vault rotation per epoch', summary: 'vault notes' };
+      const terms = [...new Set(search.tokenize('vault rotation'))];
+      assert.deepStrictEqual(search.matchedFields(e, terms),
+        search.scoreEntry(e, terms, 'vault rotation').matched,
+        'the derived matched-field list drifted from the scorer\'s');
+    });
+
+    check('search: a single-term query gets no relaxed pass — there is nothing to relax', () => {
+      const passes = search.searchPasses('vault');
+      assert.strictEqual(passes.length, 1);
+      assert.strictEqual(passes[0].minTerms, 1);
+    });
+
+    check('search: searchPasses drops stopwords and yields nothing for a query made only of them', () => {
+      assert.deepStrictEqual(search.searchPasses('what did we do'), []);
+      assert.deepStrictEqual(search.searchPasses(''), []);
+      assert.deepStrictEqual(search.searchPasses('who touched auth.js')[0].terms, ['touched', 'auth.js']);
+    });
+
     check('search: retrievalsOf does not mutate the entries it is asked about', () => {
       const e = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth' };
       const before = JSON.stringify(e);

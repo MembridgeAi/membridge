@@ -17,21 +17,24 @@ jobs:
         # dropping this leg silently removes all coverage of Windows private-key
         # storage while the suite still reports green.
         os: [ubuntu-latest, windows-latest, macos-latest]
-        # 18 dropped: the ui leg cannot go green on it. Vite 8 builds through
-        # rolldown, which imports styleText from node:util, added in Node 20,
-        # and vite, @vitejs/plugin-react, vitest and jsdom all declare engines
-        # that exclude 18.
+        # This matrix and package.json's `engines` used to DISAGREE ON PURPOSE:
+        # 18 was dropped here because the ui leg could not build on it (Vite 8
+        # via rolldown imports styleText from node:util, added in Node 20),
+        # while `engines` stayed at >=18 because that is a BUILD-time constraint
+        # and the npm tarball ships only bin, lib and vendor -- an npm consumer
+        # never runs vite. Verified then on real Node 18.20.8.
         #
-        # This matrix and package.json's `engines` DISAGREE ON PURPOSE, and the
-        # disagreement is correct. Node 18 is a BUILD-TIME constraint, not a
-        # runtime one. `engines` is a claim about the runtime, and the npm
-        # tarball ships only bin, lib and vendor (see the `files` field), so an
-        # npm consumer never runs vite and never reaches styleText. Verified on
-        # real Node 18.20.8 against a packed tarball: the CLI, the daemon and
-        # all six MCP tools work. `engines` therefore stays at >=18. Raising it
-        # on build-toolchain evidence would lock out users who are fine, which
-        # is the mirror image of the bug this comment exists to record.
-        node: [20, 22]
+        # That reasoning no longer applies, and the distinction it turned on is
+        # exactly why. lib/search-index.js requires node:sqlite, which is a
+        # RUNTIME dependency of the CLI and the daemon themselves, unflagged
+        # only from 22.13. A Node 20 consumer does not get a degraded build;
+        # they get a throw on require. So `engines` is now genuinely >=22 and
+        # this matrix follows it rather than disagreeing with it.
+        #
+        # 24 is here because it is what the Electron runtime we ship embeds
+        # (Electron 43 = Node 24.18), so the desktop app's actual runtime has
+        # coverage and not just the declared floor.
+        node: [22, 24]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
