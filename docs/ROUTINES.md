@@ -99,9 +99,15 @@ merge to master, not as a step for later.
 The tracked rule is `.claude/rules/testing.md` and it deliberately overrides
 the global always-run-everything habits:
 
-- **The full suite is a ship gate, not a dev-loop tool.** Targeted checks while
-  developing; a full run at most once per session, right before pushing. CI
-  runs everything on every push anyway.
+- **The full suite is a ship gate, not a dev-loop tool.** During development
+  run just the relevant section: `node test/run.js <suite>` finishes in
+  seconds (the split suites live in `test/suites/`: redaction, search,
+  save-state, ops-noise, mcp-config, mcp-agent-discovery). One full
+  `node test/run.js` at most once per session, right before pushing. CI runs
+  everything on every push anyway.
+- New tests go in `test/suites/`, not `run-tests.js`: require `../harness`
+  first, end with `h.finish()`. Sections moved out of the monolith left a
+  breadcrumb comment at the old location naming their new file.
 - **A green local build proves nothing about types.** Neither `Build app` nor
   `npm run build:ui` runs tsc; master was red for two days while both stayed
   green. The only local check is `cd ui && npx tsc --noEmit`.
@@ -124,6 +130,10 @@ the global always-run-everything habits:
   continuously by the daemon and parallel AI sessions; a broad add has captured
   another session's half-finished edits into a commit before. Verify the branch
   diff contains only your hunks before merging. One agent per working tree.
+- **Before pushing a finished branch, fetch and merge or rebase onto the
+  latest `origin/master` first.** Master moves underneath in-flight branches
+  (parallel sessions land work continuously), so a straight push ships against
+  a world that no longer exists.
 - Never `git push --tags` from Marco's checkout (stale pre-launch local tags
   would overwrite correct remote ones).
 - Site repo pushes go to `main` (section 3).
