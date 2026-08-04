@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Link, useLocation, useRoute } from 'wouter'
 import { MembridgeMark } from '../assets/MembridgeMark'
 import { useDataClient } from '../data/DataClientProvider'
-import { useSettings, useStatus } from '../data/queries'
+import { useSettings, useStatus, useTeamAccount } from '../data/queries'
 import { ROUTES } from './routes'
 
 interface NavLinkProps {
@@ -41,11 +41,13 @@ function errorMessage(error: unknown): string {
 export function Shell({ children }: ShellProps) {
   const statusQuery = useStatus()
   const settingsQuery = useSettings()
+  const accountQuery = useTeamAccount()
   const client = useDataClient()
   const [, navigate] = useLocation()
 
   const status = statusQuery.data
   const settings = settingsQuery.data
+  const account = accountQuery.data
   const ready = status !== undefined && settings !== undefined
   const hasError = statusQuery.isError || settingsQuery.isError
 
@@ -56,7 +58,27 @@ export function Shell({ children }: ShellProps) {
   const role = settings?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
   const showTeamNav = ready && !solo && client.capabilities.teamAdminSupported && isTeamAdmin
-  const showCreateTeam = ready && solo
+
+  // GET /api/team's `authenticated` is the ONLY field that answers "are there
+  // credentials on this machine". Neither of the other two queries can:
+  // status.solo means no linked project on a multi-member team rather than
+  // "has no team" (conflating the two is what hid team nav from real
+  // members), and settings.team is null both when signed out and when signed
+  // in with no team yet. Undefined here means the account query has not
+  // settled, which deliberately renders NEITHER branch of the footer: showing
+  // "Sign in" to someone who turns out to be signed in is the same lie as
+  // showing a name to someone who is signed out, just pointing the other way.
+  const signedIn = account?.authenticated === true
+  const signedOut = account !== undefined && !account.authenticated
+  // Prefer what the person chose to be called, then the address they signed
+  // up with. A signed-in account with neither still gets a truthful label
+  // rather than falling through to an empty span.
+  const identity = account?.user?.displayName || account?.user?.email || 'Signed in'
+
+  // Creating a team requires an account, so a signed-out machine gets the
+  // sign-in control in the footer instead of this. Gating on solo alone sent
+  // a signed-out user to a create-team form they could not submit.
+  const showCreateTeam = ready && solo && signedIn
 
   return (
     <div className="shell">
@@ -110,11 +132,26 @@ export function Shell({ children }: ShellProps) {
           <NavLink to={ROUTES.settings} label="Settings" icon="⚙" />
         </div>
 
+        {/* The footer is the one piece of chrome present on every screen, so
+            it is where the app has to state which account it is acting as.
+            It used to read the literal word "You" in both states, which meant
+            a freshly installed, signed-out app looked exactly like a signed-in
+            one and offered no route in from anywhere in the rail. */}
         <div className="rail-footer">
           {status?.running && (
             <span className="status-dot" role="img" aria-label="Daemon running" title="Daemon running" />
           )}
-          <span>You</span>
+          {/* A Link, not a button-plus-navigate like the create-team CTA
+              above: this only ever changes route, so anchor semantics give it
+              keyboard and middle-click behaviour for free. It points at the
+              Team page because TeamPage's SignInCard is the only surface that
+              accepts credentials; Settings has no sign-in control at all. */}
+          {signedOut && (
+            <Link href={ROUTES.team} className="rail-signin">Sign in</Link>
+          )}
+          {signedIn && (
+            <span className="rail-identity" data-testid="rail-identity" title={identity}>{identity}</span>
+          )}
         </div>
       </nav>
 

@@ -3,8 +3,9 @@ import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from '../data/DataClientProvider'
 import { FakeDataClient } from '../data/FakeDataClient'
-import type { Settings, Status } from '../data/types'
+import type { Settings, Status, TeamAccount } from '../data/types'
 import { App } from './App'
+import { ROUTES } from './routes'
 import { renderApp } from '../test/renderApp'
 
 describe('Shell', () => {
@@ -77,5 +78,59 @@ describe('Shell', () => {
     expect(screen.queryByRole('link', { name: 'Members' })).toBeNull()
     expect(screen.queryByRole('link', { name: 'Insights' })).toBeNull()
     expect(screen.queryByRole('button', { name: /create a team/i })).toBeNull()
+  })
+
+  // The rail footer is the only always-visible chrome on every screen, so it
+  // is where a signed-out machine has to admit it is signed out. Before this,
+  // the footer read the literal word "You" in both states and the rail
+  // carried no sign-in affordance at all, which is how a freshly installed
+  // app left someone with no discoverable way in.
+  describe('rail footer identity', () => {
+    it('offers a sign-in control pointing at the Team page when the machine is signed out', async () => {
+      renderApp({ authenticated: false, solo: true })
+      // Team page, not Settings: TeamPage's SignInCard is the only surface in
+      // the app that can actually take credentials.
+      expect(await screen.findByRole('link', { name: /sign in/i })).toHaveAttribute('href', ROUTES.team)
+    })
+
+    it('names the signed-in user in the rail footer rather than the hardcoded "You"', async () => {
+      renderApp({ authenticated: true, solo: true })
+      expect(await screen.findByTestId('rail-identity')).toHaveTextContent('Marco')
+      expect(screen.queryByRole('link', { name: /sign in/i })).toBeNull()
+    })
+
+    // Signed out, `solo` is also true, so a create-team CTA keyed on solo
+    // alone invites someone to create a team before they have an account and
+    // drops them on a sign-in wall instead. Being signed in is what the
+    // create flow actually requires, so that is what gates it.
+    it('withholds the create-team CTA from a signed-out machine and offers sign-in instead', async () => {
+      renderApp({ authenticated: false, solo: true })
+      await screen.findByRole('link', { name: /sign in/i })
+      expect(screen.queryByRole('button', { name: /create a team/i })).toBeNull()
+    })
+
+    it('still offers the create-team CTA to a signed-in machine with no team', async () => {
+      renderApp({ authenticated: true, solo: true })
+      expect(await screen.findByRole('button', { name: /create a team/i })).toBeInTheDocument()
+    })
+
+    it('renders neither a sign-in control nor an identity while the account is still loading', () => {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      // Only getTeamAccount hangs; status and settings resolve normally. That
+      // isolates the assertion to the account query, and proves the footer
+      // stays silent rather than flashing "Sign in" at someone who turns out
+      // to be signed in a moment later.
+      const pendingClient = new FakeDataClient({ solo: true })
+      pendingClient.getTeamAccount = () => new Promise<TeamAccount>(() => {})
+
+      render(
+        <QueryClientProvider client={qc}>
+          <DataClientProvider client={pendingClient}><App /></DataClientProvider>
+        </QueryClientProvider>,
+      )
+
+      expect(screen.queryByRole('link', { name: /sign in/i })).toBeNull()
+      expect(screen.queryByTestId('rail-identity')).toBeNull()
+    })
   })
 })
