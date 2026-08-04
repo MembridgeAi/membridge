@@ -14445,6 +14445,27 @@ async function main() {
     assert.strictEqual(theirs.self, false);
     assert.strictEqual(theirs.author, 'Marco');
   });
+  // Your `live` and a teammate's `live` are the same word over different
+  // evidence: yours is judged from the session's own events, theirs from the
+  // last row that reached this machine over sync. A teammate actively working
+  // reads as not-live until a row lands, and a row that landed and stopped
+  // reads as live for the rest of the window. An MCP caller took a team row's
+  // live flag as proof a teammate was working at that moment; nothing in the
+  // payload said otherwise. liveBasis names the evidence so a reader does not
+  // have to know which normalizer produced the entry.
+  check('feed: liveBasis names the evidence behind live, per origin', () => {
+    const local = feed.normalizeLocal(
+      { ts: '2026-07-14T05:00:00Z', session: 's1', source: 'Claude Code' },
+      { projectName: 'p', projectPath: '/p' });
+    assert.strictEqual(local.liveBasis, 'session-events',
+      'a local entry judges liveness from the session own events');
+    const team = feed.normalizeTeam(
+      { id: 1, project_id: 'p', project_name: 'p', author_id: 'a', author_name: 'A',
+        ts: '2026-07-14T05:00:00Z', source: 'Codex', ask: 'q', files: [],
+        created_at: '2026-07-14T05:00:00Z' }, { selfUserId: 'me' });
+    assert.strictEqual(team.liveBasis, 'synced-row',
+      'a team entry can only judge liveness from the row that reached this machine');
+  });
   // Option A — propagate the distilled flag over team sync. A team_feed row that
   // carries distilled:true must normalize to distilled:true (so a teammate's
   // distilled summary is treated as distilled, not lumped in with harvested);
@@ -16168,6 +16189,19 @@ async function main() {
       const rows = prov.fileProvenance(projWhy, { events: whyEvents }, cfgWhy, 'src/auth.js', whyNow);
       assert.strictEqual(rows[0].live, true, 'w2 (10 min old) should be live');
       assert.strictEqual(rows[1].live, false, 'w1 (3 h old) should not be live');
+    });
+
+    // Same split as the feed's liveBasis: `why` promises "whether that session
+    // is still live", and for a teammate that can only ever mean "the newest
+    // row this machine holds is recent". Say which, rather than letting one
+    // word carry two strengths of claim.
+    check('provenance: liveBasis separates a session-events claim from a synced-row one', () => {
+      assert.ok(prov, 'lib/provenance.js missing');
+      const rows = prov.fileProvenance(projWhy, { events: whyEvents, teamEntries: whyTeam }, cfgWhy, 'src/auth.js', whyNow);
+      const mine = rows.find(r => r.session === 'w2');
+      const theirs = rows.find(r => r.session === 'tp1');
+      assert.strictEqual(mine.liveBasis, 'session-events', 'own session judges liveness from its events');
+      assert.strictEqual(theirs.liveBasis, 'synced-row', 'a teammate row has only the synced row to judge on');
     });
 
     check('provenance: redacts secrets in ask and summary through the standard pipeline', () => {

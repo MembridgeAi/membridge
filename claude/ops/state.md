@@ -1,10 +1,7 @@
 # Operational state
 
-**Verified against `f92cde6` on 2026-08-01, after the activity-corpus
-reconciliation.** Every number below came from a command run at that commit. Where a command could not be run, that is
-called out in place rather than filled in from memory.
-
-**Read the two warnings directly below before doing anything else.**
+**Verified against `0fc319a` (master tip) on 2026-08-03.** Every fact in the
+status, release and CI sections below came from a command run that day.
 
 This file and `decisions.md` live in the repo. The repo is canonical and the
 Claude Project is the mirror, not the other way round. If the Project copy and
@@ -14,30 +11,43 @@ Read this first. `decisions.md` holds the reasoning behind the choices below.
 
 ---
 
-## Two warnings
+## Master was red for two days. Fixed in `0fc319a`.
 
-**1. Do NOT publish v0.2.3 as it is tagged right now.** The tag still points at
-`802d366`, which predates the USD revert, so publishing it would ship a build
-that drops user cost history. The tag was deliberately not moved. See the
-release section.
+From `bae4b0e` through `80ba253`, **all six CI legs failed** at `tsc --noEmit`
+with three `TS2591` errors: `ui/src/components/EntryRow.test.tsx` imports
+`node:fs` and `node:path` and reads `process.cwd()`, but `@types/node` was never
+a `ui/` devDependency. Adding it was the entire fix; the test's executable code
+is unchanged.
 
-**2. PR #6 was merged into master at 04:40 by mmelika and it broke the repo.**
-The `build/signed-dmg` merge (`539ffda`) wrote a duplicated `entitlementsInherit`
-key with no separating comma, so `package.json` stopped being valid JSON for
-roughly twenty five minutes. Nothing that reads it worked. It also reintroduced
-`"notarize": false`, which is the reason PR #6 was closed earlier the same day.
-Repaired in `16f4c0b`: the duplicate key removed, `notarize` returned to unset.
-**Unset is correct.** It means electron-builder notarizes exactly when Apple
-credentials are present, which lets forks and PR builds pass with no secrets
-while real releases get notarized. Setting it false short circuits before the
-credentials are read and silently ships signed-but-unnotarized builds.
+**The lesson worth keeping: a green local build proved nothing.** `Build app`
+stayed green that whole time and `npm run build:ui` succeeds locally, because
+**neither runs `tsc`**. Only the `CI` workflow typechecks. If you want to know
+whether master compiles, run `cd ui && npx tsc --noEmit` yourself.
 
-This needs a conversation with Marco, not just a fix.
+Two tidier-looking fixes were tried and both fail — the reasons are recorded in
+the test itself so they are not retried:
+
+- `import css from './components.css?raw'` returns the **empty string**, because
+  vitest stubs CSS imports. The assertion then fails while looking like a real
+  CSS regression.
+- `new URL('./components.css', import.meta.url)` throws `The URL must be of
+  scheme file` **in that module**. The react plugin transforms `.tsx` and serves
+  it over a non-file scheme. A probe in a plain `.ts` file *does* get a `file://`
+  URL, so testing this idea in the wrong file type will tell you it works.
+
+Note `@types/node` also makes node globals (`process`, `Buffer`) typecheck
+anywhere in `src/`, despite `node` being deliberately absent from `tsconfig`'s
+`types` array, because `vite.config.ts` is in `include` and pulls
+`vite/dist/node/index.d.ts` with its `/// <reference types="node" />`. If that
+ever matters, the fix is a separate tsconfig for the node-facing files.
 
 ## One-line status
 
-Master is green on both suites after the repair. v0.2.3 is tagged but **not
-published**, and its tag needs moving before it is.
+**v0.2.4 shipped** on 2026-08-02: GitHub release, five assets, and
+`@membridgeai/membridge@0.2.4` on npm. v0.2.3 was skipped entirely and will
+never be published. Master went red for two days after that and is **green
+again** as of `0fc319a`. The site installer, stuck at 0.2.2, was regenerated and
+is live at 0.2.4.
 
 ---
 
@@ -45,76 +55,98 @@ published**, and its tag needs moving before it is.
 
 | Thing | Value |
 | --- | --- |
-| Local `master` | `f92cde6`, the activity-corpus reconciliation merge |
-| `origin/master` | `6304f34` at the time of writing. Local master is **2 commits ahead and NOT pushed**. |
+| Local `master` | `0fc319a`, identical to `origin/master`. Nothing unpushed. |
+| `origin/master` | `0fc319a` |
 | Remotes | `origin` = `github.com/MembridgeAi/membridge`, and it is the ONLY remote. The `upstream` and `andrewb` remotes were removed, so a bare `git push` now goes to canonical rather than the dead fork. |
 | Fork | `andrewb-eng/membridge` still exists on GitHub pending a permissions issue, but nothing local points at it. Treat it as deleted. |
-| Root suite | **1379/1380 checks passed.** The single failure is the worktrees check below, which fails on any machine with a live git worktree. |
-| UI suite | **555 tests, 36 files passed** |
-| `tsc --noEmit` | clean |
+| Push access | Marco's laptop clone **has write access**, confirmed 2026-08-03 by `git push --dry-run origin master` reaching the remote. A 403 seen from a cloud session was specific to that session's repo scoping, not account-wide. |
+| Root suite | **1401/1402 locally**, one failure — but NOT the one this file used to predict. See known issues. |
+| UI suite | **green on all six CI legs.** Fails locally on this laptop; that is a machine artifact, see known issues. |
+| `tsc --noEmit` | clean, as of `0fc319a` |
 | Package version | `0.2.4`, root and `app/` in lockstep, pinned by a check |
 | `engines.node` | `>=18`. Deliberate. See the CI section. |
 
-## Release: v0.2.3 is tagged, NOT published, and the tag needs to move first
+## Release: v0.2.4 shipped. v0.2.3 was skipped and is dead.
 
-The tag points at `802d366`. That commit is clean and on master, but it
-**predates the USD revert**, so publishing it would ship a build that drops
-user cost history. It also predates the `package.json` repair.
+Published 2026-08-02. Verified on 2026-08-03 against the GitHub API and the npm
+registry, not from memory.
 
-The tag was deliberately not moved, even though moving it was authorized,
-because the corrected commit now sits on top of Marco's PR #6 merge and that
-merge has not been reviewed. Moving a release tag onto an unreviewed merge is
-not a call to make unattended.
+| Thing | Value |
+| --- | --- |
+| GitHub releases | `v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.2.2`, **`v0.2.4` (Latest)**. There is **no v0.2.3 release.** |
+| `v0.2.4` tag | `b1b4ffe` |
+| CI on `b1b4ffe` | **success**, both workflows |
+| npm | `@membridgeai/membridge@0.2.4`, `latest`. Unpacked 5.5 MB, up from 784 KB at 0.2.3 — `ui/dist` now ships, as decided. |
+| Assets | all five present: `MemBridge-0.2.4-arm64.dmg`, `MemBridge-0.2.4-arm64.zip`, `MemBridge-arm64.dmg`, `MemBridge-0.2.4-win.zip`, `MemBridge-win.zip` |
 
-Two ways forward, both quick:
+**The Windows build landed.** v0.2.4 is the first release carrying
+`MemBridge-*-win.zip`; every release up to v0.2.2 has only the three mac assets.
 
-- Move the tag onto the repaired tip:
-  `git push origin :refs/tags/v0.2.3 && git tag -fa v0.2.3 -m v0.2.3 <tip> && git push origin v0.2.3`
-  (was `upstream` in an earlier revision of this file; that remote no longer
-  exists, and `16f4c0b` is no longer the tip worth tagging.)
-- Or revert `539ffda` first, then tag.
+### The stale `v0.2.3` tag: leave it alone
 
-Publishing is a human step at
-`https://github.com/MembridgeAi/membridge/releases/new?tag=v0.2.3`, selecting the
-existing tag. Publishing fires `release: published`, which is the only event that
-makes the `Attach to release` steps run. **A tag alone attaches nothing.**
+`v0.2.3` still exists on `origin` pointing at `802d366`. Earlier revisions of
+this file called for retargeting it before publishing. **That instruction is
+void.** Nothing was ever published from it, v0.2.4 supersedes it, and `802d366`
+is a legitimate ancestor of master. Moving it now would point a tag at
+two-releases-old code for no reason. Do not retag it and do not delete it.
 
-Expect exactly five assets:
-
-- `MemBridge-0.2.3-arm64.dmg`
-- `MemBridge-0.2.3-arm64.zip`
-- `MemBridge-arm64.dmg` (unversioned alias, what the site download button
-  resolves through)
-- `MemBridge-0.2.3-win.zip`
-- `MemBridge-win.zip` (unversioned alias)
-
-**The two Windows files are the ones to check for.** v0.2.2 carries only the
-three mac assets, because the windows job failed before packaging on every prior
-run. On `802d366` the windows job including `npm run dist:win` is green, so
-0.2.3 should be the first release with a Windows build.
-
-Verify assets by **content type, not status code**. A missing GitHub asset
+Publishing remains a human step, and the mechanics are unchanged for next time:
+create the release at
+`https://github.com/MembridgeAi/membridge/releases/new?tag=<tag>` selecting the
+**existing** tag. Publishing fires `release: published`, which is the only event
+that makes the `Attach to release` steps run. **A tag alone attaches nothing.**
+Verify assets by **content type, not status code** — a missing GitHub asset
 redirects to HTML and still returns 200.
 
-### install.sh is pinned to 0.2.2, and that is currently correct
+### DONE 2026-08-03: the site installer is regenerated and live at 0.2.4
 
-Live `install.sh` pins `VERSION="0.2.2"` and that asset still resolves
-(`application/octet-stream`), so new installs work today.
+Live `install.sh` on membridge.app now pins `VERSION="0.2.4"` and
+`SHA256="2221760a…"`, verified by fetching the live URL and running
+`curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run`, which
+resolves the correct release URL. Landed as `ee6da53` here and
+`db428bd` on `mmelika/membridge-site` (branch **`main`**, not `master`).
 
-**It cannot be regenerated until v0.2.3 publishes.** `scripts/install/gen-install.js`
-hashes a local `dist/` build, and signed macOS binaries are not byte
-reproducible, so a local zip has a different hash than the one CI attaches. The
-only correct source is the published asset. Sequence: publish, let CI attach,
-download the published zip, regenerate through the generator, deploy.
+**Two things this exposed, and they are the reason to check it every release:**
 
-**Do not re-run CI against the v0.2.2 tag.** `--clobber` would replace the
-attached asset with a freshly signed one carrying a different hash, and the live
-`install.sh` is SHA pinned to the current one. Every new `curl | sh` install
-would hard fail.
+1. **The committed artifact had drifted from its own template.**
+   `scripts/install/install.sh` in this repo was pinned to **`0.1.2`** — four
+   releases stale — and predated the sudo-free CLI install, the `CLI_STATUS`
+   reporting and the launch-at-login step. Live was serving a *different* stale
+   generation, `0.2.2`. Regeneration is evidently not part of anyone's release
+   routine, and nothing fails when it is skipped: the old pin keeps working, so
+   a `curl | sh` user silently gets an old build with no error anywhere.
+2. **The local-vs-published hash distinction is real, not theoretical.**
+   Measured on the same version: the local `dist/MemBridge-0.2.4-arm64.zip`
+   hashes to `fde9c618…`, the published asset to `2221760a…`. Signed macOS
+   binaries are not byte reproducible. The template **dies** on checksum
+   mismatch, so pinning a local hash hard-fails every install.
+
+The sequence, for next time: download the published zip with
+`gh release download`, hash **that**, regenerate, deploy to the site repo's
+`main`, then confirm against the live URL — a push is not a deploy, and it took
+roughly 20 seconds for Pages to serve the new copy.
+
+**Do not re-run CI against an already-published tag.** `--clobber` would replace
+an attached asset with a freshly signed one carrying a different hash, and the
+live `install.sh` is SHA pinned. Every new `curl | sh` install would hard fail.
 
 ## CI
 
-On `802d366`:
+On `0fc319a` (master tip, 2026-08-03): **CI success, all six legs** — node 20
+and 22 across ubuntu, macos and windows. This is the first run since `b1b4ffe`
+that got past `tsc` and actually executed the UI suite, and it passed
+everywhere.
+
+On `bae4b0e` and `80ba253`: **CI failure, all six legs**, at `tsc --noEmit`.
+`Build app` was green on both, which is exactly why it went unnoticed. Fixed in
+`0fc319a`.
+
+On `b1b4ffe` (the `v0.2.4` tag): both workflows **success**. That is the commit
+the release was cut from.
+
+The history below is retained because the reasoning still applies.
+
+### Earlier, on `802d366`:
 
 - **Build app**: mac success, windows success. `npm run dist:win` ran and
   succeeded. `Attach to release` shows skipped because `github.event_name` is
@@ -164,27 +196,62 @@ The reason is recorded beside the matrix in `.github/workflows/ci.yml`.
 
 ## What an npm install actually gives you
 
-Verified against a packed tarball in a clean directory with no repo present:
+**Fixed in 0.2.4.** The 0.2.3 tarball was 784 KB, shipped no `ui/dist`, and
+returned a 503 reading `UI not built. Run: cd ui && npm run build` — developer
+instructions pointing at a directory the user does not have. `ui/dist` was
+decided into 0.2.4 rather than 0.2.3, and the published 0.2.4 tarball unpacks to
+5.5 MB, consistent with that having landed. Andrew verified the working
+dashboard from the registry rather than from the repo.
 
-| Surface | Result |
+The historical record below is what an 0.2.3-era npm-only install gave you, kept
+because the shape of the failure is worth recognising if it recurs:
+
+| Surface | Result at 0.2.3 |
 | --- | --- |
 | Tarball size | 784 KB |
 | `membridge --version` | `0.2.3` |
 | `membridge status` | full output |
 | Daemon | starts, `/api/status` returns 200 with a real payload |
 | MCP | initializes, lists all six tools |
-| **Dashboard** | **503, `UI not built. Run: cd ui && npm run build`** |
+| **Dashboard** | **503, `UI not built`** |
 
-**An npm-only install has no working dashboard.** The tarball ships no `ui/dist`
-and no build toolchain, and the failure is presented as developer instructions
-telling a user to build in a directory they do not have. `/app` redirects to `/`,
-which is the 503.
+The live site copy implying npm gives Windows and Linux users the full product
+was a separate false claim, fixed independently.
 
-Decided: `ui/dist` goes into the tarball in **0.2.4**, not 0.2.3. The live site
-copy implying npm gives Windows and Linux users the full product is a separate
-false claim being fixed independently.
+## The installed app lags the repo, and that is the usual cause of "it's missing"
 
-## Merged today
+Checked 2026-08-03: `/Applications/MemBridge.app` was **0.2.2, built Jul 31
+17:42**, and its `app.asar` contained zero references to `api/search` — so the
+search UI, which is on master and fully routed at `App.tsx` via `ROUTES.search`,
+simply was not in the binary being run. `ui/dist` on disk was also a Jul 31
+build with no `SearchPage` chunk.
+
+**Before concluding a feature is missing, check three things in order:** is it on
+master, is `ui/dist` newer than `ui/src`, and what version is
+`/Applications/MemBridge.app`. The daemon on port 7437 is the installed app, not
+the repo checkout — `ps -p <pid> -o command=` shows which. Rebuild with
+`npm run build:ui` for the web UI and `npm run dist:mac` for the app.
+
+## Closed since the last revision
+
+- **PR #6.** The `build/signed-dmg` merge (`539ffda`) wrote a duplicated
+  `entitlementsInherit` key with no separating comma, so `package.json` stopped
+  being valid JSON for roughly twenty five minutes, and it reintroduced
+  `"notarize": false` — the reason PR #6 had been closed earlier that day.
+  Repaired in `16f4c0b`: duplicate key removed, `notarize` returned to unset.
+  **Unset is correct.** electron-builder then notarizes exactly when Apple
+  credentials are present, so forks and PR builds pass with no secrets while real
+  releases get notarized; setting it false short-circuits before the credentials
+  are read and silently ships signed-but-unnotarized builds.
+
+  Raised with Marco on 2026-08-01. He elected to keep the process question
+  separate from the release rather than gate on it. Closed as a release concern;
+  the standing lesson is recorded in `decisions.md`: verify build config field by
+  field after any merge claiming to be superseded, because a three-way merge
+  contributes nothing for already-applied changes while still landing whatever
+  was genuinely new.
+
+## Merged as of 2026-08-01
 
 Session detail page, projects tab archive work, measured savings Tier 1 and the
 sufficiency gate, OAuth state binding with PKCE, the Windows CRLF CI fix, the
@@ -193,16 +260,18 @@ launch at login, plus the docs and these ops files.
 
 ## Not done, in priority order
 
-1. **Talk to Marco about PR #6.** It was closed with a written reason and
-   merged anyway, and the merge broke the manifest. That is a process question,
-   not a code one.
-2. **Move the v0.2.3 tag, then publish.** Human step. Blocks the install.sh
-   regeneration.
-3. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
+1. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
    a live sign-in and a replayed callback, has not happened.
-4. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
-5. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
+2. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
+3. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
    into the recalibration.
+4. **Land Andrew's `liveBasis` work.** As of 2026-08-03 it is five files,
+   uncommitted, on his machine only — `liveBasis` appears nowhere in `lib/`,
+   `ui/src/` or `test/` here. It qualifies the `live` flag the MCP already emits
+   on cached team rows, which currently claims a teammate is active when all it
+   knows is that a row synced. He also logged the matching Today-page gap
+   (`ui/src/data/mappers.ts:397` filters on raw `live`) as a deliberate product
+   call, not a bug.
 
 ## Parked, preserved off-laptop
 
@@ -213,8 +282,57 @@ Do not merge before the recalibration.
 
 ## Known issues not fixed
 
-- **The suite is 1379/1380 on any machine with a live git worktree, not clean.**
-  `worktrees: a non-repo directory returns [] rather than throwing` fails here.
+- **The root suite is 1401/1402, and WHICH check fails varies by machine.** Two
+  independent runs at `bae4b0e` on 2026-08-03 both scored 1401/1402 and both
+  failed a *different* check: Marco's laptop failed `provenance reconciliation:
+  the settle pass attributes the commit to the ACTUAL session B, never stale
+  session A`, and Andrew's failed `gitignore: .membridge/team.json is
+  committable`. Neither is the worktrees check this file used to name, and that
+  one now passes — presumably fixed by the realpath work in `2e770ea`.
+
+  Both are pre-existing and unrelated to the `tsc` fix, which touches only `ui/`.
+
+  **It is stable per machine, not random per run** — Andrew ran it three times
+  on his checkout and got the `gitignore` check every time, while this laptop
+  gets `provenance` every time. That is a sharper claim than "varies", and it
+  points somewhere specific: a check that fails deterministically on one machine
+  and passes on another is usually a fixture reading real environment state
+  rather than building its own. `git check-ignore -v .membridge/team.json`
+  returns nothing on Andrew's side, so the shipped `.gitignore` is correct and
+  the fault is in what the fixture constructs. **Nobody has diagnosed either
+  one.**
+
+  **The old "one failure is the known worktrees one" exemption is dead:**
+  1401/1402 is not self-evidently fine, so read which check failed and compare
+  against both known ones before assuming it is benign.
+
+- **The UI suite fails on Marco's laptop but passes on CI and on Andrew's
+  machine. They are timeouts, not assertions. Believe CI.** Diagnosed
+  2026-08-03. Four consecutive local runs of the same unchanged tree failed
+  16, 44, 2 and 7-8 tests — the count swings every run. In the run that was
+  classified: **26 of 44 failures were `Test timed out in 5000ms`**, 16 were
+  `TestingLibraryElementError` (an element that never appeared inside the wait,
+  i.e. the same slowness one layer up), and only 2 were real `AssertionError`s.
+  CI ran the identical suite green on Node 20 and 22 across ubuntu, macos and
+  windows; Andrew reports 612/612 in seconds on his machine.
+
+  **`--pool=threads` fixes collection but not the timeouts.** Without it the
+  number of tests *collected* varies (612, then 415) — that part is worker
+  exhaustion and threads cures it. With it all 612 collect every time and still
+  time out under load. So the default 5s `testTimeout` is simply too tight for
+  612 jsdom tests on a laptop also running the daemon, the Electron app and 16
+  worktrees.
+
+  **Do not chase these as real failures**, and do not run the UI suite next to
+  an Electron build. For a trustworthy local signal run a single file. If
+  someone wants this genuinely fixed rather than worked around, raising
+  `testTimeout` in `ui/vite.config.ts` is the lever — deliberately not changed
+  here, since it trades a slow-machine annoyance against CI's ability to catch a
+  real hang.
+
+- *(historical, now passing)* **1379/1380 on any machine with a live git
+  worktree.** `worktrees: a non-repo directory returns [] rather than throwing`
+  used to fail here.
   It is not a regression and not a defect in the shipped path: the check escapes
   its own fixture and reads the **real** repository's worktree registry, so it
   returns whatever `git worktree list` reports for the checkout it runs in and
