@@ -1,11 +1,7 @@
 # Operational state
 
-**Verified against `bae4b0e` (master tip) on 2026-08-03.** Every fact in the
-status, release and CI sections below came from a command run that day. The two
-local test suites were **not** re-run in this pass and are marked accordingly;
-everything else was checked, not remembered.
-
-**Read the warning directly below before doing anything else.**
+**Verified against `0fc319a` (master tip) on 2026-08-03.** Every fact in the
+status, release and CI sections below came from a command run that day.
 
 This file and `decisions.md` live in the repo. The repo is canonical and the
 Claude Project is the mirror, not the other way round. If the Project copy and
@@ -15,29 +11,43 @@ Read this first. `decisions.md` holds the reasoning behind the choices below.
 
 ---
 
-## One warning
+## Master was red for two days. Fixed in `0fc319a`.
 
-**Master is RED.** All six CI legs fail on `bae4b0e` at `tsc --noEmit`
-(run 30785572398). `ui/src/components/EntryRow.test.tsx` imports `node:fs` and
-`node:path` and reads `process`, but `ui/tsconfig.json` sets
-`"types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]` with no
-`node`, and `@types/node` is not in `ui/`'s devDependencies. Three `TS2591`
-errors, identical on every OS and Node version. This is not a flake.
+From `bae4b0e` through `80ba253`, **all six CI legs failed** at `tsc --noEmit`
+with three `TS2591` errors: `ui/src/components/EntryRow.test.tsx` imports
+`node:fs` and `node:path` and reads `process.cwd()`, but `@types/node` was never
+a `ui/` devDependency. Adding it was the entire fix; the test's executable code
+is unchanged.
 
-`Build app` on the same commit is **green**, and `npm run build:ui` succeeds
-locally, because neither runs `tsc`. Do not read a passing local build as a
-passing CI.
+**The lesson worth keeping: a green local build proved nothing.** `Build app`
+stayed green that whole time and `npm run build:ui` succeeds locally, because
+**neither runs `tsc`**. Only the `CI` workflow typechecks. If you want to know
+whether master compiles, run `cd ui && npx tsc --noEmit` yourself.
 
-The fix is small — add `@types/node` to `ui/` and `"node"` to that `types`
-array, or move the fixture read out of the test — but it has not been made.
-**Do not cut a release off `bae4b0e`.**
+Two tidier-looking fixes were tried and both fail — the reasons are recorded in
+the test itself so they are not retried:
+
+- `import css from './components.css?raw'` returns the **empty string**, because
+  vitest stubs CSS imports. The assertion then fails while looking like a real
+  CSS regression.
+- `new URL('./components.css', import.meta.url)` throws `The URL must be of
+  scheme file` **in that module**. The react plugin transforms `.tsx` and serves
+  it over a non-file scheme. A probe in a plain `.ts` file *does* get a `file://`
+  URL, so testing this idea in the wrong file type will tell you it works.
+
+Note `@types/node` also makes node globals (`process`, `Buffer`) typecheck
+anywhere in `src/`, despite `node` being deliberately absent from `tsconfig`'s
+`types` array, because `vite.config.ts` is in `include` and pulls
+`vite/dist/node/index.d.ts` with its `/// <reference types="node" />`. If that
+ever matters, the fix is a separate tsconfig for the node-facing files.
 
 ## One-line status
 
 **v0.2.4 shipped** on 2026-08-02: GitHub release, five assets, and
 `@membridgeai/membridge@0.2.4` on npm. v0.2.3 was skipped entirely and will
-never be published. The open items are the red master above and a site installer
-still pinned to 0.2.2.
+never be published. Master went red for two days after that and is **green
+again** as of `0fc319a`. The one open item is a site installer still pinned to
+0.2.2.
 
 ---
 
@@ -45,14 +55,14 @@ still pinned to 0.2.2.
 
 | Thing | Value |
 | --- | --- |
-| Local `master` | `bae4b0e`, identical to `origin/master`. Nothing unpushed. |
-| `origin/master` | `bae4b0e` |
+| Local `master` | `0fc319a`, identical to `origin/master`. Nothing unpushed. |
+| `origin/master` | `0fc319a` |
 | Remotes | `origin` = `github.com/MembridgeAi/membridge`, and it is the ONLY remote. The `upstream` and `andrewb` remotes were removed, so a bare `git push` now goes to canonical rather than the dead fork. |
 | Fork | `andrewb-eng/membridge` still exists on GitHub pending a permissions issue, but nothing local points at it. Treat it as deleted. |
 | Push access | Marco's laptop clone **has write access**, confirmed 2026-08-03 by `git push --dry-run origin master` reaching the remote. A 403 seen from a cloud session was specific to that session's repo scoping, not account-wide. |
-| Root suite | **not re-run in this pass.** Last recorded: 1379/1380, the one failure being the worktrees check below. |
-| UI suite | **not re-run in this pass.** Last recorded: 555 tests, 36 files passed. |
-| `tsc --noEmit` | **FAILING.** See the warning above. |
+| Root suite | **1401/1402 locally**, one failure — but NOT the one this file used to predict. See known issues. |
+| UI suite | **green on all six CI legs.** Fails locally on this laptop; that is a machine artifact, see known issues. |
+| `tsc --noEmit` | clean, as of `0fc319a` |
 | Package version | `0.2.4`, root and `app/` in lockstep, pinned by a check |
 | `engines.node` | `>=18`. Deliberate. See the CI section. |
 
@@ -108,14 +118,17 @@ live `install.sh` is SHA pinned. Every new `curl | sh` install would hard fail.
 
 ## CI
 
-On `bae4b0e` (master tip, 2026-08-03):
+On `0fc319a` (master tip, 2026-08-03): **CI success, all six legs** — node 20
+and 22 across ubuntu, macos and windows. This is the first run since `b1b4ffe`
+that got past `tsc` and actually executed the UI suite, and it passed
+everywhere.
 
-- **Build app**: **success**.
-- **CI**: **failure, all six legs**, at `tsc --noEmit`. See the warning at the
-  top of this file for the exact cause and fix.
+On `bae4b0e` and `80ba253`: **CI failure, all six legs**, at `tsc --noEmit`.
+`Build app` was green on both, which is exactly why it went unnoticed. Fixed in
+`0fc319a`.
 
-On `b1b4ffe` (the `v0.2.4` tag): both workflows **success**. That is the last
-known-good commit and the one a release was cut from.
+On `b1b4ffe` (the `v0.2.4` tag): both workflows **success**. That is the commit
+the release was cut from.
 
 The history below is retained because the reasoning still applies.
 
@@ -233,10 +246,7 @@ launch at login, plus the docs and these ops files.
 
 ## Not done, in priority order
 
-1. **Fix the red master.** All six CI legs fail at `tsc --noEmit`. See the
-   warning at the top. Two lines in `ui/`. Nothing should be released until this
-   is green.
-2. **Regenerate `install.sh` off the published 0.2.4 assets and deploy it.** No
+1. **Regenerate `install.sh` off the published 0.2.4 assets and deploy it.** No
    longer blocked. Deploy target is `mmelika/membridge-site`, branch `main`.
 3. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
    a live sign-in and a replayed callback, has not happened.
@@ -262,15 +272,19 @@ Do not merge before the recalibration.
   `ui/`. **Do not treat "one failure" as automatically benign any more:** check
   which one it is, because the old standing exemption no longer applies.
 
-- **The UI suite is unstable on this laptop and does not currently pass.**
-  Consecutive runs reported 39 files / 612 tests and then 30 files / 415 tests,
-  with 7-8 files failing and 9 unhandled errors, across files like
+- **The UI suite fails on Marco's laptop but passes on all six CI legs.
+  Believe CI.** Locally, consecutive runs reported 39 files / 612 tests and then
+  30 files / 415 tests, with 7-8 files failing and 9 unhandled errors, across
   `Shell.test.tsx`, `projectRouting.test.tsx`, `refetchBanner.test.tsx` and
-  `FeedPage.test.tsx`. The run-to-run variation in the number of tests
-  *collected* suggests resource exhaustion rather than real assertion failures —
-  jsdom environment setup dominates the runtime. These are pre-existing on
-  `bae4b0e`. CI has never reported on them because `tsc` fails first and the
-  suite never runs; the `tsc` fix should finally surface the true CI state.
+  `FeedPage.test.tsx`. On `0fc319a`, CI ran that same suite green on Node 20 and
+  22 across ubuntu, macos and windows.
+
+  The tell is that the number of tests *collected* changed between runs: that is
+  resource exhaustion, not assertions. jsdom environment setup dominates the
+  runtime (546s of a 191s wall-clock run, i.e. heavily parallel). **Do not chase
+  these as real failures**, and do not run the UI suite alongside an Electron
+  build or a busy daemon. If you need a trustworthy local signal, run a single
+  file rather than the whole suite.
 
 - *(historical, now passing)* **1379/1380 on any machine with a live git
   worktree.** `worktrees: a non-repo directory returns [] rather than throwing`
