@@ -27,6 +27,10 @@ interface DayCardProps {
    *  starts EXPANDED: collapsed, the row the link exists to point at would be
    *  unreachable, which silently breaks every Today card's link into the feed. */
   targetSession: string | null
+  /** Where a row inside this card is being opened FROM, handed to EntryRow so
+   *  the session page's back link says "the Feed" because it means it, rather
+   *  than because that was the only thing it could ever say. */
+  from: string
 }
 
 /** One person's work in one project on one local calendar day, consolidated.
@@ -38,7 +42,7 @@ interface DayCardProps {
  *
  *  The header is a real <button>: it toggles state in place and navigates
  *  nowhere, so it must not be an anchor. The rows inside are the anchors. */
-export function DayCard({ card, showAvatar, targetSession }: DayCardProps) {
+export function DayCard({ card, showAvatar, targetSession, from }: DayCardProps) {
   const holdsTarget = !!targetSession && card.entries.some(e => e.session === targetSession)
   const [expanded, setExpanded] = useState(holdsTarget)
   const panelId = useId()
@@ -93,6 +97,7 @@ export function DayCard({ card, showAvatar, targetSession }: DayCardProps) {
               project={entry.project}
               showAvatar={showAvatar}
               targeted={!!targetSession && entry.session === targetSession}
+              from={from}
             />
           ))}
         </div>

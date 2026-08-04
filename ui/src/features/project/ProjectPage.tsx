@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'wouter'
-import { ROUTES } from '../../app/routes'
+import { ROUTES, projectHref } from '../../app/routes'
 import { useDataClient } from '../../data/DataClientProvider'
 import { weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
@@ -221,7 +221,14 @@ export function ProjectPage({ slug }: ProjectPageProps) {
           {dayGroups.map(group => (
             <div key={group.day}>
               <div className="project-day">{group.day}</div>
-              {group.entries.map(entry => <EntryRow key={entry.id} entry={entry} />)}
+              {/* projectHref(project.path), not the slug this page was reached
+                  by: an old name-based deep link would otherwise hand the
+                  session page a `from` that resolves through the name-match
+                  fallback, and the back link should point at the canonical
+                  path form. */}
+              {group.entries.map(entry => (
+                <EntryRow key={entry.id} entry={entry} from={projectHref(project.path)} />
+              ))}
             </div>
           ))}
         </div>

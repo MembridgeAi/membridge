@@ -57,10 +57,27 @@ describe('MembersPage', () => {
     expect(invitesSpy).not.toHaveBeenCalled()
   })
 
-  it('offers "Transfer ownership" from another member\'s menu, owner-only', async () => {
+  // Task 4: "Transfer ownership" was a control that could not work. It called
+  // setRole(memberId, 'owner'), and set_role (002_team_v2.sql) raises
+  // `role must be admin or member` for any p_role outside that pair; no
+  // transfer_ownership RPC exists anywhere in supabase/migrations/. So the
+  // menu item opened a confirmation dialog whose only possible outcome was an
+  // error message. The menu keeps Remove, which is real.
+  it('offers no "Transfer ownership" -- no RPC can perform it', async () => {
     renderApp({}, <MembersPage />)
     await userEvent.click(await screen.findByRole('button', { name: /more actions for Andrew/i }))
-    expect(screen.getByRole('menuitem', { name: /transfer ownership/i })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /transfer ownership/i })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: /remove from team/i })).toBeInTheDocument()
+  })
+
+  it('offers no control anywhere that would set a role of "owner"', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'setMemberRole')
+    renderWith(client, <MembersPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /more actions for Andrew/i }))
+    const roleSelect = screen.getByRole('combobox', { name: /role for andrew/i }) as HTMLSelectElement
+    expect([...roleSelect.options].map(o => o.value)).not.toContain('owner')
+    expect(spy.mock.calls.flat()).not.toContain('owner')
   })
 
   it('never shows a menu on the viewer\'s own row', async () => {

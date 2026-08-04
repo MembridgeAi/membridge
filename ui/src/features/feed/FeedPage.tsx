@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useSearch } from 'wouter'
-import { FEED_SESSION_PARAM } from '../../app/routes'
+import { FEED_SESSION_PARAM, ROUTES, feedSessionHref, useRawSearch } from '../../app/routes'
 import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
@@ -77,7 +76,7 @@ export function FeedPage() {
   // Arriving from a Today card: `?session=<id>` names the row you were sent
   // to. Read defensively -- a malformed query string must degrade to "no
   // target" rather than throw into this render path.
-  const search = useSearch()
+  const search = useRawSearch()
   const targetSession = useMemo(() => {
     try {
       return new URLSearchParams(search).get(FEED_SESSION_PARAM) || null
@@ -110,6 +109,11 @@ export function FeedPage() {
   // day (dayCardKey and dayLabel both go through localTime), so a card can
   // never land under a heading for a different day.
   const dayCards = useMemo(() => buildDayCards(entries), [entries])
+  // What a session opened from here should call "back". Carrying the
+  // ?session= target through means returning re-expands the card the reader
+  // was actually looking at; without it, a deep link into one row sends them
+  // back to a collapsed feed with that row hidden again.
+  const feedOrigin = targetSession ? feedSessionHref(targetSession) : ROUTES.feed
   const dayGroups = groupByDay(dayCards)
   const projects = projectsQuery.data ?? []
   const members = membersQuery.data ?? []
@@ -165,6 +169,7 @@ export function FeedPage() {
               card={card}
               showAvatar={!solo}
               targetSession={targetSession}
+              from={feedOrigin}
             />
           ))}
         </div>

@@ -22,7 +22,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
-type PendingAction = { kind: 'remove' | 'transfer'; member: Member }
+// Only one kind of pending action survives. "Transfer ownership" is gone
+// (see MemberRow.tsx): no RPC in supabase/migrations/ can perform it, so the
+// dialog it opened could only ever end in an error. Kept as a tagged shape
+// rather than collapsed to a bare Member, because the dialog below still
+// reads `kind` and a second real action would otherwise re-thread it all.
+type PendingAction = { kind: 'remove'; member: Member }
 
 // 'revealed' is the clipboard-unavailable-or-denied fallback: the value is
 // shown in the page for the user to select and copy by hand. It must NEVER
@@ -104,15 +109,10 @@ export function MembersPage() {
   const settingsQuery = useSettings()
   const membersQuery = useMembers()
 
-  // Two independent useSetMemberRole() instances, not one shared between
-  // both call sites: `setRole` backs the ConfirmDialog's "transfer
-  // ownership" flow (awaited, its failure already surfaces via
-  // pendingError below); `setRoleFromSelect` backs the inline role <select>
-  // on each row. Sharing one mutation object between them would mean a
-  // transfer failure and a plain role-change failure both flip the same
-  // `.isError`, so a transfer error could bleed into the row-select banner
-  // (or vice versa) depending on render timing.
-  const setRole = useSetMemberRole()
+  // One useSetMemberRole(), backing the inline role <select> on each row.
+  // There were two, because a second call site awaited it for the "transfer
+  // ownership" confirmation; that flow is gone (see MemberRow.tsx), and with
+  // it the reason to keep the two mutations' `.isError` flags apart.
   const setRoleFromSelect = useSetMemberRole()
   const removeMember = useRemoveMember()
   const createInviteLink = useCreateInviteLink()
@@ -128,7 +128,10 @@ export function MembersPage() {
   const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
   const canManage = !solo && client.capabilities.teamAdminSupported && (role === 'owner' || role === 'admin')
-  const viewerIsOwner = role === 'owner'
+  // `viewerIsOwner` used to live here, gating the "Transfer ownership" menu
+  // item. That item is gone (see MemberRow.tsx: no RPC can perform a
+  // transfer), and nothing else on this page distinguishes an owner from an
+  // admin -- every remaining control is gated on canManage.
   // Task 18/19: the real viewer id (settings.viewerId, from GET /api/team),
   // never a hardcoded two-letter placeholder -- a sentinel like that never
   // matches a real user id, which silently disabled the own-row guard below
@@ -158,10 +161,6 @@ export function MembersPage() {
     setPendingError(null)
     setPendingAction({ kind: 'remove', member })
   }
-  function requestTransfer(member: Member) {
-    setPendingError(null)
-    setPendingAction({ kind: 'transfer', member })
-  }
   function cancelPending() {
     setPendingAction(null)
     setPendingError(null)
@@ -169,8 +168,7 @@ export function MembersPage() {
   async function confirmPending() {
     if (!pendingAction) return
     try {
-      if (pendingAction.kind === 'remove') await removeMember.mutateAsync(pendingAction.member.id)
-      else await setRole.mutateAsync({ memberId: pendingAction.member.id, role: 'owner' })
+      await removeMember.mutateAsync(pendingAction.member.id)
       setPendingAction(null)
       setPendingError(null)
     } catch (err) {
@@ -305,10 +303,8 @@ export function MembersPage() {
               member={member}
               isSelf={member.id === viewerId}
               canManage={canManage}
-              viewerIsOwner={viewerIsOwner}
               onSetRole={(memberId, nextRole) => setRoleFromSelect.mutate({ memberId, role: nextRole })}
               onRequestRemove={requestRemove}
-              onRequestTransfer={requestTransfer}
             />
           ))}
         </div>
@@ -322,22 +318,18 @@ export function MembersPage() {
 
       {pendingAction && (
         <ConfirmDialog
-          title={pendingAction.kind === 'remove'
-            ? `Remove ${pendingAction.member.name} from the team?`
-            : `Transfer ownership to ${pendingAction.member.name}?`}
-          message={pendingAction.kind === 'remove'
-            // Server-side this is real and immediate (migration 025), and
-            // prune-on-revocation (see AccessPanel.tsx's comment) means
-            // their local archive for every shared project is cleaned up
-            // the next time their machine syncs -- but a device that never
-            // syncs again keeps whatever it already has; nothing here can
-            // reach it. Say all three plainly, since a confirm dialog is
-            // the moment the admin forms their expectation.
-            ? `Removing ${pendingAction.member.name} cuts off access to every shared project right away. Nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.`
-            : `${pendingAction.member.name} becomes the team owner immediately. This can't be undone from here.`}
-          confirmLabel={pendingAction.kind === 'remove' ? 'Remove from team' : 'Transfer ownership'}
-          destructive={pendingAction.kind === 'remove'}
-          pending={removeMember.isPending || setRole.isPending}
+          title={`Remove ${pendingAction.member.name} from the team?`}
+          // Server-side this is real and immediate (migration 025), and
+          // prune-on-revocation (see AccessPanel.tsx's comment) means their
+          // local archive for every shared project is cleaned up the next
+          // time their machine syncs -- but a device that never syncs again
+          // keeps whatever it already has; nothing here can reach it. Say all
+          // three plainly, since a confirm dialog is the moment the admin
+          // forms their expectation.
+          message={`Removing ${pendingAction.member.name} cuts off access to every shared project right away. Nothing new reaches their machine. Anything already synced there gets removed the next time it checks in, but a device that never syncs again keeps its copy — we can't reach it.`}
+          confirmLabel="Remove from team"
+          destructive
+          pending={removeMember.isPending}
           error={pendingError}
           onConfirm={confirmPending}
           onCancel={cancelPending}

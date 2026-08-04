@@ -15,20 +15,18 @@ interface MemberRowProps {
   member: Member
   isSelf: boolean
   canManage: boolean
-  viewerIsOwner: boolean
   onSetRole: (memberId: string, role: Role) => void
   onRequestRemove: (member: Member) => void
-  onRequestTransfer: (member: Member) => void
 }
 
 /**
  * One member row. The owner's row always shows a fixed "Owner" label —
  * never a select, never an overflow menu (there is nothing to change or
- * remove on the one owner from here; transfer happens FROM another row).
+ * remove on the one owner from here).
  * A plain member viewer (canManage=false) sees the same facts read-only:
  * no select, no menu — those are owner/admin actions.
  */
-export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole, onRequestRemove, onRequestTransfer }: MemberRowProps) {
+export function MemberRow({ member, isSelf, canManage, onSetRole, onRequestRemove }: MemberRowProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const moreBtnRef = useRef<HTMLButtonElement>(null)
@@ -133,16 +131,15 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
                 >
                   Remove from team
                 </button>
-                {viewerIsOwner && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="member-menu-item"
-                    onClick={() => { closeMenuAndRestoreFocus(); onRequestTransfer(member) }}
-                  >
-                    Transfer ownership
-                  </button>
-                )}
+                {/* No "Transfer ownership" here. It shipped, and it could
+                    never work: it called setRole(id, 'owner'), and set_role
+                    (supabase/migrations/002_team_v2.sql) raises `role must be
+                    admin or member` for any p_role outside that pair. There is
+                    no transfer_ownership RPC anywhere in supabase/migrations/,
+                    so nothing else could have served it either. Building that
+                    RPC is backend work nobody has asked for; until it exists,
+                    the honest UI is no control at all. Do not re-add this item
+                    without it. */}
               </div>
             )}
           </div>

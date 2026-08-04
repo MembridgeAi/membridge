@@ -8,6 +8,7 @@ import { FEED_PAGE_SIZE } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import { dayCardStats } from './DayCard'
 import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW } from './dayCards'
+import { ROUTES, sessionHref } from '../../app/routes'
 import { FeedPage, dayLabel, groupByDay } from './FeedPage'
 
 // session defaults to null (not a shared string) so two default-built
@@ -123,7 +124,9 @@ describe('FeedPage', () => {
     const card = await expandCard(/Hook ownership now decided by durability/)
     const row = rowWithin(card, /Hook ownership now decided by durability/)
     expect(row.tagName).toBe('A')
-    expect(row.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-f2')}`)
+    // Carries ?from= so the session page's back link can say "the Feed" and
+     // mean it (Task 2), rather than saying it because it had no alternative.
+    expect(row.getAttribute('href')).toBe(sessionHref('s-f2', ROUTES.feed))
   })
 
   // Fix 16: an infinite query refetches EVERY loaded page on window
@@ -338,7 +341,7 @@ describe('feed: consolidated day cards', () => {
     const card = await expandCard('the day\'s distilled outcome')
     expect(card.querySelectorAll('.entry-row')).toHaveLength(3)
     const hrefs = [...container.querySelectorAll('.entry-row')].map(r => r.getAttribute('href'))
-    expect(hrefs).toEqual(['/sessions/s-m1', '/sessions/s-m2', '/sessions/s-m3'])
+    expect(hrefs).toEqual(['s-m1', 's-m2', 's-m3'].map(id => sessionHref(id, ROUTES.feed)))
   })
 
   it('splits one person\'s day across the two projects they worked in', async () => {

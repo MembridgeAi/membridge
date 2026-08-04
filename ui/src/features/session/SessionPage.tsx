@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { Avatar } from '../../components/Avatar'
-import { ROUTES } from '../../app/routes'
+import { FROM_PARAM, backLink, useRawSearch } from '../../app/routes'
 import { relativeAgo } from '../../data/relativeTime'
 import { useSession } from '../../data/queries'
 import type { Session } from '../../data/types'
@@ -121,6 +121,32 @@ interface SessionPageProps {
 export function SessionPage({ sessionId }: SessionPageProps) {
   const query = useSession(sessionId)
 
+  // Where the reader came from, as a PARAM rather than history.back().
+  //
+  // A session URL routinely arrives from outside this app -- an MCP tool
+  // hands one to an agent, a teammate pastes one into chat -- and in a fresh
+  // tab that URL is the first history entry, so back() has nowhere to go and
+  // strands the reader. Even when an entry does exist, back() can only move;
+  // it cannot report what it is moving to, so there is nothing to write an
+  // honest label from and the link goes back to claiming "the Feed" whatever
+  // it actually does. It also matches routes.ts's own rule that hrefs are
+  // constructed in exactly one place: backLink() owns both the target and the
+  // words, so they can never disagree.
+  //
+  // Read defensively, the same shape FeedPage's ?session= uses: a malformed
+  // query string must degrade to the Feed fallback, never throw into this
+  // render path.
+  const search = useRawSearch()
+  const back = useMemo(() => {
+    let from: string | null = null
+    try {
+      from = new URLSearchParams(search).get(FROM_PARAM)
+    } catch {
+      from = null
+    }
+    return backLink(from)
+  }, [search])
+
   if (query.isError) {
     return (
       <div className="session-page">
@@ -140,7 +166,7 @@ export function SessionPage({ sessionId }: SessionPageProps) {
     return (
       <div className="session-page">
         <p className="session-gone">This session isn't in memory anymore.</p>
-        <Link href={ROUTES.feed} className="session-gone-link">Back to the Feed</Link>
+        <Link href={back.href} className="session-gone-link">{back.label}</Link>
       </div>
     )
   }
@@ -152,9 +178,9 @@ export function SessionPage({ sessionId }: SessionPageProps) {
   return (
     <div className="session-page">
       {/* The way back, on the normal page and not only the not-found branch. */}
-      <Link href={ROUTES.feed} className="session-back">
+      <Link href={back.href} className="session-back">
         <span className="session-back-chevron" aria-hidden="true">‹</span>
-        Back to the Feed
+        {back.label}
       </Link>
       <Eyebrow s={s} />
       <SessionAnalytics session={s} />
