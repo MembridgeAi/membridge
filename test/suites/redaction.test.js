@@ -59,6 +59,12 @@ async function main() {
   // tokens. The runtime value (what the redactor is tested against) is identical.
   const SLACK_WEBHOOK = 'https://hooks.slack.com' + '/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX';
   const DISCORD_WEBHOOK = 'https://discord.com/api' + '/webhooks/123456789012345678/AbC-dEf_1234567890AbCdEfGhIjKlMnOpQrStUvWx';
+  // The shape of the real leak the url-credential-param pattern was added for.
+  // A UUID on purpose: that is what the sign-in callback actually mints, and it
+  // is the one shape the entropy backstop is GUARANTEED to miss (looksLikeSecret
+  // exempts UUIDs so session ids survive). A high-entropy blob here would pass
+  // on the backstop alone and prove nothing about the new pattern.
+  const AUTH_CODE = '1f0e5d5d-1603-4ea6-8b41-832bf6d27195';
   const cases = [
     ['aws-access-key', `creds ${AWS_KEY} here`, AWS_KEY],
     ['github-token', `rotate ${GH_TOKEN} now`, GH_TOKEN],
@@ -77,6 +83,7 @@ async function main() {
     ['npm-token', `registry ${NPM_TOKEN} used`, NPM_TOKEN],
     ['slack-webhook-url', `post ${SLACK_WEBHOOK} now`, SLACK_WEBHOOK],
     ['discord-webhook-url', `hook ${DISCORD_WEBHOOK} set`, DISCORD_WEBHOOK],
+    ['url-credential-param', `visit https://hub.membridge.ai/auth/cli?code=${AUTH_CODE} now`, AUTH_CODE],
     ['high-entropy', `blob ${ENTROPY_TOKEN} done`, ENTROPY_TOKEN],
   ];
   // E2E crypto primitives (libsodium sealed-box + secretbox). Load once so the
@@ -1214,6 +1221,62 @@ async function main() {
     // Bearer/authorization consume the whole value, no leak.
     const auth = redactLib.redactDefault('Authorization: Bearer abcDEF123456ghijKLmn');
     assert.ok(!auth.includes('abcDEF123456ghijKLmn') && auth.includes('[redacted:authorization]'), `auth -> ${auth}`);
+  });
+
+  // Live incident: a sign-in callback of the form
+  // https://host/auth/cli?code=<uuid> reached memory with all 23 patterns
+  // before this one already running. Nothing caught it -- no pattern named
+  // `code`, the auth code has no prefix to shape-match, and the entropy
+  // backstop exempts UUIDs by design (session ids must survive), so the one
+  // layer that might have caught it was guaranteed not to.
+  check('redact: a credential-bearing query parameter loses its value and keeps its name', () => {
+    const url = `https://hub.membridge.ai/auth/cli?code=${AUTH_CODE}`;
+    const out = redactLib.redactDefault(url);
+    assert.ok(!out.includes(AUTH_CODE), `the auth code survived untouched -> ${out}`);
+    assert.ok(out.includes('code=[redacted:url-credential-param]'), `param name lost -> ${out}`);
+    assert.ok(out.startsWith('https://hub.membridge.ai/auth/cli?'), `URL shape destroyed -> ${out}`);
+
+    // token=/access_token= already matched secret-assignment, but its value
+    // class runs to the next SPACE, so it swallowed the rest of the query
+    // string along with the secret. Stopping at & is the readability half of
+    // this pattern and is asserted, not incidental.
+    const multi = `open https://h/cb?state=abc&access_token=${AUTH_CODE}&expires_in=3600 now`;
+    const outMulti = redactLib.redactDefault(multi);
+    assert.ok(!outMulti.includes(AUTH_CODE), `access_token survived -> ${outMulti}`);
+    assert.ok(outMulti.includes('access_token=[redacted:url-credential-param]'), `name lost -> ${outMulti}`);
+    assert.ok(outMulti.includes('&expires_in=3600'), `redaction ate the rest of the query -> ${outMulti}`);
+
+    const tok = redactLib.redactDefault(`GET /v1/me?token=${AUTH_CODE} 200`);
+    assert.ok(!tok.includes(AUTH_CODE) && tok.includes('token=[redacted:'), `token= not handled -> ${tok}`);
+  });
+
+  // The negative half, and the reason the pattern is anchored to query
+  // position with a length floor rather than matching a bare `code=`:
+  // `code=` is common English in logs and shell prose, and a bare match would
+  // shred it. Every line here is a shape the pattern must refuse.
+  check('redact: ordinary code= prose and non-credential code= values are left alone', () => {
+    const survivors = [
+      // No ? or & in front: prose, not a query parameter.
+      'the handler returns code=200 on success and code=404 when missing',
+      'set exit code=1 in the wrapper script',
+      'see the error code=INTERNAL in the log',
+      // In query position but plainly not credentials: too short, or numeric.
+      'GET /api/status?code=200',
+      'https://example.com/docs?code=ref',
+      'https://example.com/p?code=42&page=2',
+      // Long, but all digits -- an id or a status, never a secret.
+      'https://example.com/p?code=20000000&page=2',
+    ];
+    for (const s of survivors) {
+      assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s} -> ${redactLib.redactDefault(s)}`);
+    }
+    // A parameter that merely ENDS in one of the names is not claimed here:
+    // the anchor requires the name to start immediately after the ? or &.
+    // csrf_token is still redacted, by the pre-existing secret-assignment
+    // pattern -- the point of this assertion is that the marker keeps the
+    // more accurate name rather than being relabelled as a URL credential.
+    const csrf = redactLib.redactDefault('https://example.com/x?csrf_token=abcdefghij');
+    assert.ok(!csrf.includes('url-credential-param'), `csrf_token wrongly claimed -> ${csrf}`);
   });
 
   // Negatives — as important as positives. None of these may be touched.

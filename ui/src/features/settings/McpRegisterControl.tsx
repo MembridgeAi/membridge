@@ -1,5 +1,5 @@
 import { StateChip, type StateTone } from '../../components/StateChip'
-import { useRegisterMcp } from '../../data/queries'
+import { useRegisterMcp, useSettings } from '../../data/queries'
 import type { McpRowStatus } from '../../data/types'
 
 function errorMessage(error: unknown): string {
@@ -48,7 +48,19 @@ function glyphFor(status: McpRowStatus): string {
  */
 export function McpRegisterControl() {
   const registerMcp = useRegisterMcp()
-  const rows = registerMcp.data?.rows ?? []
+  const settingsQuery = useSettings()
+
+  // These chips used to appear ONLY after a Re-register click, because the
+  // mutation response was their only source. That hid the reasons behind an
+  // action nobody knew to take: at rest the page showed a single summary
+  // sentence ("no AI tool on this machine picked it up") while the daemon
+  // had already recorded, per tool, the specific cause and the config key
+  // that fixes it -- the same lines `membridge status` prints. The recorded
+  // rows come through GET /api/settings, so they render immediately; a fresh
+  // mutation result supersedes them because it is the newer truth about the
+  // same machine.
+  const recorded = settingsQuery.data?.delivery.find(c => c.id === 'mcp')?.mcpRows ?? []
+  const rows = registerMcp.data?.rows ?? recorded
 
   return (
     <>

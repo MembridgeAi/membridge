@@ -89,6 +89,28 @@ describe('MembersPage', () => {
     expect(within(andrewRow).getByRole('button', { name: /more actions for andrew/i })).toBeInTheDocument()
   })
 
+  // The own-row guard was applied to the overflow menu and NOT to the role
+  // select sitting one line above it, so an admin was still handed a select
+  // on their own row -- the one control that can demote the viewer out of
+  // the ability to use every other control on this page. The backend refuses
+  // the write anyway (set_role is owner-only), which makes the offer worse,
+  // not better: the admin picks "Member", nothing happens, and the only
+  // feedback is an error banner explaining a rule the UI should not have
+  // invited them to break. Same fixture as the menu test above -- a
+  // REALISTIC viewerId plus role 'admin', so the viewer's own row is not
+  // also hidden by the separate owner-row rule, which would mask the bug.
+  it('never offers a role select on the viewer\'s own row', async () => {
+    const client = new FakeDataClient({ viewerId: 'usr_9f2a', role: 'admin' })
+    renderWith(client, <MembersPage />)
+    const ownRow = await screen.findByTestId('member-row-usr_9f2a')
+    expect(within(ownRow).queryByRole('combobox')).toBeNull()
+
+    // A teammate's row must keep its select: the fix is "not on yourself",
+    // not "admins can no longer change anyone's role".
+    const andrewRow = await screen.findByTestId('member-row-andrew')
+    expect(within(andrewRow).getByRole('combobox', { name: /role for andrew/i })).toBeInTheDocument()
+  })
+
   // P0 Fix 2: invite-by-email could never succeed -- no daemon endpoint
   // accepts an email or role (POST /api/team/invite mints a generic link
   // only), so the form always ended in a developer-facing rejection message.
@@ -196,13 +218,25 @@ describe('MembersPage', () => {
   // Cheap secondary escape hatch to the raw code, kept alongside the primary
   // link button -- the code still works with `membridge join <code>` when a
   // link isn't convenient (no browser handy, reading it aloud, etc).
-  it('keeps a secondary "Copy code instead" action for the standing code alongside the link', async () => {
+  it('keeps a secondary action for the standing code alongside the link', async () => {
     const client = new FakeDataClient()
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /^copy code instead$/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /^copy standing code$/i }))
     expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+  })
+
+  // The standing code and a minted link are NOT interchangeable, and the
+  // control used to imply they were: "Copy code instead" reads as a format
+  // choice. team.inviteCode is one permanent per-team secret that every member
+  // shares and that no one can revoke individually -- rotating it is the only
+  // undo, and that cuts off everyone holding it. Handing that out believing it
+  // was a throwaway alternative to a link is the mistake this copy prevents.
+  it('says the standing code is permanent and cannot be revoked individually', async () => {
+    renderWith(new FakeDataClient(), <MembersPage />)
+    expect(await screen.findByRole('button', { name: /^copy standing code$/i })).toBeInTheDocument()
+    expect(await screen.findByText(/can't be revoked, only rotated/i)).toBeInTheDocument()
   })
 
   it('surfaces a failed invite-link mint instead of looking like nothing happened', async () => {

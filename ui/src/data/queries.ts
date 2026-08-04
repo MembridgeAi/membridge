@@ -495,39 +495,62 @@ export function useRevokeInvite() {
   })
 }
 
+// A write from the Settings page moves DAEMON state, and daemon state is
+// reported by GET /api/status as well as GET /api/settings. Every one of
+// these mutations invalidated ['settings'] alone, which left ['status']
+// serving a value the daemon had already changed.
+//
+// The failure that surfaced it: "Get started" writes setupCompletedAt, the
+// daemon stores it at config.setup.completedAt, and lib/server.js derives
+// status.setupDone from it -- but App.tsx gates the entire first-run
+// takeover on status.setupDone. The write landed, ['status'] was never
+// refetched, the screen did not move, and the button read as broken.
+//
+// This is the settings-page analogue of accountRefresh above, and it is
+// applied to EVERY write on the page rather than to the one key known to be
+// broken. Any setting that moves daemon state has exactly this shape, so
+// keying the refresh off a list of known-bad keys would only leave the next
+// one to be found the same way. ['status'] is a small payload the app
+// already polls on an interval, so the unconditional invalidation costs one
+// request the app was about to make on its own moments later.
+function settingsRefresh(qc: ReturnType<typeof useQueryClient>): void {
+  qc.invalidateQueries({ queryKey: ['settings'] })
+  qc.invalidateQueries({ queryKey: ['status'] })
+}
+
 export function useSetSetting() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (vars: { key: string; value: unknown }) => c.setSetting(vars.key, vars.value),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: () => settingsRefresh(qc),
   })
 }
 
 // Re-register (Task: always-available MCP re-registration, not gated on
-// the channel's current reported install state). Invalidates settings so
-// the "installed"/"not registered" chip reflects whatever registerNow()
-// just found, same as every other write on this page.
+// the channel's current reported install state). settingsRefresh so the
+// "installed"/"not registered" chip reflects whatever registerNow() just
+// found, same as every other write on this page.
 export function useRegisterMcp() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => c.registerMcp(),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: () => settingsRefresh(qc),
   })
 }
 
 // Force-update the Stop and recall hooks to the current build (POST
 // /api/hooks/update), always available regardless of the reported
 // hooksVersion state -- same "not gated" shape as useRegisterMcp above.
-// Invalidates settings so the vintage chips reflect what forceUpdateHooks()
-// just found, on success or on a per-hook failure alike.
+// settingsRefresh so the vintage chips reflect what forceUpdateHooks() just
+// found, on success or on a per-hook failure alike.
 export function useUpdateHooks() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => c.updateHooks(),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: () => settingsRefresh(qc),
   })
 }
 
@@ -556,7 +579,7 @@ export function useCheckForUpdates() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => c.checkForUpdates(),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: () => settingsRefresh(qc),
   })
 }
 
@@ -570,12 +593,26 @@ export function useOpenMemoryFile() {
   return useMutation({ mutationFn: (projectPath: string) => c.openMemoryFile(projectPath) })
 }
 
+// Leaving a team changes ALL THREE account caches, so it takes accountRefresh
+// rather than the settings-page pair: it is a membership change, exactly like
+// the sign-in/sign-out mutations that helper was written for.
+//
+// This was the worst of the settings-only invalidations. Leaving flips
+// status.solo, and Shell.tsx gates the entire Team nav group on !solo
+// (showTeamNav) and the "Create a team" CTA on solo && signedIn. With
+// ['status'] left stale the rail went on offering Members and Insights for a
+// team this machine had just left, and went on withholding the create-team
+// CTA, until the next status poll -- and since the live queries do not
+// refetch in the background, "the next poll" is not guaranteed to arrive at
+// all while the window is unfocused. That is the state immediately after a
+// destructive action, which is the worst possible moment for the rail to
+// describe a team the user no longer belongs to.
 export function useLeaveTeam() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (teamId: string) => c.leaveTeam(teamId),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: () => accountRefresh(qc),
   })
 }
 

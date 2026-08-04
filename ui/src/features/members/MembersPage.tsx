@@ -249,11 +249,26 @@ export function MembersPage() {
                 {/* Secondary, cheap escape hatch to the raw code -- only shown
                     when the primary button is minting a link, so there is
                     never a redundant second button doing the same thing the
-                    primary one already does in the degraded (no webUrl) case. */}
+                    primary one already does in the degraded (no webUrl) case.
+
+                    Labelled "standing code", not "code instead": these two
+                    controls hand out structurally different secrets, and the
+                    old label framed it as a mere format choice. The primary
+                    button mints a fresh, individually revocable token per
+                    invite; this one copies team.inviteCode, a single permanent
+                    per-team secret shared by everyone, which no one can revoke
+                    for one person -- rotating it is the only undo and it cuts
+                    off every outstanding copy at once. Someone reaching for
+                    "instead" would not have guessed any of that. */}
                 {canMintLink && inviteCode && (
-                  <button type="button" className="members-btn" onClick={handleCopyCode}>
-                    {inviteCopy.status === 'copied' && inviteCopy.kind === 'code' ? 'Copied' : 'Copy code instead'}
-                  </button>
+                  <span className="invite-standing">
+                    <button type="button" className="members-btn" onClick={handleCopyCode}>
+                      {inviteCopy.status === 'copied' && inviteCopy.kind === 'code' ? 'Copied' : 'Copy standing code'}
+                    </button>
+                    <span className="invite-standing-note">
+                      Permanent, shared by the whole team. Can't be revoked, only rotated.
+                    </span>
+                  </span>
                 )}
                 {mintError && (
                   <p className="invite-error" role="alert">Couldn't create an invite link. {mintError}</p>

@@ -1,12 +1,29 @@
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, afterEach } from 'vitest'
+import { render, screen, cleanup } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from '../data/DataClientProvider'
 import { FakeDataClient } from '../data/FakeDataClient'
 import type { Settings, Status, TeamAccount } from '../data/types'
 import { App } from './App'
 import { ROUTES } from './routes'
-import { renderApp } from '../test/renderApp'
+import { renderApp, renderWith } from '../test/renderApp'
+
+// A machine that has not finished setup. FakeDataClient pins setupDone true,
+// and the first-run takeover is the only state in the app where the rendered
+// screen is decoupled from the URL, so it has to be reachable to test.
+class FirstRunClient extends FakeDataClient {
+  async getStatus(): Promise<Status> {
+    return { ...(await super.getStatus()), setupDone: false }
+  }
+}
+
+// The route survives a render, so a test that navigates has to put it back or
+// it leaks into every test after it in this file.
+afterEach(() => {
+  cleanup()
+  window.history.pushState({}, '', '/')
+})
 
 describe('Shell', () => {
   it('renders the brand mark with an accessible name, not hidden from assistive tech', async () => {
@@ -131,6 +148,41 @@ describe('Shell', () => {
 
       expect(screen.queryByRole('link', { name: /sign in/i })).toBeNull()
       expect(screen.queryByTestId('rail-identity')).toBeNull()
+    })
+  })
+
+  // App.tsx renders the first-run takeover regardless of path, but NavLink
+  // derived its active state straight from useRoute(to). So clicking Settings
+  // during first run pushed /settings, lit the Settings rail entry, and left
+  // the Welcome screen on the page: the app reported a location it was not
+  // rendering. That is worse than a dead link, because the rail is the app's
+  // own answer to "where am I" and it was giving a false one -- and FirstRun's
+  // copy points at Settings in the present tense, so the reader has every
+  // reason to believe the highlight.
+  //
+  // This asserts ONLY the honesty half. Whether the takeover should be
+  // escapable at all is a product call and lands separately; making Settings
+  // reachable here would pre-empt it.
+  describe('first-run takeover', () => {
+    it('marks no nav route active, because the app is not rendering any of them', async () => {
+      renderWith(new FirstRunClient(), <App />)
+      await screen.findByText('Welcome to MemBridge')
+
+      await userEvent.click(screen.getByRole('link', { name: 'Settings' }))
+
+      // The takeover is still what is on screen...
+      expect(screen.getByText('Welcome to MemBridge')).toBeInTheDocument()
+      // ...so nothing in the rail may claim otherwise.
+      expect(document.querySelectorAll('.nav-item-active')).toHaveLength(0)
+    })
+
+    it('still marks the route active once setup is done', async () => {
+      window.history.pushState({}, '', ROUTES.settings)
+      renderApp({})
+      await screen.findByRole('link', { name: 'Settings' })
+      // The guard must be scoped to the takeover: normal navigation still
+      // shows the reader where they are.
+      expect(document.querySelectorAll('.nav-item-active').length).toBeGreaterThan(0)
     })
   })
 })
