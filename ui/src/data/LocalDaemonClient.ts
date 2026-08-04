@@ -43,6 +43,18 @@ interface RawTeamPayload {
   error?: string | null
 }
 
+// One row of GET /api/team/invites, straight off public.invites (002). Kept
+// optional-tolerant for the same reason RawTeamPayload above is: an older
+// daemon that predates this endpoint's fields must degrade to the nulls
+// getInvites() already handles rather than put `undefined` on screen.
+interface RawInviteRow {
+  token: string
+  created_at: string
+  expires_at?: string | null
+  max_uses?: number | null
+  use_count?: number
+}
+
 // The same payload after teamAccountPayload() has defaulted every field --
 // nothing downstream has to re-decide what an absent field meant.
 interface TeamPayload {
@@ -411,14 +423,31 @@ export class LocalDaemonClient implements DataClient {
     return membersRes.members.map((m, i) => mapMember(m, activity[i]))
   }
 
-  // The daemon can only mint a generic, role-less invite LINK (POST
-  // /api/team/invite) and cannot list the ones already issued -- there is no
-  // endpoint backing "show pending invites" today. Resolving [] (rather than
-  // rejecting with developer text the user then saw, retried 3x per Members
-  // mount) is the honest degraded answer until a listing endpoint lands:
-  // "no pending invites known", which for this daemon is always true.
-  getInvites(): Promise<Invite[]> {
-    return Promise.resolve([])
+  // GET /api/team/invites (lib/api-access.js readInvites) lists the team's
+  // outstanding invite links. This used to be a hardcoded [], which made the
+  // whole pending-invites UI unreachable: InviteRow and its Revoke button were
+  // already written and correct, but no row could ever render to carry them,
+  // so revoke had nothing to act on.
+  //
+  // No teamId is sent: readInvites derives the team from my_teams server-side
+  // (the same way getAudit's endpoint does), precisely so a request cannot
+  // name a team the caller is not currently a manager of.
+  async getInvites(): Promise<Invite[]> {
+    const res = await get<{ invites: RawInviteRow[] }>('/api/team/invites')
+    return (res.invites ?? []).map(r => ({
+      // The token becomes `id` because that is what the revoke path needs:
+      // InviteRow calls onRevoke(invite.id) and revokeInvite posts it as
+      // `token`. Mapping anything else here breaks every Revoke button with
+      // "unknown invite" while the list itself still looks perfectly fine.
+      id: r.token,
+      createdAt: r.created_at,
+      // ?? null, not || null: a real 0 use_count must survive, and an absent
+      // expires_at must stay null rather than being coerced into something
+      // expiresIn() would render as an "expired" invite that has not expired.
+      expiresAt: r.expires_at ?? null,
+      uses: r.use_count ?? 0,
+      maxUses: r.max_uses ?? null,
+    }))
   }
 
   // POST /api/team/invite (lib/teamsync.js createInvite) also returns

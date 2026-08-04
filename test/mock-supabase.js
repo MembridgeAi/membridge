@@ -119,6 +119,10 @@ function createMockSupabase() {
         token: shortToken(), teamId: body.p_team,
         expiresAt: body.p_expires_at || null, maxUses: body.p_max_uses || null,
         useCount: 0, revokedAt: null,
+        // Offset by the current row count so two invites minted inside the
+        // same millisecond still sort deterministically newest-first, which
+        // the GET /rest/v1/invites ordering below is asserted on.
+        createdAt: new Date(Date.now() + invites.size).toISOString(),
       };
       invites.set(inv.token, inv);
       return json(res, 200, [{ token: inv.token, expires_at: inv.expiresAt, max_uses: inv.maxUses }]);
@@ -526,6 +530,29 @@ function createMockSupabase() {
             (!tEq || k.team_id === tEq) && (!eEq || String(k.epoch) === eEq) &&
             (!mEq || k.member_user_id === mEq))
           .map(k => ({ epoch: k.epoch, member_user_id: k.member_user_id, sealed_team_key: k.sealed_team_key }));
+        return json(res, 200, rows);
+      }
+      // ---- 002_team_v2.sql public.invites, RLS mirrored from its policies ----
+      // invites_select is `is_team_member(team_id)` -- deliberately WIDER than
+      // the owner/admin gate lib/api-access.js readInvites applies on top. The
+      // mock mirrors the policy, not the Node gate, so a test that loses the
+      // Node gate fails here instead of silently passing on a mock that was
+      // stricter than the real backend.
+      if (url.pathname === '/rest/v1/invites' && req.method === 'GET') {
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        const q = url.searchParams;
+        const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        if (!teamEq || !isMember(teamEq, userId)) return json(res, 200, []);
+        const revokedFilter = q.get('revoked_at');
+        const rows = [...invites.values()]
+          .filter(i => i.teamId === teamEq)
+          .filter(i => (revokedFilter === 'is.null' ? !i.revokedAt : true))
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .map(i => ({
+            token: i.token, created_at: i.createdAt, expires_at: i.expiresAt,
+            max_uses: i.maxUses, use_count: i.useCount,
+          }));
         return json(res, 200, rows);
       }
       // ---- 024_project_access_and_audit.sql tables, RLS mirrored from its policies ----

@@ -177,3 +177,9 @@
   overflow-wrap: anywhere;
   user-select: all;
 }
+
+/* Sits directly under the copied value, so the caveat is read while the code
+   is still on screen rather than after it has been pasted somewhere. */
+.team-share-caveat {
+  margin-top: var(--sp-2);
+}

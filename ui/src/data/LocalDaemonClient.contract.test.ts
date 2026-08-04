@@ -23,11 +23,12 @@ type Invoker = (client: DataClient) => Promise<unknown>
 // DataClient method forces a conscious choice here, via the Record below
 // failing to type-check until it's accounted for.
 const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
-  // POST /api/team/invite only mints a generic, role-less link and cannot
-  // list issued invites -- no listing endpoint exists, so getInvites
-  // resolves [] without ever attempting a request. (inviteMember was
-  // removed from DataClient entirely for the same structural reason.)
-  'getInvites',
+  // getInvites was here while it resolved a hardcoded []. GET
+  // /api/team/invites now backs it, so it must fire a real request like every
+  // other listed method -- leaving it exempt would let a regression back to
+  // the hardcoded [] pass unnoticed, which is exactly how the pending-invites
+  // UI stayed dead for so long.
+  //
   // pickPaths never has a daemon endpoint to attempt -- it is routed through
   // the Electron IPC bridge (window.membridge, set by app/preload.js), not
   // fetch, because the daemon is a separate process with no GUI to show a

@@ -250,11 +250,24 @@ export interface Member {
   keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
 }
 
+// One outstanding invite link (public.invites, 002_team_v2.sql).
+//
+// There is deliberately no `email` and no `role` here. The table has neither
+// column and POST /api/team/invite accepts neither argument: an invite link is
+// a bearer secret that anyone holding it can redeem, as whatever role
+// redeem_invite assigns. The old shape declared both as required fields, so
+// every consumer was free to render an addressee this system has never known,
+// which is precisely the fiction that let InviteRow show a confident
+// `invite.email` that no backend could ever populate.
 export interface Invite {
+  // The invite TOKEN. It is the table's primary key and the argument
+  // revoke_invite(p_token) takes, so it is the only value that can identify a
+  // row for revocation -- see DataClient.revokeInvite.
   id: string
-  email: string
-  expiresAt: string
-  role: Role
+  createdAt: string
+  expiresAt: string | null   // null = never expires, the default the app mints
+  uses: number               // use_count: how many people have redeemed it
+  maxUses: number | null     // null = unlimited redemptions
 }
 
 export interface AuditEvent {

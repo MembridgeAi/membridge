@@ -98,21 +98,28 @@ export interface DataClient {
   createTeam(name: string): Promise<{ id: string; inviteCode: string | null }>
 
   getMembers(): Promise<Member[]>
-  // No daemon endpoint can LIST pending invites yet -- LocalDaemonClient
-  // resolves []. (An email-invite method was removed outright: POST
-  // /api/team/invite mints a generic link and accepts no email or role, so
-  // "invite this email as this role" is structurally impossible today.)
+  // The team's outstanding invite LINKS (GET /api/team/invites), newest first
+  // and excluding revoked ones. Owner/admin only, server-side.
+  //
+  // These are links, not addressed invitations: there is no email and no role
+  // on an Invite because public.invites has neither column and POST
+  // /api/team/invite accepts neither argument, so "invite this email as this
+  // role" remains structurally impossible (the email-invite method was
+  // removed outright for that reason).
   getInvites(): Promise<Invite[]>
   // Mints a fresh onboarding-invite token for `teamId` (POST /api/team/invite)
   // -- a DIFFERENT mechanism from the standing, never-rotated `team.inviteCode`
   // (Settings.team): each call produces a new one-time token that the hosted
-  // join page (cloudflare/join, redeeming via redeem_onboarding_invite) can
-  // exchange for team membership. Callers build the shareable link themselves
+  // join page (cloudflare/join) exchanges for membership of THIS team via
+  // redeem_invite. Callers build the shareable link themselves
   // as `${settings.webUrl}/#${token}` -- matching exactly how
   // cloudflare/ops-dashboard's own JOIN_BASE + token construction works --
   // since settings.webUrl is null on a build with no hosted join page
   // configured (self-hosted, empty lib/backend.json).
   createInviteLink(teamId: string): Promise<{ token: string }>
+  // `inviteId` is the invite TOKEN -- Invite.id, as handed out by getInvites.
+  // It is the only value revoke_invite(p_token) can match, so passing any
+  // other identifier fails with "unknown invite".
   revokeInvite(inviteId: string): Promise<void>
   setMemberRole(memberId: string, role: Role): Promise<void>
   removeMember(memberId: string): Promise<void>

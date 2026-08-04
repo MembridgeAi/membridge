@@ -324,6 +324,17 @@ export function TeamPage() {
                     : 'Share this code. They run `membridge join <code>`:'}
               </p>
               <p className="mono team-share-value">{share.value}</p>
+              {/* Only the 'code' branch gets this. A minted link is one
+                  revocable token; this is team.inviteCode, the single standing
+                  per-team secret, and nothing in the old copy distinguished
+                  them -- someone pasting it into a group chat had no way to
+                  know it stays valid forever and cannot be taken back from one
+                  person. */}
+              {share.kind === 'code' && (
+                <p className="team-note team-share-caveat">
+                  Permanent, shared by the whole team. Can't be revoked, only rotated.
+                </p>
+              )}
             </section>
           )}
         </>

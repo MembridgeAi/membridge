@@ -415,19 +415,50 @@ describe('LocalDaemonClient.getInsights', () => {
   })
 })
 
-// P0 Fix 2: getInvites used to REJECT with a developer-facing "no daemon
-// endpoint yet" message, which useInvites retried 3x on every Members mount
-// and then surfaced to the user. There is still no listing endpoint, so the
-// honest resolved value is an empty list -- no request, no rejection.
+// getInvites() used to be hardcoded to resolve [] because no listing endpoint
+// existed, which left InviteRow and the whole InvitesSection permanently dead:
+// the revoke path could never run because no row could ever render. Now that
+// GET /api/team/invites ships, a hardcoded [] would silently hide every real
+// pending invite, so these tests pin the request AND the mapping.
 describe('LocalDaemonClient.getInvites()', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('resolves [] without firing any request (no listing endpoint exists yet)', async () => {
-    const fetchMock = vi.fn()
+  const stubInvites = (invites: unknown[]) => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ invites }),
+    })
     vi.stubGlobal('fetch', fetchMock)
-    const client = new LocalDaemonClient()
-    await expect(client.getInvites()).resolves.toEqual([])
-    expect(fetchMock).not.toHaveBeenCalled()
+    return fetchMock
+  }
+
+  it('reads GET /api/team/invites instead of resolving a hardcoded []', async () => {
+    const fetchMock = stubInvites([])
+    await expect(new LocalDaemonClient().getInvites()).resolves.toEqual([])
+    expect(fetchMock).toHaveBeenCalledWith('/api/team/invites', expect.anything())
+  })
+
+  // `id` MUST carry the invite TOKEN, not some other row identifier: the whole
+  // revoke path is InviteRow's onRevoke(invite.id) -> revokeInvite(id) ->
+  // POST /api/team/revoke-invite { token: id } -> revoke_invite(p_token).
+  // Any other value here makes every Revoke button fail with "unknown invite".
+  it('maps a row so that id is the token revokeInvite targets', async () => {
+    stubInvites([
+      { token: 'tok-abc', created_at: '2026-08-01T00:00:00Z', expires_at: '2026-08-09T00:00:00Z', use_count: 1, max_uses: 3 },
+    ])
+    await expect(new LocalDaemonClient().getInvites()).resolves.toEqual([
+      { id: 'tok-abc', createdAt: '2026-08-01T00:00:00Z', expiresAt: '2026-08-09T00:00:00Z', uses: 1, maxUses: 3 },
+    ])
+  })
+
+  // A never-expiring, unlimited-use invite is the DEFAULT the app mints
+  // (POST /api/team/invite sends null for both when the caller passes no
+  // expiresDays/maxUses), so nulls here are the common case, not an edge one.
+  it('keeps a null expiry and null max-uses as null rather than inventing values', async () => {
+    stubInvites([{ token: 'tok-forever', created_at: '2026-08-01T00:00:00Z', expires_at: null, use_count: 0, max_uses: null }])
+    const [invite] = await new LocalDaemonClient().getInvites()
+    expect(invite.expiresAt).toBeNull()
+    expect(invite.maxUses).toBeNull()
+    expect(invite.uses).toBe(0)
   })
 })
 

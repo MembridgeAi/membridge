@@ -406,7 +406,16 @@ export class FakeDataClient implements DataClient {
   createTeam(name: string) {
     return this.guard<{ id: string; inviteCode: string | null }>({ id: 'team-new', inviteCode: `INV-${name.slice(0, 3).toUpperCase()}` })
   }
-  getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
+  // Two rows on purpose: a capped, expiring link and the never-expiring,
+  // unlimited one the app mints by default. The old single fixture carried an
+  // `email` and a `role` that public.invites has no columns for, so the fake
+  // was demonstrating a screen the real backend could never produce.
+  getInvites() {
+    return this.guard<Invite[]>([
+      { id: 'tok_9f2aQ7', createdAt: '2026-08-02T09:15:00Z', expiresAt: '2026-08-09T00:00:00Z', uses: 1, maxUses: 3 },
+      { id: 'tok_4bK1pR', createdAt: '2026-07-30T16:40:00Z', expiresAt: null, uses: 0, maxUses: null },
+    ])
+  }
   createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }
   revokeInvite() { return this.guard<void>(undefined) }
   setMemberRole() { return this.guard<void>(undefined) }

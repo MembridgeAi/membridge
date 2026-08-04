@@ -111,12 +111,37 @@ describe('MembersPage', () => {
     expect(screen.queryByText(/last 30 days/i)).toBeNull()
   })
 
-  it('revokes a pending invite via a real DataClient call', async () => {
+  // An invite link has no addressee and no role -- public.invites has neither
+  // column. The row used to render `invite.email`, so it promised a named
+  // recipient the backend could never supply. What it must show instead is
+  // what the link really is: a bearer secret with an expiry and a use budget,
+  // where "no expiry" is the DEFAULT the app mints and must not read as an
+  // error or as "expired".
+  it('describes an invite by its expiry and use budget, naming no recipient', async () => {
+    renderWith(new FakeDataClient(), <MembersPage />)
+    expect(await screen.findByText(/^1 of 3 used$/i)).toBeInTheDocument()
+    expect(await screen.findByText(/^no expiry$/i)).toBeInTheDocument()
+    // Scoped to the invites section on purpose: member rows legitimately show
+    // real email addresses, so an unscoped check would pass on those and never
+    // notice an invite row claiming a recipient.
+    const invites = document.querySelector('.invites-section')
+    expect(invites).not.toBeNull()
+    expect(invites?.textContent).not.toContain('@')
+  })
+
+  // The argument matters as much as the call: revokeInvite must receive the
+  // invite's TOKEN (Invite.id), because revoke_invite(p_token) matches on
+  // nothing else. Asserting the exact token is what stops a regression that
+  // passes some other identifier and fails server-side with "unknown invite"
+  // while the list on screen still looks perfectly healthy.
+  it('revokes a pending invite via a real DataClient call, passing its token', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'revokeInvite')
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /revoke/i }))
-    expect(spy).toHaveBeenCalledWith('i1')
+    const revokeButtons = await screen.findAllByRole('button', { name: /^revoke$/i })
+    expect(revokeButtons).toHaveLength(2)
+    await userEvent.click(revokeButtons[0])
+    expect(spy).toHaveBeenCalledWith('tok_9f2aQ7')
   })
 
   it('changes a non-owner member\'s role through a real DataClient call', async () => {
@@ -194,13 +219,25 @@ describe('MembersPage', () => {
   // Cheap secondary escape hatch to the raw code, kept alongside the primary
   // link button -- the code still works with `membridge join <code>` when a
   // link isn't convenient (no browser handy, reading it aloud, etc).
-  it('keeps a secondary "Copy code instead" action for the standing code alongside the link', async () => {
+  it('keeps a secondary action for the standing code alongside the link', async () => {
     const client = new FakeDataClient()
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /^copy code instead$/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /^copy standing code$/i }))
     expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+  })
+
+  // The standing code and a minted link are NOT interchangeable, and the
+  // control used to imply they were: "Copy code instead" reads as a format
+  // choice. team.inviteCode is one permanent per-team secret that every member
+  // shares and that no one can revoke individually -- rotating it is the only
+  // undo, and that cuts off everyone holding it. Handing that out believing it
+  // was a throwaway alternative to a link is the mistake this copy prevents.
+  it('says the standing code is permanent and cannot be revoked individually', async () => {
+    renderWith(new FakeDataClient(), <MembersPage />)
+    expect(await screen.findByRole('button', { name: /^copy standing code$/i })).toBeInTheDocument()
+    expect(await screen.findByText(/can't be revoked, only rotated/i)).toBeInTheDocument()
   })
 
   it('surfaces a failed invite-link mint instead of looking like nothing happened', async () => {
@@ -235,7 +272,7 @@ describe('MembersPage', () => {
     const client = new FakeDataClient()
     vi.spyOn(client, 'revokeInvite').mockRejectedValue(new Error('revoke rejected'))
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    await userEvent.click((await screen.findAllByRole('button', { name: /^revoke$/i }))[0])
     expect(await screen.findByText(/revoke rejected/i)).toBeInTheDocument()
   })
 })
