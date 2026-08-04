@@ -51,6 +51,36 @@
   font-size: 11px;
 }
 
+/* Hide mine / Clear: filter controls, so they read at the same weight as the
+ * selects beside them rather than as page actions. `aria-pressed` carries the
+ * on state; the fill is what makes it visible without relying on colour alone
+ * (the label stays the same either way). */
+.search-toggle,
+.search-clear {
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  cursor: pointer;
+}
+.search-toggle:hover:not(:disabled),
+.search-clear:hover { color: var(--text); border-color: var(--text3); }
+.search-toggle[aria-pressed='true'] {
+  color: var(--surface);
+  background: var(--text);
+  border-color: var(--text);
+}
+.search-toggle:disabled { opacity: 0.4; cursor: default; }
+.search-toggle:focus-visible,
+.search-clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.search-clear { border-style: dashed; }
+
 .search-resting,
 .search-count,
 .search-error {
@@ -78,23 +108,30 @@
   outline-offset: -2px;
 }
 
-.search-result-who {
+/* The answer, first and largest. Everything else on the row is subordinate to
+ * it, which is the whole reason the attribution moved below. */
+.search-result-outcome {
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+}
+
+/* One footer line carrying who / tool / project / when / why-it-matched. Wraps
+ * as a unit on a narrow pane instead of each part claiming its own row. */
+.search-result-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  margin-top: 6px;
 }
 .search-result-author {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
+  color: var(--text2);
 }
 .search-result-meta {
   color: var(--text3);
   font-size: var(--fs-xs);
-}
-
-.search-result-outcome {
-  margin-top: 3px;
-  font-size: var(--fs-md);
 }
 
 /* The snippet is supporting evidence, not the headline: one notch down in
@@ -117,11 +154,14 @@
   font-weight: var(--fw-medium);
 }
 
+/* Pushed to the far end of the footer: "why is this here" is the last thing
+ * you reach for, and keeping it off the left edge stops it competing with the
+ * author for the start of the line. */
 .search-result-matched {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 5px;
+  margin-left: auto;
 }
 .search-chip {
   padding: 1px 6px;

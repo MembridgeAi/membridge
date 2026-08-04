@@ -16048,6 +16048,79 @@ async function main() {
     });
   }
 
+  // ---- search filters speak BOTH dialects ----
+  //
+  // search_memory's documented contract is human input (a name substring),
+  // but the dashboard's Search screen sends the same identifiers /api/feed
+  // matches on: a member's user id and a project's ABSOLUTE PATH. Matching
+  // names alone meant every dropdown on that screen returned an empty list
+  // for every query -- a uuid is not a substring of a display name, and a
+  // path is not a substring of a project name. The tool filter had its own
+  // version of the same bug: the dropdown is built from PUBLIC source names
+  // (server.js publicSource: 'Distilled' renders as 'Codex'), while the
+  // matcher compared against the raw stored source.
+  {
+    const teamArchiveForFilters = require('../lib/team-archive');
+    const filtPid = 'search-filter-dialect-uuid';
+    const projFilt = path.join(ROOT, 'projects', 'search-filter-app');
+    fs.mkdirSync(path.join(projFilt, '.membridge'), { recursive: true });
+    {
+      const state = util.loadState();
+      state.projects[projFilt] = { events: [], teamEntries: [] };
+      util.saveState(state);
+    }
+    fs.writeFileSync(path.join(projFilt, '.membridge', 'team.json'),
+      JSON.stringify({ teamId: 'search-filter-team', projectId: filtPid, teamName: 'Filter Dialect Team' }));
+    teamArchiveForFilters.appendRows(filtPid, [{
+      author: 'Andrew Brown', ts: new Date(Date.now() - 3 * 86400000).toISOString(),
+      source: 'Distilled', session: 'filt-1', ask: null, summary: null, goal: null,
+      decisions: 'searchfiltertoken planted for the filter dialect checks', gotchas: null,
+      headline: null, distilled: true, files: [], changes: null,
+    }]);
+
+    const hit = r => (r.decisions || '').includes('searchfiltertoken');
+    const unfiltered = mcpMod.searchMemory({ query: 'searchfiltertoken' });
+    check('search filters: the planted row is findable with no filter at all (fixture sanity check)', () => {
+      assert.ok(unfiltered.results.some(hit), 'fixture setup: planted row not found unfiltered');
+    });
+
+    check('search filters: the project filter accepts an absolute path, which is what the dashboard sends', () => {
+      const byPath = mcpMod.searchMemory({ query: 'searchfiltertoken', project: projFilt });
+      assert.ok(byPath.results.some(hit),
+        'an absolute project path matched nothing -- the dashboard project dropdown cannot filter');
+    });
+
+    check('search filters: the project filter still accepts a name substring, which is what search_memory documents', () => {
+      const byName = mcpMod.searchMemory({ query: 'searchfiltertoken', project: 'search-filter-app' });
+      assert.ok(byName.results.some(hit), 'a project name substring stopped matching');
+    });
+
+    check('search filters: the tool filter folds Distilled to the public name the dropdown offers', () => {
+      const byTool = mcpMod.searchMemory({ query: 'searchfiltertoken', tool: 'Codex' });
+      assert.ok(byTool.results.some(hit),
+        "selecting Codex matched nothing -- distilled rows are stored as 'Distilled' and must fold");
+    });
+
+    check('search filters: a wrong tool still excludes, so the fold is not matching everything', () => {
+      const wrongTool = mcpMod.searchMemory({ query: 'searchfiltertoken', tool: 'Cursor' });
+      assert.ok(!wrongTool.results.some(hit), 'the tool filter let through a row from a different tool');
+    });
+
+    check('search filters: a leading ! on the person filter excludes that person instead of selecting them', () => {
+      const excluded = mcpMod.searchMemory({ query: 'searchfiltertoken', author: '!Andrew' });
+      assert.ok(!excluded.results.some(hit), '"!Andrew" still returned Andrew\'s row');
+      const selected = mcpMod.searchMemory({ query: 'searchfiltertoken', author: 'Andrew' });
+      assert.ok(selected.results.some(hit), 'the un-negated person filter stopped selecting by name');
+    });
+
+    check('search filters: exclusion narrows the TOTAL, not just the returned page', () => {
+      const all = mcpMod.searchMemory({ query: 'searchfiltertoken' });
+      const excluded = mcpMod.searchMemory({ query: 'searchfiltertoken', author: '!Andrew' });
+      assert.ok(excluded.total < all.total,
+        `excluding a person left the total unchanged (${excluded.total} vs ${all.total}) -- the count would describe rows the reader cannot see`);
+    });
+  }
+
   // ---- get_project_memory parity with the injected block ----
   //
   // The tool's stated contract (see the comments above recentAsks/teammates

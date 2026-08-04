@@ -3,7 +3,7 @@ import { Link } from 'wouter'
 import { Avatar } from '../../components/Avatar'
 import { sessionHref } from '../../app/routes'
 import { relativeAgo } from '../../data/relativeTime'
-import { useMembers, useProjects, useSearch, useStatus } from '../../data/queries'
+import { useMembers, useProjects, useSearch, useStatus, useTeamAccount } from '../../data/queries'
 import type { SearchResult } from '../../data/types'
 import { matchLabels, snippetAround } from './snippet'
 import './search.css'
@@ -37,30 +37,36 @@ function isEcho(parts: { text: string }[], outcome: string): boolean {
   return outcome.includes(snippet) || snippet.includes(outcome.replace(/…$/, ''))
 }
 
+/** One result. The outcome leads and the attribution follows it, rather than
+ *  the other way round: the reader is scanning for the ANSWER, and having to
+ *  read past a name and a timestamp to reach it on every row is what made a
+ *  page of results feel like a page of metadata. Everything identifying the
+ *  row -- who, which tool, which project, when, and which fields matched --
+ *  collapses into one quiet footer line instead of stacking three. */
 function ResultRow({ result, query, showAvatar }: { result: SearchResult; query: string; showAvatar: boolean }) {
   const raw = snippetAround(snippetSource(result), query)
   const parts = isEcho(raw, result.outcome) ? [] : raw
   const labels = matchLabels(result.matched)
   const body = (
     <>
-      <div className="search-result-who">
-        {showAvatar && <Avatar id={result.authorId} name={result.author} size={17} />}
-        <span className="search-result-author">{result.author}</span>
-        <span className="search-result-meta">
-          {result.tool} · <span className="mono">{result.project}</span> · {relativeAgo(result.at)}
-        </span>
-      </div>
       {result.outcome && <div className="search-result-outcome">{result.outcome}</div>}
       {parts.length > 0 && (
         <p className="search-result-snippet">
           {parts.map((p, i) => (p.hit ? <mark key={i}>{p.text}</mark> : <span key={i}>{p.text}</span>))}
         </p>
       )}
-      {labels.length > 0 && (
-        <div className="search-result-matched">
-          {labels.map(l => <span key={l} className="search-chip">{l}</span>)}
-        </div>
-      )}
+      <div className="search-result-foot">
+        {showAvatar && <Avatar id={result.authorId} name={result.author} size={16} />}
+        <span className="search-result-author">{result.author}</span>
+        <span className="search-result-meta">
+          {result.tool} · <span className="mono">{result.project}</span> · {relativeAgo(result.at)}
+        </span>
+        {labels.length > 0 && (
+          <span className="search-result-matched">
+            {labels.map(l => <span key={l} className="search-chip">{l}</span>)}
+          </span>
+        )}
+      </div>
     </>
   )
   // Same rule as the feed's rows: a result with a session is a real link (so
@@ -81,12 +87,15 @@ function ResultRow({ result, query, showAvatar }: { result: SearchResult; query:
 export function SearchPage() {
   const statusQuery = useStatus()
   const solo = statusQuery.data?.solo ?? true
+  const accountQuery = useTeamAccount()
+  const selfId = accountQuery.data?.user?.userId ?? null
 
   const [typed, setTyped] = useState('')
   const [query, setQuery] = useState('')
   const [author, setAuthor] = useState('')
   const [project, setProject] = useState('')
   const [source, setSource] = useState('')
+  const [hideMine, setHideMine] = useState(false)
 
   // Debounce the typed value into the value the query hook actually sees.
   useEffect(() => {
@@ -96,9 +105,23 @@ export function SearchPage() {
 
   const projectsQuery = useProjects()
   const membersQuery = useMembers(!solo)
+
+  // "Hide mine" is only offerable to someone the corpus can tell apart from
+  // their teammates: it needs a signed-in identity to negate, and on a solo
+  // machine every row is yours, so the control would empty the page.
+  const canHideMine = !solo && !!selfId
+
+  // Sent as a negated person filter ('!<user id>'), which lib/activity.js
+  // applies BEFORE ranking and before the page limit. Dropping self rows from
+  // the returned page here in the browser would instead carve holes out of a
+  // top-25 that is mostly your own work, and leave the match count describing
+  // a list the reader cannot see. Picking a specific person supersedes it --
+  // the two are the same field, and an explicit choice is the stronger signal.
+  const effectiveAuthor = author || (canHideMine && hideMine ? `!${selfId}` : '')
+
   const filters = useMemo(
-    () => ({ author: author || null, project: project || null, source: source || null }),
-    [author, project, source],
+    () => ({ author: effectiveAuthor || null, project: project || null, source: source || null }),
+    [effectiveAuthor, project, source],
   )
   const searchQuery = useSearch(query, filters)
 
@@ -108,6 +131,14 @@ export function SearchPage() {
   const results = searchQuery.data?.results ?? []
   const total = searchQuery.data?.total ?? 0
   const asked = query.trim().length > 0
+  const anyFilter = !!(author || project || source || hideMine)
+
+  function clearFilters() {
+    setAuthor('')
+    setProject('')
+    setSource('')
+    setHideMine(false)
+  }
 
   return (
     <div className="search-page">
@@ -140,6 +171,21 @@ export function SearchPage() {
           <option value="">All tools</option>
           {tools.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
+        {canHideMine && (
+          <button
+            type="button"
+            className="search-toggle"
+            aria-pressed={hideMine && !author}
+            disabled={!!author}
+            title={author ? 'Already filtered to one person' : 'Show only what your teammates did'}
+            onClick={() => setHideMine(v => !v)}
+          >
+            Hide mine
+          </button>
+        )}
+        {anyFilter && (
+          <button type="button" className="search-clear" onClick={clearFilters}>Clear</button>
+        )}
       </div>
 
       {/* Resting state: never "no results" for a search nobody ran. */}
@@ -158,6 +204,7 @@ export function SearchPage() {
         <p className="search-count">
           {total === 0 ? 'No matches.' : `${total} ${total === 1 ? 'match' : 'matches'}`}
           {total > results.length && ` · showing the top ${results.length}`}
+          {hideMine && !author && ' · yours hidden'}
         </p>
       )}
 
