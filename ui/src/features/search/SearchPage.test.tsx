@@ -82,6 +82,58 @@ describe('SearchPage', () => {
     )
   })
 
+  it('offers Hide mine only where there are teammates to hide yours from', () => {
+    renderApp({ solo: true }, <SearchPage />)
+    expect(screen.queryByRole('button', { name: 'Hide mine' })).toBeNull()
+  })
+
+  // The negation is the point of the assertion, not an implementation detail:
+  // it is what makes the daemon drop self rows BEFORE ranking and before the
+  // page limit. Filtering the returned page in the browser instead would leave
+  // the reported match count describing rows the reader cannot see.
+  it('hides your own rows by negating the person filter, not by trimming the page', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient({ viewerId: 'usr_9f2a' })
+    const spy = vi.spyOn(client, 'search')
+    renderWith(client, <SearchPage />)
+    await search(user, 'ports')
+    await waitFor(() => expect(spy).toHaveBeenCalled(), SETTLED)
+    await user.click(screen.getByRole('button', { name: 'Hide mine' }))
+    await waitFor(
+      () => expect(spy).toHaveBeenCalledWith('ports', expect.objectContaining({ author: '!usr_9f2a' }), expect.any(Number)),
+      SETTLED,
+    )
+  })
+
+  it('lets a chosen person supersede Hide mine instead of combining the two', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient({ viewerId: 'usr_9f2a' })
+    const spy = vi.spyOn(client, 'search')
+    renderWith(client, <SearchPage />)
+    await search(user, 'ports')
+    await user.click(await screen.findByRole('button', { name: 'Hide mine' }, SETTLED))
+    await user.selectOptions(screen.getByLabelText('Filter by person'), 'andrew')
+    await waitFor(
+      () => expect(spy).toHaveBeenLastCalledWith('ports', expect.objectContaining({ author: 'andrew' }), expect.any(Number)),
+      SETTLED,
+    )
+    expect(screen.getByRole('button', { name: 'Hide mine' })).toBeDisabled()
+  })
+
+  it('clears every filter at once, including the one that is a button', async () => {
+    const user = userEvent.setup()
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'search')
+    renderWith(client, <SearchPage />)
+    await search(user, 'ports')
+    await user.selectOptions(await screen.findByLabelText('Filter by project', {}, SETTLED), '/Users/x/membridge')
+    await user.click(screen.getByRole('button', { name: 'Clear' }))
+    await waitFor(
+      () => expect(spy).toHaveBeenLastCalledWith('ports', { author: null, project: null, source: null }, expect.any(Number)),
+      SETTLED,
+    )
+  })
+
   it('does not repeat the outcome line as its own snippet', async () => {
     const user = userEvent.setup()
     const client = new FakeDataClient()
