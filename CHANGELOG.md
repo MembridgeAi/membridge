@@ -48,6 +48,16 @@ controls that were quietly doing nothing.
 - **You cannot demote yourself out of your own admin rights,** in the UI or
   through the API, and "Transfer ownership" is gone: no RPC to perform it has
   ever existed, so the control could only ever fail.
+- **Distilled notes are actually bullets now.** The Stop hook has been asking
+  for one short bullet per line, and every reader still saw a single
+  paragraph: two separate steps on the way out of storage collapsed all
+  whitespace, and a newline is whitespace. Sessions distilled from here on
+  keep their line structure on the feed, the session page, the team wire and
+  the injected block. Entries written before this stay as they are, since
+  their line breaks were never stored.
+- **A session roll-up asks a better question.** The final summary of a long
+  session now asks for the few things a teammate will still need next week,
+  rather than everything that happened in the order it happened.
 - **First-run navigation stops lying.** Clicking a nav item during setup moved
   the highlight and changed the URL while the welcome screen stayed put.
 
