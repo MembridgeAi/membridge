@@ -1,9 +1,27 @@
-import type { ReactNode } from 'react'
+import { createContext, useContext, type ReactNode } from 'react'
 import { Link, useLocation, useRoute } from 'wouter'
 import { MembridgeMark } from '../assets/MembridgeMark'
 import { useDataClient } from '../data/DataClientProvider'
 import { useSettings, useStatus, useTeamAccount } from '../data/queries'
 import { ROUTES } from './routes'
+
+/** Whether the rail may reflect the current route in its active state.
+ *
+ *  True everywhere the app renders the route it is on. False during the
+ *  first-run takeover, which App.tsx renders REGARDLESS of path: clicking
+ *  Settings there pushed /settings and lit the Settings entry while the
+ *  Welcome screen stayed on the page, so the rail asserted a location the
+ *  app was not rendering. The rail is the app's own answer to "where am I",
+ *  and a wrong answer there is worse than a link that does nothing.
+ *
+ *  A context rather than a prop on all eight NavLinks: the value is a
+ *  property of the whole rail, and threading it through every call site
+ *  would invite the next entry to be added without it.
+ *
+ *  Deliberately scoped to honesty. It does not disable the links or change
+ *  what first run renders -- whether the takeover should be escapable at all
+ *  is a product decision that lands separately. */
+const RouteReflectedContext = createContext(true)
 
 interface NavLinkProps {
   to: string
@@ -14,7 +32,9 @@ interface NavLinkProps {
 /** One rail entry. Active state is border-left + accent-dim background only
  *  — see app.css `.nav-item-active` — no other decoration. */
 function NavLink({ to, label, icon }: NavLinkProps) {
-  const [isActive] = useRoute(to)
+  const [matchesRoute] = useRoute(to)
+  const routeReflected = useContext(RouteReflectedContext)
+  const isActive = routeReflected && matchesRoute
   return (
     <Link href={to} className={`nav-item${isActive ? ' nav-item-active' : ''}`}>
       <span className="nav-icon" aria-hidden="true">{icon}</span> {label}
@@ -24,6 +44,10 @@ function NavLink({ to, label, icon }: NavLinkProps) {
 
 interface ShellProps {
   children: ReactNode
+  /** False when `children` is a takeover screen rendered independently of
+   *  the URL (first run), so the rail does not claim a route as current
+   *  that the app is not actually rendering. Defaults to true. */
+  routeReflected?: boolean
 }
 
 function errorMessage(error: unknown): string {
@@ -38,7 +62,7 @@ function errorMessage(error: unknown): string {
  *  make them (spec §3.7). Until status and settings both resolve, neither the
  *  Team group nor the solo "Create a team" CTA renders — defaulting either
  *  way would flash a control the user may not be entitled to. */
-export function Shell({ children }: ShellProps) {
+export function Shell({ children, routeReflected = true }: ShellProps) {
   const statusQuery = useStatus()
   const settingsQuery = useSettings()
   const accountQuery = useTeamAccount()
@@ -99,6 +123,9 @@ export function Shell({ children }: ShellProps) {
           </div>
         )}
 
+        {/* Every NavLink reads routeReflected from here rather than taking it
+            as a prop, so a rail entry added later cannot forget to honor it. */}
+        <RouteReflectedContext.Provider value={routeReflected}>
         <div className="nav">
           <NavLink to={ROUTES.today} label="Today" icon="⌂" />
           <NavLink to={ROUTES.feed} label="Feed" icon="☰" />
@@ -131,6 +158,7 @@ export function Shell({ children }: ShellProps) {
           <div className="nav-group-label">You</div>
           <NavLink to={ROUTES.settings} label="Settings" icon="⚙" />
         </div>
+        </RouteReflectedContext.Provider>
 
         {/* The footer is the one piece of chrome present on every screen, so
             it is where the app has to state which account it is acting as.
