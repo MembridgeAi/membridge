@@ -57,5 +57,18 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      - run: node test/run.js
+      # The suite is NOT run as a step of its own here, deliberately.
+      # package.json's prepublishOnly is `npm test`, so `npm publish` below
+      # runs it anyway, and an explicit step meant the whole suite ran TWICE
+      # in one job. That is not merely wasteful: the second run FAILED while
+      # the first passed, sixty seconds apart on identical code (v0.2.8:
+      # 1487/1487, then 1482/1487 with three `commits:` checks down). The
+      # suite is one sequential story over real git subprocesses and it is
+      # not idempotent within a job, so the first run poisons the second and
+      # a good build cannot publish.
+      #
+      # prepublishOnly is kept as THE gate rather than the step, because it
+      # also guards a publish run by hand, which a workflow step cannot.
+      # The underlying non-idempotency is a real bug and is filed separately;
+      # this stops it blocking releases.
       - run: npm publish --access public

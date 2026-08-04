@@ -14,10 +14,86 @@
   ~1ms, and what remains is other work around it. The first search after an
   upgrade is slower, once, while the index builds. Deleting the index
   (`~/.membridge/search.db`) is always safe — it rebuilds itself.
+- **Memory the team leans on now ranks higher.** Retrieval counts stopped
+  being a number you could only look at: search results are reordered by them.
+  Two entries that say much the same thing used to be separated by nothing but
+  their timestamps, which is a coin toss — now the one people keep coming back
+  to leads. This is reinforcement, not recency, and the distinction is
+  load-bearing: MemBridge still refuses to favour recent work, because
+  cross-teammate overlap runs about fifty days and a recency boost would
+  rebuild the exact blind spot team search exists to fix. A six-month-old
+  gotcha that keeps getting recalled is evidence, not staleness. The boost is
+  bounded — it can settle a near-tie, never bury a better answer under a
+  popular one — and it applies only to entries that already matched, so what
+  "no results" means is unchanged on every surface.
 - **Requires Node 22 or newer.** The index uses the SQLite support built into
   modern Node, so there is no new dependency to install. Node 18 and 20 both
   reached end of life earlier this year. The desktop app is unaffected — it
   ships its own runtime.
+
+## 0.2.8 — 2026-08-04
+
+- **Distilled notes are actually bullets now.** The Stop hook has been asking
+  for one short bullet per line, and every reader still saw a single
+  paragraph: two separate steps on the way out of storage collapsed all
+  whitespace, and a newline is whitespace. Sessions distilled from here on
+  keep their line structure on the feed, the session page, the team wire and
+  the injected block. Entries written before this stay as they are, since
+  their line breaks were never stored.
+- **A session roll-up asks a better question.** The final summary of a long
+  session now asks for the few things a teammate will still need next week,
+  rather than everything that happened in the order it happened.
+
+## 0.2.7 — 2026-08-04
+
+A pass over the surfaces you actually read: the feed, a session, and the
+controls that were quietly doing nothing.
+
+- **The feed is day cards now, not a wall of sessions.** One card per person
+  per project per local day, newest activity first, collapsed by default and
+  expanding into the same session rows as before. The card's line is a pick of
+  that day's best existing headline, never a new summary invented for it.
+- **A row that could not be decrypted says so.** It used to render the exact
+  words a genuinely un-summarized row renders, so a feed full of unreadable
+  teammate entries looked healthy and empty rather than locked. The daemon had
+  always sent the marker; the UI was dropping it.
+- **A session reads top to bottom.** Files first, then what happened as a
+  bulleted list, then the prompt chain folded away. "Why" and "Watch out" were
+  merged into one "What", because they were always read together and two open
+  paragraphs above the file list was the wall this page exists to avoid.
+- **Sign in is reachable.** The left rail showed a status dot and the word
+  "You" whether or not anyone was signed in, and offered "Create a team" to
+  people who could not yet sign in. It now offers sign-in when signed out and
+  names you when signed in.
+- **Pending invites are visible and revocable.** The list and its Revoke button
+  already existed and could never render, because the client returned an empty
+  array instead of asking the daemon.
+- **Credentials in URLs are redacted.** A sign-in URL carrying `?code=` reached
+  memory intact: the entropy backstop deliberately exempts UUIDs so session ids
+  stay readable, and the sign-in flow mints UUIDs, so the one layer that might
+  have caught it was guaranteed not to. `code`, `token` and `access_token`
+  values are now redacted in query position, while `code=200` in ordinary prose
+  is left alone.
+- **Settings changes take effect immediately.** Five mutations refreshed only
+  half the state they changed, which is why "Get started" appeared to do
+  nothing, and why leaving a team left the team navigation on screen until the
+  next poll, or indefinitely with the window unfocused.
+- **Searches are shareable and Back works.** The query and its filters live in
+  the URL. A session opened from Search or a project now offers a way back to
+  where you actually came from, instead of always claiming the feed.
+- **Project names are links** on Today, Projects, and the Insights rows whose
+  own copy tells you to go to the project page.
+- **Insights fits the window again.** A long concentration reason forced the
+  page 300px wider than a default window, in a range too wide to stack and too
+  narrow to fit. The reason now wraps beneath the project name.
+- **The MCP panel says why a tool was skipped.** The daemon had always computed
+  the cause and the exact config key to set; the dashboard was collapsing all
+  of it into one vague sentence.
+- **You cannot demote yourself out of your own admin rights,** in the UI or
+  through the API, and "Transfer ownership" is gone: no RPC to perform it has
+  ever existed, so the control could only ever fail.
+- **First-run navigation stops lying.** Clicking a nav item during setup moved
+  the highlight and changed the URL while the welcome screen stayed put.
 
 ## 0.2.6 — 2026-08-04
 
@@ -55,20 +131,9 @@ different way, and each was hiding the next.
   count no matter which surface or author spelling served it. Serves append
   to a log under ~/.membridge — never state.json — and a tracking failure can
   never break a search. This is the first read on what stored memory is
-  actually worth: proof of use now, and the input for the ranking change
-  below. Opt out with `trackRetrievals: false` or MEMBRIDGE_NO_RETRIEVALS=1.
-- **Memory the team leans on now ranks higher.** Retrieval counts stopped
-  being a number you could only look at: search results are reordered by them.
-  Two entries that say much the same thing used to be separated by nothing but
-  their timestamps, which is a coin toss — now the one people keep coming back
-  to leads. This is reinforcement, not recency, and the distinction is
-  load-bearing: MemBridge still refuses to favour recent work, because
-  cross-teammate overlap runs about fifty days and a recency boost would
-  rebuild the exact blind spot team search exists to fix. A six-month-old
-  gotcha that keeps getting recalled is evidence, not staleness. The boost is
-  bounded — it can settle a near-tie, never bury a better answer under a
-  popular one — and it applies only to entries that already matched, so what
-  "no results" means is unchanged on every surface.
+  actually worth: proof of use now, the input for decay and usage-aware
+  ranking later. Opt out with `trackRetrievals: false` or
+  MEMBRIDGE_NO_RETRIEVALS=1.
 - **Search quality is now a gated promise, not a hope.** A recall-quality
   harness (test/suites/recall-quality.test.js) seeds realistic corpora and
   asserts perfect recall AND precision for the questions people actually

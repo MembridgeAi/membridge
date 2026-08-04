@@ -304,6 +304,16 @@ function setupFixtures() {
   // whole legacy section doubles as proof the hatch restores plaintext sync
   // byte-identically, and keeps these tests off the real macOS keychain.
   cfg.team = { ...(cfg.team || {}), sharePrompts: true, encrypt: false };
+  // Counters opt-out ('' is the documented kill switch — lib/counters.js).
+  // Every daemon this suite spawns against this home boots a countersTick
+  // whose emitCounters tail POSTs to the real baked counters endpoint and
+  // then does a loadState->saveState pair. That pair runs a few hundred ms
+  // after daemon boot — the same moment the dashboard sections plant state
+  // out-of-band — and if it straddles a plant's rename, the plant is erased
+  // (seen live: the /api/session 404 flake on CI). It also made every CI run
+  // ping production telemetry. In-process counters/diagnostics tests are
+  // unaffected: they build their own config objects.
+  cfg.countersUrl = '';
   cfg.adapters = cfg.adapters || {};
   cfg.adapters.custom = [{
     id: 'mytool',
