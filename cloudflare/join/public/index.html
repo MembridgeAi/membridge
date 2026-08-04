@@ -57,7 +57,11 @@
 
   <section id="v-invite" hidden>
     <h1>You've been <em>invited</em></h1>
-    <p class="lead">Sign in to create your team. Your account and your encryption keys are yours — MemBridge never sees your session content.</p>
+    <!-- Neutral about what happens next, because this page cannot know until
+         after sign-in which of the two invite kinds it is holding -- and since
+         redeem() now tries the app-minted one FIRST, joining an existing team
+         is the common case, not creating a new one. -->
+    <p class="lead">Sign in to accept it. Your account and your encryption keys are yours — MemBridge never sees your session content.</p>
     <label for="name">your name</label>
     <input id="name" placeholder="Ada Lovelace" maxlength="80" autocomplete="name">
     <button id="go" class="gh">
@@ -68,13 +72,17 @@
   </section>
 
   <section id="v-working" hidden>
-    <h1>Setting up <em>your team</em></h1>
+    <h1>Accepting <em>your invite</em></h1>
     <p>One moment.</p>
   </section>
 
   <section id="v-done" hidden>
     <h1>You're <em>in</em></h1>
-    <p class="lead">Team <b id="teamName"></b> is ready. Install MemBridge on each machine and it will start sharing context automatically.</p>
+    <!-- Filled by renderDone(): "Team X is ready" is only true for the
+         onboarding path, where redeeming CREATES the team. Someone who just
+         joined an existing team did not make anything, and being told their
+         team is ready reads as if they had. -->
+    <p class="lead" id="doneLead"></p>
     <!-- These steps are GitHub-shaped on purpose. This page signs people up
          through GitHub and nothing else, so the account they just created has
          no password -- and `membridge login` takes an email and a password
@@ -166,13 +174,34 @@ async function redeem(token, displayName, accessToken) {
     const rows = await rpc('redeem_invite',
       { p_token: token, p_display_name: displayName }, accessToken);
     const row = Array.isArray(rows) ? rows[0] : rows;
-    return (row && row.team_name) || 'your team';
+    return { name: (row && row.team_name) || 'your team', joined: true };
   } catch (err) {
     if (!INVITE_NOT_FOUND.test(String(err.message || err))) throw err;
   }
   const out = await rpc('redeem_onboarding_invite',
     { p_token: token, p_display_name: displayName }, accessToken);
-  return (out && out.team_name) || 'your team';
+  return { name: (out && out.team_name) || 'your team', joined: false };
+}
+
+// `joined` is the whole reason redeem() returns a shape rather than a string:
+// the two RPCs do genuinely different things (join an existing team vs create
+// one), and only the caller of the first can honestly say "you're on the team".
+//
+// Built from DOM nodes rather than innerHTML on purpose. The team name comes
+// back from the backend but ORIGINATES with whoever named the team, so it is
+// untrusted text on this page like any other user input.
+function renderDone({ name, joined }) {
+  const lead = $('doneLead');
+  lead.textContent = '';
+  const strong = document.createElement('b');
+  strong.textContent = name;
+  lead.append(
+    joined ? "You're now on team " : 'Team ',
+    strong,
+    joined
+      ? '. Install MemBridge on each machine and it will start sharing context automatically.'
+      : ' is ready. Install MemBridge on each machine and it will start sharing context automatically.',
+  );
 }
 
 (async function () {
@@ -192,7 +221,7 @@ async function redeem(token, displayName, accessToken) {
 
     show('v-working');
     try {
-      $('teamName').textContent = await redeem(invite, name || 'Member', frag.access_token);
+      renderDone(await redeem(invite, name || 'Member', frag.access_token));
       show('v-done');
     } catch (err) {
       // The RPC raises for an invalid, revoked, expired or already-redeemed

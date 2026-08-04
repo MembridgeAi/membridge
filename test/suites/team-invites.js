@@ -1,15 +1,19 @@
 // GET /api/team/invites -- the pending-invites listing behind the Members
 // page's InvitesSection.
 //
-// NOTE ON SHAPE: this suite is meant to `require('../harness')` and end with
-// h.finish(). That harness does not exist in this repo yet (no test/harness.js,
-// no test/run.js, no other file under test/suites/, on any branch or ref), so
-// it carries its own minimal check()/tally instead of requiring a module that
-// would throw MODULE_NOT_FOUND. It still prints the "N/N checks passed" tally
-// and still exits nonzero on any failure, so it is runnable today via
+// NOTE ON SHAPE: docs/ROUTINES.md says new tests go in test/suites/, require
+// `../harness`, and end with h.finish(). The doc landed ahead of the split
+// itself: as of this commit there is no test/harness.js, no test/run.js and no
+// other file under test/suites/ on any branch or ref, so requiring the harness
+// would throw MODULE_NOT_FOUND and this suite would never run at all.
+//
+// It therefore carries its own minimal check()/tally, and still honours the
+// rule that actually matters (ROUTINES.md: "a suite run counts only if it
+// printed the N/N checks passed tally AND exited 0") -- it prints the tally and
+// exits nonzero on any failure. Runnable today via:
 //   node test/suites/team-invites.js
-// Swapping the six lines under "self-contained tally" for the harness require
-// is all that should be needed once it lands.
+// Once the harness lands, swapping the block under "self-contained tally" for
+// the require is the whole migration.
 //
 // Deliberately NOT added to test/run-tests.js: that file is one sequential
 // story whose sections share state on purpose, and this needs its own backend
@@ -107,9 +111,8 @@ async function waitForHttp(url, tries = 100) {
     await teamsync.signup(util.getConfig(), 'inv-owner@test.dev', 'pw-o', 'Owner');
     const team = await teamsync.createTeam(util.getConfig(), 'InviteCo');
 
-    // Three invites covering the three states the UI must tell apart: a
-    // default never-expiring/unlimited link, a capped one, and a revoked one
-    // that must NOT appear.
+    // Three invites covering the states the UI must tell apart: a default
+    // never-expiring/unlimited link, a capped one, and a revoked one.
     const forever = await teamsync.createInvite(util.getConfig(), team.team_id, { expiresAt: null, maxUses: null });
     const capped = await teamsync.createInvite(util.getConfig(), team.team_id,
       { expiresAt: '2099-01-01T00:00:00.000Z', maxUses: 3 });
@@ -121,41 +124,51 @@ async function waitForHttp(url, tries = 100) {
     await teamsync.signup(util.getConfig(), 'inv-member@test.dev', 'pw-m', 'Member');
     await teamsync.joinTeam(util.getConfig(), team.invite_code);
 
-    await check('GET /api/team/invites lists outstanding invites, newest first', async () => {
+    await check('GET /api/team/invites lists this team\'s invites, newest first', async () => {
       const res = await apiAs('owner', 'GET', '/api/team/invites');
       assert.strictEqual(res.status, 200, `status ${res.status}: ${JSON.stringify(res.body)}`);
-      const tokens = res.body.invites.map(i => i.token);
-      assert.deepStrictEqual(tokens, [capped.token, forever.token],
-        `expected the two live invites newest-first, got ${JSON.stringify(tokens)}`);
+      const ids = res.body.invites.map(i => i.id);
+      assert.deepStrictEqual(ids, [revoked.token, capped.token, forever.token],
+        `expected all three newest-first, got ${JSON.stringify(ids)}`);
     });
 
-    // The revoked row is the whole point of the filter: leaving it in would
-    // render a Revoke button whose only possible outcome is a silent no-op,
-    // since revoke_invite's UPDATE is already guarded by `revoked_at is null`.
-    await check('a revoked invite never appears in the listing', async () => {
+    // `id` MUST be the token. The whole revoke path is
+    // onRevoke(invite.id) -> POST /api/team/revoke-invite { token: id } ->
+    // revoke_invite(p_token), which matches on nothing else, so any other
+    // value here breaks every Revoke button with "unknown invite" while the
+    // list on screen still looks perfectly healthy.
+    await check('each row is identified by its token, and carries expiry and uses', async () => {
       const res = await apiAs('owner', 'GET', '/api/team/invites');
-      assert.ok(!res.body.invites.some(i => i.token === revoked.token),
-        'a revoked invite must not be offered for revoking again');
+      const row = res.body.invites.find(i => i.id === capped.token);
+      assert.ok(row, 'the capped invite must be listed under its token as id');
+      assert.strictEqual(row.maxUses, 3);
+      // A real 0 must survive rather than being coerced to null, or
+      // "0 of 3 used" silently becomes "unknown".
+      assert.strictEqual(row.useCount, 0);
+      assert.strictEqual(row.expiresAt, '2099-01-01T00:00:00.000Z');
+      assert.ok(row.createdAt, 'createdAt must be present');
     });
 
-    // Every field the UI renders must survive the trip. use_count in
-    // particular must arrive as a real 0 and not be dropped or coerced to
-    // null, or "0 of 3 used" silently becomes "unknown".
-    await check('each row carries the id, created, expiry and uses the UI renders', async () => {
-      const res = await apiAs('owner', 'GET', '/api/team/invites');
-      const row = res.body.invites.find(i => i.token === capped.token);
-      assert.ok(row, 'the capped invite must be listed');
-      assert.strictEqual(row.max_uses, 3);
-      assert.strictEqual(row.use_count, 0);
-      assert.strictEqual(row.expires_at, '2099-01-01T00:00:00.000Z');
-      assert.ok(row.created_at, 'created_at must be present');
-    });
-
+    // Null expiry and null max-uses are the DEFAULT the app mints (POST
+    // /api/team/invite sends null for both when given no expiresDays/maxUses),
+    // so these are the common case, not an edge one. Fabricating a date here
+    // would make the most common invite in the system read as expiring.
     await check('a never-expiring invite reports null rather than a fabricated expiry', async () => {
       const res = await apiAs('owner', 'GET', '/api/team/invites');
-      const row = res.body.invites.find(i => i.token === forever.token);
-      assert.strictEqual(row.expires_at, null);
-      assert.strictEqual(row.max_uses, null);
+      const row = res.body.invites.find(i => i.id === forever.token);
+      assert.strictEqual(row.expiresAt, null);
+      assert.strictEqual(row.maxUses, null);
+    });
+
+    // Revoked rows are listed WITH a flag rather than filtered out, so an
+    // admin chasing a link that stopped working can still find it. The flag is
+    // the only thing distinguishing it from a live one, so it has to be right.
+    await check('a revoked invite is listed as revoked, not as live', async () => {
+      const res = await apiAs('owner', 'GET', '/api/team/invites');
+      const row = res.body.invites.find(i => i.id === revoked.token);
+      assert.ok(row, 'a revoked invite must still be findable');
+      assert.strictEqual(row.revoked, true);
+      assert.strictEqual(res.body.invites.find(i => i.id === forever.token).revoked, false);
     });
 
     // The token IS the join secret. A member who cannot mint or revoke (both
@@ -167,16 +180,17 @@ async function waitForHttp(url, tries = 100) {
       assert.strictEqual(res.status, 403, `status ${res.status}: ${JSON.stringify(res.body)}`);
     });
 
-    // Revoke must round-trip against the token the listing hands out: this is
-    // the exact value InviteRow puts in onRevoke(invite.id), and the one thing
-    // that makes the already-written Revoke button real rather than decorative.
-    await check('the listed token is the one revoke-invite accepts, and it leaves the list', async () => {
-      const before = (await apiAs('owner', 'GET', '/api/team/invites')).body.invites.map(i => i.token);
-      assert.ok(before.includes(forever.token));
+    // The round trip that makes the already-written Revoke button real rather
+    // than decorative: the id the listing hands out must be the exact value
+    // the revoke route accepts, and the row must then report itself revoked.
+    await check('the listed id is the one revoke-invite accepts, and the row flips to revoked', async () => {
+      const before = (await apiAs('owner', 'GET', '/api/team/invites')).body.invites;
+      assert.strictEqual(before.find(i => i.id === forever.token).revoked, false);
       const rev = await apiAs('owner', 'POST', '/api/team/revoke-invite', { token: forever.token });
       assert.strictEqual(rev.status, 200, `revoke status ${rev.status}: ${JSON.stringify(rev.body)}`);
-      const after = (await apiAs('owner', 'GET', '/api/team/invites')).body.invites.map(i => i.token);
-      assert.deepStrictEqual(after, [capped.token], `revoked invite still listed: ${JSON.stringify(after)}`);
+      const after = (await apiAs('owner', 'GET', '/api/team/invites')).body.invites;
+      assert.strictEqual(after.find(i => i.id === forever.token).revoked, true,
+        'the revoked invite must report itself revoked on the next read');
     });
   } finally {
     await new Promise(r => mock.server.close(r));

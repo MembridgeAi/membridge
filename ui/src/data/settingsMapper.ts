@@ -198,9 +198,18 @@ export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTe
       intervalSec: raw.intervalSec,
       updateAvailable: raw.updateAvailable,
     },
-    team: status.solo || !team
-      ? null
-      : { id: team.team_id, name: team.team_name, role: team.role, memberCount: team.memberCount ?? 0, inviteCode: teamMeta.inviteCode },
+    // Membership, NOT `status.solo`. The two are different questions and this
+    // used to answer the wrong one: teamsync.isSoloMachine reports solo unless
+    // some LINKED PROJECT belongs to a multi-member team, so a user who really
+    // did join a team -- but has not linked a repo yet, or whose team is still
+    // just them -- had settings.team nulled here. Downstream that hid the
+    // Members/Insights nav and the Leave-team control, and left the rail
+    // offering "Create a team" to somebody who is already on one. `solo`
+    // remains the right signal for "is anyone else actually here" (the access
+    // columns), and is still read for that elsewhere.
+    team: team
+      ? { id: team.team_id, name: team.team_name, role: team.role, memberCount: team.memberCount ?? 0, inviteCode: teamMeta.inviteCode }
+      : null,
     viewerId: teamMeta.viewerId,
     webUrl: teamMeta.webUrl,
     contextFiles: { targets: raw.targets, extraTargets: raw.extraTargets, extraTargetFiles: raw.extraTargetFiles },

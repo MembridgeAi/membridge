@@ -278,6 +278,12 @@ export function MembersPage() {
                     Couldn't copy automatically. Copy this {inviteCopy.kind}: {inviteCopy.value}
                   </span>
                 )}
+                {/* What the recipient actually does with it. Both shapes are
+                    redeemed by the same in-app field (Team -> Join a team),
+                    which posts to /api/team/join; a link's own landing page
+                    is NOT the reliable route. Stated once, next to the
+                    buttons, rather than left for the sender to guess. */}
+                <span className="invite-hint">They paste it into MemBridge → Team → Join a team.</span>
               </span>
             )}
           </div>

@@ -23,12 +23,11 @@ type Invoker = (client: DataClient) => Promise<unknown>
 // DataClient method forces a conscious choice here, via the Record below
 // failing to type-check until it's accounted for.
 const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
-  // getInvites was here while it resolved a hardcoded []. GET
-  // /api/team/invites now backs it, so it must fire a real request like every
-  // other listed method -- leaving it exempt would let a regression back to
-  // the hardcoded [] pass unnoticed, which is exactly how the pending-invites
-  // UI stayed dead for so long.
-  //
+  // The team selection is local state on the transport, read back into the
+  // query string of the team-scoped GETs. There is no endpoint to attempt and
+  // nothing for this test's "did it try a real request" check to observe.
+  'selectTeam',
+  'selectedTeamId',
   // pickPaths never has a daemon endpoint to attempt -- it is routed through
   // the Electron IPC bridge (window.membridge, set by app/preload.js), not
   // fetch, because the daemon is a separate process with no GUI to show a
@@ -66,6 +65,12 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   signUp: c => c.signUp({ displayName: 'A', email: 'a@b.dev', password: 'fixture-only' }),
   signOut: c => c.signOut(),
   createTeam: c => c.createTeam('Acme AI'),
+  joinTeam: c => c.joinTeam('tok_fixture'),
+  // Synchronous, local, and deliberately request-free -- exempted below.
+  selectTeam: async c => { c.selectTeam(null) },
+  selectedTeamId: async c => { c.selectedTeamId() },
+  renameTeam: c => c.renameTeam('team-1', 'Acme AI'),
+  rotateInviteCode: c => c.rotateInviteCode('team-1'),
   getInvites: c => c.getInvites(),
   createInviteLink: c => c.createInviteLink('team-1'),
   revokeInvite: c => c.revokeInvite('i1'),
@@ -84,7 +89,8 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   openConfigFile: c => c.openConfigFile(),
   openMemoryFile: c => c.openMemoryFile('/x'),
   leaveTeam: c => c.leaveTeam('team-1'),
-  addProject: c => c.addProject('/x'),
+  discoverProjects: c => c.discoverProjects(),
+  adoptProjects: c => c.adoptProjects(['/x']),
   pickPaths: c => c.pickPaths({ kind: 'file' }),
 }
 

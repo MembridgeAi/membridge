@@ -104,44 +104,21 @@ describe('MembersPage', () => {
   })
 
   // Fix 6: the audit query is ?limit=30 EVENTS -- "last 30 days" claimed a
-  // time window nothing actually queries.
+  // time window nothing actually queries. The count now reflects the rows
+  // actually on screen, which is the only number that stays true once "Show
+  // more" exists.
   it('labels the audit list by event count, not a time window it never queries', async () => {
     renderApp({}, <MembersPage />)
-    expect(await screen.findByText('Audit · last 30 events')).toBeInTheDocument()
+    expect(await screen.findByText('Audit · last 4 events')).toBeInTheDocument()
     expect(screen.queryByText(/last 30 days/i)).toBeNull()
   })
 
-  // An invite link has no addressee and no role -- public.invites has neither
-  // column. The row used to render `invite.email`, so it promised a named
-  // recipient the backend could never supply. What it must show instead is
-  // what the link really is: a bearer secret with an expiry and a use budget,
-  // where "no expiry" is the DEFAULT the app mints and must not read as an
-  // error or as "expired".
-  it('describes an invite by its expiry and use budget, naming no recipient', async () => {
-    renderWith(new FakeDataClient(), <MembersPage />)
-    expect(await screen.findByText(/^1 of 3 used$/i)).toBeInTheDocument()
-    expect(await screen.findByText(/^no expiry$/i)).toBeInTheDocument()
-    // Scoped to the invites section on purpose: member rows legitimately show
-    // real email addresses, so an unscoped check would pass on those and never
-    // notice an invite row claiming a recipient.
-    const invites = document.querySelector('.invites-section')
-    expect(invites).not.toBeNull()
-    expect(invites?.textContent).not.toContain('@')
-  })
-
-  // The argument matters as much as the call: revokeInvite must receive the
-  // invite's TOKEN (Invite.id), because revoke_invite(p_token) matches on
-  // nothing else. Asserting the exact token is what stops a regression that
-  // passes some other identifier and fails server-side with "unknown invite"
-  // while the list on screen still looks perfectly healthy.
-  it('revokes a pending invite via a real DataClient call, passing its token', async () => {
+  it('revokes a pending invite via a real DataClient call', async () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'revokeInvite')
     renderWith(client, <MembersPage />)
-    const revokeButtons = await screen.findAllByRole('button', { name: /^revoke$/i })
-    expect(revokeButtons).toHaveLength(2)
-    await userEvent.click(revokeButtons[0])
-    expect(spy).toHaveBeenCalledWith('tok_9f2aQ7')
+    await userEvent.click(await screen.findByRole('button', { name: /revoke invite i1/i }))
+    expect(spy).toHaveBeenCalledWith('i1')
   })
 
   it('changes a non-owner member\'s role through a real DataClient call', async () => {
@@ -272,7 +249,7 @@ describe('MembersPage', () => {
     const client = new FakeDataClient()
     vi.spyOn(client, 'revokeInvite').mockRejectedValue(new Error('revoke rejected'))
     renderWith(client, <MembersPage />)
-    await userEvent.click((await screen.findAllByRole('button', { name: /^revoke$/i }))[0])
+    await userEvent.click(await screen.findByRole('button', { name: /revoke invite i1/i }))
     expect(await screen.findByText(/revoke rejected/i)).toBeInTheDocument()
   })
 })

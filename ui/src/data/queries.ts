@@ -436,6 +436,44 @@ export function useSignOut() {
   })
 }
 
+// Joining changes the same things creating does -- membership, the rail's
+// team nav, the solo flag -- so it refreshes the same set.
+export function useJoinTeam() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (codeOrLink: string) => c.joinTeam(codeOrLink),
+    onSuccess: () => {
+      accountRefresh(qc)
+      qc.invalidateQueries({ queryKey: ['members'] })
+    },
+  })
+}
+
+export function useRenameTeam() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ teamId, name }: { teamId: string; name: string }) => c.renameTeam(teamId, name),
+    onSuccess: () => accountRefresh(qc),
+  })
+}
+
+// Rotating also revokes every outstanding invite LINK (the rotate_invite RPC
+// does both in one statement), so the invite list is stale the moment this
+// resolves -- not just the code on the settings/team reads.
+export function useRotateInviteCode() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (teamId: string) => c.rotateInviteCode(teamId),
+    onSuccess: () => {
+      accountRefresh(qc)
+      qc.invalidateQueries({ queryKey: ['invites'] })
+    },
+  })
+}
+
 export function useCreateTeam() {
   const c = useDataClient()
   const qc = useQueryClient()
@@ -541,12 +579,37 @@ export function useLeaveTeam() {
   })
 }
 
-export function useAddProject() {
+// Discovery for the add-project dialog (GET /api/scan). `enabled` is the
+// whole point: scanPayload re-reads every session file on this machine from
+// byte 0, so this must fire when the dialog opens and never on its own.
+// staleTime 0 + gcTime 0 means each open re-scans rather than showing what
+// the machine looked like the last time the dialog was opened, which for a
+// list of "folders you have worked in lately" is the difference between a
+// live answer and a stale one.
+export function useDiscoveredProjects(enabled: boolean) {
+  const c = useDataClient()
+  return useQuery({
+    queryKey: ['discover'],
+    queryFn: () => c.discoverProjects(),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+  })
+}
+
+export function useAdoptProjects() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (path: string) => c.addProject(path),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['projects'] }) },
+    mutationFn: (paths: string[]) => c.adoptProjects(paths),
+    // Both lists move: the grid gains rows, and the discovery list must drop
+    // what is now tracked if the dialog stays open (Browse adds without
+    // closing it).
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      qc.invalidateQueries({ queryKey: ['discover'] })
+    },
   })
 }
 

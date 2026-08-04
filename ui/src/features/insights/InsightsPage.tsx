@@ -52,6 +52,18 @@ function deltaNote(delta: number | null): string | undefined {
   return `${delta > 0 ? '+' : ''}${delta}`
 }
 
+// Shown in place of a trend whenever the team feed fetch hit its page cap.
+// It replaces the delta rather than sitting beside it: the delta is null in
+// that case anyway, and the useful thing to tell a manager is that the
+// number under it is a floor, not that a comparison is missing.
+const CAP_NOTE = 'at cap — more not counted'
+
+// A truncated fetch establishes a lower bound, never a total. Printing a
+// bare "2,000" reads as a measurement; the counts are floors.
+function countValue(count: number, truncated: boolean): string {
+  return truncated ? `≥${formatCount(count)}` : formatCount(count)
+}
+
 function toCsvCell(value: string | number): string {
   let s = String(value)
   // Formula-injection guard (Fix 14b): a TEXT cell starting with =, +, - or
@@ -75,6 +87,11 @@ export function buildCsv(insights: Insights): string {
   const lines: string[] = [
     toCsvRow(['metric', 'value']),
     toCsvRow(['window_days', insights.window]),
+    // Carried as its own row rather than by decorating the counts: a
+    // spreadsheet wants those cells numeric, and "≥2000" is a string that
+    // silently stops summing. When this is true every count below is a
+    // lower bound, because the feed fetch stopped at its page cap.
+    toCsvRow(['feed_truncated', insights.truncated ? 'true' : 'false']),
     toCsvRow(['sessions', insights.sessions.count]),
     toCsvRow(['members_syncing_ok', insights.membersSyncing.ok]),
     toCsvRow(['members_syncing_total', insights.membersSyncing.total]),
@@ -169,14 +186,27 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
   const minor = insights.problems.filter(p => p.severity === 'minor')
 
   const stats: StatItem[] = [
-    { value: formatCount(insights.sessions.count), label: 'sessions', note: trendNote(insights.sessions.deltaPct, windowDays) },
+    {
+      // A truncated fetch makes every count a floor, so say "at least"
+      // rather than printing a total the backend never established. The
+      // deltas arrive null in that case (nulled in lib/api-insights.js,
+      // because the cap eats the prior window first), which is why the
+      // trend note falls away on its own here.
+      value: countValue(insights.sessions.count, insights.truncated),
+      label: 'sessions',
+      note: insights.truncated ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
+    },
     { value: assistsHeadlineValue(insights.assists), label: 'times memory helped' },
     {
       value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
       label: 'members syncing',
       note: insights.membersSyncing.ok === insights.membersSyncing.total ? 'all healthy' : undefined,
     },
-    { value: formatCount(insights.entriesShared.count), label: 'memory entries shared', note: deltaNote(insights.entriesShared.delta) },
+    {
+      value: countValue(insights.entriesShared.count, insights.truncated),
+      label: 'memory entries shared',
+      note: insights.truncated ? CAP_NOTE : deltaNote(insights.entriesShared.delta),
+    },
   ]
 
   return (

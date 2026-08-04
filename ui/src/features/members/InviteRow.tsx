@@ -1,4 +1,3 @@
-import { Avatar } from '../../components/Avatar'
 import { expiresIn } from '../../data/relativeTime'
 import type { Invite } from '../../data/types'
 
@@ -8,48 +7,47 @@ interface InviteRowProps {
   onRevoke: (inviteId: string) => void
 }
 
-/** A pending invite LINK.
+/** How many people can still use this link. "unlimited" and a real cap are
+ *  different facts and are worded differently; a used-up invite is still
+ *  shown, because "5 of 5 used" is exactly what someone chasing a link that
+ *  stopped working needs to see. */
+function usesLabel(invite: Invite): string {
+  if (invite.maxUses === null) return `${invite.useCount} used · unlimited`
+  return `${invite.useCount} of ${invite.maxUses} used`
+}
+
+/**
+ * One outstanding invite link.
  *
- * The mockup (team-v1b.html) shows an addressee and a "Resend" button; neither
- * is rendered here because neither exists. public.invites has no email column
- * and POST /api/team/invite accepts no email, so there is nobody to name and
- * no mail-delivery path anywhere in this codebase to resend through. What the
- * row shows instead is what an invite link actually is: a bearer secret,
- * anyone holding it can redeem it, with an expiry and a use budget.
+ * It used to render `invite.email` — a field the daemon has never been able
+ * to fill, because nothing in this product mails an invite, so the row showed
+ * a permanently blank address. It now shows what an invite actually is: the
+ * token, how much life it has left, and how many times it has been redeemed.
+ * The token is the credential, so it is shown in full rather than masked —
+ * this panel is owner/admin-only and its whole purpose is letting them match
+ * a link they handed out against the row that revokes it.
  *
- * "Revoke" is real (`DataClient.revokeInvite`), and it targets `invite.id` --
- * the token itself, which is what revoke_invite(p_token) matches.
+ * There is still no "Resend": nothing in this codebase can deliver mail.
  */
 export function InviteRow({ invite, pending, onRevoke }: InviteRowProps) {
   return (
-    <div className="invite-row">
-      <Avatar id={invite.id} name="" size={19} />
-      {/* The token is the secret, so only a short prefix is shown: enough to
-          tell two invites apart when deciding which to revoke, without
-          rendering a working join credential into a screenshot. */}
-      <span className="mono invite-email">{invite.id.slice(0, 8)}…</span>
-      <span className="tag tag-invited">Invite link</span>
-      <span className="invite-expiry">{expiryLabel(invite)}</span>
+    <div className="invite-row" data-testid={`invite-row-${invite.id}`}>
+      <span className="mono invite-token">{invite.id}</span>
       <span className="invite-uses">{usesLabel(invite)}</span>
+      <span className="invite-expiry">
+        {invite.expiresAt ? expiresIn(invite.expiresAt) : 'never expires'}
+      </span>
       <div className="invite-actions">
-        <button type="button" className="ghost-btn" onClick={() => onRevoke(invite.id)} disabled={pending}>
+        <button
+          type="button"
+          className="ghost-btn"
+          aria-label={`Revoke invite ${invite.id}`}
+          onClick={() => onRevoke(invite.id)}
+          disabled={pending}
+        >
           Revoke
         </button>
       </div>
     </div>
   )
-}
-
-// A null expiry is the DEFAULT the app mints, not a missing value, so it gets
-// its own honest label. Passing null to expiresIn() would render "unknown" and
-// make the most common invite in the system look broken.
-function expiryLabel(invite: Invite): string {
-  return invite.expiresAt === null ? 'no expiry' : expiresIn(invite.expiresAt)
-}
-
-// "1 use" reads as a budget of one rather than one use spent, so the
-// unlimited case is spelled out relative to what has actually happened.
-function usesLabel(invite: Invite): string {
-  if (invite.maxUses === null) return invite.uses === 1 ? 'used once' : `used ${invite.uses}×`
-  return `${invite.uses} of ${invite.maxUses} used`
 }

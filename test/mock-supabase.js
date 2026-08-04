@@ -544,14 +544,19 @@ function createMockSupabase() {
         const q = url.searchParams;
         const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
         if (!teamEq || !isMember(teamEq, userId)) return json(res, 200, []);
+        // revoked_at is both a supported FILTER and a returned column:
+        // readInvites selects it and derives `revoked` from it, so dropping it
+        // from the row would make every invite look live regardless.
         const revokedFilter = q.get('revoked_at');
+        const limit = parseInt(q.get('limit') || '100', 10);
         const rows = [...invites.values()]
           .filter(i => i.teamId === teamEq)
           .filter(i => (revokedFilter === 'is.null' ? !i.revokedAt : true))
           .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .slice(0, Math.max(1, limit))
           .map(i => ({
             token: i.token, created_at: i.createdAt, expires_at: i.expiresAt,
-            max_uses: i.maxUses, use_count: i.useCount,
+            max_uses: i.maxUses, use_count: i.useCount, revoked_at: i.revokedAt || null,
           }));
         return json(res, 200, rows);
       }
