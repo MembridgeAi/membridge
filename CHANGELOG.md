@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The context block arrives fresh at session start.** The daemon writes
+  the "Shared AI memory" block into CLAUDE.md on its own ticks, so a session
+  starting in a just-created worktree read whatever stale block an ancestor
+  file happened to carry — sometimes another project's. A SessionStart hook
+  (riding the already-registered entry, no settings change) now renders the
+  block live from state and injects it, deduped against every CLAUDE.md the
+  session can see: a healthy root session pays nothing extra, and the hook
+  only speaks when the on-disk block is missing, stale, or foreign.
+- **Capped context now says it's capped.** The block's session and teammate
+  sections showed the newest few entries with no hint that more existed.
+  When entries are elided, the headers now carry explicit counts ("showing
+  the last 5 of 37 sessions", "the freshest 8 of 412 shared entries") and
+  name where the rest lives (`search_memory`, or `.membridge/memory.md`) —
+  so an agent never mistakes the window for the whole history.
 - **`search_memory` is now relevance-ranked, not substring match.** The MCP
   tool scores headlines, decisions, gotchas, goals, files touched, per-file
   change notes, prompts, and summaries, and returns each result's relevance
@@ -22,6 +36,66 @@
   presence only, never call counts or arguments — gated by the same
   diagnostics kill switch as every other counter (`MEMBRIDGE_NO_DIAGNOSTICS=1`
   / `diagnostics.enabled: false`).
+
+## 0.2.5 — 2026-08-03
+
+Most of this shipped to `master` the evening 0.2.4 was tagged and missed that
+release by hours, so 0.2.4 users have been running without it.
+
+- **Distillation stopped writing summaries, and now does not.** The checkpoint
+  gate compared edits against `minEdits + n * checkpointEvery`, where `n` counts
+  the lines already in `summaries.jsonl`. That counter only grows and nothing
+  prunes it, so the bar climbed out of reach and the Stop hook went silent by
+  construction: failing the gate was a plain `return`. One live session reached
+  a required 97 edits and had been dead for 26 hours. Replaced by a pure
+  `isCheckpointDue` that measures edits SINCE the last checkpoint.
+- **The desktop app reported "hook not installed" on every Electron install.**
+  Liveness was judged with plain `fs.existsSync`, which cannot stat a path
+  inside `app.asar`, so a correct registration read as dead and `membridge
+  status` told users to re-run `setup-hooks` over a registration that was
+  already right.
+- **A session detail page, and a Team page.** The session page carries an
+  analytics header (files touched, lines, commits, duration), the distilled
+  one-liners, and the prompt chain, with a way back to the feed. The Team page
+  is the surface that says whether this machine is signed in at all; gating it
+  on already being on a team is what previously left signed-out users with
+  nowhere to go.
+- **Sign in is reachable from the left rail.** The rail footer showed a status
+  dot and the literal word "You" whether or not anyone was signed in. It now
+  offers a sign-in control when signed out and names the signed-in user
+  otherwise, and it withholds "Create a team" until sign-in, which used to walk
+  straight into a sign-in wall. Signed-in state is read from real account
+  status, never from `solo`, which cannot tell "signed out" from "signed in
+  with no team".
+- **The session brief leads with files, and reads as a list.** Order is now Key
+  files, Changes, What. "Why" and "Watch out" were merged into one bulleted
+  "What": they were always read together, and two open paragraphs above the
+  file list was the wall the page existed to avoid.
+- **Distilled summaries are budgeted.** `decisions` and `gotchas` were the only
+  distilled fields with no length limit, which is why they arrived as
+  800-character paragraphs while headlines stayed short. They are now asked for
+  as short bullets, one per line, and enforced. The session intent gets a wider
+  budget so it can carry real detail, and the headline is now asked for as the
+  general shape of the session rather than one specific outcome. Sessions
+  distilled before this change still render, split on sentence boundaries, with
+  nothing truncated.
+- **The macOS download carries its notarization ticket.** 0.2.4 was signed and
+  notarized but never stapled, so Gatekeeper had to reach Apple on first launch
+  and an offline machine saw a "cannot be opened" panel for a perfectly valid
+  build. The dmg is now stapled and the staple is validated in CI, which is the
+  part that was missing: nothing in the pipeline had ever checked.
+- **A recall answer no longer claims to have served lines it never served.**
+  The hook answered a ranged `Read` with "this session already read it", but
+  the ledger records only that a session read a PATH, never which lines came
+  back. Ranged reads are now refused rather than answered on unsupportable
+  evidence.
+- **Invite links, and what the app tells you to do with them.** GitHub-invited
+  users were told to run a CLI command they had no way to run, and the printed
+  invite URL used a form the hosted join page ignores.
+- **A teammate's "live" flag says what it was judged on.** A synced row means
+  recent synced activity, never proof that someone is at their machine right
+  now, and the MCP had already been read as the latter.
+- **Context injection reaches git worktrees, and fails closed.**
 
 ## 0.1.0 — 2026-07-22
 

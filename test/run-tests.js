@@ -4164,6 +4164,49 @@ async function main() {
       assert.strictEqual(sess.teamEntries.length, 3, 'state array was truncated');
     });
 
+    // Elision counts: a capped view must say it is capped (beads' `bd prime`
+    // pattern — silently truncated context reads as "this is everything").
+    // Order-sensitive: the "stays plain" check must run BEFORE the archive
+    // fixture below exists, because a 40-row archive makes every later render
+    // of trimProj elide.
+    check('elision: teammate header counts the whole backlog, not just the slice', () => {
+      const md = mdOf({});
+      assert.ok(md.includes("Teammates' AI activity (MemBridge team sync — showing the freshest 8 of 12 shared entries"), md);
+      const md3 = mdOf({ teamInjectMax: 3 });
+      assert.ok(md3.includes('showing the freshest 3 of 12 shared entries'), md3);
+    });
+
+    check('elision: teammate header stays plain when nothing is hidden', () => {
+      const mdAll = mdOf({ teamInjectMax: 12, teamMaxAgeHours: 24000 });
+      assert.ok(mdAll.includes("Teammates' AI activity (MemBridge team sync):"), mdAll);
+      assert.ok(!mdAll.includes('showing the freshest'), mdAll);
+    });
+
+    check('elision: archive row count beats the cache count when larger', () => {
+      fs.mkdirSync(path.join(trimProj, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(trimProj, '.membridge', 'team.json'),
+        JSON.stringify({ projectId: 'elision-uuid', teamId: 't' }));
+      fs.mkdirSync(path.join(process.env.MEMBRIDGE_HOME, 'team-archive'), { recursive: true });
+      fs.writeFileSync(path.join(process.env.MEMBRIDGE_HOME, 'team-archive', 'elision-uuid.meta.json'),
+        JSON.stringify({ version: 1, projectId: 'elision-uuid', backfill: { done: true, beforeId: null, stopped: null }, rowCount: 40 }));
+      assert.ok(mdOf({}).includes('showing the freshest 8 of 40 shared entries'), mdOf({}));
+    });
+
+    check('elision: session header counts elided sessions and stays plain when nothing is hidden', () => {
+      const sp2 = path.join(ROOT, 'projects', 'elision-sessions');
+      fs.mkdirSync(sp2, { recursive: true });
+      const evs = [];
+      for (let i = 1; i <= 7; i++) {
+        evs.push({ kind: 'prompt', session: `s${i}`, source: 'Claude Code', ts: tsAgo(800 - i * 20), text: `elision ask ${i}` });
+        evs.push({ kind: 'edit', session: `s${i}`, source: 'Claude Code', ts: tsAgo(799 - i * 20), file: path.join(sp2, 'a.js') });
+      }
+      const md = digest.renderBlock(sp2, { events: evs }, { ...cfgBase, maxSessions: 2 }, 'CLAUDE.md');
+      assert.ok(md.includes('Recent asks across tools (showing the last 2 of 7 sessions'), md);
+      const mdAll = digest.renderBlock(sp2, { events: evs }, { ...cfgBase, maxSessions: 10 }, 'CLAUDE.md');
+      assert.ok(mdAll.includes('Recent asks across tools:'), mdAll);
+      assert.ok(!mdAll.includes('showing the last'), mdAll);
+    });
+
     // Back to Marco: his next pass pulls Andrew's Codex ask.
     process.env.MEMBRIDGE_HOME = HOME_A;
     const rA2 = await teamsync.syncTeams();
@@ -12522,7 +12565,7 @@ async function main() {
     const base = { session: 's1', ts: '2026-07-31T00:00:00Z', did: 'did a thing' };
     const run = obj => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', target, JSON.stringify(obj)], { encoding: 'utf8' });
     assert.strictEqual(typeof hooks.GOAL_MAX, 'number', 'GOAL_MAX must be exported beside HEADLINE_MAX');
-    assert.strictEqual(hooks.GOAL_MAX, 70, 'GOAL_MAX is the ~70-char intent budget');
+    assert.strictEqual(hooks.GOAL_MAX, 180, 'GOAL_MAX is the 1-2 sentence intent budget');
     assert.strictEqual(run({ ...base, goal: 'g'.repeat(hooks.GOAL_MAX) }).status, 0, 'exactly-max goal rejected');
     assert.strictEqual(run({ ...base, goal: '  ' + 'g'.repeat(hooks.GOAL_MAX) + '  ' }).status, 0,
       'padding must not count against the max (trimmed length governs)');
@@ -12542,6 +12585,48 @@ async function main() {
     assert.ok(/goal:[^;]*own words/i.test(r), 'goal asks for the agent\'s own words, not the prompt restated');
     assert.ok(/did: 1-2 plain-text sentences/.test(r), 'did asks for 1-2 sentences');
     assert.ok(!/1-3\s+plain-text sentences/.test(r), 'the old 1-3 sentence ask must be gone');
+  });
+  // The session page renders decisions and gotchas as one bulleted list
+  // (ui/src/features/session/distill.ts whatBullets). Prose still renders, split
+  // on sentences, because hundreds of already-synced sessions carry it -- but
+  // nothing downstream can SHORTEN a paragraph, so the ask itself has to be
+  // bullets with a stated budget. Uncapped was the actual defect: headline and
+  // goal had budgets, these two had none, and they arrived as walls of text.
+  check('points: blockReason asks for bulleted decisions and gotchas with a per-point budget', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 's1', 0);
+    assert.strictEqual(typeof hooks.POINT_MAX, 'number', 'POINT_MAX must be exported beside GOAL_MAX');
+    assert.strictEqual(typeof hooks.POINTS_MAX, 'number', 'POINTS_MAX must be exported beside POINT_MAX');
+    assert.ok(/decisions:[^;]*one per line/i.test(r), 'decisions must ask for one point per line');
+    assert.ok(/gotchas:[^;]*one per line/i.test(r), 'gotchas must ask for one point per line');
+    assert.ok(r.includes(hooks.POINT_MAX + ' characters'), 'the per-point budget must be stated');
+    assert.ok(r.includes('at most ' + hooks.POINTS_MAX), 'the per-field point count must be stated');
+    assert.ok(!/decisions: choices made and why/.test(r), 'the old uncapped prose ask must be gone');
+  });
+  check('points: append enforces the per-point and per-field caps loudly for decisions and gotchas', () => {
+    const proj = path.join(ROOT, 'projects', 'pt-max'); fs.mkdirSync(proj, { recursive: true });
+    const target = path.join(proj, '.membridge', 'summaries.jsonl');
+    const base = { session: 's1', ts: '2026-08-03T00:00:00Z', did: 'did a thing' };
+    const run = obj => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', target, JSON.stringify(obj)], { encoding: 'utf8' });
+    const point = 'p'.repeat(hooks.POINT_MAX);
+    assert.strictEqual(run(base).status, 0, 'a line with neither field must stay acceptable');
+    assert.strictEqual(run({ ...base, decisions: point }).status, 0, 'exactly-max point rejected');
+    assert.strictEqual(run({ ...base, decisions: Array(hooks.POINTS_MAX).fill(point).join('\n') }).status, 0,
+      'exactly-max point COUNT rejected');
+    const longPoint = run({ ...base, decisions: 'p'.repeat(hooks.POINT_MAX + 1) });
+    assert.notStrictEqual(longPoint.status, 0, 'over-max point accepted');
+    assert.ok(longPoint.stderr.includes(String(hooks.POINT_MAX)), 'error names the per-point limit');
+    const tooMany = run({ ...base, gotchas: Array(hooks.POINTS_MAX + 1).fill('short point').join('\n') });
+    assert.notStrictEqual(tooMany.status, 0, 'over-max point count accepted');
+    assert.ok(tooMany.stderr.includes(String(hooks.POINTS_MAX)), 'error names the point-count limit');
+    assert.ok(/gotchas/.test(tooMany.stderr), 'error names the field that broke the budget');
+    assert.strictEqual(read(target).trim().split('\n').length, 3, 'rejected lines must not be written');
+  });
+  check('budgets: the header is a general line and the intent carries 1-2 sentences', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 's1', 0);
+    assert.ok(hooks.GOAL_MAX >= 150, 'goal budget must fit 1-2 sentences, not one short phrase');
+    assert.ok(/goal:[^;]*1-2 sentences/i.test(r), 'goal must ask for 1-2 sentences');
+    assert.ok(/headline:[^;]*general/i.test(r), 'headline must ask for the general shape of the day');
+    assert.ok(!/headline: the single outcome/.test(r), 'the old single-outcome headline ask must be gone');
   });
   check('digest: the AGENTS.md self-report instruction states the goal budget and the 1-2 sentence did', () => {
     const cfg = { ...util.getConfig(), distill: { enabled: true, consent: 'granted' } };
@@ -14403,6 +14488,27 @@ async function main() {
     assert.strictEqual(theirs.self, false);
     assert.strictEqual(theirs.author, 'Marco');
   });
+  // Your `live` and a teammate's `live` are the same word over different
+  // evidence: yours is judged from the session's own events, theirs from the
+  // last row that reached this machine over sync. A teammate actively working
+  // reads as not-live until a row lands, and a row that landed and stopped
+  // reads as live for the rest of the window. An MCP caller took a team row's
+  // live flag as proof a teammate was working at that moment; nothing in the
+  // payload said otherwise. liveBasis names the evidence so a reader does not
+  // have to know which normalizer produced the entry.
+  check('feed: liveBasis names the evidence behind live, per origin', () => {
+    const local = feed.normalizeLocal(
+      { ts: '2026-07-14T05:00:00Z', session: 's1', source: 'Claude Code' },
+      { projectName: 'p', projectPath: '/p' });
+    assert.strictEqual(local.liveBasis, 'session-events',
+      'a local entry judges liveness from the session own events');
+    const team = feed.normalizeTeam(
+      { id: 1, project_id: 'p', project_name: 'p', author_id: 'a', author_name: 'A',
+        ts: '2026-07-14T05:00:00Z', source: 'Codex', ask: 'q', files: [],
+        created_at: '2026-07-14T05:00:00Z' }, { selfUserId: 'me' });
+    assert.strictEqual(team.liveBasis, 'synced-row',
+      'a team entry can only judge liveness from the row that reached this machine');
+  });
   // Option A — propagate the distilled flag over team sync. A team_feed row that
   // carries distilled:true must normalize to distilled:true (so a teammate's
   // distilled summary is treated as distilled, not lumped in with harvested);
@@ -14871,6 +14977,46 @@ async function main() {
     assert.deepStrictEqual(offenders, [],
       `these workflows run the suite or publish but never install ui/ deps, so prepack's `
       + `nested npm ci will inherit omit=dev and the UI build will fail: ${JSON.stringify(offenders)}`);
+  });
+
+  check('workflows: a notarized mac build staples the ticket and proves it stuck', () => {
+    // Notarizing leaves the ticket on Apple's servers. Gatekeeper then fetches
+    // it over the network the first time the app runs, so a machine that is
+    // offline or behind a filtering proxy shows the "cannot be opened" panel
+    // for a build that is genuinely, correctly notarized. Stapling writes the
+    // ticket INTO the artifact, which is what makes it work with no network.
+    //
+    // v0.1.2 shipped with a staple and v0.2.4 shipped without one, and no step
+    // anywhere failed, because nothing in the pipeline ever looked. That is the
+    // real defect: a missing staple is invisible to every green check we had.
+    // `stapler validate` is the gate that makes it visible, so this asserts on
+    // BOTH verbs. Stapling without validating would regress just as silently.
+    //
+    // Source-level on purpose, like the ui/ deps check above: the failure mode
+    // is a workflow that quietly stops doing something, and nothing in this
+    // suite ever runs a real signing pipeline.
+    //
+    // The submit assertion is here because the first version of this step was
+    // wrong in a way this file did not catch: it stapled without submitting.
+    // electron-builder notarizes the .app and then builds the dmg AROUND it, so
+    // the dmg is a container Apple has never seen. Stapling it asks CloudKit for
+    // a record keyed by the dmg's own hash, gets "Record not found", and exits
+    // 65, which took the whole mac job down and skipped every upload step. A
+    // staple with no submit before it cannot work, so it is asserted as a pair.
+    //
+    // Ordering matters for the same reason: `notarytool submit` needs the App
+    // Store Connect key, and the workflow deletes that key as soon as it can.
+    // Submitting after the delete would fail for a different reason every time.
+    const src = read(path.join(__dirname, '..', '.github', 'workflows', 'build-app.yml'));
+    assert.ok(/notariz/i.test(src), 'guard: build-app.yml no longer mentions notarization at all');
+    assert.ok(/xcrun notarytool submit/.test(src),
+      'the dmg is never submitted for notarization, so it can never carry a ticket to staple');
+    assert.ok(/xcrun stapler staple/.test(src),
+      'the notarized dmg is never stapled, so Gatekeeper has to phone Apple on first launch');
+    assert.ok(/xcrun stapler validate/.test(src),
+      'nothing proves the staple stuck, which is exactly how 0.2.4 shipped without one');
+    assert.ok(src.indexOf('xcrun notarytool submit') < src.indexOf('rm -f "$RUNNER_TEMP/AuthKey.p8"'),
+      'the dmg is submitted after the signing key is deleted, so notarytool has no credentials');
   });
 
   check('corpus invariant: the hook, the MCP tools and /api/search share ONE assembly and ONE scorer', () => {
@@ -15945,6 +16091,79 @@ async function main() {
     });
   }
 
+  // ---- search filters speak BOTH dialects ----
+  //
+  // search_memory's documented contract is human input (a name substring),
+  // but the dashboard's Search screen sends the same identifiers /api/feed
+  // matches on: a member's user id and a project's ABSOLUTE PATH. Matching
+  // names alone meant every dropdown on that screen returned an empty list
+  // for every query -- a uuid is not a substring of a display name, and a
+  // path is not a substring of a project name. The tool filter had its own
+  // version of the same bug: the dropdown is built from PUBLIC source names
+  // (server.js publicSource: 'Distilled' renders as 'Codex'), while the
+  // matcher compared against the raw stored source.
+  {
+    const teamArchiveForFilters = require('../lib/team-archive');
+    const filtPid = 'search-filter-dialect-uuid';
+    const projFilt = path.join(ROOT, 'projects', 'search-filter-app');
+    fs.mkdirSync(path.join(projFilt, '.membridge'), { recursive: true });
+    {
+      const state = util.loadState();
+      state.projects[projFilt] = { events: [], teamEntries: [] };
+      util.saveState(state);
+    }
+    fs.writeFileSync(path.join(projFilt, '.membridge', 'team.json'),
+      JSON.stringify({ teamId: 'search-filter-team', projectId: filtPid, teamName: 'Filter Dialect Team' }));
+    teamArchiveForFilters.appendRows(filtPid, [{
+      author: 'Andrew Brown', ts: new Date(Date.now() - 3 * 86400000).toISOString(),
+      source: 'Distilled', session: 'filt-1', ask: null, summary: null, goal: null,
+      decisions: 'searchfiltertoken planted for the filter dialect checks', gotchas: null,
+      headline: null, distilled: true, files: [], changes: null,
+    }]);
+
+    const hit = r => (r.decisions || '').includes('searchfiltertoken');
+    const unfiltered = mcpMod.searchMemory({ query: 'searchfiltertoken' });
+    check('search filters: the planted row is findable with no filter at all (fixture sanity check)', () => {
+      assert.ok(unfiltered.results.some(hit), 'fixture setup: planted row not found unfiltered');
+    });
+
+    check('search filters: the project filter accepts an absolute path, which is what the dashboard sends', () => {
+      const byPath = mcpMod.searchMemory({ query: 'searchfiltertoken', project: projFilt });
+      assert.ok(byPath.results.some(hit),
+        'an absolute project path matched nothing -- the dashboard project dropdown cannot filter');
+    });
+
+    check('search filters: the project filter still accepts a name substring, which is what search_memory documents', () => {
+      const byName = mcpMod.searchMemory({ query: 'searchfiltertoken', project: 'search-filter-app' });
+      assert.ok(byName.results.some(hit), 'a project name substring stopped matching');
+    });
+
+    check('search filters: the tool filter folds Distilled to the public name the dropdown offers', () => {
+      const byTool = mcpMod.searchMemory({ query: 'searchfiltertoken', tool: 'Codex' });
+      assert.ok(byTool.results.some(hit),
+        "selecting Codex matched nothing -- distilled rows are stored as 'Distilled' and must fold");
+    });
+
+    check('search filters: a wrong tool still excludes, so the fold is not matching everything', () => {
+      const wrongTool = mcpMod.searchMemory({ query: 'searchfiltertoken', tool: 'Cursor' });
+      assert.ok(!wrongTool.results.some(hit), 'the tool filter let through a row from a different tool');
+    });
+
+    check('search filters: a leading ! on the person filter excludes that person instead of selecting them', () => {
+      const excluded = mcpMod.searchMemory({ query: 'searchfiltertoken', author: '!Andrew' });
+      assert.ok(!excluded.results.some(hit), '"!Andrew" still returned Andrew\'s row');
+      const selected = mcpMod.searchMemory({ query: 'searchfiltertoken', author: 'Andrew' });
+      assert.ok(selected.results.some(hit), 'the un-negated person filter stopped selecting by name');
+    });
+
+    check('search filters: exclusion narrows the TOTAL, not just the returned page', () => {
+      const all = mcpMod.searchMemory({ query: 'searchfiltertoken' });
+      const excluded = mcpMod.searchMemory({ query: 'searchfiltertoken', author: '!Andrew' });
+      assert.ok(excluded.total < all.total,
+        `excluding a person left the total unchanged (${excluded.total} vs ${all.total}) -- the count would describe rows the reader cannot see`);
+    });
+  }
+
   // ---- get_project_memory parity with the injected block ----
   //
   // The tool's stated contract (see the comments above recentAsks/teammates
@@ -16126,6 +16345,19 @@ async function main() {
       const rows = prov.fileProvenance(projWhy, { events: whyEvents }, cfgWhy, 'src/auth.js', whyNow);
       assert.strictEqual(rows[0].live, true, 'w2 (10 min old) should be live');
       assert.strictEqual(rows[1].live, false, 'w1 (3 h old) should not be live');
+    });
+
+    // Same split as the feed's liveBasis: `why` promises "whether that session
+    // is still live", and for a teammate that can only ever mean "the newest
+    // row this machine holds is recent". Say which, rather than letting one
+    // word carry two strengths of claim.
+    check('provenance: liveBasis separates a session-events claim from a synced-row one', () => {
+      assert.ok(prov, 'lib/provenance.js missing');
+      const rows = prov.fileProvenance(projWhy, { events: whyEvents, teamEntries: whyTeam }, cfgWhy, 'src/auth.js', whyNow);
+      const mine = rows.find(r => r.session === 'w2');
+      const theirs = rows.find(r => r.session === 'tp1');
+      assert.strictEqual(mine.liveBasis, 'session-events', 'own session judges liveness from its events');
+      assert.strictEqual(theirs.liveBasis, 'synced-row', 'a teammate row has only the synced row to judge on');
     });
 
     check('provenance: redacts secrets in ask and summary through the standard pipeline', () => {
@@ -22815,6 +23047,91 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(bad.status, 0, bad.stderr);
       assert.strictEqual(bad.stdout.trim(), '');
     });
+
+    // ---- prime: the context block, rendered fresh at session start ----
+    //
+    // The daemon writes the block into CLAUDE.md at project roots and linked
+    // worktrees, but only on its own ticks — a session that starts in a
+    // just-created worktree (this app's default) reads whatever block was
+    // last COMMITTED there, which can be days stale or another project's.
+    // lib/hooks-prime.js closes that race: it rides the same SessionStart
+    // hook and injects a fresh render, deduped against every CLAUDE.md the
+    // session's cwd can see so a healthy root session pays nothing extra.
+    {
+      const hooksPrime = require('../lib/hooks-prime');
+      const tsAgoP = sec => new Date(Date.now() - sec * 1000).toISOString();
+      const pp = path.join(ROOT, 'projects', 'prime-proj');
+      fs.mkdirSync(pp, { recursive: true });
+      const primeEvents = [
+        { kind: 'prompt', session: 'pr1', source: 'Claude Code', ts: tsAgoP(50), text: 'Prime the pump' },
+        { kind: 'edit', session: 'pr1', source: 'Claude Code', ts: tsAgoP(49), file: path.join(pp, 'lib', 'x.js') },
+      ];
+      {
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [pp]: { events: primeEvents } } });
+      }
+      const prime = extra => hooksPrime.buildPrimeOutput({
+        projectPath: pp, cwd: pp, source: 'startup', config: util.getConfig(), ...extra,
+      });
+
+      check('prime: renders the block fresh when no CLAUDE.md carries it', () => {
+        const out = prime();
+        assert.ok(out && out.text.includes('## Shared AI memory (MemBridge)'), out && out.text);
+        assert.ok(out.text.includes('Prime the pump'), out.text);
+        assert.ok(!out.text.includes(digest.BEGIN), 'markers are for files, not injected context');
+        assert.ok(/supersedes/.test(out.text), 'missing the supersede preface');
+      });
+
+      check('prime: a stale on-disk block still injects; the exact current one silences it', () => {
+        const staleBlock = digest.renderBlock(pp, { events: primeEvents.slice(0, 1) }, util.getConfig(), 'CLAUDE.md');
+        fs.writeFileSync(path.join(pp, 'CLAUDE.md'), staleBlock + '\n');
+        assert.ok(prime(), 'a stale block must not suppress the fresh render');
+        const freshBlock = digest.renderBlock(pp, util.loadState().projects[pp], util.getConfig(), 'CLAUDE.md');
+        fs.writeFileSync(path.join(pp, 'CLAUDE.md'), freshBlock + '\n');
+        assert.strictEqual(prime(), null, 'an identical on-disk block must suppress the injection');
+      });
+
+      check('prime: the dedupe sees ancestor CLAUDE.md files (worktree layout)', () => {
+        const wt = path.join(pp, '.claude', 'worktrees', 'wt1');
+        fs.mkdirSync(wt, { recursive: true });
+        assert.strictEqual(prime({ cwd: wt }), null, 'fresh block at the project root should silence a nested session');
+        fs.unlinkSync(path.join(pp, 'CLAUDE.md'));
+        const staleBlock = digest.renderBlock(pp, { events: primeEvents.slice(0, 1) }, util.getConfig(), 'CLAUDE.md');
+        fs.writeFileSync(path.join(wt, 'CLAUDE.md'), staleBlock + '\n');
+        assert.ok(prime({ cwd: wt }), 'a stale worktree checkout must get the fresh block');
+      });
+
+      check('prime: silent on resume, paused projects, and projects with nothing to say', () => {
+        assert.strictEqual(prime({ source: 'resume' }), null);
+        fs.writeFileSync(path.join(pp, '.membridge-off'), '');
+        try {
+          assert.strictEqual(prime(), null, 'a paused project must stay silent');
+        } finally {
+          fs.unlinkSync(path.join(pp, '.membridge-off'));
+        }
+        const empty = path.join(ROOT, 'projects', 'prime-empty');
+        fs.mkdirSync(empty, { recursive: true });
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [empty]: { events: [] } } });
+        assert.strictEqual(hooksPrime.buildPrimeOutput({
+          projectPath: empty, cwd: empty, source: 'startup', config: util.getConfig(),
+        }), null, 'an empty project has nothing worth a session-start injection');
+      });
+
+      check('prime: rides the notes-session-start entry point in one envelope, block first', () => {
+        fs.writeFileSync(path.join(pp, 'CLAUDE.md'), '# my file\n');
+        notesStore.write(pp, notes.buildIndex(
+          [{ author_name: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'prime-and-notes', gotchas: '' }],
+          null, new Date().toISOString()));
+        const r = runNotesEntry('notes-session-start', startPayload('sess-prime-1', pp));
+        assert.strictEqual(r.status, 0, r.stderr);
+        const hso = JSON.parse(r.stdout).hookSpecificOutput;
+        assert.ok(hso.additionalContext.includes('## Shared AI memory (MemBridge)'), r.stdout);
+        assert.ok(hso.additionalContext.includes('prime-and-notes'), r.stdout);
+        assert.ok(hso.additionalContext.indexOf('Shared AI memory') < hso.additionalContext.indexOf('prime-and-notes'),
+          'the block should come before the notes');
+      });
+    }
   }
 
   // ---- teammate notes: token accounting (spec §9) ----
@@ -25846,6 +26163,38 @@ const repoRoot = require('../lib/repo-root');
       .map(f => path.relative(repo, f));
     assert.deepStrictEqual(offenders, [],
       `raw NUL byte in source (use the \\x00 escape instead):\n${offenders.join('\n')}`);
+  });
+
+  // Feed stylesheet invariants. These live HERE rather than in the UI suite
+  // for two reasons: jsdom does no layout, so the only real check on a
+  // CSS-only fix is the stylesheet TEXT; and reading a file needs node APIs
+  // that ui/tsconfig.json deliberately keeps out (its `types` is scoped to
+  // vite/vitest/jest-dom, with no @types/node), so the UI version type-checked
+  // only by accident of a local install and broke `tsc --noEmit` on CI's
+  // clean one. Vite's `?raw` is not an escape either: vitest stubs CSS
+  // imports, so it hands back an empty string.
+  check('feed stylesheet: a previewing row is raised above the rows below it', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'src', 'components', 'components.css'), 'utf8');
+    // Every row keeps `transform: translateY(0)` after settle-in (fill mode
+    // `both`), which makes it its own stacking context and traps the hover
+    // card's z-index inside the row -- so the next row down paints its opaque
+    // background straight over the card. Raising the ROW is the only escape.
+    const rule = css.match(/\.entry-row-previewing\s*\{[^}]*\}/);
+    assert.ok(rule, '.entry-row-previewing has no rule in components.css');
+    const zIndex = rule[0].match(/z-index:\s*(\d+)/);
+    assert.ok(zIndex, '.entry-row-previewing must set a z-index');
+    assert.ok(Number(zIndex[1]) >= 30,
+      `.entry-row-previewing z-index ${zIndex[1]} must clear the preview card's own 30`);
+  });
+
+  check('feed stylesheet: the session a Today card points at is visibly marked', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'src', 'components', 'components.css'), 'utf8');
+    const rule = css.match(/\.entry-row-targeted\s*\{[^}]*\}/);
+    assert.ok(rule, '.entry-row-targeted has no rule in components.css');
+    // Arriving from a Today card has to land somewhere visible, or the link
+    // may as well not exist. Any of these carries that on its own.
+    assert.ok(/background|box-shadow|border|outline/.test(rule[0]),
+      `.entry-row-targeted must render a visible marker, rule was: ${rule[0]}`);
   });
 
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this

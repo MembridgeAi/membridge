@@ -138,6 +138,31 @@
   .status-dot { animation: pulse-live 2.4s ease-in-out infinite; }
 }
 
+/* Reads as the primary action in the footer rather than as body text: a
+   signed-out user has exactly one thing to do here, and the previous plain
+   label was missed entirely on a fresh install. */
+.rail-signin {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  color: var(--accent);
+  text-align: center;
+  text-decoration: none;
+}
+.rail-signin:hover {
+  background: var(--accent-dim);
+}
+/* A display name or email is arbitrary-length user data, and the rail is a
+   fixed-width column, so it truncates instead of widening the rail or
+   wrapping onto a second line. The full value stays available via title. */
+.rail-identity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .shell-main {
   flex: 1;
   /* A flex item's default min-width is auto, i.e. "at least as wide as my
