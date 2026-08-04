@@ -46,8 +46,8 @@ ever matters, the fix is a separate tsconfig for the node-facing files.
 **v0.2.4 shipped** on 2026-08-02: GitHub release, five assets, and
 `@membridgeai/membridge@0.2.4` on npm. v0.2.3 was skipped entirely and will
 never be published. Master went red for two days after that and is **green
-again** as of `0fc319a`. The one open item is a site installer still pinned to
-0.2.2.
+again** as of `0fc319a`. The site installer, stuck at 0.2.2, was regenerated and
+is live at 0.2.4.
 
 ---
 
@@ -98,19 +98,33 @@ that makes the `Attach to release` steps run. **A tag alone attaches nothing.**
 Verify assets by **content type, not status code** — a missing GitHub asset
 redirects to HTML and still returns 200.
 
-### OPEN: the site installer is two releases behind
+### DONE 2026-08-03: the site installer is regenerated and live at 0.2.4
 
-Live `install.sh` on membridge.app still pins `VERSION="0.2.2"`, confirmed
-2026-08-03. The v0.2.2 assets still resolve, so `curl | sh` installs succeed —
-they just silently deliver 0.2.2 to a user who thinks they are getting current.
+Live `install.sh` on membridge.app now pins `VERSION="0.2.4"` and
+`SHA256="2221760a…"`, verified by fetching the live URL and running
+`curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run`, which
+resolves the correct release URL. Landed as `ee6da53` here and
+`db428bd` on `mmelika/membridge-site` (branch **`main`**, not `master`).
 
-This is now regenerable, and was not before: it was blocked on a v0.2.3 publish
-that never happened, and v0.2.4's published assets satisfy the same requirement.
-`scripts/install/gen-install.js` hashes a `dist/` build, and signed macOS
-binaries are not byte reproducible, so a locally built zip will never match.
-**The only correct source is the downloaded published asset.** Sequence:
-download the published 0.2.4 zip, regenerate through the generator, deploy to
-`mmelika/membridge-site` — which publishes from **`main`**, not `master`.
+**Two things this exposed, and they are the reason to check it every release:**
+
+1. **The committed artifact had drifted from its own template.**
+   `scripts/install/install.sh` in this repo was pinned to **`0.1.2`** — four
+   releases stale — and predated the sudo-free CLI install, the `CLI_STATUS`
+   reporting and the launch-at-login step. Live was serving a *different* stale
+   generation, `0.2.2`. Regeneration is evidently not part of anyone's release
+   routine, and nothing fails when it is skipped: the old pin keeps working, so
+   a `curl | sh` user silently gets an old build with no error anywhere.
+2. **The local-vs-published hash distinction is real, not theoretical.**
+   Measured on the same version: the local `dist/MemBridge-0.2.4-arm64.zip`
+   hashes to `fde9c618…`, the published asset to `2221760a…`. Signed macOS
+   binaries are not byte reproducible. The template **dies** on checksum
+   mismatch, so pinning a local hash hard-fails every install.
+
+The sequence, for next time: download the published zip with
+`gh release download`, hash **that**, regenerate, deploy to the site repo's
+`main`, then confirm against the live URL — a push is not a deploy, and it took
+roughly 20 seconds for Pages to serve the new copy.
 
 **Do not re-run CI against an already-published tag.** `--clobber` would replace
 an attached asset with a freshly signed one carrying a different hash, and the
@@ -246,13 +260,18 @@ launch at login, plus the docs and these ops files.
 
 ## Not done, in priority order
 
-1. **Regenerate `install.sh` off the published 0.2.4 assets and deploy it.** No
-   longer blocked. Deploy target is `mmelika/membridge-site`, branch `main`.
-3. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
+1. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
    a live sign-in and a replayed callback, has not happened.
-4. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
-5. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
+2. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
+3. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
    into the recalibration.
+4. **Land Andrew's `liveBasis` work.** As of 2026-08-03 it is five files,
+   uncommitted, on his machine only — `liveBasis` appears nowhere in `lib/`,
+   `ui/src/` or `test/` here. It qualifies the `live` flag the MCP already emits
+   on cached team rows, which currently claims a teammate is active when all it
+   knows is that a row synced. He also logged the matching Today-page gap
+   (`ui/src/data/mappers.ts:397` filters on raw `live`) as a deliberate product
+   call, not a bug.
 
 ## Parked, preserved off-laptop
 
