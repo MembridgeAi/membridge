@@ -337,6 +337,65 @@ async function main() {
       }
       h.log?.(`  lexical baseline on this fixture: recall=${res.recall.toFixed(3)} mrr=${res.mrr.toFixed(3)}`);
     });
+
+    // --- the backfill, end to end ---
+    // ev-1 and ev-2 both touched lib/quant.js and share NOT ONE WORD. That is
+    // the whole case for the file graph, and the one BM25 cannot answer at any
+    // weighting, so these run against the real search path rather than a unit.
+    check('backfill: a file-neighbour with zero lexical overlap comes back', () => {
+      const res = activity.searchMemory({ query: 'porcupine quantizer centroids', limit: 10 });
+      const sessions = res.results.map(r => r.session);
+      assert.ok(sessions.includes('ev-1'), `fixture: the lexical hit is missing from [${sessions}]`);
+      assert.ok(sessions.includes('ev-2'),
+        `ev-2 shares lib/quant.js and no vocabulary; the file graph did not reach it: [${sessions}]`);
+      assert.ok(!sessions.includes('ev-3'),
+        `ev-3 shares neither words nor files and must not be backfilled: [${sessions}]`);
+    });
+
+    check('backfill: a backfilled row sits BELOW every lexical hit', () => {
+      const res = activity.searchMemory({ query: 'porcupine quantizer centroids', limit: 10 });
+      const sessions = res.results.map(r => r.session);
+      assert.ok(sessions.indexOf('ev-1') < sessions.indexOf('ev-2'),
+        `a file neighbour outranked a real lexical hit: [${sessions}]`);
+    });
+
+    check('backfill: a backfilled row is LABELLED as one, not passed off as a match', () => {
+      const res = activity.searchMemory({ query: 'porcupine quantizer centroids', limit: 10 });
+      const lexical = res.results.find(r => r.session === 'ev-1');
+      const graphed = res.results.find(r => r.session === 'ev-2');
+      assert.ok(graphed.fileAffinity > 0, 'no fileAffinity on a backfilled row');
+      assert.strictEqual(lexical.fileAffinity, undefined,
+        'a genuine lexical hit was labelled as a file-graph result');
+      assert.deepStrictEqual(graphed.matched, [],
+        'a backfilled row claimed lexical field matches it does not have');
+    });
+
+    check('backfill: total counts what was served, never fewer than results', () => {
+      const res = activity.searchMemory({ query: 'porcupine quantizer centroids', limit: 10 });
+      assert.ok(res.total >= res.results.length,
+        `total ${res.total} is below the ${res.results.length} results actually returned`);
+    });
+
+    check('backfill: a FULL page gets none — no lexical hit is ever displaced', () => {
+      const res = activity.searchMemory({ query: 'porcupine quantizer centroids', limit: 1 });
+      assert.strictEqual(res.results.length, 1);
+      assert.strictEqual(res.results[0].session, 'ev-1',
+        'the backfill displaced the lexical hit instead of filling empty slots');
+    });
+
+    check('backfill: the user\'s filters bind on backfilled rows too', () => {
+      // ev-2 is the backfill candidate and its author is B. Filtering to A must
+      // drop it, exactly as it would a lexical hit — a backfill that ignored
+      // filters would serve a teammate the rows they just filtered away.
+      const res = activity.searchMemory({ query: 'porcupine quantizer centroids', author: 'A', limit: 10 });
+      const sessions = res.results.map(r => r.session);
+      assert.ok(!sessions.includes('ev-2'),
+        `an author filter did not bind on the backfilled row: [${sessions}]`);
+      const dated = activity.searchMemory({
+        query: 'porcupine quantizer centroids', until: '2026-06-01', limit: 10 });
+      assert.ok(!dated.results.map(r => r.session).includes('ev-2'),
+        'a date bound did not bind on the backfilled row');
+    });
   }
 
   h.finish();
