@@ -146,6 +146,25 @@ describe('TeamPage, signed in on a team', () => {
     expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
   })
 
+  // Carried over when the Members screen merged into this page. shareInvite()
+  // mints a link whenever a webUrl exists, so without a second control the
+  // standing code becomes unreachable from the UI the moment a hosted join
+  // page is configured -- and it is the only shape `membridge join <code>`
+  // accepts. It must copy the code WITHOUT minting: a mint here would hand
+  // out a revocable token under a label promising the permanent one.
+  it('still offers the standing code beside the link, and copies it without minting', async () => {
+    const client = new FakeDataClient()
+    const mint = vi.spyOn(client, 'createInviteLink')
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderWith(client, <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy standing code$/i }))
+    expect(mint).not.toHaveBeenCalled()
+    expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+    // And it says what it just handed out, since the two secrets differ.
+    expect(await screen.findByText(/permanent, shared by the whole team/i)).toBeInTheDocument()
+  })
+
   it('signs the machine out through the daemon', async () => {
     const client = new FakeDataClient()
     const signOut = vi.spyOn(client, 'signOut')

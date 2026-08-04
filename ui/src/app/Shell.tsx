@@ -145,12 +145,11 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
           <div className="nav-group-label">Team</div>
           <NavLink to={ROUTES.team} label="Team" icon="◈" />
 
-          {showTeamNav && (
-            <>
-              <NavLink to={ROUTES.members} label="Members" icon="◎" />
-              <NavLink to={ROUTES.insights} label="Insights" icon="✦" />
-            </>
-          )}
+          {/* No Members item: the roster is a section of the Team page now.
+              Two nav entries for one team put identity and invites on one
+              screen and the people those invites produce on another, and
+              each grew its own invite control. */}
+          {showTeamNav && <NavLink to={ROUTES.insights} label="Insights" icon="✦" />}
 
           {/* Now lands on the Team page, which actually has a create-a-team
               form. It used to navigate to Settings, whose only team control
