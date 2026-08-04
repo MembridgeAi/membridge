@@ -12522,7 +12522,7 @@ async function main() {
     const base = { session: 's1', ts: '2026-07-31T00:00:00Z', did: 'did a thing' };
     const run = obj => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', target, JSON.stringify(obj)], { encoding: 'utf8' });
     assert.strictEqual(typeof hooks.GOAL_MAX, 'number', 'GOAL_MAX must be exported beside HEADLINE_MAX');
-    assert.strictEqual(hooks.GOAL_MAX, 70, 'GOAL_MAX is the ~70-char intent budget');
+    assert.strictEqual(hooks.GOAL_MAX, 180, 'GOAL_MAX is the 1-2 sentence intent budget');
     assert.strictEqual(run({ ...base, goal: 'g'.repeat(hooks.GOAL_MAX) }).status, 0, 'exactly-max goal rejected');
     assert.strictEqual(run({ ...base, goal: '  ' + 'g'.repeat(hooks.GOAL_MAX) + '  ' }).status, 0,
       'padding must not count against the max (trimmed length governs)');
@@ -12542,6 +12542,48 @@ async function main() {
     assert.ok(/goal:[^;]*own words/i.test(r), 'goal asks for the agent\'s own words, not the prompt restated');
     assert.ok(/did: 1-2 plain-text sentences/.test(r), 'did asks for 1-2 sentences');
     assert.ok(!/1-3\s+plain-text sentences/.test(r), 'the old 1-3 sentence ask must be gone');
+  });
+  // The session page renders decisions and gotchas as one bulleted list
+  // (ui/src/features/session/distill.ts whatBullets). Prose still renders, split
+  // on sentences, because hundreds of already-synced sessions carry it -- but
+  // nothing downstream can SHORTEN a paragraph, so the ask itself has to be
+  // bullets with a stated budget. Uncapped was the actual defect: headline and
+  // goal had budgets, these two had none, and they arrived as walls of text.
+  check('points: blockReason asks for bulleted decisions and gotchas with a per-point budget', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 's1', 0);
+    assert.strictEqual(typeof hooks.POINT_MAX, 'number', 'POINT_MAX must be exported beside GOAL_MAX');
+    assert.strictEqual(typeof hooks.POINTS_MAX, 'number', 'POINTS_MAX must be exported beside POINT_MAX');
+    assert.ok(/decisions:[^;]*one per line/i.test(r), 'decisions must ask for one point per line');
+    assert.ok(/gotchas:[^;]*one per line/i.test(r), 'gotchas must ask for one point per line');
+    assert.ok(r.includes(hooks.POINT_MAX + ' characters'), 'the per-point budget must be stated');
+    assert.ok(r.includes('at most ' + hooks.POINTS_MAX), 'the per-field point count must be stated');
+    assert.ok(!/decisions: choices made and why/.test(r), 'the old uncapped prose ask must be gone');
+  });
+  check('points: append enforces the per-point and per-field caps loudly for decisions and gotchas', () => {
+    const proj = path.join(ROOT, 'projects', 'pt-max'); fs.mkdirSync(proj, { recursive: true });
+    const target = path.join(proj, '.membridge', 'summaries.jsonl');
+    const base = { session: 's1', ts: '2026-08-03T00:00:00Z', did: 'did a thing' };
+    const run = obj => spawnSync(process.execPath, [HOOK_SCRIPT, 'append', target, JSON.stringify(obj)], { encoding: 'utf8' });
+    const point = 'p'.repeat(hooks.POINT_MAX);
+    assert.strictEqual(run(base).status, 0, 'a line with neither field must stay acceptable');
+    assert.strictEqual(run({ ...base, decisions: point }).status, 0, 'exactly-max point rejected');
+    assert.strictEqual(run({ ...base, decisions: Array(hooks.POINTS_MAX).fill(point).join('\n') }).status, 0,
+      'exactly-max point COUNT rejected');
+    const longPoint = run({ ...base, decisions: 'p'.repeat(hooks.POINT_MAX + 1) });
+    assert.notStrictEqual(longPoint.status, 0, 'over-max point accepted');
+    assert.ok(longPoint.stderr.includes(String(hooks.POINT_MAX)), 'error names the per-point limit');
+    const tooMany = run({ ...base, gotchas: Array(hooks.POINTS_MAX + 1).fill('short point').join('\n') });
+    assert.notStrictEqual(tooMany.status, 0, 'over-max point count accepted');
+    assert.ok(tooMany.stderr.includes(String(hooks.POINTS_MAX)), 'error names the point-count limit');
+    assert.ok(/gotchas/.test(tooMany.stderr), 'error names the field that broke the budget');
+    assert.strictEqual(read(target).trim().split('\n').length, 3, 'rejected lines must not be written');
+  });
+  check('budgets: the header is a general line and the intent carries 1-2 sentences', () => {
+    const r = hooks.blockReason('/p/.membridge/summaries.jsonl', 's1', 0);
+    assert.ok(hooks.GOAL_MAX >= 150, 'goal budget must fit 1-2 sentences, not one short phrase');
+    assert.ok(/goal:[^;]*1-2 sentences/i.test(r), 'goal must ask for 1-2 sentences');
+    assert.ok(/headline:[^;]*general/i.test(r), 'headline must ask for the general shape of the day');
+    assert.ok(!/headline: the single outcome/.test(r), 'the old single-outcome headline ask must be gone');
   });
   check('digest: the AGENTS.md self-report instruction states the goal budget and the 1-2 sentence did', () => {
     const cfg = { ...util.getConfig(), distill: { enabled: true, consent: 'granted' } };

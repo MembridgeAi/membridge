@@ -1,15 +1,23 @@
 import type { ReactNode } from 'react'
+import { whatBullets } from './distill'
 import type { FileChange, Session } from '../../data/types'
 
 // The collapsible brief widgets, native <details>/<summary> (keyboard and
 // screen-reader behavior for free). Locked decisions honored here:
-//   * fixed order Why -> Watch out -> Key files -> Changes, so the page reads
-//     the same on every session; only open state varies.
-//   * Why + Watch out open by default; the rest closed with a one-line
-//     truncated peek in the summary row so the reader can judge without
-//     opening.
+//   * fixed order Key files -> Changes -> What, so the page reads the same on
+//     every session; only open state varies. Files lead because the first
+//     question asked of a teammate's session is what it touched, and that
+//     answer used to sit below two paragraphs of prose.
+//   * Key files + What open by default; the full Changes list closed with a
+//     one-line truncated peek in the summary row so the reader can judge
+//     without opening.
 //   * a widget with no captured content does NOT render -- absence is
 //     communicated by absence, never a "(not captured)" placeholder row.
+//
+// "Why" and "Watch out" were merged into "What". They were always read
+// together, two open paragraphs stacked above the file list is the wall this
+// page exists to avoid, and the reader does not sort reasoning from pitfalls
+// before reading either. whatBullets (distill.ts) turns both into one list.
 //
 // The Checkpoints widget was REMOVED in the page redesign: the checkpoint
 // trail is now the distilled bullet list directly under the summary (see
@@ -52,21 +60,12 @@ function changeCounts(c: FileChange): ReactNode {
 export function BriefWidgets({ session }: { session: Session }) {
   const keyFiles = session.changes.filter(c => c.note)
   const changes = session.changes
+  const what = whatBullets(session)
 
   return (
     <div className="session-widgets">
-      {session.decisions && (
-        <Widget title="Why" open>
-          <p className="session-widget-text">{session.decisions}</p>
-        </Widget>
-      )}
-      {session.gotchas && (
-        <Widget title="Watch out" open>
-          <p className="session-widget-text">{session.gotchas}</p>
-        </Widget>
-      )}
       {keyFiles.length > 0 && (
-        <Widget title="Key files" peek={keyFiles.map(c => c.file).join(' · ')}>
+        <Widget title="Key files" open>
           <ul className="session-list">
             {keyFiles.map(c => (
               <li key={c.file} className="session-keyfile">
@@ -87,6 +86,13 @@ export function BriefWidgets({ session }: { session: Session }) {
                 {changeCounts(c)}
               </li>
             ))}
+          </ul>
+        </Widget>
+      )}
+      {what.length > 0 && (
+        <Widget title="What" open>
+          <ul className="session-list">
+            {what.map(text => <li key={text} className="session-what">{text}</li>)}
           </ul>
         </Widget>
       )}
