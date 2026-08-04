@@ -208,6 +208,39 @@ function createMockSupabase() {
       }
       return json(res, 200, rows.slice(0, Math.min(Math.max(body.p_limit || 50, 1), 200)));
     }
+    // 027_team_feed_counts.sql. Exact windowed totals counted in the database,
+    // because paging team_feed to count rows published its 200-row-per-page
+    // ceiling as if it were a total.
+    //
+    // The predicate here is team_feed's above, VERBATIM, minus only the keyset
+    // paging and the row limit. The migration says to change both together if
+    // it ever changes, and the same rule applies to this mock: a counts
+    // function that outlives its feed's access rules reports totals over rows
+    // the caller may no longer read, and a count is a disclosure even with no
+    // row content attached.
+    //
+    // Returns ONE row even when nothing matches, never []. The real function
+    // is an aggregate over a WHERE clause, so a non-member gets {0, 0} rather
+    // than an empty result. A mock that returned [] here would let a client
+    // that mishandles the empty case pass locally and fail against Postgres.
+    if (fn === 'team_feed_counts') {
+      const visible = !isMember(body.p_team, userId) ? [] : entries
+        .filter(e => projectTeam(e.project_id) === body.p_team)
+        .filter(e => !(projects.find(p => p.id === e.project_id) || {}).archivedAt)
+        .filter(e => canSeeProject(e.project_id, userId))
+        .filter(e => !body.p_author || e.author_id === body.p_author)
+        .filter(e => !body.p_project || e.project_id === body.p_project)
+        .filter(e => !body.p_source || e.source === body.p_source)
+        .filter(e => !body.p_since || e.ts >= body.p_since)
+        .filter(e => !body.p_until || e.ts <= body.p_until);
+      // count(distinct e.session) ignores NULLs, so the session-less rows are
+      // added back one unit each. lib/api-insights.js sessionKeyOf does the
+      // same thing (`r.session || 'entry:' + r.id`), and the two must agree or
+      // the page shows a different session count than the list beneath it.
+      const named = new Set(visible.filter(e => e.session).map(e => e.session));
+      const sessionless = visible.filter(e => !e.session).length;
+      return json(res, 200, [{ entries: visible.length, sessions: named.size + sessionless }]);
+    }
     if (fn === 'archive_project') {
       const teamId = projectTeam(body.p_project);
       if (!isManager(teamId, userId)) return json(res, 403, { message: 'only a team owner or admin can delete a project for the team' });
