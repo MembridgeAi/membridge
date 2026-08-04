@@ -60,7 +60,7 @@ is live at 0.2.4.
 | Remotes | `origin` = `github.com/MembridgeAi/membridge`, and it is the ONLY remote. The `upstream` and `andrewb` remotes were removed, so a bare `git push` now goes to canonical rather than the dead fork. |
 | Fork | `andrewb-eng/membridge` still exists on GitHub pending a permissions issue, but nothing local points at it. Treat it as deleted. |
 | Push access | Marco's laptop clone **has write access**, confirmed 2026-08-03 by `git push --dry-run origin master` reaching the remote. A 403 seen from a cloud session was specific to that session's repo scoping, not account-wide. |
-| Root suite | **1401/1402 locally**, one failure — but NOT the one this file used to predict. See known issues. |
+| Root suite | **1412/1412 clean**, on a quiet machine. A lone failure almost always means a second suite is running — see known issues. |
 | UI suite | **green on all six CI legs.** Fails locally on this laptop; that is a machine artifact, see known issues. |
 | `tsc --noEmit` | clean, as of `0fc319a` |
 | Package version | `0.2.4`, root and `app/` in lockstep, pinned by a check |
@@ -292,15 +292,31 @@ Do not merge before the recalibration.
 
   Both are pre-existing and unrelated to the `tsc` fix, which touches only `ui/`.
 
-  **It is stable per machine, not random per run** — Andrew ran it three times
-  on his checkout and got the `gitignore` check every time, while this laptop
-  gets `provenance` every time. That is a sharper claim than "varies", and it
-  points somewhere specific: a check that fails deterministically on one machine
-  and passes on another is usually a fixture reading real environment state
-  rather than building its own. `git check-ignore -v .membridge/team.json`
-  returns nothing on Andrew's side, so the shipped `.gitignore` is correct and
-  the fault is in what the fixture constructs. **Nobody has diagnosed either
-  one.**
+  **Correction, later the same night: an uncontended run is 1412/1412, clean.**
+  The earlier "stable per machine" reading is withdrawn. Every run that showed a
+  single failure — here and, by report, on Andrew's checkout — had *another*
+  `run-tests.js` executing at the same time from a different worktree. This
+  repo has ~16 worktrees and parallel agent sessions, so that overlap is easy to
+  miss and easy to cause.
+
+  The cause was hardcoded suite ports: two concurrent runs contend, and the
+  loser sees failures that look like fixture or environment bugs. The
+  `provenance reconciliation` failure did not reproduce once the machine was
+  quiet.
+
+  **`e661939` has since fixed this properly** — the suite is split into
+  sections behind `test/run.js`, with per-run port reservation, and `npm test`
+  now runs the orchestrator rather than `run-tests.js` directly. So this should
+  stop happening. The diagnostic habit is still worth keeping for any suite
+  that touches fixed resources: treat a lone failure as possible evidence of a
+  second run before concluding it is a machine-specific defect. (One trap when
+  checking — a bare `pgrep -f "run-tests.js"` inside a shell one-liner matches
+  its own command line and waits forever. Bracket it: `pgrep -f "[r]un-tests.js"`.)
+
+  Andrew's `gitignore: .membridge/team.json is committable` failure is still
+  unexplained and may be genuine on his machine; `git check-ignore -v` says the
+  shipped `.gitignore` is correct, so if it survives an uncontended run the
+  fault is in what the fixture constructs.
 
   **The old "one failure is the known worktrees one" exemption is dead:**
   1401/1402 is not self-evidently fine, so read which check failed and compare
