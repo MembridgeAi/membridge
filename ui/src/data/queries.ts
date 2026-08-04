@@ -345,6 +345,10 @@ export function useSetProjectAccess() {
       if (context?.previousAccess) qc.setQueryData(['projectAccess', vars.projectPath], context.previousAccess)
       if (context?.previousMatrix) qc.setQueryData(['accessMatrix'], context.previousMatrix)
     },
+    // Settled, not success: an access change writes access-granted /
+    // access-revoked server-side, and on the error path the optimistic
+    // rollback above can still be racing a row that DID get written.
+    onSettled: () => { qc.invalidateQueries({ queryKey: ['audit'] }) },
   })
 }
 
@@ -362,6 +366,7 @@ export function useSetMemberRole() {
       qc.invalidateQueries({ queryKey: ['members'] })
       qc.invalidateQueries({ queryKey: ['accessMatrix'] })
       qc.invalidateQueries({ queryKey: ['projectAccess'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
     },
   })
 }
@@ -375,17 +380,22 @@ export function useRemoveMember() {
       qc.invalidateQueries({ queryKey: ['members'] })
       qc.invalidateQueries({ queryKey: ['accessMatrix'] })
       qc.invalidateQueries({ queryKey: ['projectAccess'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
     },
   })
 }
 
 // Mints a fresh onboarding-invite token for a team (DataClient.createInviteLink,
-// POST /api/team/invite). No cache to invalidate: a minted link is
-// used-and-copied on the spot, not tracked in any list this UI reads back.
+// POST /api/team/invite). The minted link itself is used-and-copied on the
+// spot and appears in no list this UI reads back -- but the mint DOES write
+// an `invite-created` row (lib/server.js:2455), and the audit trail is a list
+// this UI reads back. It went stale on every mint until this landed.
 export function useCreateInviteLink() {
   const c = useDataClient()
+  const qc = useQueryClient()
   return useMutation({
     mutationFn: (teamId: string) => c.createInviteLink(teamId),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['audit'] }) },
   })
 }
 
@@ -491,7 +501,10 @@ export function useRevokeInvite() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (inviteId: string) => c.revokeInvite(inviteId),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['invites'] }) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['invites'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
   })
 }
 

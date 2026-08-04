@@ -9,8 +9,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from './DataClientProvider'
 import { FakeDataClient } from './FakeDataClient'
 import {
-  useArchiveProject, useCheckForUpdates, useLeaveTeam, useRegisterMcp, useRemoveMember,
-  useSetMemberRole, useSetSetting, useUnarchiveProject, useUpdateHooks,
+  useArchiveProject, useCheckForUpdates, useCreateInviteLink, useLeaveTeam, useRegisterMcp,
+  useRemoveMember, useRevokeInvite, useSetMemberRole, useSetProjectAccess, useSetSetting,
+  useUnarchiveProject, useUpdateHooks,
 } from './queries'
 
 function mountHook<T>(useHook: () => T, client: FakeDataClient = new FakeDataClient()): { qc: QueryClient; hook: () => T } {
@@ -49,6 +50,52 @@ describe('member mutations invalidate every member-listing surface (Fix 10)', ()
     expect(spy).toHaveBeenCalledWith({ queryKey: ['members'] })
     expect(spy).toHaveBeenCalledWith({ queryKey: ['accessMatrix'] })
     expect(spy).toHaveBeenCalledWith({ queryKey: ['projectAccess'] })
+  })
+})
+
+// The audit trail is a list this UI reads back and caches, so every action
+// that writes a team_audit row has to refresh it. Six actions do
+// (access-granted, access-revoked, invite-created, invite-revoked,
+// member-removed, role-changed) and NONE of them invalidated ['audit'] --
+// so the trail sat stale until its staleTime lapsed or the page remounted,
+// which reads as "the audit isn't updating". Each case below pins one writer.
+describe('every audit-writing mutation refreshes the audit trail', () => {
+  it('useRemoveMember invalidates audit (member-removed)', async () => {
+    const { qc, hook } = mountHook(() => useRemoveMember())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync('andrew')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['audit'] })
+  })
+
+  it('useSetMemberRole invalidates audit (role-changed)', async () => {
+    const { qc, hook } = mountHook(() => useSetMemberRole())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync({ memberId: 'andrew', role: 'member' })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['audit'] })
+  })
+
+  it('useRevokeInvite invalidates audit (invite-revoked) as well as invites', async () => {
+    const { qc, hook } = mountHook(() => useRevokeInvite())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync('inv-1')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['invites'] })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['audit'] })
+  })
+
+  // This one carried a comment saying it had no cache to invalidate. True of
+  // the link itself; false of the audit row the mint writes.
+  it('useCreateInviteLink invalidates audit (invite-created)', async () => {
+    const { qc, hook } = mountHook(() => useCreateInviteLink())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync('team-1')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['audit'] })
+  })
+
+  it('useSetProjectAccess invalidates audit (access-granted / access-revoked)', async () => {
+    const { qc, hook } = mountHook(() => useSetProjectAccess())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync({ projectPath: '/Users/x/membridge', memberId: 'andrew', canSee: false })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['audit'] })
   })
 })
 
