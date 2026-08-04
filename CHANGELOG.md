@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **You can ask what a teammate is working on.** Recent activity now takes a
+  person (and a project), so "what is Andrew on?" is a question with an answer
+  instead of a page of everyone's work you have to read through. The filter is
+  applied before the page is cut, which is the part that actually broke it
+  before: narrowing a page of fifty to one person routinely left nothing, and
+  nothing reads as "they are idle" rather than "ask for more rows".
+  The answer is deliberately phrased as **"as of four minutes ago"** rather
+  than "right now". This reads memory that has already synced to your machine,
+  so there is always some lag, and a live badge means a row arrived recently —
+  good evidence of recent work, never proof someone is at the keyboard. That
+  distinction only became trustworthy now that timestamps come from a real
+  clock (below).
+
 - **Search runs on a real search engine now.** Memory is indexed into SQLite
   FTS5 and ranked by BM25 instead of being scored by a hand-rolled scan over
   every entry in memory. The reason to care is not mainly speed: BM25 weights
