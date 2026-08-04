@@ -158,3 +158,21 @@
   color: var(--red);
   font-size: 12px;
 }
+
+/* The team switcher, when there is more than one team to switch between.
+ * Styled to sit inside .team-switch as its only child, so a one-team install
+ * (which renders a plain label instead) looks exactly as it did. */
+.team-switch-select {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+}
+.team-switch-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

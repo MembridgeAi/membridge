@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
+import { useDataClient } from '../../data/DataClientProvider'
 import {
   useCreateInviteLink, useCreateTeam, useJoinTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
 } from '../../data/queries'
@@ -208,6 +209,7 @@ function JoinCard() {
  *
  *  Leaving a team stays in Settings' danger zone, where it already is. */
 export function TeamPage() {
+  const client = useDataClient()
   const accountQuery = useTeamAccount()
   const createTeam = useCreateTeam()
   const mintInvite = useCreateInviteLink()
@@ -225,7 +227,12 @@ export function TeamPage() {
   }, [share?.status, share?.value])
 
   const account: TeamAccount | undefined = accountQuery.data
-  const team = account?.teams[0] ?? null
+  // The SELECTED team (rail switcher), matched the same way the transport
+  // matches it -- an unknown or absent selection falls back to the first.
+  // Reading teams[0] here instead would put this page on a different team
+  // from the rail, Settings and the members list the moment someone switched.
+  const selectedId = client.selectedTeamId()
+  const team = (selectedId ? account?.teams.find(t => t.id === selectedId) : undefined) ?? account?.teams[0] ?? null
   const webUrl = account?.webUrl ?? null
   const inviteCode = team ? account?.inviteCode ?? null : null
   // A real link needs both a hosted join page and a team to mint against;
@@ -359,19 +366,14 @@ export function TeamPage() {
             </section>
           )}
 
-          {/* Every team read in this app and daemon takes teams[0] (see
-              LocalDaemonClient.firstTeam, lib/api-access.js readAudit): the
-              product models one team per user, but nothing enforces that, and
-              joining a second one is reachable. Picking the first silently is
-              the one behaviour that misleads -- a member of two teams saw one,
-              with no hint the other existed, while the invite button, audit
-              and member list all quietly targeted it. Named here until there
-              is a real switcher. */}
+          {/* Says which team everything on screen is about. The switcher in
+              the rail is what changes it -- naming that here is the whole
+              point, since the invite button, member list and audit trail all
+              follow the selection and nothing else on this page says so. */}
           {account.teams.length > 1 && (
             <p className="team-note team-multi" role="status">
-              You are on {account.teams.length} teams. This app shows and manages only <b>{team?.name}</b> —
-              members, invites and the audit trail below are all about that team.
-              Run <code>membridge team list</code> to see the others: {account.teams.slice(1).map(t => t.name).join(', ')}.
+              You are on {account.teams.length} teams. Everything here — members, invites, the audit trail —
+              is about <b>{team?.name}</b>. Switch teams from the picker at the top of the sidebar.
             </p>
           )}
 

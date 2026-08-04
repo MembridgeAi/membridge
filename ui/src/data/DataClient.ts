@@ -157,6 +157,19 @@ export interface DataClient {
   // reject anything that doesn't look like a code.
   joinTeam(codeOrLink: string): Promise<{ id: string; name: string }>
 
+  // Which of the viewer's teams every team-scoped read is about: the members
+  // list, the audit trail, invites, the access matrix, insights, and the team
+  // shown in Settings and the rail. Null means "whichever the daemon lists
+  // first", which is what every one of those reads did unconditionally before
+  // a switcher existed.
+  //
+  // Imperative rather than a parameter on twelve methods, and deliberately
+  // NOT React state: the transport has to carry the choice on requests the
+  // component tree never sees. Callers must invalidate the query cache after
+  // switching -- the client cannot re-render anything by itself.
+  selectTeam(teamId: string | null): void
+  selectedTeamId(): string | null
+
   // Rename the team (POST /api/team/rename). Owner/admin only, enforced by
   // the rename_team RPC rather than here.
   renameTeam(teamId: string, name: string): Promise<void>

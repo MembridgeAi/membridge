@@ -83,14 +83,14 @@ describe('signing in the way the invite page signed you up', () => {
 })
 
 describe('being on more than one team', () => {
-  it('says so, instead of silently showing the first and managing it', async () => {
+  it('says which team the page is about, and where to change it', async () => {
     renderWith(new FakeDataClient({ solo: false, authenticated: true, secondTeam: true }), <TeamPage />)
     const notice = await screen.findByText(/you are on 2 teams/i)
     // Naming the team being managed is the whole point: the invite button,
-    // member list and audit trail all target teams[0], and a member of two
-    // teams previously had no way to know which.
+    // member list and audit trail all follow the selection, and a member of
+    // two teams previously had no way to know which one they were acting on.
     expect(notice).toHaveTextContent(/MemBridge HQ/)
-    expect(notice).toHaveTextContent(/Weekend Side Project/)
+    expect(notice).toHaveTextContent(/sidebar/i)
   })
 
   it('stays quiet for the normal one-team case', async () => {

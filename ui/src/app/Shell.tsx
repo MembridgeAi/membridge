@@ -4,6 +4,7 @@ import { MembridgeMark } from '../assets/MembridgeMark'
 import { useDataClient } from '../data/DataClientProvider'
 import { useSettings, useStatus } from '../data/queries'
 import { ROUTES } from './routes'
+import { TeamSwitcher } from './TeamSwitcher'
 
 interface NavLinkProps {
   to: string
@@ -77,12 +78,10 @@ export function Shell({ children }: ShellProps) {
 
         {/* Same correction as showTeamNav above: your team's name belongs in
             the rail as soon as you are ON a team, not only once a second
-            person's work has reached a linked project. */}
-        {settings?.team && (
-          <div className="team-switch">
-            <span className="team-switch-name">{settings.team.name}</span>
-          </div>
-        )}
+            person's work has reached a linked project. On more than one team
+            this is a real switcher; on one it renders the same label it
+            always did. */}
+        {settings?.team && <TeamSwitcher current={settings.team} />}
 
         <div className="nav">
           <NavLink to={ROUTES.today} label="Today" icon="⌂" />

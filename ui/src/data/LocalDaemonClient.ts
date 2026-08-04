@@ -113,6 +113,17 @@ async function postReadingError<T>(pathAndQuery: string, body?: unknown): Promis
 // meaningfully stale data.
 const REQUEST_CACHE_TTL_MS = 5000
 
+// Where the chosen team is remembered between sessions.
+const SELECTED_TEAM_KEY = 'membridge.selectedTeam'
+
+function readStoredTeamId(): string | null {
+  try {
+    return window.localStorage.getItem(SELECTED_TEAM_KEY) || null
+  } catch {
+    return null // storage disabled: fall back to the daemon's first team
+  }
+}
+
 export class LocalDaemonClient implements DataClient {
   readonly capabilities: Capabilities = {
     daemonControl: true,
@@ -131,6 +142,11 @@ export class LocalDaemonClient implements DataClient {
   // still in flight (or finished less than REQUEST_CACHE_TTL_MS ago) gets the
   // same promise instead of firing again.
   private requestCache = new ShortTtlCache(REQUEST_CACHE_TTL_MS)
+
+  // Restored at construction so a switch survives a reload -- the app would
+  // otherwise snap back to teams[0] every time the window reopened, which
+  // reads as the switcher not working.
+  private teamId: string | null = readStoredTeamId()
 
   private feed(query = ''): Promise<{ entries: RawFeedEntry[] }> {
     return this.requestCache.get(`feed:${query}`, () => get<{ entries: RawFeedEntry[] }>(`/api/feed?limit=${FEED_LIMIT}${query}`))
@@ -169,13 +185,49 @@ export class LocalDaemonClient implements DataClient {
     })
   }
 
+  // The chosen team, or the first one. Selection is matched against the list
+  // the DAEMON returned rather than trusted: a stale id in localStorage (a
+  // team since left, or one belonging to a different account signed in on
+  // this machine) matches nothing and quietly falls back to first, instead of
+  // pinning the whole app to a team the viewer is no longer on.
   private async teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
     const data = await this.teamAccountPayload()
-    return { team: data.teams[0] || null, viewerId: data.viewerId, inviteCode: data.inviteCode, webUrl: data.webUrl }
+    const chosen = this.teamId ? data.teams.find(t => t.team_id === this.teamId) : undefined
+    return { team: chosen ?? data.teams[0] ?? null, viewerId: data.viewerId, inviteCode: data.inviteCode, webUrl: data.webUrl }
   }
 
   private async firstTeam(): Promise<RawTeamRow | null> {
     return (await this.teamMeta()).team
+  }
+
+  // Appended to the team-scoped GETs so the daemon answers about the same
+  // team the UI is showing (lib/api-access.js selectTeam). Omitted entirely
+  // when nothing is selected, which keeps those URLs -- and their cache keys
+  // -- byte-identical to what a single-team install always sent.
+  private teamParam(prefix: '?' | '&'): string {
+    return this.teamId ? `${prefix}teamId=${encodeURIComponent(this.teamId)}` : ''
+  }
+
+  selectedTeamId(): string | null {
+    return this.teamId
+  }
+
+  selectTeam(teamId: string | null): void {
+    if (this.teamId === teamId) return
+    this.teamId = teamId
+    // Every cached response was an answer about the OLD team. Not a
+    // deleteMatching on some prefix: the team a request was about is not in
+    // its URL for most of these (members, settings, status all derive it),
+    // so nothing short of the whole cache is safe to keep.
+    this.requestCache.clear()
+    try {
+      if (teamId) window.localStorage.setItem(SELECTED_TEAM_KEY, teamId)
+      else window.localStorage.removeItem(SELECTED_TEAM_KEY)
+    } catch {
+      // A browser with storage disabled still switches for this session; the
+      // choice just doesn't survive a reload. Silently losing persistence is
+      // acceptable here, silently losing the switch would not be.
+    }
   }
 
   async getTeamAccount(): Promise<TeamAccount> {
@@ -417,7 +469,7 @@ export class LocalDaemonClient implements DataClient {
   // every field name matching AccessMatrix verbatim -- so, unlike
   // getProjectAccess above, there is nothing here to map or drop.
   getAccessMatrix(): Promise<AccessMatrix> {
-    return get<AccessMatrix>('/api/team/access-matrix')
+    return get<AccessMatrix>(`/api/team/access-matrix${this.teamParam('?')}`)
   }
 
   // projectCount and lastSharedAt used to come off ONE shared, newest-first
@@ -458,7 +510,7 @@ export class LocalDaemonClient implements DataClient {
   // section is "outstanding invites", and a revoked token is not one. They
   // stay readable in the audit trail, which is where a history belongs.
   async getInvites(): Promise<Invite[]> {
-    const r = await get<{ invites: Invite[] }>('/api/team/invites')
+    const r = await get<{ invites: Invite[] }>(`/api/team/invites${this.teamParam('?')}`)
     return (r.invites ?? []).filter(i => !i.revoked)
   }
 
@@ -497,7 +549,7 @@ export class LocalDaemonClient implements DataClient {
   async getAudit(limit?: number): Promise<AuditEvent[]> {
     const query = limit === undefined ? '' : `?limit=${limit}`
     const r = await get<{ events: (AuditEvent & { objectName?: string | null; targetName?: string | null })[] }>(
-      `/api/team/audit${query}`,
+      `/api/team/audit${query}${this.teamParam(query ? '&' : '?')}`,
     )
     // objectName/targetName are newer than the rest of the row: an older
     // daemon omits them entirely, and `undefined` reaching the renderer would
@@ -520,7 +572,7 @@ export class LocalDaemonClient implements DataClient {
   // pattern: computed entirely server-side by api-insights.js's assistsFrom,
   // no client-side counterpart the way skeleton has one for Today.
   getInsights(window: 7 | 30 | 90): Promise<Insights> {
-    return get<Insights>(`/api/team/insights?window=${window}`)
+    return get<Insights>(`/api/team/insights?window=${window}${this.teamParam('&')}`)
   }
 
   async getSkeletonStats(): Promise<SkeletonStats> {

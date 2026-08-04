@@ -23,11 +23,11 @@ type Invoker = (client: DataClient) => Promise<unknown>
 // DataClient method forces a conscious choice here, via the Record below
 // failing to type-check until it's accounted for.
 const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
-  // POST /api/team/invite only mints a generic, role-less link and cannot
-  // list issued invites -- no listing endpoint exists, so getInvites
-  // resolves [] without ever attempting a request. (inviteMember was
-  // removed from DataClient entirely for the same structural reason.)
-  'getInvites',
+  // The team selection is local state on the transport, read back into the
+  // query string of the team-scoped GETs. There is no endpoint to attempt and
+  // nothing for this test's "did it try a real request" check to observe.
+  'selectTeam',
+  'selectedTeamId',
   // pickPaths never has a daemon endpoint to attempt -- it is routed through
   // the Electron IPC bridge (window.membridge, set by app/preload.js), not
   // fetch, because the daemon is a separate process with no GUI to show a
@@ -66,6 +66,9 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   signOut: c => c.signOut(),
   createTeam: c => c.createTeam('Acme AI'),
   joinTeam: c => c.joinTeam('tok_fixture'),
+  // Synchronous, local, and deliberately request-free -- exempted below.
+  selectTeam: async c => { c.selectTeam(null) },
+  selectedTeamId: async c => { c.selectedTeamId() },
   renameTeam: c => c.renameTeam('team-1', 'Acme AI'),
   rotateInviteCode: c => c.rotateInviteCode('team-1'),
   getInvites: c => c.getInvites(),

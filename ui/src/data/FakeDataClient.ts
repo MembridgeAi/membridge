@@ -392,15 +392,9 @@ export class FakeDataClient implements DataClient {
       configured: true,
       authenticated,
       user: authenticated ? { userId: this.viewerId, email: 'marco@melika.com', displayName: 'Marco' } : null,
-      teams: onTeam
-        ? [
-          { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length },
-          // A second team only when a test asks for it: it is a reachable
-          // state the app can only partly serve, and every other fixture
-          // must keep modelling the one-team norm.
-          ...(this.opts.secondTeam ? [{ id: 'team-2', name: 'Weekend Side Project', role: 'member' as Role, memberCount: 2 }] : []),
-        ]
-        : [],
+      // A second team only when a test asks for it (opts.secondTeam): every
+      // other fixture keeps modelling the one-team norm.
+      teams: this.teamFixtures(),
       inviteCode: onTeam ? 'INV-7F3K9Q' : null,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
       error: null,
@@ -427,6 +421,27 @@ export class FakeDataClient implements DataClient {
   // daemon accepts a token, a UUID and a pasted URL and the UI must not be
   // written against a narrower idea of what is valid.
   joinTeam() { return this.guard<{ id: string; name: string }>({ id: 'team-acme', name: 'Acme AI' }) }
+
+  // The selection is real state here, not a no-op stub: every team-scoped
+  // fixture below reads selectedTeam(), so a test can prove the app actually
+  // follows the switch rather than only that a control was clicked.
+  private teamId: string | null = null
+  selectedTeamId() { return this.teamId }
+  selectTeam(teamId: string | null) { this.teamId = teamId }
+  /** The team fixture the current selection points at (first, by default). */
+  private selectedTeam(): { id: string; name: string; role: Role; memberCount: number } | null {
+    const teams = this.teamFixtures()
+    if (!teams.length) return null
+    return teams.find(t => t.id === this.teamId) ?? teams[0]
+  }
+  private teamFixtures(): { id: string; name: string; role: Role; memberCount: number }[] {
+    const authenticated = this.opts.authenticated ?? true
+    if (!(authenticated && !this.opts.solo)) return []
+    return [
+      { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length },
+      ...(this.opts.secondTeam ? [{ id: 'team-2', name: 'Weekend Side Project', role: 'member' as Role, memberCount: 2 }] : []),
+    ]
+  }
   renameTeam() { return this.guard<void>(undefined) }
   rotateInviteCode() { return this.guard<string>('INV-NEW42X') }
   // Two live invites: one time-limited and partly used, one open-ended and
@@ -537,7 +552,13 @@ export class FakeDataClient implements DataClient {
         excludeStale: [],
       },
       daemon: { running: true, port: 7391, version: '0.1.7', startAtLogin: true, intervalSec: 300, updateAvailable: null },
-      team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length, inviteCode: 'INV-7F3K9Q' },
+      // Follows the SELECTION, not always the first team -- this is what the
+      // rail and the Settings Team group render, so a switch has to be
+      // observable here or the switcher is only pretending.
+      team: (() => {
+        const t = this.selectedTeam()
+        return t ? { ...t, inviteCode: 'INV-7F3K9Q' } : null
+      })(),
       viewerId: this.viewerId,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
       contextFiles: {
