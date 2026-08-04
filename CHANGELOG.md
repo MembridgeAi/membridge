@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The context block arrives fresh at session start.** The daemon writes
+  the "Shared AI memory" block into CLAUDE.md on its own ticks, so a session
+  starting in a just-created worktree read whatever stale block an ancestor
+  file happened to carry — sometimes another project's. A SessionStart hook
+  (riding the already-registered entry, no settings change) now renders the
+  block live from state and injects it, deduped against every CLAUDE.md the
+  session can see: a healthy root session pays nothing extra, and the hook
+  only speaks when the on-disk block is missing, stale, or foreign.
+- **Capped context now says it's capped.** The block's session and teammate
+  sections showed the newest few entries with no hint that more existed.
+  When entries are elided, the headers now carry explicit counts ("showing
+  the last 5 of 37 sessions", "the freshest 8 of 412 shared entries") and
+  name where the rest lives (`search_memory`, or `.membridge/memory.md`) —
+  so an agent never mistakes the window for the whole history.
 - **`search_memory` is now relevance-ranked, not substring match.** The MCP
   tool scores headlines, decisions, gotchas, goals, files touched, per-file
   change notes, prompts, and summaries, and returns each result's relevance
