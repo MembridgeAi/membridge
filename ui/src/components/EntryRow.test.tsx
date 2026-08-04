@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { EntryRow, HOVER_PREVIEW_DELAY_MS, PATH_MAX, ROW_FILE_LIMIT, rowFiles, shortPath } from './EntryRow'
+import { EntryRow, HOVER_PREVIEW_DELAY_MS, PATH_MAX, ROW_FILE_LIMIT, UNDECRYPTABLE_NOTE, rowFiles, shortPath } from './EntryRow'
 import { sessionHref } from '../app/routes'
 import type { StreamEntry } from '../data/types'
 
@@ -75,6 +75,26 @@ describe('EntryRow', () => {
     expect(note.className).toContain('entry-row-outcome-empty')
     // And a real outcome never shows the placeholder.
     expect(container.querySelectorAll('.entry-row-outcome')).toHaveLength(1)
+  })
+
+  // A row that FAILED TO DECRYPT rendered the byte-identical "No summary yet"
+  // as a genuinely un-summarized one, so that one string meant two different
+  // things and no reader could tell which. `undecryptable` is the daemon's own
+  // marker for the first (lib/feed.js:136 -- the content fields are nulled ON
+  // PURPOSE, fail-closed, rather than trusting the server's plaintext
+  // columns), and it is the only thing that separates them.
+  it('says a row could not be DECRYPTED instead of reusing the un-summarized placeholder', () => {
+    render(<EntryRow entry={entry({ outcome: '', undecryptable: true })} />)
+    const note = screen.getByText(UNDECRYPTABLE_NOTE)
+    expect(note).toBeInTheDocument()
+    expect(note.className).toContain('entry-row-outcome-opaque')
+    expect(screen.queryByText('No summary yet')).toBeNull()
+  })
+
+  it('still says "No summary yet" for a row that is genuinely un-summarized', () => {
+    render(<EntryRow entry={entry({ outcome: '' })} />)
+    expect(screen.getByText('No summary yet')).toBeInTheDocument()
+    expect(screen.queryByText(UNDECRYPTABLE_NOTE)).toBeNull()
   })
 
   it('renders an avatar by default', () => {

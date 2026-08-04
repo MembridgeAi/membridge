@@ -16,6 +16,19 @@ function clockTime(at: string): string {
  *  never flashes cards, short enough to answer "is this worth opening"). */
 export const HOVER_PREVIEW_DELAY_MS = 400
 
+/** Said for a row whose ciphertext this client could not decrypt (fail-closed
+ *  E2E, lib/feed.js:136 -- the daemon nulls the content fields ON PURPOSE
+ *  rather than trust the server's plaintext columns).
+ *
+ *  This exists because "No summary yet" meant TWO different things: nobody has
+ *  summarized this session, and this machine cannot read this session. They
+ *  look identical on the wire once the content is nulled, they render
+ *  identically, and only one of them is something to act on (a key rotation, a
+ *  lapsed login -- feedPayload's own comment names the second). Never say
+ *  "encrypted" for the merely un-summarized case: an empty outcome on a local
+ *  row has nothing to do with encryption. */
+export const UNDECRYPTABLE_NOTE = 'Encrypted: could not be read on this machine'
+
 /** How many file paths the row names before collapsing to a count. A single
  *  live row carried 16 paths, wrapping to three lines of mono text that
  *  out-shouted the outcome above it -- the blast radius is a glance signal,
@@ -116,10 +129,15 @@ function EntryRowBody({ entry, project, showAvatar }: Required<Pick<EntryRowProp
       </span>
       {/* Fix 17: outcomeOf falls back to '' for an undistilled session --
           say so mutedly rather than rendering an empty element. No em dash;
-          the row's timestamp already says when it happened. */}
+          the row's timestamp already says when it happened.
+          The undecryptable branch is checked FIRST among the empty cases:
+          such a row also has an empty outcome, so falling through to "No
+          summary yet" is what made a broken key read as a quiet session. */}
       {entry.outcome
         ? <div className="entry-row-outcome">{entry.outcome}</div>
-        : <div className="entry-row-outcome entry-row-outcome-empty">No summary yet</div>}
+        : entry.undecryptable
+          ? <div className="entry-row-outcome entry-row-outcome-opaque">{UNDECRYPTABLE_NOTE}</div>
+          : <div className="entry-row-outcome entry-row-outcome-empty">No summary yet</div>}
       {entry.intent && (
         <div className="entry-row-intent">
           <span className="entry-row-intent-label">Intent</span>

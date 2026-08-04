@@ -62,6 +62,10 @@ export interface RawFeedEntry {
   decisions?: string | null
   gotchas?: string | null
   changes?: RawFileChange[] | null
+  // Fail-closed E2E marker (lib/feed.js:136 normalizeTeam): this client held
+  // ciphertext it could not decrypt, so summary/headline are null ON PURPOSE.
+  // Optional because only such rows carry it at all.
+  undecryptable?: boolean
   // Stamped by the daemon (lib/feed.js) from the session's newest event of any
   // kind, against util.LIVE_WINDOW_MS. The UI does not recompute it: this
   // field is the single source both the live dot and Today's LIVE NOW count
@@ -319,6 +323,11 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     intent: intentOf(e),
     files: e.files,
     session: e.session,
+    // Carried, never re-derived. Dropping these two was what made an
+    // undecryptable row indistinguishable from an un-summarized one downstream
+    // -- both arrive with an empty `outcome`, and only these say which.
+    distilled: !!e.distilled,
+    undecryptable: !!e.undecryptable,
     summaryFull: e.summaryFull || null,
     decisions: e.decisions || null,
     gotchas: e.gotchas || null,

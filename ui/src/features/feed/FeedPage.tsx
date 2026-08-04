@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import { useSearch } from 'wouter'
 import { FEED_SESSION_PARAM } from '../../app/routes'
-import { EntryRow } from '../../components/EntryRow'
 import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
+import { DayCard } from './DayCard'
+import { buildDayCards } from './dayCards'
 import './feed.css'
 
 function errorMessage(error: unknown): string {
@@ -23,23 +24,28 @@ export function dayLabel(iso: string, now: Date = new Date()): string {
   return isSameLocalDay(d, now) ? `TODAY · ${weekday}` : weekday
 }
 
-interface DayGroup {
+interface DayGroup<T> {
   day: string
-  entries: FeedEntry[]
+  entries: T[]
 }
 
-// Newest first, then bucketed into consecutive same-day runs -- entries
+// Newest first, then bucketed into consecutive same-day runs -- items
 // arrive newest-first across pages already, but this sorts before grouping
 // rather than trusting order (same defensive stance as ProjectPage's
 // groupByDay).
-export function groupByDay(entries: FeedEntry[], now: Date = new Date()): DayGroup[] {
-  const sorted = [...entries].sort((a, b) => b.at.localeCompare(a.at))
-  const groups: DayGroup[] = []
-  for (const entry of sorted) {
-    const day = dayLabel(entry.at, now)
+//
+// Generic over anything carrying an `at`: the day dividers are now the outer
+// chrome ABOVE day cards rather than above bare entries, and both shapes have
+// to bucket by exactly the same local-day rule. One function, so the two can
+// never disagree about which day something happened on.
+export function groupByDay<T extends { at: string }>(items: T[], now: Date = new Date()): DayGroup<T>[] {
+  const sorted = [...items].sort((a, b) => b.at.localeCompare(a.at))
+  const groups: DayGroup<T>[] = []
+  for (const item of sorted) {
+    const day = dayLabel(item.at, now)
     const current = groups[groups.length - 1]
-    if (current && current.day === day) current.entries.push(entry)
-    else groups.push({ day, entries: [entry] })
+    if (current && current.day === day) current.entries.push(item)
+    else groups.push({ day, entries: [item] })
   }
   return groups
 }
@@ -97,7 +103,14 @@ export function FeedPage() {
     () => collapseSessionCheckpoints(dedupeById(feedQuery.data?.pages.flatMap(p => p.entries) ?? [])),
     [feedQuery.data],
   )
-  const dayGroups = groupByDay(entries)
+  // Entries -> day cards -> day dividers. The cards are the top level of the
+  // feed now: one per person per project per local day, so a teammate's
+  // afternoon is one line with a count instead of eight near-identical rows.
+  // The dividers stay the outer chrome, and both layers key on the SAME local
+  // day (dayCardKey and dayLabel both go through localTime), so a card can
+  // never land under a heading for a different day.
+  const dayCards = useMemo(() => buildDayCards(entries), [entries])
+  const dayGroups = groupByDay(dayCards)
   const projects = projectsQuery.data ?? []
   const members = membersQuery.data ?? []
   const tools = statusQuery.data?.tools ?? []
@@ -146,13 +159,12 @@ export function FeedPage() {
       {dayGroups.map(group => (
         <div key={group.day}>
           <div className="feed-day">{group.day}</div>
-          {group.entries.map(entry => (
-            <EntryRow
-              key={entry.id}
-              entry={entry}
-              project={entry.project}
+          {group.entries.map(card => (
+            <DayCard
+              key={card.key}
+              card={card}
               showAvatar={!solo}
-              targeted={!!targetSession && entry.session === targetSession}
+              targetSession={targetSession}
             />
           ))}
         </div>

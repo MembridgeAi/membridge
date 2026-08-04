@@ -6,6 +6,8 @@ import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
 import { FEED_PAGE_SIZE } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
+import { dayCardStats } from './DayCard'
+import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW } from './dayCards'
 import { FeedPage, dayLabel, groupByDay } from './FeedPage'
 
 // session defaults to null (not a shared string) so two default-built
@@ -68,11 +70,41 @@ describe('groupByDay', () => {
   })
 })
 
+/** Expand the day card whose overview matches, and hand back the card element.
+ *  Every "what does a row look like" assertion below goes through this: the
+ *  sessions are the card's SECOND level now, and asserting on them without
+ *  opening the card would silently pass against a card that renders nothing. */
+async function expandCard(overview: RegExp | string): Promise<HTMLElement> {
+  const head = (await screen.findByText(overview)).closest('.day-card-head') as HTMLElement
+  await userEvent.click(head)
+  return head.closest('.day-card') as HTMLElement
+}
+
+/** The session row inside an expanded card whose text matches. The card's own
+ *  overview matches the same text (it is a PICK of one row's outcome), so
+ *  every row assertion has to say "the one inside an .entry-row" explicitly. */
+function rowWithin(card: HTMLElement, text: RegExp | string): HTMLElement {
+  const hit = within(card).getAllByText(text).find(el => el.closest('.entry-row'))
+  return hit!.closest('.entry-row') as HTMLElement
+}
+
+// The stat line is a LIST of parts, not a sentence, because the owner asked
+// for a prompt count here and no daemon field carries one yet. When it lands
+// it is one more part; these cases are what says the shape already allows it.
+describe('dayCardStats', () => {
+  it('says how many sessions the day holds', () => {
+    expect(dayCardStats({ sessionCount: 3 })).toEqual(['3 sessions'])
+  })
+  it('does not say "1 sessions"', () => {
+    expect(dayCardStats({ sessionCount: 1 })).toEqual(['1 session'])
+  })
+})
+
 describe('FeedPage', () => {
   it('renders each entry with its outcome, intent, and the project name in mono', async () => {
     renderApp({}, <FeedPage />)
-    const outcome = await screen.findByText(/Hook ownership now decided by durability/)
-    const row = outcome.closest('.entry-row') as HTMLElement
+    const card = await expandCard(/Hook ownership now decided by durability/)
+    const row = rowWithin(card, /Hook ownership now decided by durability/)
     const projectLabel = within(row).getByText('membridge')
     expect(projectLabel.className).toContain('mono')
     expect(within(row).getByText(/make the summary hook fire on session boundaries/)).toBeInTheDocument()
@@ -85,14 +117,13 @@ describe('FeedPage', () => {
 
   // Task 6: a feed row with a session is a real <a> to the session route --
   // middle-click and cmd-click must work, so it cannot be a click handler on
-  // a div.
+  // a div. The card that reveals it is a <button>, not a second anchor.
   it('a row with a session renders as a link to /sessions/:id built from ROUTES', async () => {
     renderApp({}, <FeedPage />)
-    const outcome = await screen.findByText(/Hook ownership now decided by durability/)
-    const row = outcome.closest('.entry-row')
-    expect(row).not.toBeNull()
-    expect(row!.tagName).toBe('A')
-    expect(row!.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-f2')}`)
+    const card = await expandCard(/Hook ownership now decided by durability/)
+    const row = rowWithin(card, /Hook ownership now decided by durability/)
+    expect(row.tagName).toBe('A')
+    expect(row.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-f2')}`)
   })
 
   // Fix 16: an infinite query refetches EVERY loaded page on window
@@ -180,10 +211,13 @@ describe('FeedPage', () => {
   })
 
   it('"Show more" pages backwards using the previous page\'s cursor, keeping the earlier page visible', async () => {
+    // Distinct days, so the two pages are two cards -- one card per person per
+    // project per day would otherwise fold both pages' single entries together
+    // and this would be asserting on the overview pick instead of on paging.
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'getFeed')
-      .mockResolvedValueOnce({ entries: [entry({ id: 'page1', outcome: 'first page entry' })], nextBefore: '2026-07-20T00:00:00Z' })
-      .mockResolvedValueOnce({ entries: [entry({ id: 'page2', outcome: 'second page entry' })], nextBefore: null })
+      .mockResolvedValueOnce({ entries: [entry({ id: 'page1', session: 'p1', outcome: 'first page entry' })], nextBefore: '2026-07-20T00:00:00Z' })
+      .mockResolvedValueOnce({ entries: [entry({ id: 'page2', session: 'p2', at: '2026-07-19T20:00:00Z', outcome: 'second page entry' })], nextBefore: null })
     renderWith(client, <FeedPage />)
 
     expect(await screen.findByText('first page entry')).toBeInTheDocument()
@@ -231,7 +265,12 @@ describe('FeedPage', () => {
     })
     renderWith(client, <FeedPage />)
 
-    expect(await screen.findAllByText('identical summary text')).toHaveLength(2)
+    // One card (one person, one project, one day), and inside it two rows --
+    // the card's own overview is the third match, which is the PICK, not a
+    // third session.
+    const card = await expandCard('identical summary text')
+    expect(within(card).getAllByText('identical summary text')).toHaveLength(3)
+    expect(card.querySelectorAll('.entry-row')).toHaveLength(2)
   })
 
   it('keeps the collapsed rows newest-first', async () => {
@@ -245,8 +284,132 @@ describe('FeedPage', () => {
     })
     renderWith(client, <FeedPage />)
 
-    const rows = await screen.findAllByText(/session outcome/)
+    const card = await expandCard('newer session outcome')
+    const rows = within(card).getAllByText(/session outcome/).filter(el => el.closest('.entry-row'))
     expect(rows.map(r => r.textContent)).toEqual(['newer session outcome', 'older session outcome'])
+  })
+})
+
+// The owner's ask: "there shouldnt be a bunch of sessions from marco just
+// today. it should be one singular one with the proper overview sentance."
+// These pin that at the real component; dayCards.test.ts pins the pure rules.
+describe('feed: consolidated day cards', () => {
+  const marcosDay = () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'm1', session: 's-m1', authorId: 'marco', author: 'Marco', at: '2026-07-29T20:00:00Z', outcome: 'a raw harvested line' }),
+        entry({ id: 'm2', session: 's-m2', authorId: 'marco', author: 'Marco', at: '2026-07-29T19:00:00Z', distilled: true, outcome: 'the day\'s distilled outcome' }),
+        entry({ id: 'm3', session: 's-m3', authorId: 'marco', author: 'Marco', at: '2026-07-29T18:00:00Z', outcome: 'another harvested line' }),
+      ],
+      nextBefore: null,
+    })
+    return c
+  }
+
+  it('folds one person\'s sessions in one project on one day into a single card', async () => {
+    const { container } = renderWith(marcosDay(), <FeedPage />)
+    await screen.findByText('the day\'s distilled outcome')
+    expect(container.querySelectorAll('.day-card')).toHaveLength(1)
+  })
+
+  it('leads with ONE picked overview sentence, not every session\'s summary', async () => {
+    renderWith(marcosDay(), <FeedPage />)
+    expect(await screen.findByText('the day\'s distilled outcome')).toBeInTheDocument()
+    expect(screen.queryByText('a raw harvested line')).toBeNull()
+    expect(screen.queryByText('another harvested line')).toBeNull()
+  })
+
+  it('states the session count', async () => {
+    renderWith(marcosDay(), <FeedPage />)
+    await screen.findByText('the day\'s distilled outcome')
+    expect(screen.getByText('3 sessions')).toBeInTheDocument()
+  })
+
+  it('is collapsed by default', async () => {
+    const { container } = renderWith(marcosDay(), <FeedPage />)
+    await screen.findByText('the day\'s distilled outcome')
+    expect(container.querySelector('.day-card-head')!.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelectorAll('.entry-row')).toHaveLength(0)
+  })
+
+  it('reveals the day\'s sessions on expand, each still linking to its session page', async () => {
+    const { container } = renderWith(marcosDay(), <FeedPage />)
+    const card = await expandCard('the day\'s distilled outcome')
+    expect(card.querySelectorAll('.entry-row')).toHaveLength(3)
+    const hrefs = [...container.querySelectorAll('.entry-row')].map(r => r.getAttribute('href'))
+    expect(hrefs).toEqual(['/sessions/s-m1', '/sessions/s-m2', '/sessions/s-m3'])
+  })
+
+  it('splits one person\'s day across the two projects they worked in', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'a', session: 'a', at: '2026-07-29T20:00:00Z', outcome: 'membridge work', project: 'membridge', projectPath: '/Users/x/membridge' }),
+        entry({ id: 'b', session: 'b', at: '2026-07-29T19:00:00Z', outcome: 'sublease work', project: 'sublease', projectPath: '/Users/x/sublease' }),
+      ],
+      nextBefore: null,
+    })
+    const { container } = renderWith(c, <FeedPage />)
+    await screen.findByText('membridge work')
+    expect(screen.getByText('sublease work')).toBeInTheDocument()
+    expect(container.querySelectorAll('.day-card')).toHaveLength(2)
+  })
+
+  it('orders cards by their newest entry, under one day divider', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'a', session: 'a', authorId: 'sarah', author: 'Sarah', at: '2026-07-29T17:00:00Z', outcome: 'the older card' }),
+        entry({ id: 'b', session: 'b', authorId: 'marco', author: 'Marco', at: '2026-07-29T19:00:00Z', outcome: 'the newer card' }),
+      ],
+      nextBefore: null,
+    })
+    const { container } = renderWith(c, <FeedPage />)
+    await screen.findByText('the newer card')
+    const overviews = [...container.querySelectorAll('.day-card-overview')].map(el => el.textContent)
+    expect(overviews).toEqual(['the newer card', 'the older card'])
+    expect(container.querySelectorAll('.feed-day')).toHaveLength(1)
+  })
+
+  it('is live when any of its sessions is, without claiming the person is present', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'a', session: 'a', at: '2026-07-29T20:00:00Z', live: false, outcome: 'the overview' }),
+        entry({ id: 'b', session: 'b', at: '2026-07-29T19:00:00Z', live: true, outcome: 'older' }),
+      ],
+      nextBefore: null,
+    })
+    const { container } = renderWith(c, <FeedPage />)
+    await screen.findByText('the overview')
+    const meta = container.querySelector('.day-card-meta') as HTMLElement
+    expect(within(meta).getByLabelText('Live')).toBeInTheDocument()
+    expect(meta.textContent).toBe('live ')
+  })
+
+  // The trap: EntryRow renders an empty outcome and a failed decrypt
+  // identically ("No summary yet"), so a reader cannot tell them apart. A day
+  // card must not inherit that ambiguity.
+  it('says an un-summarized day is un-summarized', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [entry({ id: 'a', session: 'a', outcome: '', intent: 'wire the recall hook' })],
+      nextBefore: null,
+    })
+    renderWith(c, <FeedPage />)
+    expect(await screen.findByText(NO_SUMMARY_OVERVIEW)).toBeInTheDocument()
+  })
+
+  it('says an ENCRYPTED day is encrypted, never passing it off as un-summarized', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [entry({ id: 'a', session: 'a', outcome: '', undecryptable: true })],
+      nextBefore: null,
+    })
+    renderWith(c, <FeedPage />)
+    expect(await screen.findByText(OPAQUE_OVERVIEW)).toBeInTheDocument()
+    expect(screen.queryByText(NO_SUMMARY_OVERVIEW)).toBeNull()
   })
 })
 
@@ -265,10 +428,14 @@ describe('feed: a session targeted by ?session=', () => {
     return c
   }
 
-  it('marks the matching row, and only that row', async () => {
+  // Day cards are collapsed by default, so the card HOLDING the target has to
+  // open itself -- otherwise the row every Today card links at is unreachable
+  // and the link may as well not exist.
+  it('opens the card holding the target, and marks the matching row only', async () => {
     window.history.replaceState({}, '', '/feed?session=sess-a')
     const { container } = renderWith(client(), <FeedPage />)
-    await screen.findByText('the targeted work')
+    await screen.findAllByText('the targeted work')
+    expect(container.querySelector('.day-card-head')!.getAttribute('aria-expanded')).toBe('true')
     const targeted = container.querySelectorAll('.entry-row-targeted')
     expect(targeted).toHaveLength(1)
     expect(targeted[0].textContent).toContain('the targeted work')
@@ -281,6 +448,7 @@ describe('feed: a session targeted by ?session=', () => {
     window.history.replaceState({}, '', '/feed?session=sess-not-loaded')
     const { container } = renderWith(client(), <FeedPage />)
     await screen.findByText('the targeted work')
+    expect(container.querySelector('.day-card-head')!.getAttribute('aria-expanded')).toBe('false')
     expect(container.querySelectorAll('.entry-row-targeted')).toHaveLength(0)
   })
 

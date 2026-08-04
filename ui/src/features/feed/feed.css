@@ -52,6 +52,122 @@
   border-bottom: 1px solid var(--line);
 }
 
+/* Day card: one person's work in one project on one local day. The header is
+ * a <button> (it toggles in place and navigates nowhere), so every default
+ * control style has to be reset back to the row idiom: the card must read as
+ * part of the same stream as the EntryRows it expands into, not as a form
+ * control sitting in one. Grid mirrors .entry-row's three columns (avatar /
+ * who / meta) on purpose, so a collapsed card and an expanded row share one
+ * left edge instead of stepping in and out by a few pixels. */
+.day-card {
+  border-bottom: 1px solid var(--line);
+}
+.day-card-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  column-gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  align-items: start;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.day-card-head:hover {
+  background: var(--panel2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .day-card-head { transition: background-color var(--dur-fast) var(--ease-out); }
+  .day-card { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+.day-card-avatar-cell {
+  display: flex;
+  align-items: center;
+}
+.day-card-who-cell {
+  min-width: 0;
+}
+.day-card-who {
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+.day-card-sub {
+  margin-left: 6px;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.day-card-meta {
+  padding-top: 2px;
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.day-card-meta .live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 3px;
+  border-radius: var(--r-sm);
+  background: var(--green);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .day-card-meta .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+}
+/* The overview sentence: the card's whole reason to exist, so it gets the
+ * row's reading size and spans to the stat line rather than stopping at the
+ * meta column. */
+.day-card-overview {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+}
+/* Un-summarized: muted, like an EntryRow's own empty state. */
+.day-card-overview-empty {
+  color: var(--text3);
+}
+/* Could not be decrypted. Deliberately NOT the same muted grey as the line
+ * above: those two states render identically on an EntryRow ("No summary
+ * yet"), and a reader has no way to tell a quiet day from a broken key. This
+ * is a condition to act on, not an absence to ignore. */
+.day-card-overview-opaque {
+  color: var(--amber);
+  font-style: italic;
+}
+/* Bottom-right stat line. Grid-placed in the meta column under the live
+ * indicator so it stays put when the overview wraps to two lines. */
+.day-card-stats {
+  grid-column: 4;
+  grid-row: 2;
+  justify-self: end;
+  align-self: end;
+  color: var(--text3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.day-card-chevron {
+  grid-column: 4;
+  grid-row: 1;
+  justify-self: end;
+  color: var(--text3);
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+/* Expanded: the day's sessions, indented under their card so the nesting is
+ * visible without a second border colour. */
+.day-card-sessions {
+  border-top: 1px solid var(--line);
+  background: var(--panel2);
+}
+.day-card-sessions .entry-row:last-child {
+  border-bottom: 0;
+}
+
 .feed-empty-note {
   margin: 0;
   padding: var(--sp-5) var(--sp-4) var(--sp-6);

@@ -114,6 +114,22 @@ export interface StreamEntry {
   // rare session-less row (bare plumbing); such a row is never merged with
   // anything, including another session-less row.
   session: string | null
+  // The daemon's own two markers about WHY this row's text is what it is
+  // (lib/feed.js normalizeLocal/normalizeTeam ship both on every entry).
+  // Optional, so a caller that builds a StreamEntry by hand -- and every
+  // existing fixture -- keeps compiling; absence is read as false everywhere.
+  //
+  // `distilled`: a real summarizing pass ran, as opposed to a harvested line.
+  // Already the gate mappers.ts's hasSummary uses; carried here so a consumer
+  // can prefer a distilled row without re-deriving that judgement.
+  //
+  // `undecryptable`: fail-closed E2E -- this client held ciphertext it could
+  // not read, so `outcome` is empty ON PURPOSE (lib/feed.js:136). Without this
+  // field an unreadable row and a genuinely un-summarized one are byte
+  // identical to the UI, and both render the same "No summary yet". They are
+  // different facts and must stay tellable apart.
+  distilled?: boolean
+  undecryptable?: boolean
 }
 
 // The Feed screen's entries are the same StreamEntry shape plus the project

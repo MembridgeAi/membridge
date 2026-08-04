@@ -373,6 +373,14 @@
 .entry-row-outcome-empty {
   color: var(--text3);
 }
+/* Could not be decrypted (EntryRow's UNDECRYPTABLE_NOTE). Deliberately NOT the
+   same muted grey as the line above: these two states used to render
+   identically, and one of them is a condition to act on -- a rotated key or a
+   lapsed login -- not an absence to scroll past. */
+.entry-row-outcome-opaque {
+  color: var(--amber);
+  font-style: italic;
+}
 /* Task 6: a row with a session is a real <a> (middle/cmd-click must work).
  * Same grid, same height -- the link resets are the only differences, plus
  * position: relative so the affordance and the hover preview can anchor
