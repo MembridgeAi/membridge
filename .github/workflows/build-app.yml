@@ -100,6 +100,42 @@ jobs:
       - name: Delete the App Store Connect API key
         if: always()
         run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+      # Notarizing leaves the ticket on Apple's servers. Gatekeeper fetches it
+      # over the network the first time the app runs, so an offline or proxied
+      # machine shows the "cannot be opened" panel for a build that IS properly
+      # notarized. Stapling writes the ticket into the artifact itself.
+      #
+      # electron-builder staples the .app it notarized, but the dmg is a
+      # separate container built around that app and carries no ticket of its
+      # own unless it is stapled here. The dmg is the download membridge.app
+      # links, so it is the one users actually meet.
+      #
+      # v0.1.2 shipped stapled, v0.2.4 did not, and every check stayed green
+      # because nothing looked. `stapler validate` is the gate that fixes that:
+      # it runs under `set -e` and takes the build down rather than warning,
+      # because a warning is what a missing staple already looked like.
+      #
+      # Runs AFTER the key is deleted on purpose: stapling needs the network to
+      # fetch the ticket, never the signing credentials, so the key has no
+      # reason to still be on the runner at this point.
+      - name: Staple the notarization ticket and prove it stuck
+        if: env.MB_CAN_NOTARIZE == 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(dist/*.dmg)
+          # An empty glob here means packaging changed shape, not that there is
+          # nothing to do. Failing loudly beats silently stapling nothing,
+          # which is indistinguishable from the bug this step exists to close.
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "no dmg found in dist/ to staple; packaging must have changed" >&2
+            exit 1
+          fi
+          for f in "${dmgs[@]}"; do
+            echo "stapling $f"
+            xcrun stapler staple "$f"
+            xcrun stapler validate "$f"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: membridge-mac

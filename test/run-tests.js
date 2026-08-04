@@ -14936,6 +14936,30 @@ async function main() {
       + `nested npm ci will inherit omit=dev and the UI build will fail: ${JSON.stringify(offenders)}`);
   });
 
+  check('workflows: a notarized mac build staples the ticket and proves it stuck', () => {
+    // Notarizing leaves the ticket on Apple's servers. Gatekeeper then fetches
+    // it over the network the first time the app runs, so a machine that is
+    // offline or behind a filtering proxy shows the "cannot be opened" panel
+    // for a build that is genuinely, correctly notarized. Stapling writes the
+    // ticket INTO the artifact, which is what makes it work with no network.
+    //
+    // v0.1.2 shipped with a staple and v0.2.4 shipped without one, and no step
+    // anywhere failed, because nothing in the pipeline ever looked. That is the
+    // real defect: a missing staple is invisible to every green check we had.
+    // `stapler validate` is the gate that makes it visible, so this asserts on
+    // BOTH verbs. Stapling without validating would regress just as silently.
+    //
+    // Source-level on purpose, like the ui/ deps check above: the failure mode
+    // is a workflow that quietly stops doing something, and nothing in this
+    // suite ever runs a real signing pipeline.
+    const src = read(path.join(__dirname, '..', '.github', 'workflows', 'build-app.yml'));
+    assert.ok(/notariz/i.test(src), 'guard: build-app.yml no longer mentions notarization at all');
+    assert.ok(/xcrun stapler staple/.test(src),
+      'the notarized dmg is never stapled, so Gatekeeper has to phone Apple on first launch');
+    assert.ok(/xcrun stapler validate/.test(src),
+      'nothing proves the staple stuck, which is exactly how 0.2.4 shipped without one');
+  });
+
   check('corpus invariant: the hook, the MCP tools and /api/search share ONE assembly and ONE scorer', () => {
       // lib/activity.js was extracted out of lib/mcp.js TWICE, independently:
       // once on master (78 lines, for the PreToolUse search hook) and once on
