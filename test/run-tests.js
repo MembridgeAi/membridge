@@ -4164,6 +4164,49 @@ async function main() {
       assert.strictEqual(sess.teamEntries.length, 3, 'state array was truncated');
     });
 
+    // Elision counts: a capped view must say it is capped (beads' `bd prime`
+    // pattern — silently truncated context reads as "this is everything").
+    // Order-sensitive: the "stays plain" check must run BEFORE the archive
+    // fixture below exists, because a 40-row archive makes every later render
+    // of trimProj elide.
+    check('elision: teammate header counts the whole backlog, not just the slice', () => {
+      const md = mdOf({});
+      assert.ok(md.includes("Teammates' AI activity (MemBridge team sync — showing the freshest 8 of 12 shared entries"), md);
+      const md3 = mdOf({ teamInjectMax: 3 });
+      assert.ok(md3.includes('showing the freshest 3 of 12 shared entries'), md3);
+    });
+
+    check('elision: teammate header stays plain when nothing is hidden', () => {
+      const mdAll = mdOf({ teamInjectMax: 12, teamMaxAgeHours: 24000 });
+      assert.ok(mdAll.includes("Teammates' AI activity (MemBridge team sync):"), mdAll);
+      assert.ok(!mdAll.includes('showing the freshest'), mdAll);
+    });
+
+    check('elision: archive row count beats the cache count when larger', () => {
+      fs.mkdirSync(path.join(trimProj, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(trimProj, '.membridge', 'team.json'),
+        JSON.stringify({ projectId: 'elision-uuid', teamId: 't' }));
+      fs.mkdirSync(path.join(process.env.MEMBRIDGE_HOME, 'team-archive'), { recursive: true });
+      fs.writeFileSync(path.join(process.env.MEMBRIDGE_HOME, 'team-archive', 'elision-uuid.meta.json'),
+        JSON.stringify({ version: 1, projectId: 'elision-uuid', backfill: { done: true, beforeId: null, stopped: null }, rowCount: 40 }));
+      assert.ok(mdOf({}).includes('showing the freshest 8 of 40 shared entries'), mdOf({}));
+    });
+
+    check('elision: session header counts elided sessions and stays plain when nothing is hidden', () => {
+      const sp2 = path.join(ROOT, 'projects', 'elision-sessions');
+      fs.mkdirSync(sp2, { recursive: true });
+      const evs = [];
+      for (let i = 1; i <= 7; i++) {
+        evs.push({ kind: 'prompt', session: `s${i}`, source: 'Claude Code', ts: tsAgo(800 - i * 20), text: `elision ask ${i}` });
+        evs.push({ kind: 'edit', session: `s${i}`, source: 'Claude Code', ts: tsAgo(799 - i * 20), file: path.join(sp2, 'a.js') });
+      }
+      const md = digest.renderBlock(sp2, { events: evs }, { ...cfgBase, maxSessions: 2 }, 'CLAUDE.md');
+      assert.ok(md.includes('Recent asks across tools (showing the last 2 of 7 sessions'), md);
+      const mdAll = digest.renderBlock(sp2, { events: evs }, { ...cfgBase, maxSessions: 10 }, 'CLAUDE.md');
+      assert.ok(mdAll.includes('Recent asks across tools:'), mdAll);
+      assert.ok(!mdAll.includes('showing the last'), mdAll);
+    });
+
     // Back to Marco: his next pass pulls Andrew's Codex ask.
     process.env.MEMBRIDGE_HOME = HOME_A;
     const rA2 = await teamsync.syncTeams();
@@ -23004,6 +23047,91 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(bad.status, 0, bad.stderr);
       assert.strictEqual(bad.stdout.trim(), '');
     });
+
+    // ---- prime: the context block, rendered fresh at session start ----
+    //
+    // The daemon writes the block into CLAUDE.md at project roots and linked
+    // worktrees, but only on its own ticks — a session that starts in a
+    // just-created worktree (this app's default) reads whatever block was
+    // last COMMITTED there, which can be days stale or another project's.
+    // lib/hooks-prime.js closes that race: it rides the same SessionStart
+    // hook and injects a fresh render, deduped against every CLAUDE.md the
+    // session's cwd can see so a healthy root session pays nothing extra.
+    {
+      const hooksPrime = require('../lib/hooks-prime');
+      const tsAgoP = sec => new Date(Date.now() - sec * 1000).toISOString();
+      const pp = path.join(ROOT, 'projects', 'prime-proj');
+      fs.mkdirSync(pp, { recursive: true });
+      const primeEvents = [
+        { kind: 'prompt', session: 'pr1', source: 'Claude Code', ts: tsAgoP(50), text: 'Prime the pump' },
+        { kind: 'edit', session: 'pr1', source: 'Claude Code', ts: tsAgoP(49), file: path.join(pp, 'lib', 'x.js') },
+      ];
+      {
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [pp]: { events: primeEvents } } });
+      }
+      const prime = extra => hooksPrime.buildPrimeOutput({
+        projectPath: pp, cwd: pp, source: 'startup', config: util.getConfig(), ...extra,
+      });
+
+      check('prime: renders the block fresh when no CLAUDE.md carries it', () => {
+        const out = prime();
+        assert.ok(out && out.text.includes('## Shared AI memory (MemBridge)'), out && out.text);
+        assert.ok(out.text.includes('Prime the pump'), out.text);
+        assert.ok(!out.text.includes(digest.BEGIN), 'markers are for files, not injected context');
+        assert.ok(/supersedes/.test(out.text), 'missing the supersede preface');
+      });
+
+      check('prime: a stale on-disk block still injects; the exact current one silences it', () => {
+        const staleBlock = digest.renderBlock(pp, { events: primeEvents.slice(0, 1) }, util.getConfig(), 'CLAUDE.md');
+        fs.writeFileSync(path.join(pp, 'CLAUDE.md'), staleBlock + '\n');
+        assert.ok(prime(), 'a stale block must not suppress the fresh render');
+        const freshBlock = digest.renderBlock(pp, util.loadState().projects[pp], util.getConfig(), 'CLAUDE.md');
+        fs.writeFileSync(path.join(pp, 'CLAUDE.md'), freshBlock + '\n');
+        assert.strictEqual(prime(), null, 'an identical on-disk block must suppress the injection');
+      });
+
+      check('prime: the dedupe sees ancestor CLAUDE.md files (worktree layout)', () => {
+        const wt = path.join(pp, '.claude', 'worktrees', 'wt1');
+        fs.mkdirSync(wt, { recursive: true });
+        assert.strictEqual(prime({ cwd: wt }), null, 'fresh block at the project root should silence a nested session');
+        fs.unlinkSync(path.join(pp, 'CLAUDE.md'));
+        const staleBlock = digest.renderBlock(pp, { events: primeEvents.slice(0, 1) }, util.getConfig(), 'CLAUDE.md');
+        fs.writeFileSync(path.join(wt, 'CLAUDE.md'), staleBlock + '\n');
+        assert.ok(prime({ cwd: wt }), 'a stale worktree checkout must get the fresh block');
+      });
+
+      check('prime: silent on resume, paused projects, and projects with nothing to say', () => {
+        assert.strictEqual(prime({ source: 'resume' }), null);
+        fs.writeFileSync(path.join(pp, '.membridge-off'), '');
+        try {
+          assert.strictEqual(prime(), null, 'a paused project must stay silent');
+        } finally {
+          fs.unlinkSync(path.join(pp, '.membridge-off'));
+        }
+        const empty = path.join(ROOT, 'projects', 'prime-empty');
+        fs.mkdirSync(empty, { recursive: true });
+        const st = util.loadState();
+        util.saveState({ ...st, projects: { ...(st.projects || {}), [empty]: { events: [] } } });
+        assert.strictEqual(hooksPrime.buildPrimeOutput({
+          projectPath: empty, cwd: empty, source: 'startup', config: util.getConfig(),
+        }), null, 'an empty project has nothing worth a session-start injection');
+      });
+
+      check('prime: rides the notes-session-start entry point in one envelope, block first', () => {
+        fs.writeFileSync(path.join(pp, 'CLAUDE.md'), '# my file\n');
+        notesStore.write(pp, notes.buildIndex(
+          [{ author_name: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'prime-and-notes', gotchas: '' }],
+          null, new Date().toISOString()));
+        const r = runNotesEntry('notes-session-start', startPayload('sess-prime-1', pp));
+        assert.strictEqual(r.status, 0, r.stderr);
+        const hso = JSON.parse(r.stdout).hookSpecificOutput;
+        assert.ok(hso.additionalContext.includes('## Shared AI memory (MemBridge)'), r.stdout);
+        assert.ok(hso.additionalContext.includes('prime-and-notes'), r.stdout);
+        assert.ok(hso.additionalContext.indexOf('Shared AI memory') < hso.additionalContext.indexOf('prime-and-notes'),
+          'the block should come before the notes');
+      });
+    }
   }
 
   // ---- teammate notes: token accounting (spec §9) ----
