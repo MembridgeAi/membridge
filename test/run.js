@@ -51,7 +51,13 @@ function discover() {
   const suites = [];
   if (fs.existsSync(SUITE_DIR)) {
     for (const f of fs.readdirSync(SUITE_DIR).sort()) {
-      if (f.endsWith('.test.js')) suites.push({ name: f.replace(/\.test\.js$/, ''), file: path.join(SUITE_DIR, f) });
+      if (!f.endsWith('.test.js')) continue;
+      const file = path.join(SUITE_DIR, f);
+      // A suite whose header carries "@serial" runs with nothing else going —
+      // for wall-clock perf assertions, which measure contention, not the
+      // code under test, when other suites share the CPU.
+      const serial = fs.readFileSync(file, 'utf8').slice(0, 2048).includes('@serial');
+      suites.push({ name: f.replace(/\.test\.js$/, ''), file, serial });
     }
   }
   suites.push(LEGACY);
@@ -97,16 +103,23 @@ async function main() {
     process.exit(1);
   }
 
-  // Small suites run together first; the legacy core runs after, alone. Core
-  // dominates wall-clock anyway, and a few suites carry real performance
-  // assertions (e.g. "renders under 200ms") that flake when they have to
-  // compete with core for CPU — observed live on a loaded machine.
+  // Three phases: parallel small suites, then @serial suites one at a time,
+  // then the legacy core alone. Serial suites carry wall-clock perf
+  // assertions that measure contention instead of the code under test when
+  // anything else shares the CPU (observed live: redaction's 200-event render
+  // at 2.5x its budget with six suites in flight, comfortably green alone).
+  // Core runs last for the same reason, and it dominates wall-clock anyway.
   const blocks = freeBlocks();
-  const small = picked.filter(s => s.name !== 'core');
-  const results = await Promise.all(small.map(s => {
+  const parallel = picked.filter(s => s.name !== 'core' && !s.serial);
+  const serial = picked.filter(s => s.name !== 'core' && s.serial);
+  const results = await Promise.all(parallel.map(s => {
     const { value: portBase } = blocks.next();
     return runSuite(s, portBase);
   }));
+  for (const s of serial) {
+    const { value: portBase } = blocks.next();
+    results.push(await runSuite(s, portBase));
+  }
   if (picked.some(s => s.name === 'core')) {
     const { value: portBase } = blocks.next();
     results.push(await runSuite(LEGACY, portBase));

@@ -1,0 +1,30 @@
+# The hosted invite-redemption page, served at join.membridge.me.
+#
+# This file exists because the project had no deploy config at all: the folder
+# was just `public/`, and how to publish it lived in whoever's memory had done
+# it last. Every other piece of this stack (counters-worker, ops-api) carries
+# its own wrangler.toml; this one did not, so a page that only changes when
+# invites break was also the one nobody could confidently ship.
+#
+#   npx wrangler pages deploy --branch main
+#
+# Run it from THIS directory. `pages_build_output_dir` points at public/, so
+# the command needs no --project-name and no path argument -- both were the
+# parts worth getting wrong. A mistyped --project-name does not fail: Pages
+# CREATES a project under that name and publishes to a .pages.dev nobody
+# visits, while join.membridge.me quietly keeps serving the old page.
+#
+# There is NO Git connection on this project (confirmed in the dashboard), so
+# nothing publishes on push. Landing a change on master and deploying it are
+# two separate acts, deliberately: the page's copy references controls in the
+# desktop app, so it must not go out ahead of the app build that has them.
+name = "membridge-join"
+pages_build_output_dir = "public"
+compatibility_date = "2026-07-01"
+
+# On the `membridge-join.pages.dev` hostname every Pages project gets and
+# cannot delete: unlike the ops panel (cloudflare/README.md §5, where it is a
+# real back door around Access), this page is meant to be public. It is
+# noindex, it does nothing without a valid invite token in the fragment, and
+# every action behind it is authenticated and RLS-checked. Left open on
+# purpose rather than overlooked.
