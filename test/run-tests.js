@@ -13717,31 +13717,74 @@ async function main() {
       const mcpSrc = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
       const serverSrc = readSource(path.join(__dirname, '..', 'lib', 'server.js'));
 
-      // ONE entry assembly. The hook calls projectEntries directly; allActivity
-      // must call it too rather than repeating memorydb.buildEntries +
-      // feed.normalizeLocal in its own loop, which is exactly what the branch
-      // version did.
+      // ONE entry assembly. The hook calls projectEntries directly; the
+      // whole-machine read must reach it too rather than repeating
+      // memorydb.buildEntries + feed.normalizeLocal in its own loop, which is
+      // exactly what the branch version did.
+      //
+      // The chain gained a link when search moved onto the FTS5 index
+      // (lib/search-index.js): allActivity -> projectCorpus -> projectEntries.
+      // projectCorpus exists so the index can refill ONE project through the
+      // same assembly the whole-machine read uses, so it is asserted as part
+      // of the chain rather than treated as an escape from it.
       assert.ok(/activity\.projectEntries\(/.test(hookSrc),
         'the search hook no longer builds entries through projectEntries');
       assert.ok(/module\.exports[\s\S]*projectEntries/.test(activitySrc),
         'lib/activity.js stopped exporting projectEntries, which the hook needs');
+      const projectCorpusBody = activitySrc.slice(
+        activitySrc.indexOf('function projectCorpus'),
+        activitySrc.indexOf('function allActivity'));
       const allActivityBody = activitySrc.slice(
         activitySrc.indexOf('function allActivity'),
-        activitySrc.indexOf('function deriveDeferred'));
-      assert.ok(allActivityBody.includes('projectEntries('),
-        'allActivity no longer delegates to projectEntries');
-      assert.ok(!/buildEntries\(/.test(allActivityBody),
-        'allActivity re-inlined the per-project assembly instead of calling projectEntries; '
-        + 'that is the split this module exists to prevent');
+        activitySrc.indexOf('function projectSearchFingerprint'));
+      assert.ok(projectCorpusBody.includes('projectEntries('),
+        'projectCorpus no longer delegates to projectEntries');
+      assert.ok(allActivityBody.includes('projectCorpus('),
+        'allActivity no longer delegates to projectCorpus');
+      for (const [name, body] of [['projectCorpus', projectCorpusBody], ['allActivity', allActivityBody]]) {
+        assert.ok(!/buildEntries\(/.test(body),
+          `${name} re-inlined the per-project assembly instead of delegating; `
+          + 'that is the split this module exists to prevent');
+      }
+      // The index must be refilled through that same assembly. Reading rows
+      // straight out of state.json here would rebuild the second corpus this
+      // whole check exists to prevent, only now persisted to disk.
+      const freshenBody = activitySrc.slice(
+        activitySrc.indexOf('function freshenIndex'),
+        activitySrc.indexOf('function revokedProjects'));
+      assert.ok(freshenBody.includes('projectCorpus('),
+        'freshenIndex fills the search index from something other than the shared assembly');
 
-      // ONE scorer. rankWithFallback holds the strict-then-relaxed policy, so
-      // "no results" means the same thing on every surface. A direct
-      // rankEntries call from a search surface silently opts out of it.
+      // ONE ranking. Both search surfaces now answer out of the same BM25
+      // index, which is the strongest form this invariant has taken: they no
+      // longer merely share a scorer, they share the stored ranking itself.
       for (const [name, src] of [['lib/activity.js', activitySrc], ['lib/hooks-search.js', hookSrc]]) {
-        assert.ok(/rankWithFallback\(/.test(src), `${name} does not rank through rankWithFallback`);
+        assert.ok(/searchLib\.searchPasses\(/.test(src),
+          `${name} no longer takes its strict/relaxed passes from lib/search.js`);
+        assert.ok(/searchIndex\.search\(/.test(src),
+          `${name} stopped answering out of the shared BM25 index`);
         assert.ok(!/searchLib\.rankEntries\(/.test(src),
           `${name} calls rankEntries directly, bypassing the shared strict/relaxed policy`);
+        assert.ok(!/buildMatch\(/.test(src),
+          `${name} hand-builds an FTS5 MATCH instead of going through searchPasses`);
       }
+      // The hook keeps the in-memory scorer as a FALLBACK only — a machine
+      // whose daemon has never run has no index, and a hook that answered
+      // nothing there would be a silent regression from what shipped before.
+      assert.ok(/rankWithFallback\(/.test(hookSrc),
+        'lib/hooks-search.js dropped its in-memory fallback; an unindexed project now serves nothing');
+      // ...and it must stay READ-ONLY. It is spawned per Grep under a hard
+      // timeout; writing here would add a per-tool-call writer to a database
+      // the daemon is already maintaining, and make one Grep pay to re-index
+      // a 50,000-row archive.
+      for (const writer of ['replaceAll(', 'replaceProject(', 'freshenIndex(', 'freshenProject(']) {
+        assert.ok(!hookSrc.includes(`searchIndex.${writer}`) && !hookSrc.includes(`activity.${writer}`),
+          `lib/hooks-search.js writes to the search index (${writer}); the hook must only read`);
+      }
+      const searchSrc = readSource(path.join(__dirname, '..', 'lib', 'search.js'));
+      assert.ok(/function rankWithFallback/.test(searchSrc) && /function searchPasses/.test(searchSrc),
+        'the two spellings of the strict/relaxed policy no longer live side by side in lib/search.js, '
+        + 'which is the only thing stopping them from drifting apart');
 
       // ONE search. Both the MCP tool and the dashboard endpoint delegate
       // rather than each assembling and ranking their own corpus.

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **Search runs on a real search engine now.** Memory is indexed into SQLite
+  FTS5 and ranked by BM25 instead of being scored by a hand-rolled scan over
+  every entry in memory. The reason to care is not mainly speed: BM25 weights
+  a word by how *rare* it is, and the old scorer had no notion of that at all —
+  a match on a word appearing in every entry counted exactly as much as a match
+  on a word appearing in one. Rare, specific terms now win, which is what you
+  wanted every time a search buried the good answer under noise.
+  End to end a search is roughly twice as fast on a hit and four times on a
+  miss against a 50,000-row archive; the query itself drops from ~450ms to
+  ~1ms, and what remains is other work around it. The first search after an
+  upgrade is slower, once, while the index builds. Deleting the index
+  (`~/.membridge/search.db`) is always safe — it rebuilds itself.
+- **Requires Node 22 or newer.** The index uses the SQLite support built into
+  modern Node, so there is no new dependency to install. Node 18 and 20 both
+  reached end of life earlier this year. The desktop app is unaffected — it
+  ships its own runtime.
+
 ## 0.2.6 — 2026-08-04
 
 An invite you send now works. Every step of accepting one was broken in a

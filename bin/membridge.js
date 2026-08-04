@@ -36,6 +36,7 @@ const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
 const hooks = require('../lib/hooks');
 const counters = require('../lib/counters');
+const activity = require('../lib/activity');
 const notes = require('../lib/teammate-notes');
 const notesStore = require('../lib/teammate-notes-store');
 const prompts = require('../lib/prompts');
@@ -169,6 +170,13 @@ function cmdDaemon() {
       if (r.changes.length) {
         util.log(`sync: ${r.newEvents} new event(s) -> ${r.changes.map(c => c.file).join('; ')}`);
       }
+      // Keep the BM25 search index current here, AFTER syncOnce has landed
+      // this round's events, so a search never has to refill it on the user's
+      // time. Cheap when nothing moved (one stat per project, no writes), and
+      // it swallows its own errors — a search-index problem must not stop
+      // memory from syncing.
+      const idx = activity.refreshSearchIndex();
+      if (idx && idx.refreshed) util.log(`search index: refreshed ${idx.refreshed} project(s)`);
       teamTick();
       countersTick();
     } catch (err) {
