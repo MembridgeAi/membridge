@@ -22,9 +22,18 @@ release regenerates and republishes `install.sh`.
    builds the download URL from it.)
 5. Publish `install.sh` so `https://membridge.app/install.sh` serves it: copy
    `scripts/install/install.sh` to the root of the `mmelika/membridge-site`
-   repo as `install.sh`, commit, and push (GitHub Pages serves it). The raw
-   fallback URL, which works without the site repo, is
+   repo as `install.sh`, commit, and push to `main` (GitHub Pages serves it;
+   `main`, not `master` — a push to `master` there creates an unserved branch
+   and looks like a successful deploy). The raw fallback URL, which works
+   without the site repo, is
    `https://raw.githubusercontent.com/MembridgeAi/membridge/master/scripts/install/install.sh`.
+
+   In the same commit, bump `"softwareVersion"` in the JSON-LD block of that
+   repo's `index.html` to the new version. It tracks the **public release**,
+   not master, and nothing verifies it against the installer pin — so it goes
+   stale silently and mis-reports the current version to search engines and AI
+   crawlers. Until this is republished, the site keeps installing and
+   advertising the previous release no matter what this repo says.
 6. Commit the regenerated `scripts/install/install.sh` in this repo.
 7. Smoke-test on a clean Apple Silicon machine:
    ```sh
