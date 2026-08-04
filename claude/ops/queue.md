@@ -103,6 +103,44 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
 
 ## Found 2026-08-03, not yet fixed
 
+- **A distilled summary's `ts` is written by the MODEL and trusted verbatim, so
+  every teammate reads as hours dead while actively working.** The Stop hook
+  asks the agent for `"ts":"<current UTC time, ISO-8601>"`; `lib/scan.js:517`
+  takes that field as-is and only falls back to `new Date()` when it is
+  absent. Models have no clock, so they estimate: the last six `ts` values in
+  this machine's own `.membridge/summaries.jsonl` were `03:05:00`, `03:05:00`,
+  `03:30:00`, `03:40:00`, `03:52:30`, `04:05:00` — all round numbers, newest 65
+  minutes behind real time.
+
+  Measured on the live backend (team `6ba3c572`): Andrew's rows were being
+  written continuously while stamped hours earlier — `created_at 05:03:59Z` /
+  `ts 00:04:48Z` (299m), `04:15:34Z` / `01:53:20Z` (142m), `04:07:34Z` /
+  `00:40:51Z` (207m) — across five distinct recent sessions, so not backfill.
+
+  Invisible to whoever has it: local sessions judge liveness from real
+  transcript events (`session-events`), only teammates are judged on the
+  written `ts` (`lib/feed.js:99` → `util.isLive`, 15-minute window). Everyone
+  sees their own work as live and each other's as dead.
+
+  Downstream, everything keys on it: the feed sorts on `ts`, and
+  `lib/api-insights.js` splits current/prior windows on `Date.parse(r.ts)`, so
+  activity is counted into the wrong window or dropped from both — which also
+  means the new exact counts (027) count into the wrong buckets.
+
+  Andrew called this on 2026-07-31 ("one bug, probably in the team pull") and
+  had the location wrong; the pull is fine. `liveBasis` (PR #13) names what the
+  flag rests on and is worth keeping, but it treats a symptom of this.
+
+  **Decision needed (Andrew owns the distiller contract):** stamp `ts` at
+  ingest from the daemon, which knows the real time when it reads the line, or
+  keep the model's value in a separate field and stop letting it drive ordering
+  and liveness. Cheap interim: clamp — reject future-dated, or anything older
+  than the file's own mtime.
+
+  **Blocks presence.** A heartbeat would show a teammate green while their
+  entries kept arriving misdated, leaving every historical figure wrong with a
+  live dot vouching for it.
+
 - **The MemBridge MCP cannot currently answer "what is Andrew doing live right
   now" from the data it exposes.** `get_recent_activity` is registered as
   "newest-first AI activity" and combines local sessions with cached teammate
