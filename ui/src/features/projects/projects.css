@@ -429,3 +429,84 @@
   font-size: 10.5px;
   border-top: 1px solid var(--line);
 }
+
+/* The add-project dialog's discovery list (AddProjectDialog): what GET
+ * /api/scan found on this machine, one checkbox per untracked folder. Lives
+ * inside the shared .dialog shell, so only the list itself is styled here.
+ * The list is height-capped and scrolls: a machine with forty projects must
+ * not push the dialog past the window it is centred in. */
+.discover-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.discover-count {
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.discover-select-all {
+  margin-left: auto;
+  padding: 3px 8px;
+}
+
+.discover-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.discover-row {
+  border-bottom: 1px solid var(--line);
+}
+.discover-row:last-child {
+  border-bottom: none;
+}
+.discover-label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.discover-label:hover {
+  background: var(--panel2);
+}
+.discover-label input {
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+.discover-name {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.discover-meta {
+  grid-column: 2;
+  color: var(--text3);
+  font-size: 10.5px;
+}
+.discover-path {
+  grid-column: 2;
+  color: var(--text3);
+  font-size: 10px;
+  /* A deep path must wrap inside the dialog, never widen it. */
+  overflow-wrap: anywhere;
+}
+
+/* Browse sits left of Cancel/Add: it is the alternate route in, not the
+ * primary action, and must never be the button muscle memory lands on. */
+.discover-actions {
+  align-items: center;
+}
+.discover-browse,
+.discover-note {
+  margin-right: auto;
+}
+.discover-note {
+  color: var(--text3);
+  font-size: 10.5px;
+}

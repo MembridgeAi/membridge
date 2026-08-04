@@ -21,10 +21,19 @@ describe('mapSettings', () => {
     const summaries = s.delivery.find(d => d.id === 'summaries')
     expect(summaries).toMatchObject({ installed: true, enabled: true })
   })
-  it('is solo-null for team even when a team row is passed, if status says solo', () => {
+  // Reversed deliberately. `solo` (teamsync.isSoloMachine) means "no LINKED
+  // PROJECT belongs to a multi-member team" -- it is not an answer to "are
+  // you on a team". Nulling the team on solo hid the Members/Insights nav and
+  // the Leave-team control from real members who had simply not linked a repo
+  // yet, and kept offering "Create a team" to an owner who had just created
+  // one.
+  it('keeps the team a real member is on, even while the machine still reads solo', () => {
     const soloStatus: Status = { ...status, solo: true }
     const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }
-    expect(mapSettings(raw, soloStatus, team).team).toBeNull()
+    expect(mapSettings(raw, soloStatus, team).team).toMatchObject({ id: 't1', name: 'Acme' })
+  })
+  it('is null only when there is genuinely no team', () => {
+    expect(mapSettings(raw, status, null).team).toBeNull()
   })
   it('surfaces the real team name, role, member count and invite code when not solo', () => {
     const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }

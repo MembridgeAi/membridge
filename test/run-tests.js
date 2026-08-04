@@ -26138,6 +26138,57 @@ const repoRoot = require('../lib/repo-root');
   // raw byte is harmful. Deliberately reads BYTES, not readSource() -- the
   // subject is the literal on-disk encoding, and a Buffer scan is immune to
   // the CRLF normalisation readSource exists for.
+  // Insights truncation. `fetchSince` pages team_feed BACKWARDS from newest,
+  // so the MAX_PAGES cap does not thin the result evenly -- it removes the
+  // oldest rows. insightsPayload fetches priorStart..now in ONE call and
+  // splits it, so the prior window (the baseline every delta is measured
+  // against) is what disappears first. Observed live on a real team: a 30d
+  // window fetched 2000 rows, every one of them inside the current window,
+  // prior therefore empty, and `entriesShared.delta` published "+2000" --
+  // explosive growth that was really just the fetch stopping early.
+  check('insights: a capped fetch reports truncated, so a starved baseline cannot publish a fake delta', async () => {
+    const teamsync = require('../lib/teamsync');
+    const { fetchSince, TEAM_FEED_PAGE, MAX_PAGES } = apiInsights;
+    const realTeamFeed = teamsync.teamFeed;
+    const row = (i, ts) => ({ id: `r${i}`, ts: new Date(ts).toISOString(), created_at: new Date(ts).toISOString() });
+    try {
+      // Endless backend: every page comes back full, so the loop can only
+      // ever stop by hitting the cap.
+      let served = 0;
+      const now = Date.now();
+      teamsync.teamFeed = async () => Array.from({ length: TEAM_FEED_PAGE },
+        () => row(served, now - (served++) * 1000));
+      const capped = await fetchSince({}, 't', new Date(0).toISOString());
+      assert.strictEqual(capped.truncated, true, 'a fetch that fills every page must report truncated');
+      assert.strictEqual(capped.rows.length, TEAM_FEED_PAGE * MAX_PAGES,
+        'a capped fetch stops at exactly MAX_PAGES * TEAM_FEED_PAGE rows');
+
+      // A backend with less than a full page left is complete, not capped.
+      let once = false;
+      teamsync.teamFeed = async () => (once ? [] : (once = true, [row(1, now)]));
+      const complete = await fetchSince({}, 't', new Date(0).toISOString());
+      assert.strictEqual(complete.truncated, false, 'a short page means the data ran out, not the cap');
+      assert.strictEqual(complete.rows.length, 1);
+    } finally {
+      teamsync.teamFeed = realTeamFeed;
+    }
+  });
+
+  // The silent-teammate copy quotes `lookbackDays` ("nothing has arrived in
+  // N days"). That number was windowDays * 2 unconditionally, which is only
+  // true when the fetch completed -- under truncation the rows reach back
+  // far less, so the sentence claimed a search that never ran and could
+  // accuse a teammate who was merely past the cap.
+  check('insights: oldestTs reports how far rows REALLY reach, which is what bounds the silent-teammate claim', () => {
+    const { oldestTs } = apiInsights;
+    const t = ms => new Date(ms).toISOString();
+    assert.strictEqual(oldestTs([]), null, 'an empty fetch has no floor to report');
+    assert.strictEqual(oldestTs([{ ts: t(5000) }, { ts: t(1000) }, { ts: t(3000) }]), 1000,
+      'the floor is the oldest row, whatever order the pages arrived in');
+    assert.strictEqual(oldestTs([{ ts: 'not-a-date' }, { ts: t(2000) }]), 2000,
+      'an unparseable ts is skipped rather than poisoning the floor with NaN');
+  });
+
   check('no committed source or doc carries a raw NUL byte (it makes grep skip the file as binary)', () => {
     const repo = path.join(__dirname, '..');
     // Hand-written source and docs only. vendor/, ui/dist and app/ are

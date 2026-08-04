@@ -14,6 +14,16 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     globals: true,
     passWithNoTests: true,
+    // Must stay comfortably ABOVE vitest.setup.ts's asyncUtilTimeout (5s),
+    // or a findBy* that is allowed to wait five seconds kills the test at
+    // five and reports a vitest timeout instead of Testing Library's much
+    // more useful "here is the DOM I actually saw". Neither limit slows a
+    // passing run -- both exit the moment the element appears -- they only
+    // decide how much scheduler starvation (a busy dev machine running the
+    // whole suite in parallel) is tolerated before a passing test is
+    // reported as a failure. This suite had a long tail of phantom
+    // "Unable to find <element>" failures that were exactly that.
+    testTimeout: 15_000,
     // Pin the suite's timezone. The UI renders every timestamp in the
     // VIEWER's local zone, so these assertions are only meaningful against a
     // known zone -- unpinned, the ambient TZ leaks into the workers and the

@@ -415,19 +415,37 @@ describe('LocalDaemonClient.getInsights', () => {
   })
 })
 
-// P0 Fix 2: getInvites used to REJECT with a developer-facing "no daemon
-// endpoint yet" message, which useInvites retried 3x on every Members mount
-// and then surfaced to the user. There is still no listing endpoint, so the
-// honest resolved value is an empty list -- no request, no rejection.
+// getInvites has a real listing endpoint now (GET /api/team/invites,
+// lib/api-access.js readInvites). It previously resolved [] unconditionally
+// because none existed -- which also made the revoke button, which only
+// appears on a listed row, permanently unreachable.
 describe('LocalDaemonClient.getInvites()', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('resolves [] without firing any request (no listing endpoint exists yet)', async () => {
-    const fetchMock = vi.fn()
+  function stubInvites(invites: unknown[]) {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ invites }) })
     vi.stubGlobal('fetch', fetchMock)
-    const client = new LocalDaemonClient()
-    await expect(client.getInvites()).resolves.toEqual([])
-    expect(fetchMock).not.toHaveBeenCalled()
+    return fetchMock
+  }
+
+  it('reads the listing endpoint', async () => {
+    const fetchMock = stubInvites([])
+    await new LocalDaemonClient().getInvites()
+    expect(fetchMock).toHaveBeenCalledWith('/api/team/invites', expect.anything())
+  })
+
+  it('drops revoked invites: the section lists what is still outstanding', async () => {
+    stubInvites([
+      { id: 'live', createdAt: '2026-07-28T09:00:00Z', expiresAt: null, maxUses: null, useCount: 0, revoked: false },
+      { id: 'dead', createdAt: '2026-07-27T09:00:00Z', expiresAt: null, maxUses: null, useCount: 1, revoked: true },
+    ])
+    const invites = await new LocalDaemonClient().getInvites()
+    expect(invites.map(i => i.id)).toEqual(['live'])
+  })
+
+  it('resolves [] rather than throwing when the daemon sends no invites key', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }))
+    await expect(new LocalDaemonClient().getInvites()).resolves.toEqual([])
   })
 })
 

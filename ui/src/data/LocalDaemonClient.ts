@@ -3,7 +3,7 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
   Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
@@ -41,6 +41,16 @@ interface RawTeamPayload {
   inviteCode?: string | null
   webUrl?: string | null
   error?: string | null
+}
+
+// GET /api/scan's per-project row, verbatim (lib/server.js scanPayload).
+interface RawScanProject {
+  path?: string
+  name?: string
+  tracked?: boolean
+  paused?: boolean
+  sessionCount?: number
+  bySource?: Record<string, number>
 }
 
 // The same payload after teamAccountPayload() has defaulted every field --
@@ -103,6 +113,17 @@ async function postReadingError<T>(pathAndQuery: string, body?: unknown): Promis
 // meaningfully stale data.
 const REQUEST_CACHE_TTL_MS = 5000
 
+// Where the chosen team is remembered between sessions.
+const SELECTED_TEAM_KEY = 'membridge.selectedTeam'
+
+function readStoredTeamId(): string | null {
+  try {
+    return window.localStorage.getItem(SELECTED_TEAM_KEY) || null
+  } catch {
+    return null // storage disabled: fall back to the daemon's first team
+  }
+}
+
 export class LocalDaemonClient implements DataClient {
   readonly capabilities: Capabilities = {
     daemonControl: true,
@@ -121,6 +142,11 @@ export class LocalDaemonClient implements DataClient {
   // still in flight (or finished less than REQUEST_CACHE_TTL_MS ago) gets the
   // same promise instead of firing again.
   private requestCache = new ShortTtlCache(REQUEST_CACHE_TTL_MS)
+
+  // Restored at construction so a switch survives a reload -- the app would
+  // otherwise snap back to teams[0] every time the window reopened, which
+  // reads as the switcher not working.
+  private teamId: string | null = readStoredTeamId()
 
   private feed(query = ''): Promise<{ entries: RawFeedEntry[] }> {
     return this.requestCache.get(`feed:${query}`, () => get<{ entries: RawFeedEntry[] }>(`/api/feed?limit=${FEED_LIMIT}${query}`))
@@ -159,13 +185,49 @@ export class LocalDaemonClient implements DataClient {
     })
   }
 
+  // The chosen team, or the first one. Selection is matched against the list
+  // the DAEMON returned rather than trusted: a stale id in localStorage (a
+  // team since left, or one belonging to a different account signed in on
+  // this machine) matches nothing and quietly falls back to first, instead of
+  // pinning the whole app to a team the viewer is no longer on.
   private async teamMeta(): Promise<{ team: RawTeamRow | null } & RawTeamMeta> {
     const data = await this.teamAccountPayload()
-    return { team: data.teams[0] || null, viewerId: data.viewerId, inviteCode: data.inviteCode, webUrl: data.webUrl }
+    const chosen = this.teamId ? data.teams.find(t => t.team_id === this.teamId) : undefined
+    return { team: chosen ?? data.teams[0] ?? null, viewerId: data.viewerId, inviteCode: data.inviteCode, webUrl: data.webUrl }
   }
 
   private async firstTeam(): Promise<RawTeamRow | null> {
     return (await this.teamMeta()).team
+  }
+
+  // Appended to the team-scoped GETs so the daemon answers about the same
+  // team the UI is showing (lib/api-access.js selectTeam). Omitted entirely
+  // when nothing is selected, which keeps those URLs -- and their cache keys
+  // -- byte-identical to what a single-team install always sent.
+  private teamParam(prefix: '?' | '&'): string {
+    return this.teamId ? `${prefix}teamId=${encodeURIComponent(this.teamId)}` : ''
+  }
+
+  selectedTeamId(): string | null {
+    return this.teamId
+  }
+
+  selectTeam(teamId: string | null): void {
+    if (this.teamId === teamId) return
+    this.teamId = teamId
+    // Every cached response was an answer about the OLD team. Not a
+    // deleteMatching on some prefix: the team a request was about is not in
+    // its URL for most of these (members, settings, status all derive it),
+    // so nothing short of the whole cache is safe to keep.
+    this.requestCache.clear()
+    try {
+      if (teamId) window.localStorage.setItem(SELECTED_TEAM_KEY, teamId)
+      else window.localStorage.removeItem(SELECTED_TEAM_KEY)
+    } catch {
+      // A browser with storage disabled still switches for this session; the
+      // choice just doesn't survive a reload. Silently losing persistence is
+      // acceptable here, silently losing the switch would not be.
+    }
   }
 
   async getTeamAccount(): Promise<TeamAccount> {
@@ -216,6 +278,34 @@ export class LocalDaemonClient implements DataClient {
   async signOut(): Promise<void> {
     await postReadingError<{ authenticated: boolean }>('/api/team/logout')
     this.requestCache.clear()
+  }
+
+  // postReadingError, not post: every reason a join fails is a sentence the
+  // backend already worded for a human ("this invite link has expired", "this
+  // invite link has been revoked"), and it is the only thing the user can act
+  // on. The generic post() would replace all of them with "404".
+  async joinTeam(codeOrLink: string): Promise<{ id: string; name: string }> {
+    const r = await postReadingError<{ team_id: string; team_name?: string | null }>(
+      '/api/team/join', { inviteCode: codeOrLink },
+    )
+    // Team membership just changed: every cached read (status, team, members)
+    // is now stale in a way the URL-keyed cache can't infer. Same clear
+    // leaveTeam does for the mirror-image event.
+    this.requestCache.clear()
+    return { id: r.team_id, name: r.team_name ?? '' }
+  }
+
+  async renameTeam(teamId: string, name: string): Promise<void> {
+    await postReadingError<{ name: string }>('/api/team/rename', { teamId, name })
+    // The name is on the cached /api/team read that the rail, Settings and the
+    // Team page all render from.
+    this.requestCache.clear()
+  }
+
+  async rotateInviteCode(teamId: string): Promise<string> {
+    const r = await postReadingError<{ inviteCode: string }>('/api/team/rotate-invite', { teamId })
+    this.requestCache.clear()
+    return String(r.inviteCode ?? '')
   }
 
   async createTeam(name: string): Promise<{ id: string; inviteCode: string | null }> {
@@ -379,7 +469,7 @@ export class LocalDaemonClient implements DataClient {
   // every field name matching AccessMatrix verbatim -- so, unlike
   // getProjectAccess above, there is nothing here to map or drop.
   getAccessMatrix(): Promise<AccessMatrix> {
-    return get<AccessMatrix>('/api/team/access-matrix')
+    return get<AccessMatrix>(`/api/team/access-matrix${this.teamParam('?')}`)
   }
 
   // projectCount and lastSharedAt used to come off ONE shared, newest-first
@@ -411,14 +501,17 @@ export class LocalDaemonClient implements DataClient {
     return membersRes.members.map((m, i) => mapMember(m, activity[i]))
   }
 
-  // The daemon can only mint a generic, role-less invite LINK (POST
-  // /api/team/invite) and cannot list the ones already issued -- there is no
-  // endpoint backing "show pending invites" today. Resolving [] (rather than
-  // rejecting with developer text the user then saw, retried 3x per Members
-  // mount) is the honest degraded answer until a listing endpoint lands:
-  // "no pending invites known", which for this daemon is always true.
-  getInvites(): Promise<Invite[]> {
-    return Promise.resolve([])
+  // GET /api/team/invites (lib/api-access.js readInvites). This used to
+  // resolve [] unconditionally because no listing endpoint existed, which
+  // meant an issued invite could never be reviewed and the revoke button --
+  // which only ever appears on a listed row -- was unreachable.
+  //
+  // Revoked rows are dropped here rather than rendered struck through: the
+  // section is "outstanding invites", and a revoked token is not one. They
+  // stay readable in the audit trail, which is where a history belongs.
+  async getInvites(): Promise<Invite[]> {
+    const r = await get<{ invites: Invite[] }>(`/api/team/invites${this.teamParam('?')}`)
+    return (r.invites ?? []).filter(i => !i.revoked)
   }
 
   // POST /api/team/invite (lib/teamsync.js createInvite) also returns
@@ -455,8 +548,19 @@ export class LocalDaemonClient implements DataClient {
   // this only unwraps.
   async getAudit(limit?: number): Promise<AuditEvent[]> {
     const query = limit === undefined ? '' : `?limit=${limit}`
-    const r = await get<{ events: AuditEvent[] }>(`/api/team/audit${query}`)
-    return r.events
+    const r = await get<{ events: (AuditEvent & { objectName?: string | null; targetName?: string | null })[] }>(
+      `/api/team/audit${query}${this.teamParam(query ? '&' : '?')}`,
+    )
+    // objectName/targetName are newer than the rest of the row: an older
+    // daemon omits them entirely, and `undefined` reaching the renderer would
+    // read as "the daemon said there is no name" instead of "this daemon
+    // cannot say". Normalized to null, which is what "none" means everywhere
+    // else in this file.
+    return (r.events ?? []).map(e => ({
+      ...e,
+      objectName: e.objectName ?? null,
+      targetName: e.targetName ?? null,
+    }))
   }
 
   // GET /api/team/insights (lib/api-insights.js insightsPayload, wired in
@@ -468,7 +572,7 @@ export class LocalDaemonClient implements DataClient {
   // pattern: computed entirely server-side by api-insights.js's assistsFrom,
   // no client-side counterpart the way skeleton has one for Today.
   getInsights(window: 7 | 30 | 90): Promise<Insights> {
-    return get<Insights>(`/api/team/insights?window=${window}`)
+    return get<Insights>(`/api/team/insights?window=${window}${this.teamParam('&')}`)
   }
 
   async getSkeletonStats(): Promise<SkeletonStats> {
@@ -539,8 +643,30 @@ export class LocalDaemonClient implements DataClient {
     this.requestCache.clear()
   }
 
-  async addProject(path: string): Promise<void> {
-    await post<{ path?: string; error?: string }>('/api/projects/add', { path })
+  // GET /api/scan (lib/server.js scanPayload). Tolerant at the boundary the
+  // same way every other raw payload is: a row with no path is dropped rather
+  // than rendered as a nameless checkbox that adopts nothing.
+  async discoverProjects(): Promise<DiscoveredProject[]> {
+    const payload = await get<{ projects?: RawScanProject[] }>('/api/scan')
+    return (payload.projects ?? [])
+      .map(raw => ({
+        path: String(raw.path ?? ''),
+        name: String(raw.name ?? '') || String(raw.path ?? '').split('/').filter(Boolean).pop() || '',
+        tracked: !!raw.tracked,
+        sessionCount: Number(raw.sessionCount ?? 0),
+        // bySource is { 'Claude Code': 12, Codex: 3 } -- the UI only ever
+        // names the tools, so the counts are dropped here rather than
+        // carried through the whole UI unused.
+        tools: Object.keys(raw.bySource ?? {}),
+      }))
+      .filter(p => p.path !== '')
+  }
+
+  // POST /api/projects/adopt. postReadingError, not post: the daemon answers
+  // 400 with { error } text ("paths required", "not a directory") that is the
+  // only actionable thing the user gets back.
+  adoptProjects(paths: string[]): Promise<AdoptResult> {
+    return postReadingError<AdoptResult>('/api/projects/adopt', { paths })
   }
 
   // Routed through the Electron bridge, never the daemon -- the daemon is a
