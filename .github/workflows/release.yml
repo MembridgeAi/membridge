@@ -57,5 +57,5 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      - run: node test/run-tests.js
+      - run: node test/run.js
       - run: npm publish --access public

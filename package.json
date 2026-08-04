@@ -31,7 +31,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/run-tests.js",
+    "test": "node test/run.js",
     "build:ui": "node scripts/build-ui.js",
     "prepack": "npm run build:ui",
     "prepublishOnly": "npm test",
