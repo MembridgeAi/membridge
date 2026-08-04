@@ -120,13 +120,32 @@ function exportCsv(insights: Insights): void {
   }, 0)
 }
 
-function LRow({ name, sub, value }: { name: string; sub?: string; value: string }) {
+/**
+ * A ruled list row in either of two shapes, chosen by which slot the caller
+ * fills.
+ *
+ * `value` is a SHORT metric ("268 sessions") and stays on the name's line,
+ * right-aligned in the nowrap `.lrow-value`. `reason` is a SENTENCE, and
+ * gets its own wrapping line beneath the name instead -- the same
+ * label+description shape SettingRow.tsx uses.
+ *
+ * The split exists because `.lrow-value` is `white-space: nowrap`, so a flex
+ * item there has an intrinsic minimum equal to its full text width. Putting
+ * the knowledge-concentration reason in that slot let one long sentence set
+ * the minimum width of the entire 340px right column and push the page to
+ * 1577px at a 1280px viewport (measured). Ellipsising it was not an option:
+ * the reason is the whole point of the row, so it has to wrap, not vanish.
+ */
+function LRow({ name, sub, value, reason }: { name: string; sub?: string; value?: string; reason?: string }) {
   return (
     <div className="lrow">
-      <span className="lrow-name">
-        {name} {sub && <span className="lrow-muted">{sub}</span>}
-      </span>
-      <span className="mono lrow-value">{value}</span>
+      <div className="lrow-label">
+        <span className="lrow-name">
+          {name} {sub && <span className="lrow-muted">{sub}</span>}
+        </span>
+        {reason && <div className="lrow-reason">{reason}</div>}
+      </div>
+      {value && <span className="mono lrow-value">{value}</span>}
     </div>
   )
 }
@@ -253,7 +272,7 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
             Knowledge concentration <span className="insights-hint">who is the only one who has touched a project</span>
           </div>
           {insights.concentration.map(c => (
-            <LRow key={c.projectName} name={c.projectName} value={`${c.onlyPerson} only · ${c.detail}`} />
+            <LRow key={c.projectName} name={c.projectName} reason={`${c.onlyPerson} only · ${c.detail}`} />
           ))}
           {insights.concentration.length > 0 && (
             <p className="insights-foot">

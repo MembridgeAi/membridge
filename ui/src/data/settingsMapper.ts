@@ -96,7 +96,18 @@ const MCP_DESCRIPTION = 'Lets any MCP-capable tool query team memory directly.'
 // bin/membridge.js's printMcpStatus so the dashboard and the CLI never
 // disagree about what "registered" means.
 function mcpChannel(mcp: RawMcpStatus | undefined): DeliveryChannel {
-  const base = { id: 'mcp' as const, label: MCP_LABEL, description: MCP_DESCRIPTION }
+  // The recorded rows ride along on every branch that has them, SEPARATE
+  // from the summary `detail`. `detail` names only the tools that succeeded,
+  // so on a machine where every tool was skipped it said nothing but
+  // "no AI tool picked it up" while the daemon was already reporting three
+  // specific causes, each naming the config key that fixes it. Summarising
+  // is lossy by design; the rows are how the UI gets at what was lost.
+  const base = {
+    id: 'mcp' as const,
+    label: MCP_LABEL,
+    description: MCP_DESCRIPTION,
+    mcpRows: mcp?.rows ?? undefined,
+  }
   if (!mcp) return { ...base, installed: null, enabled: null, detail: 'Not reported by this daemon yet.' }
   if (mcp.state === 'disabled') {
     return { ...base, installed: false, enabled: null, detail: 'Auto-registration is turned off in your config.' }

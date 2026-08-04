@@ -145,6 +145,40 @@ describe('InsightsPage', () => {
     expect(screen.queryByTestId('assists-breakdown')).toBeNull()
   })
 
+  // The knowledge-concentration reason used to render in the same `.lrow`
+  // flex line as the project name, inside `.lrow-value` -- which is
+  // `white-space: nowrap` and has no `min-width: 0`. A nowrap flex item's
+  // intrinsic minimum is its FULL text width, so one long reason set the
+  // minimum width of the whole 340px right column and pushed the page past
+  // the 1280px default window. The reason IS the content, so it cannot be
+  // ellipsised away: it has to become its own wrapping line beneath the
+  // name, the same label+description shape SettingRow.tsx already uses.
+  it('renders the concentration reason as its own line beneath the project name', async () => {
+    const client = new FakeDataClient()
+    const base = await client.getInsights(30)
+    const detail = '41 sessions and nobody else on the team has opened this project in the last 30 days'
+    vi.spyOn(client, 'getInsights').mockResolvedValue({
+      ...base,
+      concentration: [{ projectName: 'billing-poc', onlyPerson: 'Andrew', detail }],
+    })
+    renderWith(client, <InsightsPage />)
+
+    // The whole reason survives -- no truncation, no ellipsis substitute.
+    const reason = await screen.findByText(`Andrew only · ${detail}`)
+    const name = screen.getByText(/billing-poc/)
+
+    // It is a separate element from the name, not the nowrap metric sibling.
+    expect(reason).not.toBe(name)
+    expect(reason).not.toHaveClass('lrow-value')
+
+    // ...and it sits BENEATH the name inside a shared label block, so it has
+    // a block of its own to wrap inside of.
+    const label = name.parentElement
+    expect(label).not.toBeNull()
+    expect(reason.parentElement).toBe(label)
+    expect(name.compareDocumentPosition(reason) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('switches the time window and refetches for the new window', async () => {
     const client = new FakeDataClient()
     const insightsSpy = vi.spyOn(client, 'getInsights')
