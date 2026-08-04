@@ -62,6 +62,83 @@ async function main() {
       const after = fs.existsSync(retrievals.logPath()) ? fs.readFileSync(retrievals.logPath(), 'utf8') : '';
       assert.strictEqual(after, before);
     });
+  }
+
+  // --- the log SHAPE: what a serve records beyond the bare count ---
+  // These are the write-time-or-never fields. A count can be recomputed from
+  // a log forever; the query that caused it cannot be recovered from anything
+  // once the call returns, so each of these asserts it reached disk.
+  {
+    // Close the torn tail line the fold block above deliberately left behind,
+    // WITHOUT discarding the log — later checks still count what is in it.
+    // That line has no trailing newline, so the next append concatenates onto
+    // it and is skipped as corrupt: accepted, documented behaviour for this
+    // file, but it would silently eat the first serve recorded here and make
+    // it read as a shape failure rather than the torn-line tolerance it is.
+    if (!fs.readFileSync(retrievals.logPath(), 'utf8').endsWith('\n')) {
+      fs.appendFileSync(retrievals.logPath(), '\n', 'utf8');
+    }
+    const servesFor = tool => retrievals.readServes().filter(r => r.tool === tool);
+
+    check('shape: a search serve records the QUERY that caused it, not just the keys', () => {
+      retrievals.record('search', ['shape-k1', 'shape-k2'], { query: 'vault rotation' });
+      const rec = servesFor('search').pop();
+      assert.strictEqual(rec.q, 'vault rotation',
+        'the query was dropped — nothing downstream can ever reconstruct it');
+      assert.deepStrictEqual(rec.keys, ['shape-k1', 'shape-k2']);
+    });
+
+    check('shape: keys keep SERVED RANK ORDER, so a key position is its index', () => {
+      retrievals.record('search', ['rank-a', 'rank-b', 'rank-c'], { query: 'ordering' });
+      const rec = servesFor('search').pop();
+      assert.deepStrictEqual(rec.keys, ['rank-a', 'rank-b', 'rank-c'],
+        'rank order was not preserved; a hit at 1 and a hit at 20 became the same event');
+    });
+
+    check('shape: project, total and files ride along when the caller knows them', () => {
+      retrievals.record('search', ['shape-k3'], {
+        query: 'q', project: 'proj-x', total: 42, files: ['lib/a.js'],
+      });
+      const rec = servesFor('search').pop();
+      assert.strictEqual(rec.project, 'proj-x');
+      assert.strictEqual(rec.total, 42, 'served-vs-ranked is what makes recall@k mean anything');
+      assert.deepStrictEqual(rec.files, ['lib/a.js']);
+    });
+
+    check('shape: fields the caller does not know are OMITTED, never written as null', () => {
+      retrievals.record('search', ['shape-k4'], {});
+      const rec = servesFor('search').pop();
+      for (const f of ['q', 'project', 'total', 'files']) {
+        assert.ok(!(f in rec), `${f} was written with no value; a reader cannot tell that from a real one`);
+      }
+    });
+
+    check('shape: a secret pasted into a QUERY is redacted at this boundary', () => {
+      // The caller is not trusted to have redacted it — this file is at rest
+      // on disk, and a search box is a place people paste things.
+      retrievals.record('search', ['shape-k5'], { query: 'why did sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF fail' });
+      const rec = servesFor('search').pop();
+      assert.ok(!/sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF/.test(rec.q),
+        'an API key in a query came to rest unredacted in retrievals.jsonl');
+      assert.ok(/redacted/i.test(rec.q), `expected a redaction marker, got: ${rec.q}`);
+    });
+
+    check('shape: OLD lines (no q) still count, and read back as unlabelled not empty', () => {
+      // Written in the pre-shape format, exactly as months of existing logs are.
+      fs.appendFileSync(retrievals.logPath(),
+        JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', tool: 'search', keys: ['legacy-k'] }) + '\n', 'utf8');
+      assert.strictEqual(retrievals.readCounts()['legacy-k'].n, 1,
+        'the shape change broke counting for lines written before it');
+      const rec = retrievals.readServes().filter(r => r.keys.includes('legacy-k')).pop();
+      assert.strictEqual(rec.q, undefined, 'a legacy serve must be unlabelled, not a serve of ""');
+    });
+
+    check('shape: readServes tolerates a torn tail line like readCounts does', () => {
+      fs.appendFileSync(retrievals.logPath(), '{"ts":"2026-08-09T', 'utf8');
+      const serves = retrievals.readServes();
+      assert.ok(serves.some(r => r.keys.includes('legacy-k')),
+        'a corrupt tail took the healthy serves with it');
+    });
 
     check('retrievals: compaction folds log into base and truncates, with no count change', () => {
       const before = retrievals.readCounts();
@@ -124,6 +201,26 @@ async function main() {
     check('retrievals: the second serve of the same entry reports retrievals: 1', () => {
       assert.strictEqual(second.results.length, 1);
       assert.strictEqual(second.results[0].retrievals, 1);
+    });
+
+    // The shape is only worth anything if the REAL search path fills it in;
+    // a writer that can carry a query and a caller that never passes one
+    // would still leave the log unlabelled forever.
+    check('wiring: a real searchMemory call lands the query and pool size on the log line', () => {
+      const rec = retrievals.readServes().filter(r => r.tool === 'search').pop();
+      assert.strictEqual(rec.q, 'retrievaltoken',
+        'searchMemory recorded a serve without the query that caused it');
+      assert.strictEqual(rec.total, 1, 'the ranked pool size did not reach the log');
+      assert.deepStrictEqual(rec.keys, [activity.eventKey(
+        { session: 'retr-s1', ts: '2026-07-01T00:00:00.000Z', source: 'Claude Code' })],
+      'the served keys on the line are not the ones the caller got back');
+    });
+
+    check('wiring: the query is redacted on the way to the log by searchMemory itself', () => {
+      activity.searchMemory({ query: 'retrievaltoken sk-ant-api03-ZZZZYYYYXXXXWWWWVVVVUUUU' });
+      const rec = retrievals.readServes().filter(r => r.tool === 'search').pop();
+      assert.ok(!/sk-ant-api03-ZZZZYYYYXXXXWWWWVVVVUUUU/.test(rec.q),
+        'a secret in a live search query reached retrievals.jsonl unredacted');
     });
 
     check('retrievals: entries never served accrue nothing — only the returned slice records', () => {
