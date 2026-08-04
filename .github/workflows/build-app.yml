@@ -54,7 +54,7 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      - run: node test/run-tests.js
+      - run: node test/run.js
       # The App Store Connect key is base64 in the secret, but electron-builder
       # passes APPLE_API_KEY straight to notarytool as a FILE PATH, so it has
       # to be decoded onto disk. It goes in RUNNER_TEMP rather than the
@@ -207,7 +207,7 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      - run: node test/run-tests.js
+      - run: node test/run.js
       - run: npm run dist:win
       - uses: actions/upload-artifact@v4
         with:
