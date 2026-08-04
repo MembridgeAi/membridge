@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Memory the team leans on now ranks higher.** Retrieval counts stopped
+  being a number you could only look at: search results are reordered by them.
+  Two entries that say much the same thing used to be separated by nothing but
+  their timestamps, which is a coin toss — now the one people keep coming back
+  to leads. This is reinforcement, not recency, and the distinction is
+  load-bearing: MemBridge still refuses to favour recent work, because
+  cross-teammate overlap runs about fifty days and a recency boost would
+  rebuild the exact blind spot team search exists to fix. A six-month-old
+  gotcha that keeps getting recalled is evidence, not staleness. The boost is
+  bounded — it can settle a near-tie, never bury a better answer under a
+  popular one — and it applies only to entries that already matched, so what
+  "no results" means is unchanged on every surface.
+
 ## 0.2.8 — 2026-08-04
 
 - **Distilled notes are actually bullets now.** The Stop hook has been asking

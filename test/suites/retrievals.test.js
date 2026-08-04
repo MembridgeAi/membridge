@@ -189,6 +189,44 @@ async function main() {
       assert.strictEqual(searched.results[0].retrievals, 1,
         'the why serve did not accrue onto the same event key the search reads');
     });
+
+    check('retrievals: usage reorders the next search — a proven entry beats its newer twin', () => {
+      // Two rows saying the SAME thing, so lexical scoring cannot separate them
+      // and the newest-first tiebreak decides. Then one of them earns a usage
+      // history, and the next search must put it first.
+      const projRank = path.join(ROOT, 'projects', 'retrievals-rank-app');
+      fs.mkdirSync(path.join(projRank, '.membridge'), { recursive: true });
+      const twin = extra => ({
+        author: 'Teammate', source: 'Claude Code', ask: null, goal: null, summary: null,
+        decisions: 'rankingtoken is resolved in the middleware', gotchas: null,
+        headline: null, distilled: true, files: [], changes: null, ...extra,
+      });
+      const st = util.loadState();
+      st.projects[projRank] = {
+        events: [],
+        teamEntries: [
+          twin({ session: 'rank-old', ts: '2026-05-01T00:00:00.000Z' }),
+          twin({ session: 'rank-new', ts: '2026-06-01T00:00:00.000Z' }),
+        ],
+      };
+      util.saveState(st);
+
+      const before = activity.searchMemory({ query: 'rankingtoken' });
+      assert.strictEqual(before.results.length, 2, 'fixture: both twins should match');
+      assert.strictEqual(before.results[0].session, 'rank-new',
+        'fixture: with no usage history the newest twin must lead on the ts tiebreak');
+
+      // Give the older twin a real history (that first search already gave both one).
+      const oldKey = activity.eventKey({ session: 'rank-old', ts: '2026-05-01T00:00:00.000Z', source: 'Claude Code' });
+      retrievals.record('search', [oldKey]);
+      retrievals.record('why', [oldKey]);
+      retrievals.record('search', [oldKey]);
+
+      const after = activity.searchMemory({ query: 'rankingtoken' });
+      assert.strictEqual(after.results[0].session, 'rank-old',
+        'the entry the team keeps coming back to did not rise');
+      assert.strictEqual(after.results[0].retrievals, 4, 'fixture: expected 1 serve + 3 recorded');
+    });
   }
 
   h.finish();

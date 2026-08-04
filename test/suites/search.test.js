@@ -92,6 +92,68 @@ async function main() {
       const ranked = search.rankEntries([older, newer], 'vault');
       assert.strictEqual(ranked[0].ts, '2026-06-01T00:00:00.000Z');
     });
+
+    // --- usage as a relevance prior (opts.retrievalsOf) ---
+    // Reinforcement, NOT recency: the module header's ban on recency weighting
+    // stands. A six-month-old gotcha the team keeps coming back to is more
+    // likely to be the answer than an equally-worded one nobody ever needed,
+    // and that is a claim about demand, not about the clock.
+
+    check('search: a proven memory outranks an equally-relevant never-retrieved one', () => {
+      // The unused entry is the NEWER of the two, so it wins the ts tiebreak.
+      // Only the usage prior can put the proven one on top.
+      const unused = { ts: '2026-06-01T00:00:00.000Z', session: 'unused', decisions: 'vault rotation runs per epoch' };
+      const proven = { ts: '2026-01-01T00:00:00.000Z', session: 'proven', decisions: 'vault rotation runs per epoch' };
+      const ranked = search.rankEntries([unused, proven], 'vault rotation', {
+        retrievalsOf: e => (e.session === 'proven' ? 6 : 0),
+      });
+      assert.strictEqual(ranked[0].session, 'proven', 'usage did not lift the entry the team actually leans on');
+    });
+
+    check('search: usage cannot overturn a clearly stronger lexical match', () => {
+      const strong = {
+        ts: '2026-01-01T00:00:00.000Z', session: 'strong',
+        headline: 'vault rotation rewritten',
+        decisions: 'vault rotation runs per epoch',
+        files: ['infra/vault-rotation.tf'],
+      };
+      const weak = { ts: '2026-06-01T00:00:00.000Z', session: 'weak', summary: 'vault rotation mentioned' };
+      const ranked = search.rankEntries([strong, weak], 'vault rotation', {
+        retrievalsOf: e => (e.session === 'weak' ? 10000 : 0),
+      });
+      assert.strictEqual(ranked[0].session, 'strong', 'a popular weak match buried the better answer');
+    });
+
+    check('search: usage never changes which entries match — only their order', () => {
+      const partial = { ts: '2026-07-01T00:00:00.000Z', summary: 'only vault, no other terms' };
+      assert.deepStrictEqual(
+        search.rankEntries([partial], 'vault rotation epochs', { retrievalsOf: () => 9999 }), [],
+        'a heavily-used entry that fails the AND-bias must still not be a result');
+    });
+
+    check('search: omitting retrievalsOf leaves the raw lexical score untouched', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', decisions: 'vault rotation runs per epoch' };
+      const plain = search.rankEntries([e], 'vault rotation');
+      const zeroed = search.rankEntries([e], 'vault rotation', { retrievalsOf: () => 0 });
+      assert.strictEqual(Number.isInteger(plain[0].score), true,
+        'the unboosted score must stay the raw lexical integer');
+      assert.strictEqual(zeroed[0].score, plain[0].score, 'zero retrievals must not move the score');
+    });
+
+    check('search: the usage boost saturates — it can never double a score', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', decisions: 'vault rotation runs per epoch' };
+      const base = search.rankEntries([e], 'vault rotation')[0].score;
+      const many = search.rankEntries([e], 'vault rotation', { retrievalsOf: () => 100000 })[0].score;
+      assert.ok(many > base, 'heavy usage bought nothing at all');
+      assert.ok(many <= base * 1.5 + 1e-9, `the boost is unbounded (${base} -> ${many})`);
+    });
+
+    check('search: retrievalsOf does not mutate the entries it is asked about', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth' };
+      const before = JSON.stringify(e);
+      search.rankEntries([e], 'auth', { retrievalsOf: () => 12 });
+      assert.strictEqual(JSON.stringify(e), before);
+    });
   }
 
   h.finish();
