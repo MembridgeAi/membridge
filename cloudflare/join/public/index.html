@@ -57,10 +57,10 @@
 
   <section id="v-invite" hidden>
     <h1>You've been <em>invited</em></h1>
-    <!-- Deliberately neutral about what happens next: this page serves both
-         an ops onboarding invite (which creates a team) and a team invite from
-         the app (which joins an existing one), and it cannot tell which it is
-         holding until after sign-in. -->
+    <!-- Neutral about what happens next, because this page cannot know until
+         after sign-in which of the two invite kinds it is holding -- and since
+         redeem() now tries the app-minted one FIRST, joining an existing team
+         is the common case, not creating a new one. -->
     <p class="lead">Sign in to accept it. Your account and your encryption keys are yours — MemBridge never sees your session content.</p>
     <label for="name">your name</label>
     <input id="name" placeholder="Ada Lovelace" maxlength="80" autocomplete="name">
@@ -78,10 +78,7 @@
 
   <section id="v-done" hidden>
     <h1>You're <em>in</em></h1>
-    <!-- Rewritten by redeem(): the wording differs for someone who just
-         created a team and someone who joined an existing one. The text here
-         is the fallback if the script never gets that far. -->
-    <p class="lead" id="doneLead">Your team is ready. Install MemBridge on each machine and it will start sharing context automatically.</p>
+    <p class="lead">Team <b id="teamName"></b> is ready. Install MemBridge on each machine and it will start sharing context automatically.</p>
     <!-- These steps are GitHub-shaped on purpose. This page signs people up
          through GitHub and nothing else, so the account they just created has
          no password -- and `membridge login` takes an email and a password
@@ -93,7 +90,7 @@
       <li>Open it:<pre>membridge dashboard</pre></li>
       <li>Sign in with <b>Continue with GitHub</b> — the same account you just used. Not the email and password fields; you don't have a password.</li>
     </ol>
-    <p class="muted-note" id="doneNote">Then add a project from the app, or run <code>membridge team link</code> inside a repo. Invite the rest of your team from the app once you're set up.</p>
+    <p class="muted-note">Then add a project from the app, or run <code>membridge team link</code> inside a repo. Invite the rest of your team from the app once you're set up.</p>
   </section>
 
   <section id="v-error" hidden>
@@ -146,40 +143,40 @@ async function rpc(fn, body, accessToken) {
   return text ? JSON.parse(text) : null;
 }
 
-// TWO kinds of invite reach this page, and for a long time it only understood
-// one of them:
+// Two invite tables exist, and this page could only ever reach the wrong one.
 //
-//   * an ONBOARDING invite (public.onboarding_invites, issued by ops) --
-//     redeem_onboarding_invite, which CREATES a team with the recipient as
-//     owner. This is the flow the page was built for.
-//   * a TEAM invite (public.invites, minted by create_invite -- which is what
-//     "Copy invite link" in the app and `membridge team invite` produce) --
-//     redeem_invite, which adds the recipient to an EXISTING team.
+// The app mints links through create_invite, which writes public.invites and is
+// redeemed by redeem_invite (migrations 002/003) -- that is the ONLY call that
+// joins an existing team. redeem_onboarding_invite reads a different table,
+// public.onboarding_invites, seeded by hand from the ops panel, and it calls
+// create_team: it makes the redeemer the owner of a BRAND NEW team named after
+// the invite (023). So every link the product actually sends landed on "That
+// invite link is not recognised", and any that did work would have quietly
+// built a second team rather than joining yours.
 //
-// They are different tables, so every link the app has ever handed out landed
-// on "That invite link is not recognised", forever, no matter how many fresh
-// ones the sender minted.
-//
-// Onboarding is tried first so that flow is byte-for-byte unchanged. The
-// fallback fires ONLY on "not recognised" -- i.e. "no such onboarding invite",
-// the one error that means "maybe it is the other kind". An onboarding invite
-// that is genuinely expired or already used keeps its own accurate message
-// instead of being retried and mislabelled "invalid invite link".
+// Both are still tried, app-minted first, because ops-issued onboarding tokens
+// are real and some are still in flight. The fallback fires ONLY on the
+// not-found message: a revoked, expired or already-used app invite has to
+// surface its own reason, not be re-asked as an onboarding token and come back
+// with a vaguer one.
+const INVITE_NOT_FOUND = /invalid invite link/i;
+
 async function redeem(token, displayName, accessToken) {
   try {
-    const out = await rpc('redeem_onboarding_invite',
-      { p_token: token, p_display_name: displayName }, accessToken);
-    return { joined: false, teamName: out && out.team_name };
-  } catch (err) {
-    const msg = String((err && err.message) || err);
-    if (!/not recognised/i.test(msg)) throw err;
-    // redeem_invite `returns table (team_id, team_name)`, so PostgREST answers
-    // with an ARRAY of rows, not the single object the onboarding RPC returns.
+    // redeem_invite returns table(team_id, team_name), so PostgREST sends a
+    // row ARRAY here -- redeem_onboarding_invite returns a jsonb object. The
+    // shapes differ; reading .team_name off the array would have quietly
+    // rendered "your team" for every successful join.
     const rows = await rpc('redeem_invite',
       { p_token: token, p_display_name: displayName }, accessToken);
     const row = Array.isArray(rows) ? rows[0] : rows;
-    return { joined: true, teamName: row && row.team_name };
+    return (row && row.team_name) || 'your team';
+  } catch (err) {
+    if (!INVITE_NOT_FOUND.test(String(err.message || err))) throw err;
   }
+  const out = await rpc('redeem_onboarding_invite',
+    { p_token: token, p_display_name: displayName }, accessToken);
+  return (out && out.team_name) || 'your team';
 }
 
 (async function () {
@@ -199,24 +196,11 @@ async function redeem(token, displayName, accessToken) {
 
     show('v-working');
     try {
-      const out = await redeem(invite, name || 'Member', frag.access_token);
-      // The two flows end in genuinely different places -- one person now
-      // OWNS a new team, the other has JOINED someone else's -- and the next
-      // steps differ with them, so the page must not tell both the same story.
-      $('doneLead').textContent = out.joined
-        ? `You've joined ${out.teamName || 'the team'}. Install MemBridge on each machine and it will start sharing context automatically.`
-        : `Team ${out.teamName || 'yours'} is ready. Install MemBridge on each machine and it will start sharing context automatically.`;
-      // innerHTML here and textContent above, deliberately: these two strings
-      // are fixed literals (the <code> chip is part of the design), whereas
-      // the line above interpolates a team NAME somebody else chose and must
-      // never be parsed as markup.
-      $('doneNote').innerHTML = out.joined
-        ? 'Then add a project from the app, or run <code>membridge team link</code> inside a repo — your teammates\' work appears on the repos you have both linked.'
-        : 'Then add a project from the app, or run <code>membridge team link</code> inside a repo. Invite the rest of your team from the app once you\'re set up.';
+      $('teamName').textContent = await redeem(invite, name || 'Member', frag.access_token);
       show('v-done');
     } catch (err) {
-      // Every RPC here raises for an invalid, expired, revoked or used-up
-      // token; the wording matters because they all land here and "invalid"
+      // The RPC raises for an invalid, revoked, expired or already-redeemed
+      // token; the wording matters because all of them land here and "invalid"
       // alone reads as "we have no idea".
       fail(String(err.message || err));
     }
