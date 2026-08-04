@@ -14952,12 +14952,28 @@ async function main() {
     // Source-level on purpose, like the ui/ deps check above: the failure mode
     // is a workflow that quietly stops doing something, and nothing in this
     // suite ever runs a real signing pipeline.
+    //
+    // The submit assertion is here because the first version of this step was
+    // wrong in a way this file did not catch: it stapled without submitting.
+    // electron-builder notarizes the .app and then builds the dmg AROUND it, so
+    // the dmg is a container Apple has never seen. Stapling it asks CloudKit for
+    // a record keyed by the dmg's own hash, gets "Record not found", and exits
+    // 65, which took the whole mac job down and skipped every upload step. A
+    // staple with no submit before it cannot work, so it is asserted as a pair.
+    //
+    // Ordering matters for the same reason: `notarytool submit` needs the App
+    // Store Connect key, and the workflow deletes that key as soon as it can.
+    // Submitting after the delete would fail for a different reason every time.
     const src = read(path.join(__dirname, '..', '.github', 'workflows', 'build-app.yml'));
     assert.ok(/notariz/i.test(src), 'guard: build-app.yml no longer mentions notarization at all');
+    assert.ok(/xcrun notarytool submit/.test(src),
+      'the dmg is never submitted for notarization, so it can never carry a ticket to staple');
     assert.ok(/xcrun stapler staple/.test(src),
       'the notarized dmg is never stapled, so Gatekeeper has to phone Apple on first launch');
     assert.ok(/xcrun stapler validate/.test(src),
       'nothing proves the staple stuck, which is exactly how 0.2.4 shipped without one');
+    assert.ok(src.indexOf('xcrun notarytool submit') < src.indexOf('rm -f "$RUNNER_TEMP/AuthKey.p8"'),
+      'the dmg is submitted after the signing key is deleted, so notarytool has no credentials');
   });
 
   check('corpus invariant: the hook, the MCP tools and /api/search share ONE assembly and ONE scorer', () => {
