@@ -4536,6 +4536,50 @@ async function main() {
       assert.ok(hubMembers.every(m => m.user_id && m.joined_at), 'user_id/joined_at missing');
     });
 
+    // POST /api/team/set-role is reachable by anything that can talk to
+    // 127.0.0.1, so hiding the self-demote select in the dashboard does not
+    // close the hole it was hiding. The daemon-side guard is what stops a
+    // role change from leaving a team with nobody who can administer it --
+    // a state with no in-app recovery, since the members left cannot promote
+    // anyone and cannot undo the demotion either.
+    //
+    // Fed the REAL listMembers payload above (not a hand-built array) so the
+    // guard is proven against the row shape the route actually hands it:
+    // user_id/role, not the dashboard's id/role.
+    check('set-role: the daemon refuses a demotion that would leave the team with no manager', () => {
+      const { lastManagerBlock } = require('../lib/server');
+      const marco = hubMembers.find(m => m.display_name === 'Marco');   // owner
+      const andrew = hubMembers.find(m => m.display_name === 'Andrew'); // admin
+      const dana = hubMembers.find(m => m.display_name === 'Dana');     // member
+
+      // Two managers: demoting one is recoverable by the other, so it passes.
+      assert.strictEqual(lastManagerBlock(hubMembers, andrew.user_id, 'member'), null,
+        'a demotion with another manager still standing was blocked');
+
+      // The same team with only one manager left: this is the write that
+      // must not land.
+      const lastOne = hubMembers.map(m => (m.user_id === andrew.user_id ? { ...m, role: 'member' } : m))
+        .map(m => (m.user_id === marco.user_id ? { ...m, role: 'admin' } : m));
+      assert.ok(lastManagerBlock(lastOne, marco.user_id, 'member'),
+        'demoting the last remaining manager was allowed');
+
+      // Everything that cannot empty the manager set must still go through.
+      assert.strictEqual(lastManagerBlock(lastOne, dana.user_id, 'member'), null, 'demoting a plain member was blocked');
+      assert.strictEqual(lastManagerBlock(lastOne, dana.user_id, 'admin'), null, 'a promotion was blocked');
+      // The dashboard's "Transfer ownership" flow sends role 'owner'; it adds
+      // a manager and must never trip an availability guard.
+      assert.strictEqual(lastManagerBlock(lastOne, dana.user_id, 'owner'), null, 'an ownership transfer was blocked');
+      assert.strictEqual(lastManagerBlock(lastOne, 'no-such-user', 'member'), null, 'an unknown member was refused locally');
+
+      // listMembers can fail (offline, old backend, 403) and the route passes
+      // that failure through as null. Refusing on a list we could not read
+      // would turn every network blip into "you cannot change roles", so
+      // absence must defer to the backend, which is the real authority.
+      for (const bad of [null, undefined, [], 'nope', {}]) {
+        assert.strictEqual(lastManagerBlock(bad, marco.user_id, 'member'), null,
+          `fabricated a refusal from an unreadable member list: ${JSON.stringify(bad)}`);
+      }
+    });
 
     const hubFeedAndrew = await teamsync.teamFeed(util.getConfig(), team.team_id, { author: andrewId, limit: 10 });
     check('hub: teamFeed wrapper filters by author', () => {
