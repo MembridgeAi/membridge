@@ -63,7 +63,15 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
   // "Change role" lives ONLY in the select below, not duplicated as a menu
   // item -- see the report for why a second control doing the same thing
   // was left out rather than added.
-  const showRoleSelect = canManage && !isOwnerRow
+  // !isSelf belongs on BOTH lines. It was on the menu and missing here, so an
+  // admin still got a role select on their own row -- the one control that can
+  // strip the viewer of the ability to use every other control on this page.
+  // The daemon refuses the write regardless (set_role is owner-only, and it
+  // rejects a self-targeted change outright), which makes offering the select
+  // worse rather than safer: the admin picks "Member", nothing changes, and
+  // the only feedback is an error explaining a rule the UI invited them to
+  // break. Changing your own role is not an action this page offers.
+  const showRoleSelect = canManage && !isSelf && !isOwnerRow
   const showMenu = canManage && !isSelf && !isOwnerRow
 
   return (
