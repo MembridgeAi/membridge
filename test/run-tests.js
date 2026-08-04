@@ -756,7 +756,15 @@ async function main() {
   });
   check('install.sh template carries the safety-critical steps', () => {
     const tmpl = readSource(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
-    assert.ok(tmpl.includes('com.apple.quarantine'), 'quarantine strip missing');
+    // The quarantine strip is GONE deliberately, and this asserts it stays
+    // gone. It existed to suppress a Gatekeeper prompt the app no longer
+    // triggers: the mac build is signed, notarized and stapled, so stripping
+    // the attribute buys nothing, while a publicly served installer that
+    // advertises Gatekeeper avoidance is an escalation in any security review.
+    assert.ok(!tmpl.includes('com.apple.quarantine'),
+      'quarantine strip is back; the app is notarized and must not strip it');
+    assert.ok(!/gatekeeper/i.test(tmpl),
+      'installer must not advertise Gatekeeper avoidance');
     assert.ok(tmpl.includes('ELECTRON_RUN_AS_NODE=1'), 'CLI wrapper runtime missing');
     assert.ok(tmpl.includes('shasum -a 256'), 'sha256 verification missing');
     assert.ok(tmpl.includes('__MEMBRIDGE_VERSION__') && tmpl.includes('__MEMBRIDGE_SHA256__'),

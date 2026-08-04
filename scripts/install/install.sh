@@ -1,12 +1,12 @@
 #!/bin/sh
-# MemBridge macOS installer — installs the app + `membridge` CLI, no Gatekeeper warning.
+# MemBridge macOS installer. Installs the signed, notarized app plus the `membridge` CLI.
 # Pinned to one release (version + SHA-256) by scripts/install/gen-install.js.
 #   curl -fsSL https://membridge.app/install.sh | sh
 #   curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run
 set -eu
 
-VERSION="0.2.7"
-SHA256="409ba4dd999db53d01a05087bc1876393408a78bfea6dc923ab9d240ab6d667a"
+VERSION="0.2.8"
+SHA256="422eb03ac3e06deb3141af21577fc36aad5cc676ffc017a7cf3073099bed95cf"
 REPO="MembridgeAi/membridge"
 APP_NAME="MemBridge"
 APP_DEST="/Applications/${APP_NAME}.app"
@@ -27,7 +27,7 @@ command -v shasum >/dev/null 2>&1 || die "shasum is required."
 ASSET="${APP_NAME}-${VERSION}-arm64.zip"
 URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET}"
 
-# 2. Download (curl never sets com.apple.quarantine — this is the whole point)
+# 2. Download the release asset, then verify it against the pinned SHA-256 below.
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 say "Downloading ${APP_NAME} ${VERSION}..."
@@ -55,10 +55,7 @@ run "mkdir -p '$TMP/unzip'"
 run "ditto -x -k '$TMP/$ASSET' '$TMP/unzip'"
 run "mv '$TMP/unzip/${APP_NAME}.app' '$APP_DEST'"
 
-# 6. Strip quarantine (belt-and-suspenders; curl already avoids it)
-run "xattr -dr com.apple.quarantine '$APP_DEST' 2>/dev/null || true"
-
-# 7. Install the CLI wrapper (runs the bundled CLI via the app's Electron-as-Node)
+# 6. Install the CLI wrapper (runs the bundled CLI via the app's Electron-as-Node)
 #
 # NO SUDO anywhere in this script: the in-app updater re-runs it from a
 # detached, non-interactive spawn where a sudo password prompt can only hang
@@ -125,7 +122,7 @@ SH
 MANUAL
 fi
 
-# 7b. Register the MCP server with every AI tool this user actually has.
+# 6b. Register the MCP server with every AI tool this user actually has.
 #
 # HERE, and not left to the daemon, because this runs in the user's own shell:
 # `claude` resolves off the real PATH (nvm, volta, asdf, a custom prefix) with
@@ -143,36 +140,36 @@ if [ "$DRY_RUN" = 1 ]; then
   printf '  [dry-run] %s mcp register\n' "$CLI_DEST"
 elif [ -n "$CLI_DEST" ] && [ -x "$CLI_DEST" ]; then
   say "Registering the MemBridge MCP server with your AI tools..."
-  "$CLI_DEST" mcp register </dev/null || say "MCP registration didn't complete — run 'membridge mcp register' later. The install is fine."
+  "$CLI_DEST" mcp register </dev/null || say "MCP registration didn't complete. Run 'membridge mcp register' later. The install is fine."
 fi
 
-# 7c. Launch at login, via the app's own headless flag (see app/main.js:
+# 6c. Launch at login, via the app's own headless flag (see app/main.js:
 # `MemBridge --set-login=on` flips the Electron login item and exits without
 # opening any UI), so MemBridge survives reboots. Best-effort: guarded so a
 # failure here can never fail the install. </dev/null for the same reason as
-# mcp register above — under `curl | sh`, stdin is the rest of this script.
+# mcp register above. Under `curl | sh`, stdin is the rest of this script.
 if [ "$DRY_RUN" = 1 ]; then
   printf '  [dry-run] %s --set-login=on\n' "$APP_DEST/Contents/MacOS/$APP_NAME"
 else
   "$APP_DEST/Contents/MacOS/$APP_NAME" --set-login=on >/dev/null 2>&1 </dev/null \
-    || say "Couldn't enable launch at login — toggle 'Start at login' in the tray menu."
+    || say "Couldn't enable launch at login. Toggle 'Start at login' in the tray menu."
 fi
 
-# 8. Launch + report (truthful: say what actually happened to the CLI)
+# 7. Launch + report (truthful: say what actually happened to the CLI)
 run "open '$APP_DEST'"
-say "Done. ${APP_NAME} is installed and opens with no warning."
+say "Done. ${APP_NAME} is installed."
 case "$CLI_STATUS" in
   ready)
     if command -v membridge >/dev/null 2>&1; then
       say "CLI ready: $(command -v membridge)"
     else
-      say "CLI installed at ${CLI_DEST} — open a new terminal to use 'membridge'."
+      say "CLI installed at ${CLI_DEST}. Open a new terminal to use 'membridge'."
     fi
     ;;
   not_on_path)
-    say "CLI installed at ${CLI_DEST}, but that directory isn't on your PATH yet — see the note above."
+    say "CLI installed at ${CLI_DEST}, but that directory isn't on your PATH yet. See the note above."
     ;;
   *)
-    say "CLI not installed — see the manual steps above."
+    say "CLI not installed. See the manual steps above."
     ;;
 esac
