@@ -443,6 +443,7 @@ export class FakeDataClient implements DataClient {
   getInsights(window: 7 | 30 | 90) {
     return this.guard<Insights>({
       window,
+      truncated: false,
       sessions: { count: 412, deltaPct: 18 },
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },

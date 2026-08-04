@@ -29,6 +29,55 @@ describe('buildCsv formula-injection escaping', () => {
   })
 })
 
+// A truncated fetch (lib/api-insights.js hit MAX_PAGES * TEAM_FEED_PAGE)
+// establishes a floor, not a total, because paging runs newest-first and the
+// cap drops the OLDEST rows. Seen live: a 30d window returned 2000 rows with
+// every one inside the current window, so the prior window was empty and the
+// stat published "+2000" of growth that never happened.
+describe('InsightsPage under a truncated feed fetch', () => {
+  const truncated = async () => ({
+    ...(await new FakeDataClient().getInsights(30)),
+    truncated: true,
+    sessions: { count: 267, deltaPct: null },
+    entriesShared: { count: 2000, delta: null },
+  })
+
+  // The fake has no truncation mode of its own -- this is a backend state,
+  // not a fixture variant -- so the payload is overridden on the client.
+  const clientServing = async (insights: Awaited<ReturnType<typeof truncated>>) => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getInsights').mockResolvedValue(insights)
+    return client
+  }
+
+  it('renders counts as floors and replaces the trend with the cap note', async () => {
+    renderWith(await clientServing(await truncated()), <InsightsPage />)
+    // "≥" is the whole point: a bare 2,000 reads as a measurement.
+    expect(await screen.findByText('≥2,000')).toBeInTheDocument()
+    expect(screen.getByText('≥267')).toBeInTheDocument()
+    expect(screen.getAllByText(/at cap/).length).toBeGreaterThan(0)
+    // The fabricated delta must not come back in any form.
+    expect(screen.queryByText('+2000')).toBeNull()
+    expect(screen.queryByText(/vs prev 30d/)).toBeNull()
+  })
+
+  it('carries the caveat into the CSV without turning numeric cells into strings', async () => {
+    const csv = buildCsv(await truncated())
+    expect(csv).toContain('feed_truncated,true')
+    // Counts stay numeric so a spreadsheet can still sum them.
+    expect(csv).toContain('entries_shared,2000')
+    expect(csv).not.toContain('≥')
+  })
+
+  it('says nothing about a cap when the fetch completed', async () => {
+    const csv = buildCsv(await new FakeDataClient().getInsights(30))
+    expect(csv).toContain('feed_truncated,false')
+    renderApp({}, <InsightsPage />)
+    expect(await screen.findByText('187')).toBeInTheDocument()
+    expect(screen.queryByText(/at cap/)).toBeNull()
+  })
+})
+
 describe('InsightsPage', () => {
   it('renders exactly two skeleton lines', async () => {
     renderApp({}, <InsightsPage />)
