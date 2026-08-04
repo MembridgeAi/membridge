@@ -23929,7 +23929,12 @@ const repoRoot = require('../lib/repo-root');
   // window fetched 2000 rows, every one of them inside the current window,
   // prior therefore empty, and `entriesShared.delta` published "+2000" --
   // explosive growth that was really just the fetch stopping early.
-  check('insights: a capped fetch reports truncated, so a starved baseline cannot publish a fake delta', async () => {
+  // MUST be awaited: this check monkey-patches teamsync.teamFeed, and check()
+  // only hands the promise back — it does not await for you. Unawaited, the
+  // finally that restores the real function runs after later checks have
+  // already started, and the stub leaks into the teamsync suite. That is not
+  // hypothetical; it took four teamsync checks down before the await landed.
+  await check('insights: a capped fetch reports truncated, so a starved baseline cannot publish a fake delta', async () => {
     const teamsync = require('../lib/teamsync');
     const { fetchSince, TEAM_FEED_PAGE, MAX_PAGES } = apiInsights;
     const realTeamFeed = teamsync.teamFeed;
