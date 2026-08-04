@@ -351,11 +351,13 @@ export interface Problem {
 
 export interface Insights {
   window: 7 | 30 | 90
-  // The team feed fetch hit its page cap (lib/api-insights.js MAX_PAGES *
-  // TEAM_FEED_PAGE). Paging runs newest-first, so the cap drops the OLDEST
-  // rows: every count below becomes a FLOOR rather than a total, and the
-  // deltas are nulled server-side because their baseline window is the part
-  // that went missing. Render counts as "at least", never as totals.
+  // Counts came from the database's own aggregate (027_team_feed_counts.sql)
+  // rather than from measuring fetched rows, so they are true totals at any
+  // window size. False only on a backend predating that migration.
+  exact: boolean
+  // Only reachable when `exact` is false: the paged fallback ran out of pages,
+  // so the counts are floors and their deltas are null. Against a current
+  // backend this is always false.
   truncated: boolean
   sessions: { count: number; deltaPct: number | null }
   membersSyncing: { ok: number; total: number }
