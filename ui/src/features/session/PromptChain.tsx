@@ -9,6 +9,15 @@ import type { SessionCheckpoint, SessionPrompt } from '../../data/types'
 //   * an unshared prompt (ask: null, team-origin) renders the literal
 //     "(prompt not shared)" placeholder HERE, in the renderer -- the daemon
 //     never fabricates prompt text.
+//   * FOLDED by default. The page reads Changes (folded) -> distilled bullets
+//     -> prompts (folded), and an expanded chain broke that: the raw prompt
+//     text is the longest thing on the page, so it pushed the bullets the
+//     page exists to lead with off the first screen. The fold is a native
+//     <details>/<summary>, the same element BriefWidgets uses and for the
+//     same reason -- <summary> already carries the disclosure role, the
+//     Enter/Space activation, and the expanded/collapsed state a screen
+//     reader announces, none of which a useState-and-a-div would have
+//     without reimplementing all three by hand.
 // A checkpoint renders beneath the prompt it followed (the newest prompt at
 // or before the checkpoint's ts) as an accent-ruled block.
 
@@ -53,8 +62,14 @@ export function PromptChain({ prompts, checkpoints }: PromptChainProps) {
   if (total === 0) return null
 
   return (
-    <div className="session-chain">
-      <div className="session-chain-title">Prompts</div>
+    <details className="session-chain">
+      {/* The count rides in the summary for the same reason the closed
+          Changes widget carries a peek: a fold the reader cannot judge from
+          the outside just becomes a fold nobody opens. */}
+      <summary className="session-chain-summary">
+        <span className="session-chain-title">Prompts</span>
+        <span className="session-chain-count">{total}</span>
+      </summary>
       <ol className="session-chain-list">
         {visible.map((p, i) => (
           <li key={`${p.ts}|${total - i}`} className="session-prompt">
@@ -93,6 +108,6 @@ export function PromptChain({ prompts, checkpoints }: PromptChainProps) {
           Show older prompts
         </button>
       )}
-    </div>
+    </details>
   )
 }

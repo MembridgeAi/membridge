@@ -406,13 +406,49 @@
   margin-top: var(--sp-5);
 }
 
+/* The chain's disclosure row. Deliberately the same affordance as
+ * .session-widget-summary above (hidden native marker, rotating chevron) so
+ * the page presents ONE way to open a fold; a chain that folded differently
+ * from the widgets directly above it would read as a different kind of
+ * control and get missed. It stays unboxed, though -- the widgets are cards
+ * and the chain is the page's last section, not a fourth card. */
+.session-chain-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  cursor: pointer;
+  list-style: none;
+  margin-bottom: var(--sp-2);
+}
+.session-chain-summary::-webkit-details-marker {
+  display: none;
+}
+.session-chain-summary::before {
+  content: '›';
+  color: var(--text3);
+  flex: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .session-chain-summary::before {
+    transition: transform var(--dur-fast) var(--ease-out);
+  }
+}
+.session-chain[open] > .session-chain-summary::before {
+  transform: rotate(90deg);
+}
+
 .session-chain-title {
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text2);
-  margin-bottom: var(--sp-2);
+}
+
+/* How many prompts are behind the fold, so the closed row is judgeable. */
+.session-chain-count {
+  font-size: var(--fs-xs);
+  color: var(--text3);
 }
 
 /* The left-ruled timeline: one rule down the chain, each prompt hanging off it. */

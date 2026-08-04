@@ -93,4 +93,32 @@ describe('PromptChain (Task 5)', () => {
     expect(screen.getByText('lib/hooks.js')).toBeInTheDocument()
     expect(screen.getByText('test/run-tests.js')).toBeInTheDocument()
   })
+
+  // The owner's page order is Changes (folded) -> bullets -> prompts (FOLDED).
+  // The chain rendered expanded, so every session page opened onto a wall of
+  // raw prompt text and the distilled bullets it exists to lead with were
+  // pushed off the first screen. It has to be a native <details> and not a
+  // useState toggle: <summary> already gives the disclosure role, the
+  // Enter/Space activation, and the expanded/collapsed announcement that a
+  // hand-rolled div would have to reimplement, which is the same reason
+  // BriefWidgets uses one.
+  it('the chain is collapsed by default, as a native details element', () => {
+    render(<PromptChain prompts={chain(3)} checkpoints={[]} />)
+    const chainEl = document.querySelector('.session-chain')
+    expect(chainEl).not.toBeNull()
+    expect(chainEl!.tagName).toBe('DETAILS')
+    expect((chainEl as HTMLDetailsElement).open).toBe(false)
+  })
+
+  // The fold must not cost the reader the label that tells them what is
+  // behind it, nor the count that lets them judge whether opening is worth
+  // it -- the same "judge without opening" rule the closed Changes widget
+  // follows with its peek row.
+  it('the closed chain still names itself and says how many prompts are folded', () => {
+    render(<PromptChain prompts={chain(12)} checkpoints={[]} />)
+    const summary = document.querySelector('.session-chain > summary')
+    expect(summary).not.toBeNull()
+    expect(summary!.textContent).toContain('Prompts')
+    expect(summary!.textContent).toContain('12')
+  })
 })
