@@ -139,6 +139,42 @@ async function rpc(fn, body, accessToken) {
   return text ? JSON.parse(text) : null;
 }
 
+// Two invite tables exist, and this page could only ever reach the wrong one.
+//
+// The app mints links through create_invite, which writes public.invites and is
+// redeemed by redeem_invite (migrations 002/003) -- that is the ONLY call that
+// joins an existing team. redeem_onboarding_invite reads a different table,
+// public.onboarding_invites, seeded by hand from the ops panel, and it calls
+// create_team: it makes the redeemer the owner of a BRAND NEW team named after
+// the invite (023). So every link the product actually sends landed on "That
+// invite link is not recognised", and any that did work would have quietly
+// built a second team rather than joining yours.
+//
+// Both are still tried, app-minted first, because ops-issued onboarding tokens
+// are real and some are still in flight. The fallback fires ONLY on the
+// not-found message: a revoked, expired or already-used app invite has to
+// surface its own reason, not be re-asked as an onboarding token and come back
+// with a vaguer one.
+const INVITE_NOT_FOUND = /invalid invite link/i;
+
+async function redeem(token, displayName, accessToken) {
+  try {
+    // redeem_invite returns table(team_id, team_name), so PostgREST sends a
+    // row ARRAY here -- redeem_onboarding_invite returns a jsonb object. The
+    // shapes differ; reading .team_name off the array would have quietly
+    // rendered "your team" for every successful join.
+    const rows = await rpc('redeem_invite',
+      { p_token: token, p_display_name: displayName }, accessToken);
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    return (row && row.team_name) || 'your team';
+  } catch (err) {
+    if (!INVITE_NOT_FOUND.test(String(err.message || err))) throw err;
+  }
+  const out = await rpc('redeem_onboarding_invite',
+    { p_token: token, p_display_name: displayName }, accessToken);
+  return (out && out.team_name) || 'your team';
+}
+
 (async function () {
   const frag = readFragment();
 
@@ -156,14 +192,12 @@ async function rpc(fn, body, accessToken) {
 
     show('v-working');
     try {
-      const out = await rpc('redeem_onboarding_invite',
-        { p_token: invite, p_display_name: name || 'Member' }, frag.access_token);
-      $('teamName').textContent = (out && out.team_name) || 'your team';
+      $('teamName').textContent = await redeem(invite, name || 'Member', frag.access_token);
       show('v-done');
     } catch (err) {
-      // The RPC raises for an invalid, expired or already-redeemed token; the
-      // wording matters because all three land here and "invalid" alone reads
-      // as "we have no idea".
+      // The RPC raises for an invalid, revoked, expired or already-redeemed
+      // token; the wording matters because all of them land here and "invalid"
+      // alone reads as "we have no idea".
       fail(String(err.message || err));
     }
     return;
