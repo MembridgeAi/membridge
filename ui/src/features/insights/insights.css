@@ -105,7 +105,10 @@
   width: 340px;
   flex-shrink: 0;
 }
-@media (max-width: 1000px) {
+/* 1200, not 1000: the two columns need roughly 1200px before the right one
+ * stops feeling cramped, so 1000 left a dead zone where a 1280px window (the
+ * default) was too wide to stack yet too narrow to fit both comfortably. */
+@media (max-width: 1200px) {
   .insights-cols {
     flex-direction: column;
   }
@@ -217,12 +220,32 @@
 @media (prefers-reduced-motion: no-preference) {
   .lrow { transition: background-color var(--dur-fast) var(--ease-out); }
 }
-.lrow-name {
+/* Mirrors .setting-row-label (settings.css): a title line with an optional
+ * description beneath it. `min-width: 0` is what actually lets this item
+ * shrink below its content -- without it the flex item keeps an `auto`
+ * minimum and the reason inside would set the width of the 340px right
+ * column again, which is the overflow this structure exists to prevent. */
+.lrow-label {
   flex: 1;
   min-width: 0;
+}
+.lrow-name {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Mirrors .setting-row-desc. Deliberately NOT nowrap/ellipsis: this is the
+ * reason a project is single-owner, and truncating it would remove the only
+ * real information the row carries. It wraps to as many lines as it needs.
+ * `overflow-wrap: anywhere` covers an unbroken token (a long path or repo
+ * name), which would otherwise be a single unbreakable box and reintroduce
+ * the very overflow this replaced. */
+.lrow-reason {
+  margin-top: 1px;
+  color: var(--text3);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
 }
 .lrow-muted {
   color: var(--text3);

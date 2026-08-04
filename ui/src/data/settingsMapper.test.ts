@@ -130,6 +130,33 @@ describe('mapSettings', () => {
       const mcp = s.delivery.find(d => d.id === 'mcp')
       expect(mcp?.installed).toBe(false)
     })
+    // `membridge status` names the exact cause and the config key that fixes
+    // it for every tool it could not register. /api/settings has always
+    // carried those same per-row `detail` sentences (verified against a live
+    // daemon), but mcpChannel collapsed the rows into one summary string and
+    // filtered out everything that was not registered/unchanged -- so the
+    // dashboard threw away precisely the rows that were actionable. The
+    // summary string stays as it is; the rows have to survive alongside it
+    // for the UI to be able to render them at all.
+    it('carries the per-tool rows through, including the skipped ones the summary omits', () => {
+      const s = mapSettings({
+        ...raw,
+        mcp: {
+          autoRegister: true, state: 'registered', at: null,
+          rows: [
+            { agent: 'claude-code', status: 'skipped', detail: 'could not find the `claude` binary; set config.mcp.claudeBin to its full path' },
+            { agent: 'codex', status: 'registered', detail: null },
+          ],
+        },
+      }, status, null)
+      const mcp = s.delivery.find(d => d.id === 'mcp')
+      expect(mcp?.mcpRows).toHaveLength(2)
+      expect(mcp?.mcpRows?.[0]).toMatchObject({
+        agent: 'claude-code',
+        status: 'skipped',
+        detail: 'could not find the `claude` binary; set config.mcp.claudeBin to its full path',
+      })
+    })
     it('is not installed after a real unregister', () => {
       const s = mapSettings({ ...raw, mcp: { autoRegister: true, state: 'removed', at: null, rows: [{ agent: 'codex', status: 'removed', detail: null }] } }, status, null)
       const mcp = s.delivery.find(d => d.id === 'mcp')

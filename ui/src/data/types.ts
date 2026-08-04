@@ -367,6 +367,13 @@ export interface DeliveryChannel {
   // last checked (e.g. "registered with Claude Code, Codex · checked 2h
   // ago"). '' when there is nothing dynamic to add yet.
   detail: string
+  // 'mcp' only. The per-tool registration rows the daemon already recorded,
+  // carried through UNSUMMARISED. `detail` above names only the tools that
+  // DID register, which is exactly the wrong half when nothing did: the
+  // skipped/failed rows are the ones whose `detail` names the config key
+  // that fixes them (the same lines `membridge status` prints). Undefined
+  // for every other channel, and for an older daemon that sent no rows.
+  mcpRows?: McpRegisterRow[]
 }
 
 // Force-update hooks (lib/hooks.js's hooksVersionStatus/forceUpdateHooks):

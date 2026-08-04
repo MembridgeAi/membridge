@@ -49,6 +49,42 @@ describe('SettingsPage', () => {
     expect(within(row).getByRole('button', { name: /re-register/i })).toBeInTheDocument()
   })
 
+  // `membridge status` prints, per tool, the specific cause AND the config
+  // key that fixes it. The dashboard showed one vague summary sentence
+  // ("Registration ran, but no AI tool on this machine picked it up.")
+  // instead, even though /api/settings already carries every one of those
+  // per-row sentences (verified against a live daemon). The per-tool chips
+  // existed but were fed ONLY by the POST /api/mcp/register mutation, so the
+  // reasons appeared only after clicking Re-register -- they have to be
+  // visible at rest, without the user guessing that re-registering is how
+  // you find out why nothing registered.
+  it('names each tool and the config key that fixes it, without clicking Re-register', async () => {
+    const client = new FakeDataClient()
+    const base = await client.getSettings()
+    vi.spyOn(client, 'getSettings').mockResolvedValue({
+      ...base,
+      delivery: base.delivery.map(c => c.id === 'mcp'
+        ? {
+            ...c,
+            installed: false,
+            detail: 'Registration ran, but no AI tool on this machine picked it up.',
+            mcpRows: [
+              { agent: 'claude-code', status: 'skipped' as const, detail: 'could not find the `claude` binary; set config.mcp.claudeBin to its full path' },
+              { agent: 'codex', status: 'skipped' as const, detail: '/Users/x/.codex does not exist, so nothing was written; if you keep this config elsewhere, set config.mcp.codex.configPath' },
+            ],
+          }
+        : c),
+    })
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+
+    // The exact cause and the exact config key, per tool -- the same two
+    // things the CLI prints, and no click needed to reach them.
+    expect(await within(row).findByText(/claude code: skipped, could not find the `claude` binary; set config\.mcp\.claudeBin/i)).toBeInTheDocument()
+    expect(within(row).getByText(/codex: skipped, .*set config\.mcp\.codex\.configPath/i)).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: /re-register/i })).toBeInTheDocument()
+  })
+
   // The "unknown" render state (installed:null -- an older daemon that has
   // not reported a real check for this channel yet). Must say so in words,
   // and must never fall back to "not registered": that would tell the user
