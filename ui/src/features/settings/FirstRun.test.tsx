@@ -60,4 +60,22 @@ describe('FirstRun', () => {
     await userEvent.click(await screen.findByRole('button', { name: /get started/i }))
     expect(await screen.findByText(/setup save rejected/i)).toBeInTheDocument()
   })
+
+  // "Get started" writes setupCompletedAt and then waits for ['status'] to
+  // come back with setupDone:true before App.tsx swaps this screen out. That
+  // is a real round trip on a cold daemon, and with a button whose label
+  // never changed the screen looked frozen -- the same "silently did
+  // nothing" complaint the error banner above exists for, just with a slow
+  // write instead of a rejected one. The mutation already tracks isPending;
+  // the label only has to say so.
+  it('says the write is in flight instead of looking frozen', async () => {
+    const client = new FakeDataClient()
+    // Deliberately never resolves: pending is the state under test, so the
+    // write must not be allowed to finish and end it.
+    vi.spyOn(client, 'setSetting').mockReturnValue(new Promise<void>(() => {}))
+    renderWith(client, <FirstRun />)
+    await userEvent.click(await screen.findByRole('button', { name: /get started/i }))
+    expect(await screen.findByRole('button', { name: /saving/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^get started$/i })).toBeNull()
+  })
 })

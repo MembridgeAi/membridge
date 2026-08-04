@@ -89,6 +89,28 @@ describe('MembersPage', () => {
     expect(within(andrewRow).getByRole('button', { name: /more actions for andrew/i })).toBeInTheDocument()
   })
 
+  // The own-row guard was applied to the overflow menu and NOT to the role
+  // select sitting one line above it, so an admin was still handed a select
+  // on their own row -- the one control that can demote the viewer out of
+  // the ability to use every other control on this page. The backend refuses
+  // the write anyway (set_role is owner-only), which makes the offer worse,
+  // not better: the admin picks "Member", nothing happens, and the only
+  // feedback is an error banner explaining a rule the UI should not have
+  // invited them to break. Same fixture as the menu test above -- a
+  // REALISTIC viewerId plus role 'admin', so the viewer's own row is not
+  // also hidden by the separate owner-row rule, which would mask the bug.
+  it('never offers a role select on the viewer\'s own row', async () => {
+    const client = new FakeDataClient({ viewerId: 'usr_9f2a', role: 'admin' })
+    renderWith(client, <MembersPage />)
+    const ownRow = await screen.findByTestId('member-row-usr_9f2a')
+    expect(within(ownRow).queryByRole('combobox')).toBeNull()
+
+    // A teammate's row must keep its select: the fix is "not on yourself",
+    // not "admins can no longer change anyone's role".
+    const andrewRow = await screen.findByTestId('member-row-andrew')
+    expect(within(andrewRow).getByRole('combobox', { name: /role for andrew/i })).toBeInTheDocument()
+  })
+
   // P0 Fix 2: invite-by-email could never succeed -- no daemon endpoint
   // accepts an email or role (POST /api/team/invite mints a generic link
   // only), so the form always ended in a developer-facing rejection message.

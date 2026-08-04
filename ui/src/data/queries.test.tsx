@@ -8,7 +8,10 @@ import { render, cleanup } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from './DataClientProvider'
 import { FakeDataClient } from './FakeDataClient'
-import { useArchiveProject, useRemoveMember, useSetMemberRole, useUnarchiveProject } from './queries'
+import {
+  useArchiveProject, useCheckForUpdates, useLeaveTeam, useRegisterMcp, useRemoveMember,
+  useSetMemberRole, useSetSetting, useUnarchiveProject, useUpdateHooks,
+} from './queries'
 
 function mountHook<T>(useHook: () => T, client: FakeDataClient = new FakeDataClient()): { qc: QueryClient; hook: () => T } {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -71,5 +74,73 @@ describe('archive mutations', () => {
     await hook().mutateAsync('/Users/x/sublease')
     expect(clientSpy).toHaveBeenCalledWith('/Users/x/sublease')
     expect(spy).toHaveBeenCalledWith({ queryKey: ['projects'] })
+  })
+})
+
+// A setting write moves daemon state, and daemon state is what GET /api/status
+// reports -- not just GET /api/settings. The concrete failure: FirstRun's "Get
+// started" writes setupCompletedAt, App.tsx gates the whole first-run takeover
+// on status.setupDone (lib/server.js derives it from config.setup.completedAt),
+// and invalidating only ['settings'] left ['status'] holding setupDone:false.
+// The write succeeded, the screen did not move, and the button read as broken.
+// Invalidating ['status'] on EVERY setting write rather than special-casing
+// this one key is deliberate: any setting that moves daemon state has exactly
+// this shape, and ['status'] is a small payload the app already polls, so the
+// unconditional refetch costs one request the app was about to make anyway.
+describe('useSetSetting refreshes daemon state, not only the settings payload', () => {
+  it('invalidates both settings and status on every setting write', async () => {
+    const client = new FakeDataClient()
+    const clientSpy = vi.spyOn(client, 'setSetting')
+    const { qc, hook } = mountHook(() => useSetSetting(), client)
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync({ key: 'setupCompletedAt', value: '2026-08-03T00:00:00.000Z' })
+    expect(clientSpy).toHaveBeenCalledWith('setupCompletedAt', '2026-08-03T00:00:00.000Z')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['settings'] })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['status'] })
+  })
+
+  it('invalidates status for an ordinary setting key too, not just the setup key', async () => {
+    const { qc, hook } = mountHook(() => useSetSetting())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync({ key: 'distill', value: { enabled: false } })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['status'] })
+  })
+
+  // useSetSetting was not the only site with this shape -- the same
+  // settings-only invalidation was copied to every write on the Settings
+  // page. Each of these writes moves daemon state that /api/status reports,
+  // so each one could leave the rail or a gate reading a value the daemon has
+  // already changed.
+  it('every daemon-state write on the settings page refreshes status too', async () => {
+    for (const [name, mount, run] of [
+      ['useRegisterMcp', () => useRegisterMcp(), (h: { mutateAsync: (v?: unknown) => Promise<unknown> }) => h.mutateAsync()],
+      ['useUpdateHooks', () => useUpdateHooks(), (h: { mutateAsync: (v?: unknown) => Promise<unknown> }) => h.mutateAsync()],
+      ['useCheckForUpdates', () => useCheckForUpdates(), (h: { mutateAsync: (v?: unknown) => Promise<unknown> }) => h.mutateAsync()],
+    ] as const) {
+      const { qc, hook } = mountHook(mount as () => { mutateAsync: (v?: unknown) => Promise<unknown> })
+      const spy = vi.spyOn(qc, 'invalidateQueries')
+      await run(hook())
+      expect(spy, `${name} did not invalidate settings`).toHaveBeenCalledWith({ queryKey: ['settings'] })
+      expect(spy, `${name} did not invalidate status`).toHaveBeenCalledWith({ queryKey: ['status'] })
+      cleanup()
+    }
+  })
+
+  // The worst of the family, and the one nobody caught by reading. Leaving a
+  // team flips status.solo, and Shell.tsx gates the entire Team nav group on
+  // !solo (showTeamNav) and the "Create a team" CTA on solo && signedIn. With
+  // only ['settings'] invalidated the rail kept offering Members and Insights
+  // for a team the machine had just left, and withheld the create-team CTA,
+  // until the next ['status'] poll -- which, with refetchIntervalInBackground
+  // false, does not arrive at all while the window is unfocused. Team
+  // membership moves all three caches, so this goes through accountRefresh
+  // rather than a settings-and-status pair.
+  it('useLeaveTeam refreshes teamAccount, settings and status, not settings alone', async () => {
+    const { qc, hook } = mountHook(() => useLeaveTeam())
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    await hook().mutateAsync('team-1')
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['settings'] })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['status'] })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['teamAccount'] })
   })
 })

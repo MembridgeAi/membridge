@@ -49,7 +49,14 @@ export function App() {
   if (statusQuery.data?.setupDone === false) {
     return (
       <Router base={routerBase()}>
-        <Shell>
+        {/* routeReflected={false} because this branch renders FirstRun no
+            matter what the path is. Without it, clicking a rail entry pushed
+            that route and lit it in the rail while the Welcome screen stayed
+            on the page, so the app reported a location it was not rendering.
+            This only stops the rail from asserting something untrue; it does
+            not make any route reachable during first run, which is a separate
+            product decision. */}
+        <Shell routeReflected={false}>
           <FirstRun />
         </Shell>
       </Router>

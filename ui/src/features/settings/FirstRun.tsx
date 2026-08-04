@@ -86,8 +86,16 @@ export function FirstRun() {
         <p className="settings-error" role="alert">Couldn't save the change. {errorMessage(setSetting.error)}</p>
       )}
 
-      <button type="button" className="first-run-btn" onClick={finish}>
-        Get started
+      {/* The click writes setupCompletedAt and then waits for ['status'] to
+          come back with setupDone:true before App.tsx takes this screen
+          down, so there is a real round trip between the press and anything
+          visible changing. Without a label that moves, that gap looks
+          identical to the button not working -- the same "silently did
+          nothing" failure the error banner above was added for, just caused
+          by a slow write instead of a rejected one. Disabled while pending
+          because a second press only queues a second identical write. */}
+      <button type="button" className="first-run-btn" onClick={finish} disabled={setSetting.isPending}>
+        {setSetting.isPending ? 'Saving…' : 'Get started'}
       </button>
     </div>
   )
