@@ -263,14 +263,20 @@ Do not merge before the recalibration.
 
 ## Known issues not fixed
 
-- **The root suite is 1401/1402 on Marco's laptop as of 2026-08-03, and the one
-  failure has CHANGED.** It is now `provenance reconciliation: the settle pass
-  attributes the commit to the ACTUAL session B, never stale session A`. The
-  worktrees check described below now passes, presumably fixed by the realpath
-  work in `2e770ea`. The provenance failure was not investigated — it is
-  pre-existing on `bae4b0e` and unrelated to the `tsc` fix, which touches only
-  `ui/`. **Do not treat "one failure" as automatically benign any more:** check
-  which one it is, because the old standing exemption no longer applies.
+- **The root suite is 1401/1402, and WHICH check fails varies by machine.** Two
+  independent runs at `bae4b0e` on 2026-08-03 both scored 1401/1402 and both
+  failed a *different* check: Marco's laptop failed `provenance reconciliation:
+  the settle pass attributes the commit to the ACTUAL session B, never stale
+  session A`, and Andrew's failed `gitignore: .membridge/team.json is
+  committable`. Neither is the worktrees check this file used to name, and that
+  one now passes — presumably fixed by the realpath work in `2e770ea`.
+
+  Both are pre-existing and unrelated to the `tsc` fix, which touches only `ui/`.
+  Andrew confirmed his by stashing and re-running, and reports `git check-ignore`
+  says the repo's own rules are correct, so his looks like a fixture problem.
+  Neither was investigated. **The old "one failure is the known worktrees one"
+  exemption is dead:** 1401/1402 is not self-evidently fine, so read which check
+  failed and compare against both known ones before assuming it is benign.
 
 - **The UI suite fails on Marco's laptop but passes on all six CI legs.
   Believe CI.** Locally, consecutive runs reported 39 files / 612 tests and then
