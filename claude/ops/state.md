@@ -291,25 +291,44 @@ Do not merge before the recalibration.
   one now passes — presumably fixed by the realpath work in `2e770ea`.
 
   Both are pre-existing and unrelated to the `tsc` fix, which touches only `ui/`.
-  Andrew confirmed his by stashing and re-running, and reports `git check-ignore`
-  says the repo's own rules are correct, so his looks like a fixture problem.
-  Neither was investigated. **The old "one failure is the known worktrees one"
-  exemption is dead:** 1401/1402 is not self-evidently fine, so read which check
-  failed and compare against both known ones before assuming it is benign.
 
-- **The UI suite fails on Marco's laptop but passes on all six CI legs.
-  Believe CI.** Locally, consecutive runs reported 39 files / 612 tests and then
-  30 files / 415 tests, with 7-8 files failing and 9 unhandled errors, across
-  `Shell.test.tsx`, `projectRouting.test.tsx`, `refetchBanner.test.tsx` and
-  `FeedPage.test.tsx`. On `0fc319a`, CI ran that same suite green on Node 20 and
-  22 across ubuntu, macos and windows.
+  **It is stable per machine, not random per run** — Andrew ran it three times
+  on his checkout and got the `gitignore` check every time, while this laptop
+  gets `provenance` every time. That is a sharper claim than "varies", and it
+  points somewhere specific: a check that fails deterministically on one machine
+  and passes on another is usually a fixture reading real environment state
+  rather than building its own. `git check-ignore -v .membridge/team.json`
+  returns nothing on Andrew's side, so the shipped `.gitignore` is correct and
+  the fault is in what the fixture constructs. **Nobody has diagnosed either
+  one.**
 
-  The tell is that the number of tests *collected* changed between runs: that is
-  resource exhaustion, not assertions. jsdom environment setup dominates the
-  runtime (546s of a 191s wall-clock run, i.e. heavily parallel). **Do not chase
-  these as real failures**, and do not run the UI suite alongside an Electron
-  build or a busy daemon. If you need a trustworthy local signal, run a single
-  file rather than the whole suite.
+  **The old "one failure is the known worktrees one" exemption is dead:**
+  1401/1402 is not self-evidently fine, so read which check failed and compare
+  against both known ones before assuming it is benign.
+
+- **The UI suite fails on Marco's laptop but passes on CI and on Andrew's
+  machine. They are timeouts, not assertions. Believe CI.** Diagnosed
+  2026-08-03. Four consecutive local runs of the same unchanged tree failed
+  16, 44, 2 and 7-8 tests — the count swings every run. In the run that was
+  classified: **26 of 44 failures were `Test timed out in 5000ms`**, 16 were
+  `TestingLibraryElementError` (an element that never appeared inside the wait,
+  i.e. the same slowness one layer up), and only 2 were real `AssertionError`s.
+  CI ran the identical suite green on Node 20 and 22 across ubuntu, macos and
+  windows; Andrew reports 612/612 in seconds on his machine.
+
+  **`--pool=threads` fixes collection but not the timeouts.** Without it the
+  number of tests *collected* varies (612, then 415) — that part is worker
+  exhaustion and threads cures it. With it all 612 collect every time and still
+  time out under load. So the default 5s `testTimeout` is simply too tight for
+  612 jsdom tests on a laptop also running the daemon, the Electron app and 16
+  worktrees.
+
+  **Do not chase these as real failures**, and do not run the UI suite next to
+  an Electron build. For a trustworthy local signal run a single file. If
+  someone wants this genuinely fixed rather than worked around, raising
+  `testTimeout` in `ui/vite.config.ts` is the lever — deliberately not changed
+  here, since it trades a slow-machine annoyance against CI's ability to catch a
+  real hang.
 
 - *(historical, now passing)* **1379/1380 on any machine with a live git
   worktree.** `worktrees: a non-repo directory returns [] rather than throwing`
