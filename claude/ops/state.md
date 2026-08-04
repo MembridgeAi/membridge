@@ -46,8 +46,8 @@ ever matters, the fix is a separate tsconfig for the node-facing files.
 **v0.2.4 shipped** on 2026-08-02: GitHub release, five assets, and
 `@membridgeai/membridge@0.2.4` on npm. v0.2.3 was skipped entirely and will
 never be published. Master went red for two days after that and is **green
-again** as of `0fc319a`. The one open item is a site installer still pinned to
-0.2.2.
+again** as of `0fc319a`. The site installer, stuck at 0.2.2, was regenerated and
+is live at 0.2.4.
 
 ---
 
@@ -98,19 +98,33 @@ that makes the `Attach to release` steps run. **A tag alone attaches nothing.**
 Verify assets by **content type, not status code** — a missing GitHub asset
 redirects to HTML and still returns 200.
 
-### OPEN: the site installer is two releases behind
+### DONE 2026-08-03: the site installer is regenerated and live at 0.2.4
 
-Live `install.sh` on membridge.app still pins `VERSION="0.2.2"`, confirmed
-2026-08-03. The v0.2.2 assets still resolve, so `curl | sh` installs succeed —
-they just silently deliver 0.2.2 to a user who thinks they are getting current.
+Live `install.sh` on membridge.app now pins `VERSION="0.2.4"` and
+`SHA256="2221760a…"`, verified by fetching the live URL and running
+`curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run`, which
+resolves the correct release URL. Landed as `ee6da53` here and
+`db428bd` on `mmelika/membridge-site` (branch **`main`**, not `master`).
 
-This is now regenerable, and was not before: it was blocked on a v0.2.3 publish
-that never happened, and v0.2.4's published assets satisfy the same requirement.
-`scripts/install/gen-install.js` hashes a `dist/` build, and signed macOS
-binaries are not byte reproducible, so a locally built zip will never match.
-**The only correct source is the downloaded published asset.** Sequence:
-download the published 0.2.4 zip, regenerate through the generator, deploy to
-`mmelika/membridge-site` — which publishes from **`main`**, not `master`.
+**Two things this exposed, and they are the reason to check it every release:**
+
+1. **The committed artifact had drifted from its own template.**
+   `scripts/install/install.sh` in this repo was pinned to **`0.1.2`** — four
+   releases stale — and predated the sudo-free CLI install, the `CLI_STATUS`
+   reporting and the launch-at-login step. Live was serving a *different* stale
+   generation, `0.2.2`. Regeneration is evidently not part of anyone's release
+   routine, and nothing fails when it is skipped: the old pin keeps working, so
+   a `curl | sh` user silently gets an old build with no error anywhere.
+2. **The local-vs-published hash distinction is real, not theoretical.**
+   Measured on the same version: the local `dist/MemBridge-0.2.4-arm64.zip`
+   hashes to `fde9c618…`, the published asset to `2221760a…`. Signed macOS
+   binaries are not byte reproducible. The template **dies** on checksum
+   mismatch, so pinning a local hash hard-fails every install.
+
+The sequence, for next time: download the published zip with
+`gh release download`, hash **that**, regenerate, deploy to the site repo's
+`main`, then confirm against the live URL — a push is not a deploy, and it took
+roughly 20 seconds for Pages to serve the new copy.
 
 **Do not re-run CI against an already-published tag.** `--clobber` would replace
 an attached asset with a freshly signed one carrying a different hash, and the
@@ -246,13 +260,18 @@ launch at login, plus the docs and these ops files.
 
 ## Not done, in priority order
 
-1. **Regenerate `install.sh` off the published 0.2.4 assets and deploy it.** No
-   longer blocked. Deploy target is `mmelika/membridge-site`, branch `main`.
-3. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
+1. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
    a live sign-in and a replayed callback, has not happened.
-4. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
-5. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
+2. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
+3. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
    into the recalibration.
+4. **Land Andrew's `liveBasis` work.** As of 2026-08-03 it is five files,
+   uncommitted, on his machine only — `liveBasis` appears nowhere in `lib/`,
+   `ui/src/` or `test/` here. It qualifies the `live` flag the MCP already emits
+   on cached team rows, which currently claims a teammate is active when all it
+   knows is that a row synced. He also logged the matching Today-page gap
+   (`ui/src/data/mappers.ts:397` filters on raw `live`) as a deliberate product
+   call, not a bug.
 
 ## Parked, preserved off-laptop
 
@@ -263,28 +282,53 @@ Do not merge before the recalibration.
 
 ## Known issues not fixed
 
-- **The root suite is 1401/1402 on Marco's laptop as of 2026-08-03, and the one
-  failure has CHANGED.** It is now `provenance reconciliation: the settle pass
-  attributes the commit to the ACTUAL session B, never stale session A`. The
-  worktrees check described below now passes, presumably fixed by the realpath
-  work in `2e770ea`. The provenance failure was not investigated — it is
-  pre-existing on `bae4b0e` and unrelated to the `tsc` fix, which touches only
-  `ui/`. **Do not treat "one failure" as automatically benign any more:** check
-  which one it is, because the old standing exemption no longer applies.
+- **The root suite is 1401/1402, and WHICH check fails varies by machine.** Two
+  independent runs at `bae4b0e` on 2026-08-03 both scored 1401/1402 and both
+  failed a *different* check: Marco's laptop failed `provenance reconciliation:
+  the settle pass attributes the commit to the ACTUAL session B, never stale
+  session A`, and Andrew's failed `gitignore: .membridge/team.json is
+  committable`. Neither is the worktrees check this file used to name, and that
+  one now passes — presumably fixed by the realpath work in `2e770ea`.
 
-- **The UI suite fails on Marco's laptop but passes on all six CI legs.
-  Believe CI.** Locally, consecutive runs reported 39 files / 612 tests and then
-  30 files / 415 tests, with 7-8 files failing and 9 unhandled errors, across
-  `Shell.test.tsx`, `projectRouting.test.tsx`, `refetchBanner.test.tsx` and
-  `FeedPage.test.tsx`. On `0fc319a`, CI ran that same suite green on Node 20 and
-  22 across ubuntu, macos and windows.
+  Both are pre-existing and unrelated to the `tsc` fix, which touches only `ui/`.
 
-  The tell is that the number of tests *collected* changed between runs: that is
-  resource exhaustion, not assertions. jsdom environment setup dominates the
-  runtime (546s of a 191s wall-clock run, i.e. heavily parallel). **Do not chase
-  these as real failures**, and do not run the UI suite alongside an Electron
-  build or a busy daemon. If you need a trustworthy local signal, run a single
-  file rather than the whole suite.
+  **It is stable per machine, not random per run** — Andrew ran it three times
+  on his checkout and got the `gitignore` check every time, while this laptop
+  gets `provenance` every time. That is a sharper claim than "varies", and it
+  points somewhere specific: a check that fails deterministically on one machine
+  and passes on another is usually a fixture reading real environment state
+  rather than building its own. `git check-ignore -v .membridge/team.json`
+  returns nothing on Andrew's side, so the shipped `.gitignore` is correct and
+  the fault is in what the fixture constructs. **Nobody has diagnosed either
+  one.**
+
+  **The old "one failure is the known worktrees one" exemption is dead:**
+  1401/1402 is not self-evidently fine, so read which check failed and compare
+  against both known ones before assuming it is benign.
+
+- **The UI suite fails on Marco's laptop but passes on CI and on Andrew's
+  machine. They are timeouts, not assertions. Believe CI.** Diagnosed
+  2026-08-03. Four consecutive local runs of the same unchanged tree failed
+  16, 44, 2 and 7-8 tests — the count swings every run. In the run that was
+  classified: **26 of 44 failures were `Test timed out in 5000ms`**, 16 were
+  `TestingLibraryElementError` (an element that never appeared inside the wait,
+  i.e. the same slowness one layer up), and only 2 were real `AssertionError`s.
+  CI ran the identical suite green on Node 20 and 22 across ubuntu, macos and
+  windows; Andrew reports 612/612 in seconds on his machine.
+
+  **`--pool=threads` fixes collection but not the timeouts.** Without it the
+  number of tests *collected* varies (612, then 415) — that part is worker
+  exhaustion and threads cures it. With it all 612 collect every time and still
+  time out under load. So the default 5s `testTimeout` is simply too tight for
+  612 jsdom tests on a laptop also running the daemon, the Electron app and 16
+  worktrees.
+
+  **Do not chase these as real failures**, and do not run the UI suite next to
+  an Electron build. For a trustworthy local signal run a single file. If
+  someone wants this genuinely fixed rather than worked around, raising
+  `testTimeout` in `ui/vite.config.ts` is the lever — deliberately not changed
+  here, since it trades a slow-machine annoyance against CI's ability to catch a
+  real hang.
 
 - *(historical, now passing)* **1379/1380 on any machine with a live git
   worktree.** `worktrees: a non-repo directory returns [] rather than throwing`

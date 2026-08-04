@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { INTENT_MAX, distilledBullets, shortIntent } from './distill'
+import { INTENT_MAX, distilledBullets, shortIntent, whatBullets } from './distill'
 import type { Session } from '../../data/types'
 
 const session = (overrides: Partial<Session> = {}): Session => ({
@@ -87,5 +87,64 @@ describe('shortIntent', () => {
 
   it('collapses the newlines of a multi-line prompt so the line cannot grow vertically', () => {
     expect(shortIntent('first line\n\nsecond line').text).toBe('first line second line')
+  })
+})
+
+// whatBullets: the merged "What" widget's content. Two shapes reach it, and
+// both have to read as a scannable list. New sessions arrive already bulleted
+// (lib/hooks.js asks for one short line per bullet); every session distilled
+// before that change arrives as one prose paragraph, and there are hundreds of
+// those already synced, so prose is split on sentence boundaries rather than
+// rendered as a single bullet the width of the widget.
+describe('whatBullets', () => {
+  it('splits a bulleted field into one bullet per line, markers stripped', () => {
+    const out = whatBullets(session({
+      decisions: '- Durability beats recency.\n- The gate moved to hooks.js.\n* Third marker shape.',
+    }))
+    expect(out).toEqual([
+      'Durability beats recency.',
+      'The gate moved to hooks.js.',
+      'Third marker shape.',
+    ])
+  })
+
+  it('splits legacy prose on sentence boundaries', () => {
+    const out = whatBullets(session({
+      decisions: 'Durability beats recency because a crashed run must not steal the hook. The gate moved to hooks.js.',
+    }))
+    expect(out).toEqual([
+      'Durability beats recency because a crashed run must not steal the hook.',
+      'The gate moved to hooks.js.',
+    ])
+  })
+
+  it('appends gotchas after decisions in one list', () => {
+    const out = whatBullets(session({
+      decisions: 'Durability beats recency.',
+      gotchas: 'settings.json rewrites drop unknown keys.',
+    }))
+    expect(out).toEqual([
+      'Durability beats recency.',
+      'settings.json rewrites drop unknown keys.',
+    ])
+  })
+
+  it('never truncates a bullet: the widget restructures text, it does not hide it', () => {
+    const long = `${'word '.repeat(80).trim()}.`
+    const out = whatBullets(session({ decisions: long }))
+    expect(out).toEqual([long])
+  })
+
+  it('is empty when neither field was captured, so the widget can be absent', () => {
+    expect(whatBullets(session())).toEqual([])
+    expect(whatBullets(session({ decisions: '   ', gotchas: null }))).toEqual([])
+  })
+
+  it('drops a gotcha that merely repeats a decision', () => {
+    const out = whatBullets(session({
+      decisions: 'Durability beats recency.',
+      gotchas: 'durability beats recency',
+    }))
+    expect(out).toEqual(['Durability beats recency.'])
   })
 })

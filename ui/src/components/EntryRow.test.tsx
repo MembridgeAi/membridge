@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { EntryRow, HOVER_PREVIEW_DELAY_MS, PATH_MAX, ROW_FILE_LIMIT, rowFiles, shortPath } from './EntryRow'
@@ -204,33 +202,10 @@ describe('EntryRow hover preview (Task 6)', () => {
     expect(row.classList.contains('entry-row-previewing')).toBe(false)
   })
 
-  it('the stylesheet raises a previewing row above the rows below it', () => {
-    // Resolved from the vitest root (ui/), not import.meta.url -- vite serves
-    // test modules over a non-file scheme.
-    //
-    // Both alternatives were tried here and both fail; do not "tidy" this back
-    // into either. `new URL('./components.css', import.meta.url)` throws
-    // "The URL must be of scheme file" in THIS module, because the react
-    // plugin transforms .tsx and serves it over a non-file scheme -- a probe in
-    // a plain .ts file does get a file:// URL, so testing that idea in the
-    // wrong file type will tell you it works. And
-    // `import css from './components.css?raw'` yields the empty string, because
-    // vitest stubs CSS imports, so the regex below finds nothing and the
-    // assertion fails while looking like a real CSS regression.
-    //
-    // `@types/node` is a devDependency purely so `node:fs` resolves; its
-    // absence is what broke CI with TS2591. Note it also makes node GLOBALS
-    // typecheck anywhere in src/ despite `node` being absent from tsconfig's
-    // `types` array, because vite.config.ts is in `include` and pulls
-    // vite/dist/node/index.d.ts, which carries `/// <reference types="node" />`.
-    const css = readFileSync(resolve(process.cwd(), 'src/components/components.css'), 'utf8')
-    const rule = css.match(/\.entry-row-previewing\s*\{[^}]*\}/)
-    expect(rule, '.entry-row-previewing has no rule in components.css').not.toBeNull()
-    const zIndex = rule![0].match(/z-index:\s*(\d+)/)
-    expect(zIndex, '.entry-row-previewing must set a z-index').not.toBeNull()
-    // Strictly above the preview card's own z-index, which is scoped inside it.
-    expect(Number(zIndex![1])).toBeGreaterThanOrEqual(30)
-  })
+  // The stylesheet rule that makes the class do anything is asserted in the
+  // ROOT suite (test/run-tests.js), not here: jsdom does no layout, so the
+  // only real check is on the CSS text, and reading a file needs node APIs
+  // this project deliberately keeps out of the UI tsconfig.
 })
 
 // One live row named 16 files, wrapping to three lines of mono text that

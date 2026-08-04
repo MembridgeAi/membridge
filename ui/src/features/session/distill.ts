@@ -82,3 +82,44 @@ export function distilledBullets(session: Session): string[] {
   }
   return out
 }
+
+/** One field's worth of points. A newline means the writer already made a
+ *  list, so it is the authoritative boundary; a paragraph offers only its
+ *  sentences. Leading bullet markers are stripped so the list renders as one
+ *  shape whichever way the text arrived. */
+function splitPoints(text: string | null): string[] {
+  const raw = String(text || '')
+  if (!raw.trim()) return []
+  const pieces = raw.includes('\n') ? raw.split('\n') : raw.split(/(?<=[.!?])\s+/)
+  return pieces.map(p => oneLine(p).replace(/^[-*•]\s*/, '')).filter(Boolean)
+}
+
+/** The merged "What" widget's bullets: the session's decisions followed by its
+ *  gotchas, as one scannable list.
+ *
+ *  Two shapes reach this and both have to read the same way. A session
+ *  distilled after the hook prompt started asking for bullets arrives with one
+ *  line per point; every session distilled before that arrives as a prose
+ *  paragraph, and hundreds of those are already synced, so prose is split on
+ *  sentence boundaries rather than rendered as a single bullet the height of
+ *  the widget.
+ *
+ *  Nothing is truncated and the list is not capped. Restructuring text is this
+ *  renderer's job; making it short is the distiller's (lib/hooks.js), and a
+ *  clip here would hide a teammate's reasoning with no control to reach it.
+ *
+ *  A gotcha that merely restates a decision is dropped: the two fields are one
+ *  list now, and the same sentence twice reads as a rendering bug. */
+export function whatBullets(session: Session): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const field of [session.decisions, session.gotchas]) {
+    for (const piece of splitPoints(field)) {
+      const key = sameLineKey(piece)
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      out.push(piece)
+    }
+  }
+  return out
+}

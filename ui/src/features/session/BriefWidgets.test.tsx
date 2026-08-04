@@ -29,21 +29,38 @@ function widgetTitles(): string[] {
 }
 
 describe('BriefWidgets (Task 4)', () => {
-  it('renders the widgets in the locked fixed order', () => {
+  // Files lead. The reader's first question about a teammate's session is what
+  // it touched, and that answer used to sit below two paragraphs of prose.
+  // "Why" and "Watch out" are one widget now, titled "What": they were always
+  // read together, and two open paragraphs stacked above the file list is the
+  // wall this page exists to avoid.
+  it('renders the widgets in the locked fixed order, files first', () => {
     render(<BriefWidgets session={session()} />)
-    expect(widgetTitles()).toEqual(['Why', 'Watch out', 'Key files', 'Changes'])
+    expect(widgetTitles()).toEqual(['Key files', 'Changes', 'What'])
   })
 
-  it('Why and Watch out are open by default; the other two are closed', () => {
+  it('Key files and What are open by default; the full Changes list is closed', () => {
     render(<BriefWidgets session={session()} />)
     const details = [...document.querySelectorAll('details.session-widget')] as HTMLDetailsElement[]
-    expect(details.map(d => d.open)).toEqual([true, true, false, false])
+    expect(details.map(d => d.open)).toEqual([true, false, true])
+  })
+
+  it('What merges decisions and gotchas into one bulleted list', () => {
+    render(<BriefWidgets session={session()} />)
+    const what = screen.getByText('What').closest('details')!
+    const bullets = [...what.querySelectorAll('li')].map(li => li.textContent)
+    expect(bullets).toEqual([
+      'Durability beats recency because a crashed run must not steal the hook.',
+      'settings.json rewrites drop unknown keys, so merge before writing.',
+    ])
+    // The old two-widget shape is gone, not merely reordered.
+    expect(screen.queryByText('Why')).toBeNull()
+    expect(screen.queryByText('Watch out')).toBeNull()
   })
 
   it('a widget with no captured content is ABSENT from the DOM -- no placeholder row', () => {
     render(<BriefWidgets session={session({ decisions: null, gotchas: null, checkpoints: [] })} />)
-    expect(screen.queryByText('Why')).toBeNull()
-    expect(screen.queryByText('Watch out')).toBeNull()
+    expect(screen.queryByText('What')).toBeNull()
     expect(screen.queryByText('Checkpoints')).toBeNull()
     expect(screen.queryByText(/not captured/i)).toBeNull()
     expect(widgetTitles()).toEqual(['Key files', 'Changes'])
@@ -92,7 +109,7 @@ describe('BriefWidgets (Task 4)', () => {
     expect(peek).not.toBeNull()
     expect(peek!.textContent).toMatch(/lib\/hooks\.js/)
     // Open widgets carry no peek -- there is nothing to preview.
-    const why = screen.getByText('Why').closest('details')!
-    expect(why.querySelector('summary .session-widget-peek')).toBeNull()
+    const what = screen.getByText('What').closest('details')!
+    expect(what.querySelector('summary .session-widget-peek')).toBeNull()
   })
 })

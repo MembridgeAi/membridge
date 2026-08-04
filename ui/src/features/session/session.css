@@ -327,11 +327,29 @@
   padding-top: var(--sp-2);
 }
 
-.session-widget-text {
-  margin: 0;
-  font-size: var(--fs-md);
-  line-height: var(--lh-base);
+/* The merged What widget's points. Same dot-and-indent shape as the distilled
+ * bullets under the summary, deliberately: the reader meets one bullet style
+ * on this page, not two. Sized a step down because this list runs longer and
+ * sits below the file lists rather than under the header.
+ *
+ * .session-widget-text was removed with the prose paragraphs it styled (the
+ * Why and Watch out widgets); nothing renders a bare <p> in a widget now. */
+.session-what {
+  position: relative;
+  padding-left: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
   color: var(--text);
+}
+.session-what::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 0.55em;
+  width: 4px;
+  height: 4px;
+  border-radius: var(--r-sm);
+  background: var(--accent);
 }
 
 .session-list {

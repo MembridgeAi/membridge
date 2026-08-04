@@ -316,3 +316,73 @@ clear first-run notice so nothing is happening in secret, and add a Settings
 toggle that reflects the real state and actually controls it. That gets
 informed consent and keeps the breadth. It has not been agreed to, and this
 entry stays contested until someone agrees to something.
+
+## MemBridge is confident about narrative and silent about state
+
+**Status:** open product observation, not a decision and not a queue item. No
+code change is proposed here. Recorded because it was demonstrated twice in one
+evening, in opposite directions, by the product being used on itself.
+
+The `liveBasis` fix (`0ea7d83`) taught an agent to say *"I only have the synced
+row."* This entry is the same shape one layer up, and unfixed: **nothing yet
+makes an agent say "the tree I am reading is not the tree they are working
+in."**
+
+### The evidence, 2026-08-03
+
+Both incidents involve the same two people and the same repo, hours apart.
+
+**Direction one: the summary moved, the work did not.** Andrew finished the
+`liveBasis` work and its handoff reached Marco's machine within minutes —
+accurate, detailed, verifiable. The five changed files reached nothing. They sat
+uncommitted on one laptop while every reader of the team feed had a confident
+description of work that existed in exactly one place. It was one `git checkout`
+from gone, and MemBridge would have retained a faithful account of a thing that
+no longer existed.
+
+**Direction two: the state was read through the wrong tree.** Marco's earlier
+session reported adding a queue item to `claude/ops/queue.md`. Andrew reviewed
+from his own clone at `bae4b0e`, correctly observed no such entry and a clean
+tree, and concluded it had never been written. It had — it was uncommitted in
+Marco's working tree. His observation was sound and his inference was wrong,
+because the tree he could see was not the tree the claim was about.
+
+### Why this is the product's problem and not the operator's
+
+Both people did the reasonable thing. Neither failure is carelessness, and no
+amount of discipline removes the asymmetry: a teammate's *uncommitted* state is,
+by construction, not visible to anyone else, while their *description* of it
+syncs immediately. The gap between those two is exactly where MemBridge
+operates, and right now the product widens it — it makes the narrative more
+available without making its unreliability legible.
+
+An agent reading the team feed today cannot distinguish:
+
+- work that is committed, pushed, and readable by the reader
+- work that is committed locally and not pushed
+- work that exists only as unsaved edits in someone's editor
+
+All three produce the same confident summary card.
+
+### What is NOT the answer
+
+**Syncing the work itself.** MemBridge is a memory layer, not a replication
+layer. Pushing someone's uncommitted diffs to teammates is a different and much
+riskier product, and it inverts the privacy posture the rest of the system took
+care to establish.
+
+**Telling people to commit more.** True and useless. It is the advice that gets
+given after every occurrence and prevents none of them.
+
+### What might be
+
+Something closer to `liveBasis`'s move: make the claim carry its own basis.
+A summary could state what it is grounded in — a pushed commit a reader can
+fetch, a local commit they cannot, or a working tree they will never see — and
+an agent reading it could then say *"Andrew describes work I have no way to
+verify."* That is cheap, honest, and does not move a single byte of anyone's
+code.
+
+Whether that belongs in the summary schema, the MCP tool descriptions, or both
+is undecided. So is whether it is worth building at all. **This entry exists to
+stop the observation being lost, not to commit anyone to acting on it.**

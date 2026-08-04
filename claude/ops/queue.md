@@ -91,6 +91,38 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
 
 ## Found 2026-08-03, not yet fixed
 
+- **The MemBridge MCP cannot currently answer "what is Andrew doing live right
+  now" from the data it exposes.** `get_recent_activity` is registered as
+  "newest-first AI activity" and combines local sessions with cached teammate
+  activity, but its implementation reads only local state and cached pulled
+  team rows (`lib/mcp.js:340`, `lib/activity.js:295`). In this Codex session it
+  returned Marco's live local sessions but no live Andrew row; the newest Andrew
+  row visible through project memory was a synced teammate summary from
+  2026-08-01 19:00 UTC. Decide whether "live teammate presence" should mean
+  cached team rows only, a backend poll for active remote sessions, or a separate
+  clearly-labelled surface.
+
+- **Answering the item above: live teammate presence is unbuilt, and the
+  dashboard's "Happening now" is the surface that still implies otherwise.**
+  The decision was option 1, qualify the claim rather than build presence or add
+  a third surface; presence stays on the roadmap. Marco asked through the MCP
+  whether he could see what Andrew was doing as we speak. He could not:
+  `get_recent_activity` is a local read over `proj.teamEntries`
+  (`lib/activity.js:222`), and the `live` flag on a team row is judged only on
+  that row's ts (`lib/feed.js` `normalizeTeam`), so it is evidence of recent
+  synced activity, never proof of a current remote session. The payload and the
+  `get_recent_activity`/`why` tool descriptions now say so via `liveBasis`
+  ('session-events' vs 'synced-row'), which is that fix. NOT fixed:
+  `dedupeLiveSessions` in `ui/src/data/mappers.ts:397` filters Today's
+  "Happening now" list and its "live now" count on that same `live` flag
+  without reading `liveBasis`, so a teammate whose row synced inside the
+  15-minute window still renders as working right now, with a live dot. Options
+  are to filter Today on `liveBasis === 'session-events'` (honest, but removes
+  teammates from the dashboard's presence surface entirely), or to render team
+  rows there under separate wording such as "last synced". That is a product
+  call, not a bug fix, and it overlaps the real presence feature already on the
+  roadmap at `docs/guide.md:507`.
+
 - **The invite URL the CLI prints cannot be redeemed.** `teamsync.inviteUrl`
   builds `<webUrl>/join/<token>`, but the hosted join page reads its token from
   the fragment only (`location.hash.slice(1)`,
