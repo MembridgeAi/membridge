@@ -29,6 +29,24 @@ different way, and each was hiding the next.
   every filter returned an empty list for every query. There is also a **Hide
   mine** control, applied before ranking rather than trimming the page, and
   results now lead with the outcome instead of the attribution.
+- **Memory now knows when it gets used.** Every `search_memory` result and
+  every `why` row carries `retrievals`: how many times that entry had been
+  served before this call, counted identically across the MCP tools and the
+  dashboard search and keyed on the event itself, so one memory accrues one
+  count no matter which surface or author spelling served it. Serves append
+  to a log under ~/.membridge — never state.json — and a tracking failure can
+  never break a search. This is the first read on what stored memory is
+  actually worth: proof of use now, the input for decay and usage-aware
+  ranking later. Opt out with `trackRetrievals: false` or
+  MEMBRIDGE_NO_RETRIEVALS=1.
+- **Search quality is now a gated promise, not a hope.** A recall-quality
+  harness (test/suites/recall-quality.test.js) seeds realistic corpora and
+  asserts perfect recall AND precision for the questions people actually
+  re-ask: a decision arc across sessions, a row that shared nothing but a
+  file list, project/author/date filters, one event pushed under two display
+  names, and an old exact answer outranking a recent partial one. A ranking
+  change that silently breaks resurfacing now fails in seconds instead of in
+  a teammate's session.
 - **The installer stops overwriting a linked checkout.** Running it on a
   machine with `npm link` clobbered the developer's own `bin/membridge.js`.
 - **Insights cannot publish a change it never measured.** A feed fetch that

@@ -7,6 +7,12 @@
 .team-page {
   display: flex;
   flex-direction: column;
+  /* ONE column width for everything on this page. Each block used to pick
+     its own -- cards at 560px, the multi-team note full-bleed, the roster
+     wider still -- so the page stepped in and out three times down its own
+     length. Set it here and reference it below; a new block that forgets to
+     is the bug this variable exists to make obvious. */
+  --team-col: 860px;
 }
 
 .team-title {
@@ -33,7 +39,7 @@
 .team-card {
   margin: var(--sp-4);
   padding: var(--sp-4);
-  max-width: 560px;
+  max-width: var(--team-col);
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: var(--panel);
@@ -197,20 +203,22 @@
 /* The "you are on more than one team" notice. Tinted rather than red: it is
  * a stated limitation, not an error the user caused or can fix. */
 .team-multi {
-  padding: 8px 10px;
+  /* Same column and gutter as the cards it sits between -- it used to run
+     the full page width, which made it read as a page-level banner rather
+     than a note about the team below it. */
+  margin: 0 var(--sp-4) var(--sp-4);
+  max-width: var(--team-col);
+  padding: var(--sp-3);
   background: var(--panel2);
   border: 1px solid var(--line2);
   border-radius: var(--r);
 }
 
-/* People: the roster, folded in from the old /team/members screen.
-   Wider than the cards above it because a member row carries a name, a role
-   control, a project count and a "what has arrived from them" line -- at the
-   560px the identity/invite cards use, every row wrapped to three lines and
-   the role select collided with the count. */
-.team-members {
-  max-width: 860px;
-}
+/* People: the roster, folded in from the old /team/members screen. It takes
+   the shared column like every other card -- the column is 860px BECAUSE of
+   this section, since a member row carries a name, a role control, a project
+   count and an arrival line, and all of that wrapped to three lines at the
+   560px the cards used to use. */
 .team-members-head {
   display: flex;
   align-items: baseline;
