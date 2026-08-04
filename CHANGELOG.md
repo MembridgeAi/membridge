@@ -1,7 +1,43 @@
 # Changelog
 
-## Unreleased
+## 0.2.6 — 2026-08-04
 
+An invite you send now works. Every step of accepting one was broken in a
+different way, and each was hiding the next.
+
+- **Invite links can be accepted.** Three separate faults, end to end. Signing
+  in through an invite bounced to a nonsense address and dropped the invite,
+  because Supabase's Site URL had no scheme and the join page's own return
+  address was not on the redirect allowlist. The page then redeemed against
+  the wrong table: it called the ops onboarding RPC, which **creates a new
+  team** and never sees the invites the app actually mints, so a real invite
+  answered "not recognised". And its closing instructions told people to run a
+  CLI login that takes a password they do not have, having just signed up
+  through GitHub. Accepting an invite now signs you in, joins you to the team
+  that invited you, and points you at the app.
+- **Joining a team, and switching between teams, from the app.** There was no
+  join UI at all — an invited user could redeem a link and still have no way to
+  connect a machine. The Team page now takes a pasted link or code, GitHub
+  sign-in is reachable from the sign-in card (the only method the invite page
+  offers, so an invited user had no password to type), and teams switch from
+  the left rail.
+- **Adding a project no longer means typing a path.** The dialog lists every
+  folder on the machine that has AI sessions, with a native picker beside it.
+- **Search filters filter.** All three did nothing: the person and project
+  dropdowns send identifiers, the tool dropdown sends a display name, and the
+  matcher compared them against names and raw stored values respectively — so
+  every filter returned an empty list for every query. There is also a **Hide
+  mine** control, applied before ranking rather than trimming the page, and
+  results now lead with the outcome instead of the attribution.
+- **The installer stops overwriting a linked checkout.** Running it on a
+  machine with `npm link` clobbered the developer's own `bin/membridge.js`.
+- **Insights cannot publish a change it never measured.** A feed fetch that
+  stopped at its page cap still produced a delta, so a truncated 30-day window
+  reported growth that had not happened. Capped figures now say so.
+- **Anonymous `mcp_tool_used` counter.** Reports which MCP tools see use —
+  presence only, never call counts or arguments — gated by the same
+  diagnostics kill switch as every other counter (`MEMBRIDGE_NO_DIAGNOSTICS=1`
+  / `diagnostics.enabled: false`).
 - **The context block arrives fresh at session start.** The daemon writes
   the "Shared AI memory" block into CLAUDE.md on its own ticks, so a session
   starting in a just-created worktree read whatever stale block an ancestor
@@ -16,7 +52,12 @@
   the last 5 of 37 sessions", "the freshest 8 of 412 shared entries") and
   name where the rest lives (`search_memory`, or `.membridge/memory.md`) —
   so an agent never mistakes the window for the whole history.
-- **`search_memory` is now relevance-ranked, not substring match.** The MCP
+Two entries below sat under "Unreleased" through the 0.2.5 release but had
+already shipped in it. They are recorded here as **0.2.5** features so nobody
+upgrading from it expects them to be new:
+
+- **`search_memory` is now relevance-ranked, not substring match.** _(0.2.5)_
+  The MCP
   tool scores headlines, decisions, gotchas, goals, files touched, per-file
   change notes, prompts, and summaries, and returns each result's relevance
   `score` and which fields `matched`, plus a `total`. Deliberately not
@@ -24,7 +65,7 @@
   old work still surfaces when it's the best match. New optional filters:
   `author`, `project`, `file`, `tool`, `since`/`until` (a bare date like
   `2026-06-01` is inclusive of that whole day), and `limit`.
-- **Team activity gets a durable local archive.** The teammate-activity
+- **Team activity gets a durable local archive.** _(0.2.5)_ The teammate-activity
   cache only ever kept the newest 100 entries per project — under a week
   for a busy five-person team — and discarded the rest permanently. Every
   pulled entry is now also written to a per-project archive under
@@ -32,10 +73,6 @@
   the team's earliest entry is archived. `search_memory` reads the archive
   so it can answer questions about work far outside the cache window;
   `get_recent_activity` intentionally does not, to keep its payload small.
-- **Anonymous `mcp_tool_used` counter.** Reports which MCP tools see use —
-  presence only, never call counts or arguments — gated by the same
-  diagnostics kill switch as every other counter (`MEMBRIDGE_NO_DIAGNOSTICS=1`
-  / `diagnostics.enabled: false`).
 
 ## 0.2.5 — 2026-08-03
 

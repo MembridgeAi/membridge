@@ -1,4 +1,8 @@
 'use strict';
+// @serial — carries a perf assertion (the 200-event render budget). The check
+// measures process CPU time, which external load mostly cannot inflate, but
+// heavy contention still taxes it somewhat (SMT siblings, cache pressure), so
+// test/run.js additionally runs this suite with nothing else in flight.
 // Extracted verbatim from test/run-tests.js. Shared plumbing lives in
 // test/harness.js; run this file directly, or via `node test/run.js redaction`.
 // --- 12. built-in secret redaction (lib/redact.js) ---
@@ -1342,16 +1346,27 @@ async function main() {
     // inflates the slower samples, which the minimum discards. Widening the
     // bound was considered and rejected: that would have traded one flake for
     // a permanently weaker check.
+    //
+    // Second chapter (2026-08-04): on a machine saturated by several agent
+    // sessions, ALL THREE wall-clock samples inflated together (402-512ms
+    // best-of-3, same tree that renders in ~10ms quiet), so the minimum alone
+    // cannot save a wall-clock measurement from sustained external load. The
+    // clock is now process CPU time: the regression this check exists to
+    // catch (per-event regex recompilation, an accidentally quadratic
+    // redactText) burns THIS process's CPU directly, while a busy machine
+    // steals wall-clock without charging this process. Bound and best-of-3
+    // are unchanged, so sensitivity is exactly what it was.
     let ms = Infinity;
     let block = '';
     for (let run = 0; run < 3; run++) {
       const proj = { events: events.slice() };
-      const t0 = Date.now();
+      const c0 = process.cpuUsage();
       block = digest.renderBlock(path.join(ROOT, 'projects', 'perf'), proj, cfg, 'CLAUDE.md');
       memorydb.buildEntries(path.join(ROOT, 'projects', 'perf'), proj, cfg);
-      ms = Math.min(ms, Date.now() - t0);
+      const d = process.cpuUsage(c0);
+      ms = Math.min(ms, (d.user + d.system) / 1000);
     }
-    assert.ok(ms < 200, `200-event render took ${ms}ms (best of 3)`);
+    assert.ok(ms < 200, `200-event render took ${ms.toFixed(1)}ms of CPU time (best of 3)`);
     assert.ok(!block.includes(AWS_KEY) && !block.includes(ANTHROPIC_KEY), 'secret leaked into the perf render');
   });
 

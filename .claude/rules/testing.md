@@ -14,6 +14,9 @@ it; `node test/run.js <name>` runs one suite (`--list` to see names).
 `<topic>.test.js` (require `../harness` FIRST, end with `h.finish()`) or an
 existing suite file. Add to the monolith only when the test genuinely needs
 the accumulated fixture state, and expect it to be extracted eventually.
+A suite containing wall-clock performance assertions must carry `@serial` in
+its header comment — run.js then runs it with nothing else in flight, so the
+assertion measures the code, not CPU contention from sibling suites.
 
 This rule intentionally overrides the global ECC rules (`testing.md`,
 `code-review.md`, `development-workflow.md`) wherever they require a full local
