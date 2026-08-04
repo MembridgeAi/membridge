@@ -41,6 +41,8 @@
   .ok{color:var(--green)}
   pre{background:var(--bg-alt);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
       font:13px var(--mono);overflow-x:auto;margin:0 0 16px}
+  code{font:12px var(--mono);background:var(--bg-alt);border:1px solid var(--border);
+       border-radius:5px;padding:1px 5px}
   .steps{counter-reset:s;padding:0;margin:0 0 18px;list-style:none}
   .steps li{counter-increment:s;position:relative;padding-left:30px;margin-bottom:12px;color:var(--ink);font-size:15px}
   .steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:20px;height:20px;border-radius:50%;
@@ -80,12 +82,18 @@
          created a team and someone who joined an existing one. The text here
          is the fallback if the script never gets that far. -->
     <p class="lead" id="doneLead">Your team is ready. Install MemBridge on each machine and it will start sharing context automatically.</p>
+    <!-- These steps are GitHub-shaped on purpose. This page signs people up
+         through GitHub and nothing else, so the account they just created has
+         no password -- and `membridge login` takes an email and a password
+         (bin/membridge.js cmdLogin). Telling an invited user to run it sent
+         them to a prompt they could never satisfy. The app's sign-in card is
+         the only surface that offers GitHub, so the route runs through it. -->
     <ol class="steps">
       <li>Install it:<pre id="installCmd">curl -fsSL https://membridge.app/install.sh | sh</pre></li>
-      <li>Sign in with the same account:<pre>membridge login</pre></li>
-      <li>Link a repo:<pre>membridge team link</pre></li>
+      <li>Open it:<pre>membridge dashboard</pre></li>
+      <li>Sign in with <b>Continue with GitHub</b> — the same account you just used. Not the email and password fields; you don't have a password.</li>
     </ol>
-    <p class="muted-note" id="doneNote">Invite the rest of your team from the app once you're set up.</p>
+    <p class="muted-note" id="doneNote">Then add a project from the app, or run <code>membridge team link</code> inside a repo. Invite the rest of your team from the app once you're set up.</p>
   </section>
 
   <section id="v-error" hidden>
@@ -198,9 +206,13 @@ async function redeem(token, displayName, accessToken) {
       $('doneLead').textContent = out.joined
         ? `You've joined ${out.teamName || 'the team'}. Install MemBridge on each machine and it will start sharing context automatically.`
         : `Team ${out.teamName || 'yours'} is ready. Install MemBridge on each machine and it will start sharing context automatically.`;
-      $('doneNote').textContent = out.joined
-        ? "Your teammates' work shows up once you link a repo they share."
-        : "Invite the rest of your team from the app once you're set up.";
+      // innerHTML here and textContent above, deliberately: these two strings
+      // are fixed literals (the <code> chip is part of the design), whereas
+      // the line above interpolates a team NAME somebody else chose and must
+      // never be parsed as markup.
+      $('doneNote').innerHTML = out.joined
+        ? 'Then add a project from the app, or run <code>membridge team link</code> inside a repo — your teammates\' work appears on the repos you have both linked.'
+        : 'Then add a project from the app, or run <code>membridge team link</code> inside a repo. Invite the rest of your team from the app once you\'re set up.';
       show('v-done');
     } catch (err) {
       // Every RPC here raises for an invalid, expired, revoked or used-up

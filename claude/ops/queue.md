@@ -91,6 +91,17 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
 
 ## Found 2026-08-03, not yet fixed
 
+- **The MemBridge MCP cannot currently answer "what is Andrew doing live right
+  now" from the data it exposes.** `get_recent_activity` is registered as
+  "newest-first AI activity" and combines local sessions with cached teammate
+  activity, but its implementation reads only local state and cached pulled
+  team rows (`lib/mcp.js:340`, `lib/activity.js:295`). In this Codex session it
+  returned Marco's live local sessions but no live Andrew row; the newest Andrew
+  row visible through project memory was a synced teammate summary from
+  2026-08-01 19:00 UTC. Decide whether "live teammate presence" should mean
+  cached team rows only, a backend poll for active remote sessions, or a separate
+  clearly-labelled surface.
+
 - **The invite URL the CLI prints cannot be redeemed.** `teamsync.inviteUrl`
   builds `<webUrl>/join/<token>`, but the hosted join page reads its token from
   the fragment only (`location.hash.slice(1)`,

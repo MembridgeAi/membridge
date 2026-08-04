@@ -27,13 +27,21 @@ provider account and a DNS record, so budget a little longer for that part.
 
 3. **Allow the redirect back to the web app** — *Authentication* → *URL
    Configuration*:
-   - **Site URL**: the deployed web workspace's URL (the Vercel deployment of
-     `web/`).
-   - **Redirect URLs**: add `https://<that-domain>/**`, plus
-     `http://localhost:7437/**` and `http://127.0.0.1:7437/**` (the desktop
-     app's dashboard — its GitHub button round-trips through
-     `/team/oauth/callback` on that port), and `http://localhost:3000/**`
-     for local web dev.
+   - **Site URL**: `https://membridge.app` — **including the scheme**. GoTrue
+     resolves a bare `membridge.app` against its own host, so every fallback
+     redirect lands on `https://<project>.supabase.co/membridge.app` with the
+     session in the fragment. If you are seeing that URL, this is why.
+   - **Redirect URLs**: add `https://join.membridge.me/**` (the hosted invite
+     landing page — every invite link ever sent points at it), plus
+     `https://membridge.app/**`, `http://localhost:7437/**` and
+     `http://127.0.0.1:7437/**` (the desktop app's dashboard — its GitHub
+     button round-trips through `/team/oauth/callback` on that port), and
+     `http://localhost:3000/**` for local web dev.
+
+   Note that GoTrue does **not** validate `redirect_to` when it hands you off
+   to GitHub — `/auth/v1/authorize` forwards any destination you give it. The
+   allowlist is only enforced on the way back, so a missing entry looks like a
+   working sign-in right up until the final redirect.
 
    The GitHub button sends people back to the exact page they started from
    (`/login`, `/join/<token>`, or the app's dashboard), and Supabase only
