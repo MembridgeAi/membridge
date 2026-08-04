@@ -178,6 +178,12 @@
   user-select: all;
 }
 
+/* Sits directly under the copied value, so the caveat is read while the code
+   is still on screen rather than after it has been pasted somewhere. */
+.team-share-caveat {
+  margin-top: var(--sp-2);
+}
+
 /* "Continue with GitHub" on the sign-in card. An anchor, not a button (it is
  * a real navigation to the daemon's /team/oauth/github redirect), so it needs
  * the button's own box back: an <a> gets none of .team-btn's block sizing. */

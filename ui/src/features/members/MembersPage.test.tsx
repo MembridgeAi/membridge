@@ -196,13 +196,25 @@ describe('MembersPage', () => {
   // Cheap secondary escape hatch to the raw code, kept alongside the primary
   // link button -- the code still works with `membridge join <code>` when a
   // link isn't convenient (no browser handy, reading it aloud, etc).
-  it('keeps a secondary "Copy code instead" action for the standing code alongside the link', async () => {
+  it('keeps a secondary action for the standing code alongside the link', async () => {
     const client = new FakeDataClient()
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /^copy code instead$/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /^copy standing code$/i }))
     expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+  })
+
+  // The standing code and a minted link are NOT interchangeable, and the
+  // control used to imply they were: "Copy code instead" reads as a format
+  // choice. team.inviteCode is one permanent per-team secret that every member
+  // shares and that no one can revoke individually -- rotating it is the only
+  // undo, and that cuts off everyone holding it. Handing that out believing it
+  // was a throwaway alternative to a link is the mistake this copy prevents.
+  it('says the standing code is permanent and cannot be revoked individually', async () => {
+    renderWith(new FakeDataClient(), <MembersPage />)
+    expect(await screen.findByRole('button', { name: /^copy standing code$/i })).toBeInTheDocument()
+    expect(await screen.findByText(/can't be revoked, only rotated/i)).toBeInTheDocument()
   })
 
   it('surfaces a failed invite-link mint instead of looking like nothing happened', async () => {

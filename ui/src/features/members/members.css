@@ -170,6 +170,21 @@
   color: var(--text3);
   font-size: 10.5px;
 }
+/* The standing-code button and its caveat travel together: the warning is
+ * only true of that button, never of the mint-a-link button beside it, so it
+ * must not be able to drift away from the control it qualifies. */
+.invite-standing {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+.invite-standing-note {
+  color: var(--text3);
+  font-size: 10px;
+  line-height: 1.35;
+  max-width: 32ch;
+}
 .invite-actions {
   margin-left: auto;
   display: flex;

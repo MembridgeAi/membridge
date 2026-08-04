@@ -409,15 +409,25 @@ export function TeamPage() {
                   : `Send this to whoever should join:`}
               </p>
               <p className="mono team-share-value">{share.value}</p>
-              {/* The instruction is the in-app paste, for BOTH shapes. The
-                  hosted page a link points at redeems from a different table
-                  than the one this token is written to, so telling someone to
-                  click it is the one thing that reliably does not work --
-                  whereas pasting either shape into Join a team goes straight
-                  to redeem_invite via the daemon. */}
+              {/* The instruction is the in-app paste, for BOTH shapes.
+                  Pasting either shape into Join a team goes straight to
+                  redeem_invite via the daemon, which is the path the daemon
+                  itself uses and the one that cannot be broken by whatever the
+                  hosted page happens to redeem against. */}
               <p className="team-note">
                 They paste it into MemBridge → Team → Join a team. (Or, from a terminal, <code>membridge join</code>.)
               </p>
+              {/* Only the 'code' branch gets this. A minted link is one
+                  revocable token; this is team.inviteCode, the single standing
+                  per-team secret, and nothing else on this screen distinguished
+                  them -- someone pasting it into a group chat had no way to
+                  know it stays valid forever and cannot be taken back from one
+                  person. */}
+              {share.kind === 'code' && (
+                <p className="team-note team-share-caveat">
+                  Permanent, shared by the whole team. Can't be revoked, only rotated.
+                </p>
+              )}
             </section>
           )}
         </>
