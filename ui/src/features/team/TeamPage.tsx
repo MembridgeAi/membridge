@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import {
-  useCreateInviteLink, useCreateTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
+  useCreateInviteLink, useCreateTeam, useJoinTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
 } from '../../data/queries'
 import type { TeamAccount, TeamSummary } from '../../data/types'
 import './team.css'
@@ -89,6 +89,20 @@ function SignInCard({ configured }: { configured: boolean }) {
       {notice && <p className="team-notice" role="status">{notice}</p>}
       {error && <p className="team-error" role="alert">{error}</p>}
 
+      {/* GitHub is the ONLY method the hosted onboarding page offers
+          (cloudflare/join), so anyone who arrived that way has an account
+          with no password and could not sign in here at all while this card
+          was email-only. A plain anchor, not a fetch: /team/oauth/github is a
+          302 into GitHub's consent screen, and the daemon's callback page
+          finishes the exchange and links back here. */}
+      <a className="team-btn team-btn-oauth" href="/team/oauth/github">
+        Continue with GitHub
+      </a>
+      <p className="team-note">
+        Use this if you set your account up from a MemBridge invite page — that flow is GitHub-only,
+        so your account has no password to type below.
+      </p>
+
       {/* Uncontrolled on purpose: the password lives in the DOM field for the
           moment it takes to submit, never in React state. */}
       <form className="team-form" onSubmit={submit}>
@@ -131,14 +145,67 @@ function SignInCard({ configured }: { configured: boolean }) {
 // failed copy can never read as a success and leave someone pasting nothing.
 type Share = { kind: 'link' | 'code'; value: string; status: 'shown' | 'copied' | 'manual' }
 
+/** State 2a: signed in, on no team, holding an invite somebody sent you.
+ *
+ *  This is deliberately FIRST on the no-team screen, above "Create a team".
+ *  The invited user is the one arriving with no idea what to do, and when
+ *  creating was the only thing on offer they created a second team --
+ *  precisely what the invite existed to prevent.
+ *
+ *  One field, and it takes whatever they were actually sent: a short token, a
+ *  legacy UUID code, or the whole pasted invite URL. The daemon normalizes
+ *  all three (teamsync.parseInviteToken), so nothing is validated or trimmed
+ *  to shape here -- a UI that guessed at the format would reject real
+ *  invites. */
+function JoinCard() {
+  const joinTeam = useJoinTeam()
+  const [error, setError] = useState<string | null>(null)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = event.currentTarget
+    const code = String(new FormData(form).get('inviteCode') || '').trim()
+    if (!code) return
+    setError(null)
+    try {
+      await joinTeam.mutateAsync(code)
+      form.reset()
+      // Nothing else to do on success: the mutation refreshes the account, and
+      // this whole card unmounts as the team card takes its place.
+    } catch (err) {
+      // The backend's own wording ("this invite link has expired", "…has been
+      // revoked") is the only actionable thing here, so it renders verbatim.
+      setError(errorMessage(err))
+    }
+  }
+
+  return (
+    <section className="team-card" aria-labelledby="team-join-heading">
+      <h2 className="team-card-title" id="team-join-heading">Join a team</h2>
+      <p className="team-note">
+        Someone sent you an invite? Paste it here — the link or just the code both work.
+      </p>
+      {error && <p className="team-error" role="alert">{error}</p>}
+      <form className="team-form" onSubmit={submit}>
+        <div className="team-field">
+          <label htmlFor="team-join-input">Invite link or code</label>
+          <input id="team-join-input" name="inviteCode" type="text" autoComplete="off" required />
+        </div>
+        <div className="team-actions">
+          <button type="submit" className="team-btn team-btn-primary" disabled={joinTeam.isPending}>
+            {joinTeam.isPending ? 'Joining…' : 'Join team'}
+          </button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
 /** The Team page. Three states, chosen by GET /api/team:
  *  1. `authenticated: false` -> the sign-in card above.
- *  2. authenticated, `teams` empty -> create a team, then show its invite link.
+ *  2. authenticated, `teams` empty -> join with an invite, or create a team.
  *  3. authenticated, on a team -> the team, plus Copy invite link.
  *
- *  Joining by code stays CLI-only (`membridge join <code>`): there is a
- *  POST /api/team/join route, but the whole redeem flow the hosted page runs
- *  is out of scope here, so this page never pretends to offer it.
  *  Leaving a team stays in Settings' danger zone, where it already is. */
 export function TeamPage() {
   const accountQuery = useTeamAccount()
@@ -270,6 +337,8 @@ export function TeamPage() {
             <p className="team-error" role="alert">Couldn't read your teams. {account.error}</p>
           )}
 
+          {!team && !account.error && <JoinCard />}
+
           {!team && !account.error && (
             <section className="team-card" aria-labelledby="team-create-heading">
               <h2 className="team-card-title" id="team-create-heading">Create a team</h2>
@@ -288,6 +357,22 @@ export function TeamPage() {
                 </div>
               </form>
             </section>
+          )}
+
+          {/* Every team read in this app and daemon takes teams[0] (see
+              LocalDaemonClient.firstTeam, lib/api-access.js readAudit): the
+              product models one team per user, but nothing enforces that, and
+              joining a second one is reachable. Picking the first silently is
+              the one behaviour that misleads -- a member of two teams saw one,
+              with no hint the other existed, while the invite button, audit
+              and member list all quietly targeted it. Named here until there
+              is a real switcher. */}
+          {account.teams.length > 1 && (
+            <p className="team-note team-multi" role="status">
+              You are on {account.teams.length} teams. This app shows and manages only <b>{team?.name}</b> —
+              members, invites and the audit trail below are all about that team.
+              Run <code>membridge team list</code> to see the others: {account.teams.slice(1).map(t => t.name).join(', ')}.
+            </p>
           )}
 
           {team && (
@@ -319,11 +404,18 @@ export function TeamPage() {
               <p className="team-note">
                 {share.status === 'manual'
                   ? `Couldn't copy automatically. Copy this ${share.kind} by hand:`
-                  : share.kind === 'link'
-                    ? 'Share this link with whoever should join:'
-                    : 'Share this code. They run `membridge join <code>`:'}
+                  : `Send this to whoever should join:`}
               </p>
               <p className="mono team-share-value">{share.value}</p>
+              {/* The instruction is the in-app paste, for BOTH shapes. The
+                  hosted page a link points at redeems from a different table
+                  than the one this token is written to, so telling someone to
+                  click it is the one thing that reliably does not work --
+                  whereas pasting either shape into Join a team goes straight
+                  to redeem_invite via the daemon. */}
+              <p className="team-note">
+                They paste it into MemBridge → Team → Join a team. (Or, from a terminal, <code>membridge join</code>.)
+              </p>
             </section>
           )}
         </>

@@ -1,5 +1,5 @@
 import type {
-  AccessMatrix, AuditEvent, DeleteProjectResult, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
   Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
@@ -149,7 +149,32 @@ export interface DataClient {
   openConfigFile(): Promise<void>
   openMemoryFile(projectPath: string): Promise<void>
   leaveTeam(teamId: string): Promise<void>
-  addProject(path: string): Promise<void>
+
+  // Redeem an invite and join the team it belongs to (POST /api/team/join).
+  // Takes whatever the user was actually sent: a short invite token, a legacy
+  // UUID standing code, or a pasted invite URL -- teamsync.parseInviteToken
+  // normalizes all three, so the UI must NOT try to pre-parse it and must not
+  // reject anything that doesn't look like a code.
+  joinTeam(codeOrLink: string): Promise<{ id: string; name: string }>
+
+  // Rename the team (POST /api/team/rename). Owner/admin only, enforced by
+  // the rename_team RPC rather than here.
+  renameTeam(teamId: string, name: string): Promise<void>
+  // Replace the STANDING invite code with a new one (POST
+  // /api/team/rotate-invite), which is the only remedy when the old one has
+  // leaked -- it is long-lived and unlimited-use by design, unlike the
+  // single-purpose tokens createInviteLink mints. Resolves the new code.
+  rotateInviteCode(teamId: string): Promise<string>
+
+  // Discovery (GET /api/scan): every project on this machine with AI
+  // activity, so adding one is picking from a list instead of typing a path.
+  // EXPENSIVE by construction -- scanPayload re-reads every session file from
+  // byte 0 and persists nothing -- so this runs when the user opens the add
+  // dialog and never on a poll timer.
+  discoverProjects(): Promise<DiscoveredProject[]>
+  // Start watching one or more folders. Bulk in one request so a 40-project
+  // sweep can't half-finish; per-path outcomes come back in the result.
+  adoptProjects(paths: string[]): Promise<AdoptResult>
 
   // Opens a native OS file/folder picker via the Electron bridge and
   // resolves to the chosen absolute paths, or [] when the user cancels.

@@ -250,11 +250,23 @@ export interface Member {
   keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
 }
 
+// One outstanding invite link (GET /api/team/invites, lib/api-access.js
+// readInvites). There is no `email` and no `role`: nothing in this product
+// mails an invite or pre-assigns a role -- an invite is a token somebody
+// pastes, and everyone who redeems one joins as a member. Those two fields
+// existed on this type before any endpoint could fill them, which is why the
+// row rendered a permanently blank address.
 export interface Invite {
+  /** The invite token. Also the id: it is the primary key AND exactly what
+   *  revoking takes, so a row needs nothing else to be revocable. */
   id: string
-  email: string
-  expiresAt: string
-  role: Role
+  createdAt: string
+  /** Null means it never expires -- a real and different state from expired. */
+  expiresAt: string | null
+  /** Null means unlimited uses. */
+  maxUses: number | null
+  useCount: number
+  revoked: boolean
 }
 
 export interface AuditEvent {
@@ -263,7 +275,18 @@ export interface AuditEvent {
   actorName: string
   action: string
   objectType: 'project' | 'member' | 'invite' | 'team' | 'setting'
+  /** The raw backend key: a project UUID, a user id, an invite token. Kept
+   *  for exactness (it is what the row is really about) but never the thing a
+   *  human is shown -- see objectName/targetName. */
   objectLabel: string
+  /** The friendly name of the object: a project's folder path. Null when the
+   *  event carries none -- absent and unknown must stay distinguishable, so
+   *  this is never backfilled with the UUID. */
+  objectName: string | null
+  /** The OTHER person in the event: whose access changed, who was removed.
+   *  Resolved to a display name by the daemon while the roster still has
+   *  them; falls back to their user id, null when the event has no subject. */
+  targetName: string | null
   detail: string | null
 }
 
@@ -464,6 +487,35 @@ export interface DeleteProjectResult {
   deleted?: boolean
   unlinked?: boolean
   message?: string
+}
+
+// GET /api/scan's per-project row (lib/server.js scanPayload): every folder
+// on this machine that has real AI activity, whether MemBridge watches it or
+// not. Discovery only -- an untracked row here contributes NOTHING until it
+// is adopted, because syncOnce drops every session whose project is not
+// tracked (scan.filterTrackedSessions).
+export interface DiscoveredProject {
+  path: string
+  name: string
+  /** Already watched. Rendered as "already added", never offered again. */
+  tracked: boolean
+  /** Narrative sessions found in this folder -- the "how much work is here"
+   *  count, plumbing excluded (scanPayload computes it that way). */
+  sessionCount: number
+  /** The AI tools that produced them, e.g. ['Claude Code', 'Codex']. */
+  tools: string[]
+}
+
+// POST /api/projects/adopt's result (lib/server.js adoptProjects). Bulk by
+// construction and per-path in its reporting: one unreadable folder must not
+// abandon the rest of the sweep, so a partial success is a 200 with the
+// failures named in `skipped` -- callers have to read it.
+export interface AdoptResult {
+  adopted: string[]
+  skipped: { path: string; reason: string }[]
+  /** Adopted WITHOUT their history, because they were deleted on purpose
+   *  before (the tombstone `membridge remove` writes). */
+  historyWithheld: string[]
 }
 
 export interface AccessMatrix {

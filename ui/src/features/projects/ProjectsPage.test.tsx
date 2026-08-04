@@ -132,25 +132,23 @@ describe('ProjectsPage', () => {
     expect(within(popover).getByRole('checkbox', { name: /Sarah/i })).toBeInTheDocument()
   })
 
-  it('adds a project through a real DataClient call', async () => {
+  it('adds the discovered projects the user picked, through a real DataClient call', async () => {
     const client = new FakeDataClient()
-    const spy = vi.spyOn(client, 'addProject')
+    const spy = vi.spyOn(client, 'adoptProjects')
     renderWith(client, <ProjectsPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^add project$/i }))
     const dialog = await screen.findByRole('dialog')
-    await userEvent.type(within(dialog).getByRole('textbox', { name: /folder path/i }), '/Users/x/new-project')
-    await userEvent.click(within(dialog).getByRole('button', { name: /^add project$/i }))
-    expect(spy).toHaveBeenCalledWith('/Users/x/new-project')
+    await userEvent.click(await within(dialog).findByRole('button', { name: /add 2 projects/i }))
+    expect(spy).toHaveBeenCalledWith(['/Users/x/polycopy', '/Users/x/site'])
   })
 
-  it('surfaces a failed add-project instead of looking like nothing happened', async () => {
+  it('surfaces a failed add instead of looking like nothing happened', async () => {
     const client = new FakeDataClient()
-    vi.spyOn(client, 'addProject').mockRejectedValue(new Error('not a directory'))
+    vi.spyOn(client, 'adoptProjects').mockRejectedValue(new Error('not a directory'))
     renderWith(client, <ProjectsPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^add project$/i }))
     const dialog = await screen.findByRole('dialog')
-    await userEvent.type(within(dialog).getByRole('textbox', { name: /folder path/i }), '/not/a/dir')
-    await userEvent.click(within(dialog).getByRole('button', { name: /^add project$/i }))
+    await userEvent.click(await within(dialog).findByRole('button', { name: /add 2 projects/i }))
     expect(await screen.findByText(/not a directory/i)).toBeInTheDocument()
   })
 })

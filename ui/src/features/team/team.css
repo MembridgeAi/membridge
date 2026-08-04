@@ -177,3 +177,22 @@
   overflow-wrap: anywhere;
   user-select: all;
 }
+
+/* "Continue with GitHub" on the sign-in card. An anchor, not a button (it is
+ * a real navigation to the daemon's /team/oauth/github redirect), so it needs
+ * the button's own box back: an <a> gets none of .team-btn's block sizing. */
+.team-btn-oauth {
+  display: inline-block;
+  margin-bottom: var(--sp-2);
+  text-align: center;
+  text-decoration: none;
+}
+
+/* The "you are on more than one team" notice. Tinted rather than red: it is
+ * a stated limitation, not an error the user caused or can fix. */
+.team-multi {
+  padding: 8px 10px;
+  background: var(--panel2);
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+}

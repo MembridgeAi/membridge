@@ -65,6 +65,9 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   signUp: c => c.signUp({ displayName: 'A', email: 'a@b.dev', password: 'fixture-only' }),
   signOut: c => c.signOut(),
   createTeam: c => c.createTeam('Acme AI'),
+  joinTeam: c => c.joinTeam('tok_fixture'),
+  renameTeam: c => c.renameTeam('team-1', 'Acme AI'),
+  rotateInviteCode: c => c.rotateInviteCode('team-1'),
   getInvites: c => c.getInvites(),
   createInviteLink: c => c.createInviteLink('team-1'),
   revokeInvite: c => c.revokeInvite('i1'),
@@ -83,7 +86,8 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   openConfigFile: c => c.openConfigFile(),
   openMemoryFile: c => c.openMemoryFile('/x'),
   leaveTeam: c => c.leaveTeam('team-1'),
-  addProject: c => c.addProject('/x'),
+  discoverProjects: c => c.discoverProjects(),
+  adoptProjects: c => c.adoptProjects(['/x']),
   pickPaths: c => c.pickPaths({ kind: 'file' }),
 }
 

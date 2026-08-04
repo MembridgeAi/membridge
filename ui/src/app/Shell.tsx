@@ -52,11 +52,15 @@ export function Shell({ children }: ShellProps) {
   // Unknown (still loading, or failed) defaults to solo/no-role — a control
   // never flashes on before its data confirms the machine is actually on a
   // team and the viewer actually holds an admin role.
-  const solo = status?.solo ?? true
   const role = settings?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
-  const showTeamNav = ready && !solo && client.capabilities.teamAdminSupported && isTeamAdmin
-  const showCreateTeam = ready && solo
+  // Membership, not `solo`: solo answers "is anyone else actually here",
+  // which is the wrong question for "do you already have a team". Keying
+  // these off solo is what left a real member with no Members/Insights nav
+  // and an owner being asked to create the team they had just created.
+  const onTeam = !!settings?.team
+  const showTeamNav = ready && onTeam && client.capabilities.teamAdminSupported && isTeamAdmin
+  const showCreateTeam = ready && !onTeam
 
   return (
     <div className="shell">
@@ -71,7 +75,10 @@ export function Shell({ children }: ShellProps) {
           <span aria-hidden="true">MemBridge</span>
         </div>
 
-        {!solo && settings?.team && (
+        {/* Same correction as showTeamNav above: your team's name belongs in
+            the rail as soon as you are ON a team, not only once a second
+            person's work has reached a linked project. */}
+        {settings?.team && (
           <div className="team-switch">
             <span className="team-switch-name">{settings.team.name}</span>
           </div>

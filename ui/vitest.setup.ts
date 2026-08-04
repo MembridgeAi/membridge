@@ -1,4 +1,15 @@
 import '@testing-library/jest-dom/vitest'
+import { configure } from '@testing-library/react'
+
+// findBy*/waitFor use Testing Library's OWN timeout (1000ms by default), NOT
+// vitest's testTimeout -- so on a loaded machine a query gives up after one
+// second and reports "Unable to find <element>", which reads exactly like a
+// real failure and cannot be relieved by passing --testTimeout. Every screen
+// here renders behind at least one react-query round trip, so one second of
+// scheduler starvation is enough to fail a passing test. Raised to five, which
+// costs nothing when things resolve promptly (the poll exits as soon as the
+// element appears) and only ever delays a test that was going to fail anyway.
+configure({ asyncUtilTimeout: 5000 })
 
 // jsdom does not implement matchMedia. Polyfill a minimal, always-resolves
 // stub so any code that reads prefers-color-scheme (ui/src/theme/theme.ts)

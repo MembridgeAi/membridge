@@ -7,6 +7,12 @@
 .shell {
   display: flex;
   height: 100vh;
+  /* The app is never wider than its window. Without this, any single wide
+   * thing inside main (a long absolute path, a nowrap table row) grew the
+   * flex row past the viewport and the whole shell — rail included — scrolled
+   * sideways. Overflow is now main's problem to solve, in main's own box. */
+  width: 100%;
+  overflow: hidden;
 }
 
 .rail {
@@ -134,7 +140,13 @@
 
 .shell-main {
   flex: 1;
+  /* A flex item's default min-width is auto, i.e. "at least as wide as my
+   * widest child" — which is what let content push the window's width. 0
+   * lets main be exactly the space left over, and scroll anything wider
+   * INSIDE itself. */
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: auto;
   scrollbar-gutter: stable;
 }
 
