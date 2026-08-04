@@ -95,31 +95,33 @@ jobs:
           # not the API-key path used here. Passed so that switching paths is a
           # workflow edit rather than a secrets change.
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      # if: always() -- a failed or cancelled packaging step must not leave a
-      # usable signing key on the runner.
-      - name: Delete the App Store Connect API key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
       # Notarizing leaves the ticket on Apple's servers. Gatekeeper fetches it
-      # over the network the first time the app runs, so an offline or proxied
-      # machine shows the "cannot be opened" panel for a build that IS properly
-      # notarized. Stapling writes the ticket into the artifact itself.
+      # over the network the first time the artifact is opened, so an offline or
+      # proxied machine shows the "cannot be opened" panel for a build that IS
+      # properly notarized. Stapling writes the ticket into the artifact itself.
       #
-      # electron-builder staples the .app it notarized, but the dmg is a
-      # separate container built around that app and carries no ticket of its
-      # own unless it is stapled here. The dmg is the download membridge.app
-      # links, so it is the one users actually meet.
+      # electron-builder notarizes and staples the .app. It then builds the dmg
+      # AROUND that app as a separate container which Apple has never seen, so
+      # the dmg has no ticket of its own and none can be fetched: `stapler
+      # staple` on it asks CloudKit for a record keyed by the dmg's hash and
+      # gets "Record not found", exit 65. The dmg has to be submitted in its own
+      # right first. A previous attempt at this step stapled without submitting
+      # and took the whole mac job down, which is why the submit is here.
+      #
+      # The dmg is what membridge.app links, so it is the artifact users meet.
       #
       # v0.1.2 shipped stapled, v0.2.4 did not, and every check stayed green
-      # because nothing looked. `stapler validate` is the gate that fixes that:
+      # because nothing looked. `stapler validate` is the gate that closes that:
       # it runs under `set -e` and takes the build down rather than warning,
-      # because a warning is what a missing staple already looked like.
+      # because a warning is indistinguishable from the silence we already had.
       #
-      # Runs AFTER the key is deleted on purpose: stapling needs the network to
-      # fetch the ticket, never the signing credentials, so the key has no
-      # reason to still be on the runner at this point.
-      - name: Staple the notarization ticket and prove it stuck
+      # Runs BEFORE the key is deleted: stapling needs only the network, but
+      # `notarytool submit` needs the credentials, so the key has to outlive it.
+      - name: Notarize and staple the dmg, and prove the staple stuck
         if: env.MB_CAN_NOTARIZE == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -132,10 +134,21 @@ jobs:
             exit 1
           fi
           for f in "${dmgs[@]}"; do
+            echo "submitting $f for notarization"
+            xcrun notarytool submit "$f" \
+              --key "$RUNNER_TEMP/AuthKey.p8" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
             echo "stapling $f"
             xcrun stapler staple "$f"
             xcrun stapler validate "$f"
           done
+      # if: always() -- a failed or cancelled packaging step must not leave a
+      # usable signing key on the runner.
+      - name: Delete the App Store Connect API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
       - uses: actions/upload-artifact@v4
         with:
           name: membridge-mac

@@ -104,10 +104,12 @@ describe('MembersPage', () => {
   })
 
   // Fix 6: the audit query is ?limit=30 EVENTS -- "last 30 days" claimed a
-  // time window nothing actually queries.
+  // time window nothing actually queries. The count now reflects the rows
+  // actually on screen, which is the only number that stays true once "Show
+  // more" exists.
   it('labels the audit list by event count, not a time window it never queries', async () => {
     renderApp({}, <MembersPage />)
-    expect(await screen.findByText('Audit · last 30 events')).toBeInTheDocument()
+    expect(await screen.findByText('Audit · last 4 events')).toBeInTheDocument()
     expect(screen.queryByText(/last 30 days/i)).toBeNull()
   })
 
@@ -115,7 +117,7 @@ describe('MembersPage', () => {
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'revokeInvite')
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /revoke invite i1/i }))
     expect(spy).toHaveBeenCalledWith('i1')
   })
 
@@ -235,7 +237,7 @@ describe('MembersPage', () => {
     const client = new FakeDataClient()
     vi.spyOn(client, 'revokeInvite').mockRejectedValue(new Error('revoke rejected'))
     renderWith(client, <MembersPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /revoke invite i1/i }))
     expect(await screen.findByText(/revoke rejected/i)).toBeInTheDocument()
   })
 })
