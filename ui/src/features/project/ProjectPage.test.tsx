@@ -3,6 +3,7 @@ import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
+import { projectHref, sessionHref } from '../../app/routes'
 import { ProjectPage } from './ProjectPage'
 
 describe('ProjectPage', () => {
@@ -113,7 +114,9 @@ describe('ProjectPage', () => {
     const row = outcome.closest('.entry-row')
     expect(row).not.toBeNull()
     expect(row!.tagName).toBe('A')
-    expect(row!.getAttribute('href')).toBe(`/sessions/${encodeURIComponent('s-e1')}`)
+    // Carries ?from= pointing at this project, so the session page's back
+    // link returns here instead of dumping the reader in the Feed (Task 2).
+    expect(row!.getAttribute('href')).toBe(sessionHref('s-e1', projectHref('/Users/x/membridge')))
   })
 })
 

@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { Link } from 'wouter'
+import { projectHref } from '../../app/routes'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { useDataClient } from '../../data/DataClientProvider'
@@ -153,12 +155,12 @@ function exportCsv(insights: Insights): void {
  * 1577px at a 1280px viewport (measured). Ellipsising it was not an option:
  * the reason is the whole point of the row, so it has to wrap, not vanish.
  */
-function LRow({ name, sub, value, reason }: { name: string; sub?: string; value?: string; reason?: string }) {
+function LRow({ name, sub, value, reason, href }: { name: string; sub?: string; value?: string; reason?: string; href?: string }) {
   return (
     <div className="lrow">
       <div className="lrow-label">
         <span className="lrow-name">
-          {name} {sub && <span className="lrow-muted">{sub}</span>}
+          {href ? <Link href={href} className="lrow-link">{name}</Link> : name} {sub && <span className="lrow-muted">{sub}</span>}
         </span>
         {reason && <div className="lrow-reason">{reason}</div>}
       </div>
@@ -296,8 +298,20 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
           <div className="insights-sect">
             Knowledge concentration <span className="insights-hint">who is the only one who has touched a project</span>
           </div>
+          {/* The footnote below tells the reader the fix is "one toggle on
+              the project page" and, until now, gave them no way to reach it:
+              they had to memorise the name, walk to Projects, and find it.
+              Insights carries a project NAME and no path (lib/api-insights.js
+              groups by project_id and emits projectName), which the project
+              route already accepts -- ProjectPage looks a slug up by path and
+              falls back to a name match for exactly this. */}
           {insights.concentration.map(c => (
-            <LRow key={c.projectName} name={c.projectName} reason={`${c.onlyPerson} only · ${c.detail}`} />
+            <LRow
+              key={c.projectName}
+              name={c.projectName}
+              href={projectHref(c.projectName)}
+              reason={`${c.onlyPerson} only · ${c.detail}`}
+            />
           ))}
           {insights.concentration.length > 0 && (
             <p className="insights-foot">

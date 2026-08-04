@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
@@ -26,6 +26,14 @@ async function search(user: ReturnType<typeof userEvent.setup>, text: string) {
   await user.click(box)
   await user.paste(text)
 }
+
+// The query and filters live in the URL now, so a test that leaves one behind
+// SEEDS the next one: the box would open pre-filled with the previous test's
+// query and paste() would append to it, producing a search neither test asked
+// for. jsdom's location is shared for the whole file.
+afterEach(() => {
+  window.history.pushState({}, '', '/')
+})
 
 describe('SearchPage', () => {
   it('says what it searches before anything is typed -- never "no results"', () => {

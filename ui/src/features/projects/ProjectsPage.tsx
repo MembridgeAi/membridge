@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'wouter'
-import { ROUTES } from '../../app/routes'
+import { projectHref } from '../../app/routes'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { SyncStateView } from '../../components/SyncState'
@@ -51,8 +51,13 @@ function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPe
           />
         </td>
       )}
+      {/* The NAME is the link, not only the "Open" button parked at the far
+          right of the row: the name is what a reader points at, and leaving it
+          dead meant the obvious target did nothing. Same destination as Open,
+          from the same builder, so the two can never drift apart. */}
       <td className="proj-name">
-        {project.name} <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>{project.shared ? 'Shared' : 'Private'}</span>
+        <Link href={projectHref(project.path)} className="proj-name-link">{project.name}</Link>
+        {' '}<span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>{project.shared ? 'Shared' : 'Private'}</span>
         <span className="mono proj-path">{project.path}</span>
       </td>
       <td className="mono num">{project.sessionsThisWeek}</td>
@@ -73,9 +78,11 @@ function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPe
       {/* Route on the encoded PATH, never the raw name: two projects can
           share a basename (two checkouts of "api"), and a raw name breaks
           the URL outright on '#' or '?'. ProjectPage decodes and looks up
-          by path, with a name-match fallback for old links. */}
+          by path, with a name-match fallback for old links. The interpolation
+          that used to live here re-typed the project path pattern, which is
+          exactly what routes.ts's header rule forbids -- projectHref owns it. */}
       <td className="row-actions">
-        <Link href={`${ROUTES.projects}/${encodeURIComponent(project.path)}`} className="proj-btn">Open</Link>
+        <Link href={projectHref(project.path)} className="proj-btn">Open</Link>
         {onDelete && (
           <button
             type="button"

@@ -216,9 +216,19 @@
   align-items: center;
   gap: 8px;
 }
+/* Now an <a>. Same rule as projects.css's .proj-name-link: the row is a
+ * scannable list, so the link affordance shows on hover/focus rather than
+ * painting every name blue at rest. `inherit` keeps whatever colour the
+ * active theme gives the row. */
 .project-name {
+  color: inherit;
   font-weight: 600;
   font-size: 12.5px;
+  text-decoration: none;
+}
+.project-name:hover,
+.project-name:focus-visible {
+  text-decoration: underline;
 }
 .tag {
   display: inline-block;

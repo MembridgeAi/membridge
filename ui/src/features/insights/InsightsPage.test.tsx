@@ -249,7 +249,9 @@ describe('InsightsPage', () => {
 
     // The whole reason survives -- no truncation, no ellipsis substitute.
     const reason = await screen.findByText(`Andrew only · ${detail}`)
-    const name = screen.getByText(/billing-poc/)
+    // The name is a LINK now (Task 3), so getByText lands on the <a>; the
+    // structural claim below is about the .lrow-name line that holds it.
+    const name = screen.getByText(/billing-poc/).closest('.lrow-name')!
 
     // It is a separate element from the name, not the nowrap metric sibling.
     expect(reason).not.toBe(name)

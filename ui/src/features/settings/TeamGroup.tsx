@@ -102,7 +102,7 @@ export function TeamGroup({ team }: TeamGroupProps) {
         description={`You are the ${roleLabel(team.role)} · ${memberCountLabel(team.memberCount)}`}
         testId="setting-team"
       >
-        {isTeamAdmin && <Link href={ROUTES.members} className="settings-btn">Manage</Link>}
+        {isTeamAdmin && <Link href={ROUTES.team} className="settings-btn">Manage</Link>}
         {isTeamAdmin && (
           <button type="button" className="settings-btn" onClick={() => setRenaming(true)}>Rename</button>
         )}

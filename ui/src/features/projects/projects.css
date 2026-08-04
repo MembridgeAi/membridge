@@ -120,6 +120,19 @@
 .proj-name {
   font-weight: 600;
 }
+/* The name is a link now. It must not READ as one at rest: a table whose
+ * every first cell is blue and underlined is a table nobody can scan. The
+ * affordance appears on hover/focus, where the reader is already pointing.
+ * `inherit`, not a hardcoded colour, so the cell keeps whatever weight and
+ * colour .proj-name and the active theme give it. */
+.proj-name-link {
+  color: inherit;
+  text-decoration: none;
+}
+.proj-name-link:hover,
+.proj-name-link:focus-visible {
+  text-decoration: underline;
+}
 .proj-path {
   display: block;
   margin-top: 1px;

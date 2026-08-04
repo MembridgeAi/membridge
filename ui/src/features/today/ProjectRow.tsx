@@ -1,5 +1,7 @@
 import { memo, useCallback } from 'react'
+import { Link } from 'wouter'
 import { Avatar } from '../../components/Avatar'
+import { projectHref } from '../../app/routes'
 import { Sparkline } from '../../components/Sparkline'
 import { SyncStateView } from '../../components/SyncState'
 import type { Project } from '../../data/types'
@@ -39,7 +41,11 @@ function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: Pr
     <div className="project-row" data-testid="project-row">
       <div className="project-left">
         <div className="project-left-top">
-          <span className="project-name">{project.name}</span>
+          {/* The name is the way in. This row named a project, showed a week
+              of its activity, and then gave the reader nowhere to take it --
+              projectHref keeps the target identical to the one the Projects
+              table builds, so the two screens can never point apart. */}
+          <Link href={projectHref(project.path)} className="project-name">{project.name}</Link>
           <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
             {project.shared ? 'Shared' : 'Private'}
           </span>

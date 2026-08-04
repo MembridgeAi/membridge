@@ -104,6 +104,11 @@ interface EntryRowProps {
    *  a miss is a plain false, never an error, because the feed is paged and
    *  the target may sit past the pages that are loaded. */
   targeted?: boolean
+  /** The location this row is being rendered on, passed straight to
+   *  sessionHref so the session page can offer an honest back link. This row
+   *  is shared by the Feed and by a project stream, which are two different
+   *  answers to "where did I come from", and only the caller knows which. */
+  from?: string
 }
 
 /** The row's unchanged anatomy, shared by both shells below (link and plain
@@ -190,7 +195,7 @@ function HoverPreview({ entry }: { entry: StreamEntry }) {
  *  session-less row (bare plumbing) keeps the non-interactive markup --
  *  there is no page to link to. Nothing expands inside the feed; the row's
  *  height is invariant (the preview is absolutely positioned). */
-export function EntryRow({ entry, project, showAvatar = true, targeted = false }: EntryRowProps) {
+export function EntryRow({ entry, project, showAvatar = true, targeted = false, from }: EntryRowProps) {
   const [previewOpen, setPreviewOpen] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rowRef = useRef<HTMLAnchorElement | null>(null)
@@ -252,7 +257,7 @@ export function EntryRow({ entry, project, showAvatar = true, targeted = false }
     // untouched.
     <Link
       ref={rowRef}
-      href={sessionHref(entry.session)}
+      href={sessionHref(entry.session, from)}
       className={`entry-row entry-row-link${previewOpen ? ' entry-row-previewing' : ''}${targeted ? ' entry-row-targeted' : ''}`}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'wouter'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation } from 'wouter'
 import { Avatar } from '../../components/Avatar'
-import { sessionHref } from '../../app/routes'
+import { parseSearchState, searchHref, sessionHref, useRawSearch, type SearchState } from '../../app/routes'
 import { relativeAgo } from '../../data/relativeTime'
 import { useMembers, useProjects, useSearch, useStatus, useTeamAccount } from '../../data/queries'
 import type { SearchResult } from '../../data/types'
@@ -43,7 +43,7 @@ function isEcho(parts: { text: string }[], outcome: string): boolean {
  *  page of results feel like a page of metadata. Everything identifying the
  *  row -- who, which tool, which project, when, and which fields matched --
  *  collapses into one quiet footer line instead of stacking three. */
-function ResultRow({ result, query, showAvatar }: { result: SearchResult; query: string; showAvatar: boolean }) {
+function ResultRow({ result, query, showAvatar, from }: { result: SearchResult; query: string; showAvatar: boolean; from: string }) {
   const raw = snippetAround(snippetSource(result), query)
   const parts = isEcho(raw, result.outcome) ? [] : raw
   const labels = matchLabels(result.matched)
@@ -71,8 +71,11 @@ function ResultRow({ result, query, showAvatar }: { result: SearchResult; query:
   )
   // Same rule as the feed's rows: a result with a session is a real link (so
   // cmd-click and middle-click open a window); one without has nowhere to go.
+  // `from` is this page's own URL, filters and all, so the session's back link
+  // returns to the search that found the row rather than dumping the reader
+  // in the Feed.
   return result.session
-    ? <Link href={sessionHref(result.session)} className="search-result search-result-link">{body}</Link>
+    ? <Link href={sessionHref(result.session, from)} className="search-result search-result-link">{body}</Link>
     : <div className="search-result">{body}</div>
 }
 
@@ -90,18 +93,56 @@ export function SearchPage() {
   const accountQuery = useTeamAccount()
   const selfId = accountQuery.data?.user?.userId ?? null
 
-  const [typed, setTyped] = useState('')
-  const [query, setQuery] = useState('')
-  const [author, setAuthor] = useState('')
-  const [project, setProject] = useState('')
-  const [source, setSource] = useState('')
-  const [hideMine, setHideMine] = useState(false)
+  // The URL is the state. Component state could not make a search shareable,
+  // could not survive a reload, and left Back/Forward doing nothing on a
+  // screen whose whole job is finding one row again.
+  //
+  // Read defensively, exactly like FeedPage's ?session=: a malformed query
+  // string must degrade to "no query, no filters" and never throw into this
+  // render path.
+  const searchString = useRawSearch()
+  const [, navigate] = useLocation()
+  const { q: query, author, project, source, hideMine } = useMemo(
+    () => parseSearchState(searchString),
+    [searchString],
+  )
 
-  // Debounce the typed value into the value the query hook actually sees.
+  // What is in the box right now, which leads the URL by one debounce so the
+  // input stays responsive per keystroke while the address bar (and the
+  // request) only move once typing settles.
+  const [typed, setTyped] = useState(query)
+  // The last q THIS component put in the URL. Without it, an externally
+  // driven change (Back/Forward, a pasted link) is indistinguishable from a
+  // stale local value, and the two write over each other forever.
+  const lastWrittenQuery = useRef(query)
+
+  // Replace, never push, for a filter-preserving URL update: a filter change
+  // is a deliberate act worth a history entry, a keystroke is not, and pushing
+  // per debounce buries the page the reader actually wants to go Back to under
+  // twenty near-identical entries.
+  function applyState(next: Partial<SearchState>, replace = false) {
+    navigate(searchHref({ q: query, author, project, source, hideMine, ...next }), { replace })
+  }
+
+  // The URL moved under us (Back/Forward, or a link opened into this screen):
+  // adopt it into the box rather than letting the debounce below push our own
+  // stale value straight back over it.
   useEffect(() => {
-    const id = setTimeout(() => setQuery(typed), SEARCH_DEBOUNCE_MS)
+    if (query === lastWrittenQuery.current) return
+    lastWrittenQuery.current = query
+    setTyped(query)
+  }, [query])
+
+  // Debounce the typed value into the URL, which is what the query hook reads.
+  const href = searchHref({ q: typed, author, project, source, hideMine })
+  useEffect(() => {
+    if (typed === lastWrittenQuery.current) return
+    const id = setTimeout(() => {
+      lastWrittenQuery.current = typed
+      navigate(href, { replace: true })
+    }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(id)
-  }, [typed])
+  }, [typed, href, navigate])
 
   const projectsQuery = useProjects()
   const membersQuery = useMembers(!solo)
@@ -134,11 +175,14 @@ export function SearchPage() {
   const anyFilter = !!(author || project || source || hideMine)
 
   function clearFilters() {
-    setAuthor('')
-    setProject('')
-    setSource('')
-    setHideMine(false)
+    applyState({ author: '', project: '', source: '', hideMine: false })
   }
+
+  // This page's own URL, handed to every result row so the session it opens
+  // can offer a back link to the search that found it (routes.ts backLink).
+  // Built from the state the page is ACTUALLY rendering, not from
+  // window.location, so it can never describe a debounce-old query.
+  const selfHref = searchHref({ q: query, author, project, source, hideMine })
 
   return (
     <div className="search-page">
@@ -158,16 +202,16 @@ export function SearchPage() {
 
       <div className="search-filters">
         {!solo && (
-          <select aria-label="Filter by person" value={author} onChange={e => setAuthor(e.target.value)}>
+          <select aria-label="Filter by person" value={author} onChange={e => applyState({ author: e.target.value })}>
             <option value="">Everyone</option>
             {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
           </select>
         )}
-        <select aria-label="Filter by project" value={project} onChange={e => setProject(e.target.value)}>
+        <select aria-label="Filter by project" value={project} onChange={e => applyState({ project: e.target.value })}>
           <option value="">All projects</option>
           {projects.map(p => <option key={p.path} value={p.path}>{p.name}</option>)}
         </select>
-        <select aria-label="Filter by tool" value={source} onChange={e => setSource(e.target.value)}>
+        <select aria-label="Filter by tool" value={source} onChange={e => applyState({ source: e.target.value })}>
           <option value="">All tools</option>
           {tools.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
@@ -178,7 +222,7 @@ export function SearchPage() {
             aria-pressed={hideMine && !author}
             disabled={!!author}
             title={author ? 'Already filtered to one person' : 'Show only what your teammates did'}
-            onClick={() => setHideMine(v => !v)}
+            onClick={() => applyState({ hideMine: !hideMine })}
           >
             Hide mine
           </button>
@@ -209,7 +253,7 @@ export function SearchPage() {
       )}
 
       {results.map(r => (
-        <ResultRow key={r.id} result={r} query={query} showAvatar={!solo} />
+        <ResultRow key={r.id} result={r} query={query} showAvatar={!solo} from={selfHref} />
       ))}
     </div>
   )

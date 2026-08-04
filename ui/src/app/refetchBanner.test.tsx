@@ -17,7 +17,7 @@ import { FakeDataClient } from '../data/FakeDataClient'
 import { TodayPage } from '../features/today/TodayPage'
 import { ProjectsPage } from '../features/projects/ProjectsPage'
 import { ProjectPage } from '../features/project/ProjectPage'
-import { MembersPage } from '../features/members/MembersPage'
+import { TeamPage } from '../features/team/TeamPage'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { InsightsPage } from '../features/insights/InsightsPage'
 
@@ -92,8 +92,8 @@ describe('a refetch failure with cached data keeps the page, adds a banner (P0 F
     expect(screen.queryByText(FULL_PAGE_ERROR)).toBeNull()
   })
 
-  it('Members keeps its member list', async () => {
-    const { refetchAll } = renderPage(<MembersPage />)
+  it('the Team page People section keeps its member list', async () => {
+    const { refetchAll } = renderPage(<TeamPage />)
     await screen.findByTestId('member-row-andrew')
     await refetchAll()
     expect(await screen.findByText(BANNER)).toBeInTheDocument()

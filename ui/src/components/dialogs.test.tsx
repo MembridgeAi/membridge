@@ -102,10 +102,8 @@ describe('MemberRow menu focus restore (Fix 11)', () => {
         member={member}
         isSelf={false}
         canManage
-        viewerIsOwner
         onSetRole={() => {}}
         onRequestRemove={onRequestRemove}
-        onRequestTransfer={() => {}}
       />,
     )
   }

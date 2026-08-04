@@ -5,6 +5,7 @@ import {
   useCreateInviteLink, useCreateTeam, useJoinTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
 } from '../../data/queries'
 import type { TeamAccount, TeamSummary } from '../../data/types'
+import { MembersSection } from './MembersSection'
 import './team.css'
 
 function errorMessage(error: unknown): string {
@@ -394,10 +395,37 @@ export function TeamPage() {
                       ? 'Copied'
                       : canMintLink ? 'Copy invite link' : 'Copy invite code'}
                   </button>
+                  {/* Carried over in the Members merge rather than dropped.
+                      shareInvite() mints a link whenever a webUrl exists, so
+                      without this the standing code became unreachable from
+                      the UI the moment a hosted join page was configured --
+                      and it is the only shape that works with `membridge
+                      join <code>` when nobody has a browser handy.
+
+                      Labelled "standing code", never "code instead": the two
+                      controls hand out structurally different secrets. The
+                      primary mints a fresh, individually revocable token per
+                      invite; this copies the single permanent per-team code
+                      that no one can revoke for one person -- rotating it is
+                      the only undo and it cuts off every outstanding copy at
+                      once. "Instead" framed that as a mere format choice. */}
+                  {canMintLink && inviteCode && (
+                    <button
+                      type="button" className="team-btn"
+                      onClick={() => present('code', inviteCode, true)}
+                    >
+                      {share?.status === 'copied' && share.kind === 'code' ? 'Copied' : 'Copy standing code'}
+                    </button>
+                  )}
                 </div>
               )}
             </section>
           )}
+
+          {/* The roster lives here rather than behind its own nav item: the
+              two screens split one team across two places, and each shipped
+              its own invite control wired to a different code path. */}
+          {team && <MembersSection />}
 
           {actionError && <p className="team-error" role="alert">{actionError}</p>}
 
