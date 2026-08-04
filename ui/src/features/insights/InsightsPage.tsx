@@ -52,16 +52,16 @@ function deltaNote(delta: number | null): string | undefined {
   return `${delta > 0 ? '+' : ''}${delta}`
 }
 
-// Shown in place of a trend whenever the team feed fetch hit its page cap.
-// It replaces the delta rather than sitting beside it: the delta is null in
-// that case anyway, and the useful thing to tell a manager is that the
-// number under it is a floor, not that a comparison is missing.
-const CAP_NOTE = 'at cap — more not counted'
+// Counts are exact: 027_team_feed_counts.sql counts in the database, so the
+// figure is the real total however large the window. The only time that is
+// not true is a backend predating that migration, where the paged fallback
+// can still run out of pages -- `exact: false` with `truncated: true`. That
+// combination is the ONLY thing this note is for, and it should never be
+// seen against a current backend.
+const CAP_NOTE = 'approximate — backend needs migration 027'
 
-// A truncated fetch establishes a lower bound, never a total. Printing a
-// bare "2,000" reads as a measurement; the counts are floors.
-function countValue(count: number, truncated: boolean): string {
-  return truncated ? `≥${formatCount(count)}` : formatCount(count)
+function countValue(count: number, capped: boolean): string {
+  return capped ? `≥${formatCount(count)}` : formatCount(count)
 }
 
 function toCsvCell(value: string | number): string {
@@ -206,11 +206,6 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
 
   const stats: StatItem[] = [
     {
-      // A truncated fetch makes every count a floor, so say "at least"
-      // rather than printing a total the backend never established. The
-      // deltas arrive null in that case (nulled in lib/api-insights.js,
-      // because the cap eats the prior window first), which is why the
-      // trend note falls away on its own here.
       value: countValue(insights.sessions.count, insights.truncated),
       label: 'sessions',
       note: insights.truncated ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
 import { InsightsPage, buildCsv } from './InsightsPage'
+import type { Insights } from '../../data/types'
 
 // Fix 14b: a CSV cell starting with =, +, - or @ executes as a formula when
 // the export is opened in Excel/Sheets -- and person names, project names
@@ -29,33 +30,67 @@ describe('buildCsv formula-injection escaping', () => {
   })
 })
 
-// A truncated fetch (lib/api-insights.js hit MAX_PAGES * TEAM_FEED_PAGE)
-// establishes a floor, not a total, because paging runs newest-first and the
-// cap drops the OLDEST rows. Seen live: a 30d window returned 2000 rows with
-// every one inside the current window, so the prior window was empty and the
-// stat published "+2000" of growth that never happened.
-describe('InsightsPage under a truncated feed fetch', () => {
+// The fake has no truncation or exactness mode of its own -- these are
+// backend states, not fixture variants -- so the payload is overridden on the
+// client.
+const clientServing = async (insights: Insights) => {
+  const client = new FakeDataClient()
+  vi.spyOn(client, 'getInsights').mockResolvedValue(insights)
+  return client
+}
+
+// Counts are exact against a current backend (027_team_feed_counts.sql counts
+// in the database), so a big number renders as the number. The old behaviour
+// -- paging team_feed and publishing the 2000-row cap as if it were a total,
+// with a "+2000" delta that was really the prior window running out of pages
+// -- survives only as the pre-migration fallback below.
+describe('InsightsPage with exact counts', () => {
+  const exact = async () => ({
+    ...(await new FakeDataClient().getInsights(30)),
+    exact: true,
+    truncated: false,
+    sessions: { count: 4871, deltaPct: 12.5 },
+    entriesShared: { count: 28143, delta: 3120 },
+  })
+
+  it('prints the real total, with no floor marker and a real trend', async () => {
+    renderWith(await clientServing(await exact()), <InsightsPage />)
+    expect(await screen.findByText('28,143')).toBeInTheDocument()
+    expect(screen.getByText('4,871')).toBeInTheDocument()
+    // The number is the number -- no "≥", no cap note, whatever its size.
+    expect(screen.queryByText(/≥/)).toBeNull()
+    expect(screen.queryByText(/approximate/)).toBeNull()
+    expect(screen.getByText('+3120')).toBeInTheDocument()
+    expect(screen.getByText(/\+12\.5% vs prev 30d/)).toBeInTheDocument()
+  })
+
+  it('exports the exact totals, unmarked, to CSV', async () => {
+    const csv = buildCsv(await exact())
+    expect(csv).toContain('entries_shared,28143')
+    expect(csv).toContain('sessions,4871')
+    expect(csv).toContain('feed_truncated,false')
+  })
+})
+
+// Pre-migration fallback ONLY: a backend without team_feed_counts still pages
+// team_feed, so it can still run out of pages. This is the one path where a
+// count is a floor, and it names the missing migration rather than implying
+// the team's numbers are inherently unknowable.
+describe('InsightsPage against a backend predating migration 027', () => {
   const truncated = async () => ({
     ...(await new FakeDataClient().getInsights(30)),
+    exact: false,
     truncated: true,
     sessions: { count: 267, deltaPct: null },
     entriesShared: { count: 2000, delta: null },
   })
-
-  // The fake has no truncation mode of its own -- this is a backend state,
-  // not a fixture variant -- so the payload is overridden on the client.
-  const clientServing = async (insights: Awaited<ReturnType<typeof truncated>>) => {
-    const client = new FakeDataClient()
-    vi.spyOn(client, 'getInsights').mockResolvedValue(insights)
-    return client
-  }
 
   it('renders counts as floors and replaces the trend with the cap note', async () => {
     renderWith(await clientServing(await truncated()), <InsightsPage />)
     // "≥" is the whole point: a bare 2,000 reads as a measurement.
     expect(await screen.findByText('≥2,000')).toBeInTheDocument()
     expect(screen.getByText('≥267')).toBeInTheDocument()
-    expect(screen.getAllByText(/at cap/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/approximate/).length).toBeGreaterThan(0)
     // The fabricated delta must not come back in any form.
     expect(screen.queryByText('+2000')).toBeNull()
     expect(screen.queryByText(/vs prev 30d/)).toBeNull()
@@ -74,7 +109,7 @@ describe('InsightsPage under a truncated feed fetch', () => {
     expect(csv).toContain('feed_truncated,false')
     renderApp({}, <InsightsPage />)
     expect(await screen.findByText('187')).toBeInTheDocument()
-    expect(screen.queryByText(/at cap/)).toBeNull()
+    expect(screen.queryByText(/approximate/)).toBeNull()
   })
 })
 
