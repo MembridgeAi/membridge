@@ -101,7 +101,12 @@ export function MemberRow({ member, isSelf, canManage, viewerIsOwner, onSetRole,
           <span className="member-role-text">{member.role}</span>
         )}
 
-        <span className="mono kvi">{member.projectCount} {member.projectCount === 1 ? 'project' : 'projects'}</span>
+        {/* "active in N projects", not "N projects": this counts projects the
+            member has POSTED INTO (types.ts), not projects they can see. On a
+            page about membership and permissions the bare noun reads as an
+            access count, so a member with access to eight quiet projects
+            looked like a permissions bug at "0 projects". */}
+        <span className="mono kvi">active in {member.projectCount} {member.projectCount === 1 ? 'project' : 'projects'}</span>
         <span className="kvi">{sharedLabel(member.lastSharedAt)}</span>
         {member.keyAlert && <StateChip tone="warn" glyph="⚠">key changed</StateChip>}
 

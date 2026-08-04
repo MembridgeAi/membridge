@@ -2,6 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(node test/run-tests.js)",
+      "Bash(node test/run.js)",
+      "Bash(node test/run.js *)",
       "Bash(npm test)",
       "mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot"
     ]

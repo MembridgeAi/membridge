@@ -1,6 +1,6 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
-  AccessMatrix, AssistsStats, AuditEvent, DeleteProjectResult, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
+  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
   Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
@@ -54,6 +54,14 @@ export interface FakeOptions {
   // state, which is a DIFFERENT state from solo (no team) and used to be
   // indistinguishable from it in the UI.
   authenticated?: boolean
+  // Puts the viewer on a SECOND team. Reachable (nothing stops a second
+  // join) and only partly served by an app that reads teams[0] everywhere,
+  // so the state has to be testable.
+  secondTeam?: boolean
+  // discoverProjects()'s result (the add-project dialog's scan). Defaults to
+  // a mixed fixture (one already-watched row plus two untracked ones); pass
+  // [] for the "nothing new on this machine" empty state.
+  discovered?: DiscoveredProject[]
   // Adds two archived rows to getProjects(): one whose folder exists and one
   // whose folder is gone (missing) -- the Archived section's two render
   // states. Opt-in so fixtures that predate archiving are untouched.
@@ -384,7 +392,9 @@ export class FakeDataClient implements DataClient {
       configured: true,
       authenticated,
       user: authenticated ? { userId: this.viewerId, email: 'marco@melika.com', displayName: 'Marco' } : null,
-      teams: onTeam ? [{ id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length }] : [],
+      // A second team only when a test asks for it (opts.secondTeam): every
+      // other fixture keeps modelling the one-team norm.
+      teams: this.teamFixtures(),
       inviteCode: onTeam ? 'INV-7F3K9Q' : null,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
       error: null,
@@ -406,14 +416,74 @@ export class FakeDataClient implements DataClient {
   createTeam(name: string) {
     return this.guard<{ id: string; inviteCode: string | null }>({ id: 'team-new', inviteCode: `INV-${name.slice(0, 3).toUpperCase()}` })
   }
-  getInvites() { return this.guard<Invite[]>([{ id: 'i1', email: 'dana@acme.dev', expiresAt: '2026-08-04T00:00:00Z', role: 'member' }]) }
+  // Resolves whatever the real daemon would after normalizing the input --
+  // the fixture deliberately does NOT validate the code's shape, because the
+  // daemon accepts a token, a UUID and a pasted URL and the UI must not be
+  // written against a narrower idea of what is valid.
+  joinTeam() { return this.guard<{ id: string; name: string }>({ id: 'team-acme', name: 'Acme AI' }) }
+
+  // The selection is real state here, not a no-op stub: every team-scoped
+  // fixture below reads selectedTeam(), so a test can prove the app actually
+  // follows the switch rather than only that a control was clicked.
+  private teamId: string | null = null
+  selectedTeamId() { return this.teamId }
+  selectTeam(teamId: string | null) { this.teamId = teamId }
+  /** The team fixture the current selection points at (first, by default). */
+  private selectedTeam(): { id: string; name: string; role: Role; memberCount: number } | null {
+    const teams = this.teamFixtures()
+    if (!teams.length) return null
+    return teams.find(t => t.id === this.teamId) ?? teams[0]
+  }
+  private teamFixtures(): { id: string; name: string; role: Role; memberCount: number }[] {
+    const authenticated = this.opts.authenticated ?? true
+    if (!(authenticated && !this.opts.solo)) return []
+    return [
+      { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length },
+      ...(this.opts.secondTeam ? [{ id: 'team-2', name: 'Weekend Side Project', role: 'member' as Role, memberCount: 2 }] : []),
+    ]
+  }
+  renameTeam() { return this.guard<void>(undefined) }
+  rotateInviteCode() { return this.guard<string>('INV-NEW42X') }
+  // Two live invites: one time-limited and partly used, one open-ended and
+  // untouched -- the two shapes the row has to render honestly (an expiry vs
+  // "never expires", a use count vs "unlimited").
+  getInvites() {
+    return this.guard<Invite[]>([
+      { id: 'i1', createdAt: '2026-07-28T09:00:00Z', expiresAt: '2026-08-04T00:00:00Z', maxUses: 5, useCount: 2, revoked: false },
+      { id: 'i2', createdAt: '2026-07-20T09:00:00Z', expiresAt: null, maxUses: null, useCount: 0, revoked: false },
+    ])
+  }
   createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }
   revokeInvite() { return this.guard<void>(undefined) }
   setMemberRole() { return this.guard<void>(undefined) }
   removeMember() { return this.guard<void>(undefined) }
+  // One row per action family the trail can now record, so the panel's
+  // rendering is exercised against real shapes rather than one synthetic
+  // event: a project-access change (UUID key, friendly path in objectName),
+  // a membership change, a role change (whose new role lives in detail), and
+  // an action nothing knows how to phrase (the fallback path).
   getAudit() {
     return this.guard<AuditEvent[]>([
-      { id: 'a1', at: '2026-07-29T14:02:00Z', actorName: 'Andrew', action: 'unshared', objectType: 'project', objectLabel: 'billing-poc', detail: null },
+      {
+        id: 'a1', at: '2026-07-29T14:02:00Z', actorName: 'Andrew', action: 'access-revoked',
+        objectType: 'project', objectLabel: '8f21c0de-1c44-4a0b-9a0e-2b6d5f7c1234',
+        objectName: '/Users/x/billing-poc', targetName: 'Dana',
+        detail: JSON.stringify({ path: '/Users/x/billing-poc', memberId: 'dana', canSee: false }),
+      },
+      {
+        id: 'a2', at: '2026-07-29T13:40:00Z', actorName: 'Andrew', action: 'member-removed',
+        objectType: 'member', objectLabel: 'usr_gone', objectName: null, targetName: 'Priya',
+        detail: JSON.stringify({ memberId: 'usr_gone', targetName: 'Priya' }),
+      },
+      {
+        id: 'a3', at: '2026-07-29T11:05:00Z', actorName: 'Marco', action: 'role-changed',
+        objectType: 'member', objectLabel: 'sarah', objectName: null, targetName: 'Sarah',
+        detail: JSON.stringify({ memberId: 'sarah', role: 'admin' }),
+      },
+      {
+        id: 'a4', at: '2026-06-30T09:00:00Z', actorName: 'Andrew', action: 'unshared',
+        objectType: 'project', objectLabel: 'billing-poc', objectName: null, targetName: null, detail: null,
+      },
     ])
   }
   // Shared by getInsights() and getSkeletonStats() -- both read the same
@@ -443,6 +513,7 @@ export class FakeDataClient implements DataClient {
   getInsights(window: 7 | 30 | 90) {
     return this.guard<Insights>({
       window,
+      truncated: false,
       sessions: { count: 412, deltaPct: 18 },
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },
@@ -482,7 +553,13 @@ export class FakeDataClient implements DataClient {
         excludeStale: [],
       },
       daemon: { running: true, port: 7391, version: '0.1.7', startAtLogin: true, intervalSec: 300, updateAvailable: null },
-      team: this.opts.solo ? null : { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length, inviteCode: 'INV-7F3K9Q' },
+      // Follows the SELECTION, not always the first team -- this is what the
+      // rail and the Settings Team group render, so a switch has to be
+      // observable here or the switcher is only pretending.
+      team: (() => {
+        const t = this.selectedTeam()
+        return t ? { ...t, inviteCode: 'INV-7F3K9Q' } : null
+      })(),
       viewerId: this.viewerId,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
       contextFiles: {
@@ -516,7 +593,22 @@ export class FakeDataClient implements DataClient {
   openConfigFile() { return this.guard<void>(undefined) }
   openMemoryFile() { return this.guard<void>(undefined) }
   leaveTeam() { return this.guard<void>(undefined) }
-  addProject() { return this.guard<void>(undefined) }
+
+  // Discovery fixture: two untracked folders with real activity plus one
+  // already-watched row, so the dialog's "already added" filtering is
+  // exercised by the DEFAULT fixture rather than only by an opt-in one.
+  discoverProjects() {
+    if (this.opts.discovered) return this.guard<DiscoveredProject[]>(this.opts.discovered)
+    return this.guard<DiscoveredProject[]>([
+      { path: '/Users/x/membridge', name: 'membridge', tracked: true, sessionCount: 184, tools: ['Claude Code', 'Codex'] },
+      { path: '/Users/x/polycopy', name: 'polycopy', tracked: false, sessionCount: 12, tools: ['Claude Code'] },
+      { path: '/Users/x/site', name: 'site', tracked: false, sessionCount: 3, tools: ['Codex'] },
+    ])
+  }
+
+  adoptProjects(paths: string[]) {
+    return this.guard<AdoptResult>({ adopted: paths, skipped: [], historyWithheld: [] })
+  }
 
   pickPaths() {
     if (!this.capabilities.filePicker) {

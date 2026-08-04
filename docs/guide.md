@@ -463,7 +463,8 @@ runtime dependency list is deliberately short: encryption
 ## Development
 
 ```bash
-node test/run-tests.js   # dependency-free offline suite (temp dirs + mock Supabase)
+node test/run.js         # dependency-free offline suite (temp dirs + mock Supabase)
+node test/run.js redaction   # one focused suite from test/suites/ (seconds)
 npm run app              # run the tray app from source (Electron)
 npm run dist:mac         # build the macOS menu-bar app
 ```

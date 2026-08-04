@@ -4,6 +4,7 @@ import { MembridgeMark } from '../assets/MembridgeMark'
 import { useDataClient } from '../data/DataClientProvider'
 import { useSettings, useStatus, useTeamAccount } from '../data/queries'
 import { ROUTES } from './routes'
+import { TeamSwitcher } from './TeamSwitcher'
 
 /** Whether the rail may reflect the current route in its active state.
  *
@@ -78,17 +79,20 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   // Unknown (still loading, or failed) defaults to solo/no-role — a control
   // never flashes on before its data confirms the machine is actually on a
   // team and the viewer actually holds an admin role.
-  const solo = status?.solo ?? true
   const role = settings?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
-  const showTeamNav = ready && !solo && client.capabilities.teamAdminSupported && isTeamAdmin
+  // Membership, not `solo`: solo answers "is anyone else actually here",
+  // which is the wrong question for "do you already have a team". Keying
+  // these off solo is what left a real member with no Members/Insights nav
+  // and an owner being asked to create the team they had just created.
+  const onTeam = !!settings?.team
+  const showTeamNav = ready && onTeam && client.capabilities.teamAdminSupported && isTeamAdmin
 
   // GET /api/team's `authenticated` is the ONLY field that answers "are there
   // credentials on this machine". Neither of the other two queries can:
   // status.solo means no linked project on a multi-member team rather than
-  // "has no team" (conflating the two is what hid team nav from real
-  // members), and settings.team is null both when signed out and when signed
-  // in with no team yet. Undefined here means the account query has not
+  // "has no team", and settings.team is null both when signed out and when
+  // signed in with no team yet. Undefined here means the account query has not
   // settled, which deliberately renders NEITHER branch of the footer: showing
   // "Sign in" to someone who turns out to be signed in is the same lie as
   // showing a name to someone who is signed out, just pointing the other way.
@@ -101,8 +105,9 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
 
   // Creating a team requires an account, so a signed-out machine gets the
   // sign-in control in the footer instead of this. Gating on solo alone sent
-  // a signed-out user to a create-team form they could not submit.
-  const showCreateTeam = ready && solo && signedIn
+  // a signed-out user to a create-team form they could not submit -- and
+  // gating on solo at all offered it to people already on a team.
+  const showCreateTeam = ready && !onTeam && signedIn
 
   return (
     <div className="shell">
@@ -117,11 +122,12 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
           <span aria-hidden="true">MemBridge</span>
         </div>
 
-        {!solo && settings?.team && (
-          <div className="team-switch">
-            <span className="team-switch-name">{settings.team.name}</span>
-          </div>
-        )}
+        {/* Same correction as showTeamNav above: your team's name belongs in
+            the rail as soon as you are ON a team, not only once a second
+            person's work has reached a linked project. On more than one team
+            this is a real switcher; on one it renders the same label it
+            always did. */}
+        {settings?.team && <TeamSwitcher current={settings.team} />}
 
         {/* Every NavLink reads routeReflected from here rather than taking it
             as a prop, so a rail entry added later cannot forget to honor it. */}

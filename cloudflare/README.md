@@ -306,10 +306,32 @@ and the team is created when the first real user redeems it, as them. Ownership
 and E2E key material are established exactly as in an organic signup; only the
 name and the fact that we were expecting them are pre-set.
 
-The invite link is `https://membridge.app/join#<token>`. **That route does not
-exist on the marketing site yet** — it needs a page that takes the fragment,
-signs the user in, and calls `redeem_onboarding_invite`. Until it exists, issued
-invites cannot be redeemed.
+The invite link is `https://join.membridge.me/#<token>` — a Pages project of its
+own (`membridge-join`, source in `join/`), not a route on the marketing site.
+An earlier version of this section said the page did not exist and put it at
+`membridge.app/join`; both were wrong, and the second sent anyone looking for it
+to a host that has never served it.
+
+That page redeems **both** invite kinds, and the order matters. It calls
+`redeem_invite` first — the app's own links, minted by `create_invite` into
+`public.invites`, which JOIN AN EXISTING TEAM — and falls back to
+`redeem_onboarding_invite` only when the token is not found there. The ops
+panel's pre-issued tokens are the fallback case, not the main one, because the
+product sends far more app invites than the panel issues. Note that the
+onboarding RPC *creates* a team rather than joining one, so the success screen
+reads differently on each path; see `join/public/index.html`.
+
+**Deploying it.** From `join/`:
+
+```bash
+npx wrangler pages deploy --branch main
+```
+
+`wrangler.toml` there carries the project name and output directory, so the
+command takes no arguments — a mistyped `--project-name` silently creates a new
+Pages project instead of failing. The project has **no Git connection**: nothing
+ships on push, and a change on master is live only once someone runs that
+command.
 
 ### CSRF
 

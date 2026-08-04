@@ -176,3 +176,12 @@
     animation: settle-in var(--dur-base) var(--ease-out) both;
   }
 }
+
+/* A value shown in place of a control once the action has been taken -- the
+ * rotated invite code, which the admin has to be able to read and copy right
+ * where the button was, because nothing else on this screen will show it. */
+.settings-value {
+  font-size: 10.5px;
+  color: var(--text2);
+  overflow-wrap: anywhere;
+}

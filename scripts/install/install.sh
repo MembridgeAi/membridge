@@ -88,6 +88,16 @@ APP="${APP_DEST}"
 exec env ELECTRON_RUN_AS_NODE=1 "\$APP/Contents/MacOS/${APP_NAME}" "\$APP/Contents/Resources/app.asar/bin/membridge.js" "\$@"
 EOF
   chmod +x "$WRAPPER"
+  # Delete the destination before writing it. `cp` FOLLOWS a symlink at the
+  # destination and writes through to its target, and `membridge` is very
+  # often a symlink: `npm link` (the standard dev setup, and how anyone
+  # working on MemBridge has it) points /opt/homebrew/bin/membridge at
+  # lib/node_modules/membridge, which points at the developer's own checkout.
+  # Without this rm, installing overwrites bin/membridge.js IN THEIR REPO
+  # with this 3-line shim -- silently, since cp succeeds. Observed on a real
+  # machine: 1191 lines of CLI replaced, and the only symptom was an
+  # unrelated-looking wave of test failures.
+  rm -f "$CLI_DEST"
   if cp "$WRAPPER" "$CLI_DEST" && chmod +x "$CLI_DEST"; then
     say "CLI installed at ${CLI_DEST}"
     case ":$PATH:" in

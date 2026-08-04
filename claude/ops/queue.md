@@ -9,6 +9,18 @@ state. This file holds only what is next.
 
 ---
 
+## Heads-up for in-flight branches
+
+**The test suite is split (2026-08-04).** Six self-contained sections moved
+verbatim out of `test/run-tests.js` into `test/suites/*.test.js` (redaction,
+search, save-state, ops-noise, mcp-config, mcp-agent-discovery), each leaving a
+one-line breadcrumb at its old location. `node test/run.js` runs everything in
+parallel and is what `npm test` and all three workflows now call;
+`node test/run.js <name>` runs one suite in seconds. If a branch of yours edits
+one of the moved sections, the edit belongs in the suite file now — the
+breadcrumb comment says which. New tests go in `test/suites/` (require
+`../harness` first, end with `h.finish()`), not in run-tests.js.
+
 ## In flight
 
 **`feat/alpha-readiness-backfill`**, three commits, not merged and not pushed.
