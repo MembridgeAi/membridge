@@ -1,117 +1,66 @@
+'use strict';
 // GET /api/team/invites -- the pending-invites listing behind the Members
 // page's InvitesSection.
 //
-// NOTE ON SHAPE: docs/ROUTINES.md says new tests go in test/suites/, require
-// `../harness`, and end with h.finish(). The doc landed ahead of the split
-// itself: as of this commit there is no test/harness.js, no test/run.js and no
-// other file under test/suites/ on any branch or ref, so requiring the harness
-// would throw MODULE_NOT_FOUND and this suite would never run at all.
+// The endpoint shipped with no coverage at all: nothing in run-tests.js
+// exercised it and the mock backend had no /rest/v1/invites handler, so the
+// route, its manager gate, and the token-as-id contract the Revoke button
+// depends on were all unverified end to end.
 //
-// It therefore carries its own minimal check()/tally, and still honours the
-// rule that actually matters (ROUTINES.md: "a suite run counts only if it
-// printed the N/N checks passed tally AND exited 0") -- it prints the tally and
-// exits nonzero on any failure. Runnable today via:
-//   node test/suites/team-invites.js
-// Once the harness lands, swapping the block under "self-contained tally" for
-// the require is the whole migration.
-//
-// Deliberately NOT added to test/run-tests.js: that file is one sequential
-// story whose sections share state on purpose, and this needs its own backend
-// fixture with a revoked invite in it.
+// A new file rather than a run-tests.js section: this needs its own backend
+// fixture (an owner, a plain member, and an already-revoked invite), and the
+// legacy suite is one sequential story whose sections share state on purpose.
+const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
+const { check, ROOT, P, waitForHttp, post } = h;
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
-const os = require('os');
 const path = require('path');
-
-const { createMockSupabase } = require('../mock-supabase');
 const util = require('../../lib/util');
 const teamsync = require('../../lib/teamsync');
 const { startServer } = require('../../lib/server');
+const { createMockSupabase } = require('../mock-supabase');
 
-// ---- self-contained tally (replace with require('../harness')) ----
-let passed = 0;
-let failed = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  ok  ${name}`);
-  } catch (err) {
-    failed++;
-    console.log(`FAIL  ${name}\n      ${err.message}`);
-  }
-}
-function finish() {
-  const total = passed + failed;
-  console.log(`\n${passed}/${total} checks passed`);
-  process.exit(failed ? 1 : 0);
-}
+// Two identities, each with its own MEMBRIDGE_HOME and dashboard port. The
+// harness points MEMBRIDGE_HOME at one throwaway home; these are siblings of
+// it under the same ROOT, so its leak guards still cover them.
+const HOME_OWNER = path.join(ROOT, 'home-invites-owner');
+const HOME_MEMBER = path.join(ROOT, 'home-invites-member');
+const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
+const portFor = { owner: P(61), member: P(62) };
 
-// Ports are probed and only used once confirmed free. A hardcoded port would
-// collide with the installed MemBridge daemon (7437 is the INSTALLED app, not
-// this checkout) or with a parallel suite, and a bind failure here would crash
-// before the tally printed -- which reads as a pass to anything grepping output
-// for "FAIL" rather than checking the tally and the exit code.
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitForHttp(url, tries = 100) {
-  for (let i = 0; i < tries; i++) {
-    try { await fetch(url); return; } catch { await new Promise(r => setTimeout(r, 50)); }
-  }
-  throw new Error(`server never came up: ${url}`);
-}
-
-(async () => {
-  const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'membridge-invites-'));
-  const ORIGINAL_HOME = process.env.MEMBRIDGE_HOME;
-  const HOME_OWNER = path.join(ROOT, 'home-owner');
-  const HOME_MEMBER = path.join(ROOT, 'home-member');
-  const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
-  const portFor = { owner: await freePort(), member: await freePort() };
+async function main() {
+  const mock = createMockSupabase();
+  await new Promise(r => mock.server.listen(P(60), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(60)}`;
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
 
   // One dashboard server per identity, started and closed around each call:
   // util.getConfig()/loadCredentials read process.env.MEMBRIDGE_HOME fresh on
-  // every call, so this is only safe while identities are never concurrent.
+  // every call, so this is only safe while the two are never concurrent.
   async function apiAs(role, method, pathname, body) {
     process.env.MEMBRIDGE_HOME = homeFor[role];
     const port = portFor[role];
     const srv = startServer(port, { retries: 0 });
     try {
       await waitForHttp(`http://127.0.0.1:${port}/api/status`);
-      const res = method === 'GET'
-        ? await fetch(`http://127.0.0.1:${port}${pathname}`)
-        : await fetch(`http://127.0.0.1:${port}${pathname}`, {
-          method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
-        });
+      const url = `http://127.0.0.1:${port}${pathname}`;
+      const res = method === 'GET' ? await fetch(url) : await post(url, body);
       return { status: res.status, body: await res.json().catch(() => null) };
     } finally {
       await new Promise(r => srv.close(r));
     }
   }
 
-  const mock = createMockSupabase();
-  const mockPort = await freePort();
-  await new Promise(r => mock.server.listen(mockPort, '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${mockPort}`;
-  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
-
   try {
+    fs.mkdirSync(HOME_OWNER, { recursive: true });
+    fs.mkdirSync(HOME_MEMBER, { recursive: true });
+
     process.env.MEMBRIDGE_HOME = HOME_OWNER;
     util.ensureConfig();
     await teamsync.signup(util.getConfig(), 'inv-owner@test.dev', 'pw-o', 'Owner');
     const team = await teamsync.createTeam(util.getConfig(), 'InviteCo');
 
-    // Three invites covering the states the UI must tell apart: a default
+    // Three invites covering the states the UI must tell apart: the default
     // never-expiring/unlimited link, a capped one, and a revoked one.
     const forever = await teamsync.createInvite(util.getConfig(), team.team_id, { expiresAt: null, maxUses: null });
     const capped = await teamsync.createInvite(util.getConfig(), team.team_id,
@@ -194,10 +143,12 @@ async function waitForHttp(url, tries = 100) {
     });
   } finally {
     await new Promise(r => mock.server.close(r));
-    if (ORIGINAL_HOME === undefined) delete process.env.MEMBRIDGE_HOME;
-    else process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
-    fs.rmSync(ROOT, { recursive: true, force: true });
   }
 
-  finish();
-})().catch(err => { console.error(err); process.exit(1); });
+  h.finish();
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
