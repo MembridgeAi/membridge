@@ -202,3 +202,26 @@
   border: 1px solid var(--line2);
   border-radius: var(--r);
 }
+
+/* People: the roster, folded in from the old /team/members screen.
+   Wider than the cards above it because a member row carries a name, a role
+   control, a project count and a "what has arrived from them" line -- at the
+   560px the identity/invite cards use, every row wrapped to three lines and
+   the role select collided with the count. */
+.team-members {
+  max-width: 860px;
+}
+.team-members-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.team-members-head .team-card-title {
+  margin-bottom: 0;
+}
+/* The count is context for the heading, not a number worth reading first. */
+.team-members-count {
+  color: var(--text3);
+  font-size: var(--fs-sm);
+}

@@ -24,7 +24,6 @@ const ProjectsPage = lazy(() => import('../features/projects/ProjectsPage').then
 const ProjectPage = lazy(() => import('../features/project/ProjectPage').then(m => ({ default: m.ProjectPage })))
 const SessionPage = lazy(() => import('../features/session/SessionPage').then(m => ({ default: m.SessionPage })))
 const TeamPage = lazy(() => import('../features/team/TeamPage').then(m => ({ default: m.TeamPage })))
-const MembersPage = lazy(() => import('../features/members/MembersPage').then(m => ({ default: m.MembersPage })))
 const InsightsPage = lazy(() => import('../features/insights/InsightsPage').then(m => ({ default: m.InsightsPage })))
 const SettingsPage = lazy(() => import('../features/settings/SettingsPage').then(m => ({ default: m.SettingsPage })))
 
@@ -82,7 +81,11 @@ export function App() {
                 order -- wouter matches these patterns exactly, so '/team'
                 never swallows the two nested paths. */}
             <Route path={ROUTES.team}><TeamPage /></Route>
-            <Route path={ROUTES.members}><MembersPage /></Route>
+            {/* /team/members is kept as an alias, not deleted: it was a real
+                screen with real bookmarks, and 404ing them to prove a point
+                helps nobody. It renders the Team page, whose People section
+                is where that content went. */}
+            <Route path={ROUTES.members}><TeamPage /></Route>
             <Route path={ROUTES.insights}><InsightsPage /></Route>
             <Route path={ROUTES.settings}><SettingsPage /></Route>
             <Route><Placeholder title="Not found" /></Route>
