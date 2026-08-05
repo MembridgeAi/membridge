@@ -24,7 +24,13 @@ function createMockSupabase() {
   const teamKeys = [];              // team_keys rows: { team_id, epoch, member_user_id, sealed_team_key } (009)
   const projectAccess = [];         // project_access rows (023): { team_id, project_key, member_id, can_see, updated_at, updated_by }
   const teamAudit = [];             // team_audit rows (023): { id, team_id, actor_id, action, object_type, object_key, detail, created_at }
-  const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0 };
+  // logoutCalls counts POST /auth/v1/logout — the GoTrue call that actually
+  // ends a session server-side by revoking its refresh token. It is a counter
+  // rather than a boolean because "signed out" must be provable per sign-out,
+  // not once per process: a daemon that deletes its local credentials file and
+  // never tells the backend leaves a refresh token that keeps minting valid
+  // access tokens for anyone holding a copy of that file.
+  const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0, logoutCalls: 0 };
   // Test knobs for backend quirks. rejectSummary is kept for back-compat;
   // rejectColumns is the general form — any column name added here provokes the
   // PostgREST "schema cache" error until the POST body no longer carries it, so
@@ -499,6 +505,22 @@ function createMockSupabase() {
         const user = { id: uuid(), email: body.email, password: body.password };
         users.set(body.email, user);
         return json(res, 200, newSession(user));
+      }
+      // GoTrue's session teardown. Revoking here is what makes a sign-out
+      // durable: the refresh token stops working, so a leaked or copied
+      // credentials file cannot be replayed into a fresh access token. Modelled
+      // faithfully (the token really is dropped) so a test can tell "the daemon
+      // called this" apart from "the daemon deleted a local file and stopped".
+      if (url.pathname === '/auth/v1/logout') {
+        stats.logoutCalls++;
+        const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        const userId = sessions.get(token);
+        if (userId) {
+          for (const [rt, uid] of refreshTokens) if (uid === userId) refreshTokens.delete(rt);
+          sessions.delete(token);
+        }
+        res.writeHead(204);
+        return res.end();
       }
       if (url.pathname === '/auth/v1/user') {
         // What loginWithTokens calls to verify an OAuth access token. Only
