@@ -208,6 +208,74 @@ async function main() {
       const redeem = await apiAs('bystander', 'POST', '/api/team/join', { inviteCode: live.token });
       assert.notStrictEqual(redeem.status, 200, 'a revoked invite must not redeem');
     });
+
+    // -----------------------------------------------------------------------
+    // 4. The audit trail names people, not user ids.
+    // -----------------------------------------------------------------------
+    // readAudit resolves detail.memberId against the CURRENT roster, and
+    // lib/server.js reads a member's display name off the roster BEFORE
+    // removing them and stores it as detail.targetName for exactly this
+    // reason — its own comment says the event would otherwise "render as a
+    // bare user id forever". That capture was dead code: the ternary read
+    // `nameById.get(detail.memberId) || detail.memberId`, so a detail carrying
+    // both fields never reached the targetName branch.
+    //
+    // Latent until the rotation landed. Before it, a removed member usually
+    // walked back in with the standing code and was back on the roster by the
+    // time anyone read the trail, so the lookup happened to succeed. Making
+    // removal durable made the fallback reachable — the one row that describes
+    // somebody LOSING access is the row that stopped naming them.
+    const keeperJoin = await asOwner(cfg => teamsync.createInvite(cfg, alpha.team_id, {}));
+    process.env.MEMBRIDGE_HOME = HOME_BYSTANDER;
+    const keeperJoined = await apiAs('bystander', 'POST', '/api/team/join', { inviteCode: keeperJoin.token });
+    assert.strictEqual(keeperJoined.status, 200, `fixture: bystander must join Alpha, got ${keeperJoined.status}`);
+    const bystanderId = mock.members.find(m => m.displayName === 'Bystander').userId;
+    const roleChanged = await apiAs('owner', 'POST', '/api/team/set-role',
+      { teamId: alpha.team_id, userId: bystanderId, role: 'admin' });
+    assert.strictEqual(roleChanged.status, 200, `fixture: set-role must succeed, got ${roleChanged.status}`);
+    const alphaAudit = async () => {
+      const res = await apiAs('owner', 'GET', `/api/team/audit?teamId=${alpha.team_id}`);
+      return (res.body && res.body.events) || [];
+    };
+
+    await check('a removed member is still named in the audit trail, not shown as a user id', async () => {
+      const row = (await alphaAudit()).find(e => e.action === 'member-removed');
+      assert.ok(row, 'fixture: the removal must have produced an audit row');
+      assert.strictEqual(row.targetName, 'Member',
+        'the name captured with the event must be used once the roster lookup misses; ' +
+        `got ${JSON.stringify(row.targetName)}, and the detail carries it: ${row.detail}`);
+    });
+
+    // The class, not the instance: a user id rendered where a person's name
+    // belongs answers nothing, and it is the failure the surrounding comment in
+    // lib/api-access.js already forbids for object_key. Written as a sweep so a
+    // future action that grows a memberId detail cannot reintroduce it quietly.
+    await check('no audit row renders a raw user id where a person\'s name belongs', async () => {
+      const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const offenders = (await alphaAudit()).filter(e => e.targetName && UUID.test(e.targetName));
+      assert.deepStrictEqual(offenders.map(e => e.action), [],
+        `these rows show a uuid as a person: ${JSON.stringify(offenders)}`);
+    });
+
+    // COUNTER-CHECKS — pass before AND after. The roster lookup is the primary
+    // source and must stay primary: a "fix" that always prefers the captured
+    // name would freeze a display name at the moment of the event and quietly
+    // stop tracking renames, and one that broke the shared nameById map would
+    // take actorName down with it.
+    await check('a member still on the roster is named from the roster', async () => {
+      const row = (await alphaAudit()).find(e => e.action === 'role-changed');
+      assert.ok(row, 'fixture: the role change must have produced an audit row');
+      assert.strictEqual(row.targetName, 'Bystander',
+        `a current member's name comes from the live roster, got ${JSON.stringify(row.targetName)}`);
+    });
+
+    await check('the actor on every audit row is still resolved to a name', async () => {
+      const rows = await alphaAudit();
+      assert.ok(rows.length > 0, 'fixture: Alpha must have audit rows by now');
+      const unresolved = rows.filter(e => !e.actorName || e.actorName === 'Unknown');
+      assert.deepStrictEqual(unresolved.map(e => e.action), [],
+        `every one of these rows was written by Owner: ${JSON.stringify(unresolved)}`);
+    });
   } finally {
     await new Promise(r => mock.server.close(r));
   }
