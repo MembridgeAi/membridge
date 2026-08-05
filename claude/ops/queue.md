@@ -231,13 +231,13 @@ Slack: #handoffs 2026-08-04 evening (main message plus four thread replies).
   bypassing `link_project` and 029's materialization.~~ **CLOSED live
   2026-08-05**: the policy was dropped by hand, and `public.projects` now carries
   `projects_select` only (RLS still on, the `032` trigger intact, 7 projects and
-  13 `project_access` rows unchanged). Written down as `035`, which is the one
+  13 `project_access` rows unchanged). Written down as `036`, which is the one
   file in `supabase/migrations/` that is already applied — it exists so the repo
   stops disagreeing with production, not to introduce a change. Safe because
   `link_project` is owned by `postgres` (`rolbypassrls = true`) and
   `public.projects` is not FORCE-RLS, so the RPC's insert never evaluated the
   policy; either fact alone is sufficient. Rollback at
-  `supabase/rollback/pre-035-projects-insert.sql`. **Does not fix the duplicate
+  `supabase/rollback/pre-036-projects-insert.sql`. **Does not fix the duplicate
   `membridge` / `Membridge` pair above** — that came from `link_project` matching
   on exact name, not from the POST path.
 - `memory_entries_insert`/`_update` gate on membership and `author_id` only, so

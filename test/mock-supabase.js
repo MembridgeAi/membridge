@@ -162,7 +162,7 @@ function createMockSupabase() {
   // 032_materialize_project_access_on_insert.sql: the AFTER INSERT trigger on
   // public.projects. Same materialization as 029 §3, but reached from the INSERT
   // itself rather than from the RPC, so it covers every other way a row can land
-  // in public.projects. Since 035 dropped `projects_insert` there is no
+  // in public.projects. Since 036 dropped `projects_insert` there is no
   // member-reachable direct POST left; what remains is the set of RLS-bypassing
   // writers (link_project's definer insert, a service-role write, an operator's
   // insert in the SQL editor), and the trigger fires on all of them. The POST
@@ -717,7 +717,7 @@ function createMockSupabase() {
         return json(res, 200, rows);
       }
       // POST /rest/v1/projects — public.projects has NO INSERT POLICY since
-      // 035_drop_projects_insert.sql, so this route exists to model that refusal
+      // 036_drop_projects_insert.sql, so this route exists to model that refusal
       // and the one insert path that survives it.
       //
       //   * With a member's bearer token the caller is the `authenticated` role.
@@ -725,9 +725,9 @@ function createMockSupabase() {
       //     exists, so the INSERT raises 42501 and PostgREST returns 403. That is
       //     unconditional: it does not depend on team membership or on the value
       //     of created_by, because there is no predicate left to satisfy. Before
-      //     035 this same request succeeded under `projects_insert`
+      //     036 this same request succeeded under `projects_insert`
       //     (`is_team_member(team_id) and created_by = auth.uid()`) — its exact
-      //     body is at supabase/rollback/pre-035-projects-insert.sql.
+      //     body is at supabase/rollback/pre-036-projects-insert.sql.
       //   * With the SERVICE-ROLE key the caller is a BYPASSRLS role, so row
       //     security is not applied at all and the insert lands. This is the
       //     offline stand-in for the writers that remain in production —
@@ -744,7 +744,7 @@ function createMockSupabase() {
         const bypassRls = String(req.headers.apikey || '') === SERVICE_ROLE_KEY;
         const userId = authedUser(req);
         if (!bypassRls && !userId) return json(res, 401, { message: 'not authenticated' });
-        // The whole of 035: no INSERT policy, so an `authenticated` caller is
+        // The whole of 036: no INSERT policy, so an `authenticated` caller is
         // refused whatever the row says — before the row is even looked at. The
         // membership and created_by checks that used to live here are gone on
         // purpose; reinstating either would make the mock model a policy that no

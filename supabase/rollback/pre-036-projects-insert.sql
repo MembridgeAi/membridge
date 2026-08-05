@@ -1,11 +1,11 @@
--- Rollback for 035_drop_projects_insert.sql.
+-- Rollback for 036_drop_projects_insert.sql.
 --
 -- OUTSIDE supabase/migrations/ ON PURPOSE so nothing applies it by accident —
 -- same placement and reasoning as the other files in this directory. This one
 -- matters more than most: running it silently re-opens a member-reachable write
 -- path into public.projects.
 --
--- WHAT 035 REMOVED. One policy, `projects_insert` on public.projects, restored
+-- WHAT 036 REMOVED. One policy, `projects_insert` on public.projects, restored
 -- verbatim below:
 --
 --   for insert to authenticated
@@ -24,7 +24,7 @@
 -- a policy granted to PUBLIC would also cover the `anon` role — so an error here
 -- fails in the safe direction.
 --
--- WHAT IT CANNOT UNDO. Nothing was written or deleted by 035, so there is no
+-- WHAT IT CANNOT UNDO. Nothing was written or deleted by 036, so there is no
 -- data to restore — but restoring the policy does NOT restore the state of the
 -- world before it was dropped. Any direct POST refused while the policy was
 -- absent was refused for good, and the caller saw a 403; those attempts are not
@@ -36,14 +36,14 @@
 -- creation: link_project is `security definer` owned by `postgres`, which has
 -- `rolbypassrls = true`, and public.projects has `relforcerowsecurity = false`,
 -- so the RPC's insert was never evaluated against this policy. Either fact alone
--- is sufficient (both were measured live — see 035's header). If project
--- creation is failing after 035, this policy is not the cause and recreating it
+-- is sufficient (both were measured live — see 036's header). If project
+-- creation is failing after 036, this policy is not the cause and recreating it
 -- will not fix it; look at link_project itself, at team membership, and at the
 -- `unique (team_id, name)` constraint. The only legitimate reason to run this
 -- file is a deliberate decision to let clients POST projects directly again,
 -- which no code in this repo does.
 --
--- Safe to run twice, and safe to run if 035 was never applied: the policy is
+-- Safe to run twice, and safe to run if 036 was never applied: the policy is
 -- dropped first because `create policy` has no `if not exists` / `or replace` in
 -- the Postgres versions this project targets — the same convention 024's
 -- policies use.

@@ -14,7 +14,7 @@
 --    the retroactive behaviour this migration exists to remove."
 --
 -- (That quote describes the backend as it stood when 032 was written. The
--- `projects_insert` policy it names no longer exists — 035 dropped it — so the
+-- `projects_insert` policy it names no longer exists — 036 dropped it — so the
 -- direct-POST path is closed as well as covered. See §3.)
 --
 -- This is that ticket. A row-less project is not a cosmetic problem: tier 2 is
@@ -23,9 +23,9 @@
 -- to existing members, and flipping that flag later silently moves everybody.
 --
 -- WHAT IT DOES NOT DO, AND WHY — `projects_insert` IS LEFT ALONE BY THIS FILE.
--- SUPERSEDED: the policy was dropped later, by 035_drop_projects_insert.sql.
+-- SUPERSEDED: the policy was dropped later, by 036_drop_projects_insert.sql.
 -- The reasoning below is kept because it is still why THIS migration is shaped
--- the way it is, but read finding 2 with 035's header beside it: the fact it
+-- the way it is, but read finding 2 with 036's header beside it: the fact it
 -- calls unverifiable was subsequently measured on the live database, and it came
 -- back the way that made the drop safe. See §3, which has been updated.
 --
@@ -58,7 +58,7 @@
 -- insert path, including the direct POST, without taking that bet. Whether to
 -- additionally revoke the unused capability was left as a separate, smaller
 -- decision for a human with a psql prompt; the queries that settled it are in
--- §3, and 035 is the answer they produced.
+-- §3, and 036 is the answer they produced.
 --
 -- RISK CLASS: DDL ONLY. This migration replaces a function and creates a
 -- trigger. It writes no rows and deletes none, so it is reversible by dropping
@@ -147,7 +147,7 @@ create trigger projects_materialize_access
   execute function public.projects_materialize_access();
 
 -- ---------------------------------------------------------------------------
--- 3. THE QUESTION THIS FILE DID NOT ANSWER — ANSWERED SINCE, BY 035.
+-- 3. THE QUESTION THIS FILE DID NOT ANSWER — ANSWERED SINCE, BY 036.
 --
 -- Whether `projects_insert` should exist at all. Finding 1 above says no client
 -- needs it; finding 2 said revoking it safely depends on whether link_project's
@@ -175,11 +175,11 @@ create trigger projects_materialize_access
 -- table whenever FORCE is off — so this function's insert never evaluated
 -- `projects_insert` at all, and project creation could not be broken by
 -- removing it. `drop policy if exists projects_insert on public.projects;` was
--- therefore applied, and is written down as 035_drop_projects_insert.sql.
+-- therefore applied, and is written down as 036_drop_projects_insert.sql.
 --
 -- WHAT THAT MEANS FOR THE TRIGGER ABOVE: keep it. It no longer covers a
 -- member-reachable hole, because there is no longer one — but every remaining
 -- insert path (link_project's definer insert, a service-role write, an
 -- operator's insert in the SQL editor) bypasses RLS and fires it, and it is
 -- still what makes 029's invariant a property of the schema rather than a client
--- convention. 035 removed one way in; it did not make this trigger redundant.
+-- convention. 036 removed one way in; it did not make this trigger redundant.

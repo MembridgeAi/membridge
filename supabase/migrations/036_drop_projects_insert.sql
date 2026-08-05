@@ -1,5 +1,11 @@
--- 035_drop_projects_insert.sql — remove the `projects_insert` policy from
+-- 036_drop_projects_insert.sql — remove the `projects_insert` policy from
 -- public.projects, closing the direct-POST path into the projects table.
+--
+-- NUMBERING: this was written as 035 while 035 was still free. It is not:
+-- 035_delete_own_entries.sql (self-serve deletion) took that number on master
+-- first, so this file is 036 and its rollback is
+-- supabase/rollback/pre-036-projects-insert.sql. A comment in lib/ or test/
+-- pointing at "035" means the DELETION migration, never this one.
 --
 -- WHY THIS EXISTS. 032 §3 left exactly one question open and named the two
 -- queries that would settle it. They have now been run against the live
@@ -75,7 +81,7 @@
 -- RISK CLASS: DDL ONLY, AND SUBTRACTIVE. Drops one policy. Writes no rows,
 -- deletes none, changes no function. Reversible by recreating the policy from
 -- its exact prior body, captured at
--- supabase/rollback/pre-035-projects-insert.sql.
+-- supabase/rollback/pre-036-projects-insert.sql.
 --
 -- ALREADY APPLIED, UNIQUELY IN THIS DIRECTORY — READ THIS BEFORE RE-RUNNING.
 -- Unlike 031-034, the drop this file describes was performed by hand on the live

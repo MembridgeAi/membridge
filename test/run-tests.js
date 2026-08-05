@@ -23120,7 +23120,7 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(await feedCountFor('late'), 0);
       });
 
-      // ===== 032 + 035: the invariant 029 could only ASSUME, and the hole =====
+      // ===== 032 + 036: the invariant 029 could only ASSUME, and the hole =====
       // 029 §3 says in its own header that "every (member, project) pair has a
       // row" holds "only for as long as callers use the RPC; it is not enforced
       // anywhere", because the `projects_insert` policy let a member POST
@@ -23132,7 +23132,7 @@ const repoRoot = require('../lib/repo-root');
       //     insert path is covered. mock17.flags.noProjectInsertTrigger
       //     suppresses it and is how the trigger checks are proven
       //     non-vacuous — with it set, every one of them fails.
-      //   * 035 DROPS `projects_insert` outright, so the member-reachable path
+      //   * 036 DROPS `projects_insert` outright, so the member-reachable path
       //     is closed as well as covered. That is live: public.projects now has
       //     `projects_select` only, with RLS still on and the trigger intact.
       //
@@ -23143,7 +23143,7 @@ const repoRoot = require('../lib/repo-root');
       // things a POST can now be:
       //
       //   * as a MEMBER (bearer token, `authenticated` role): refused, because
-      //     035 left no INSERT policy to satisfy. This is the surface 029 §3
+      //     036 left no INSERT policy to satisfy. This is the surface 029 §3
       //     flagged, and it is now closed.
       //   * with the SERVICE-ROLE key (BYPASSRLS): admitted, because row
       //     security is not applied to that role at all. This stands in for the
@@ -23156,7 +23156,7 @@ const repoRoot = require('../lib/repo-root');
       // PL/pgSQL, trigger ordering, `security definer` rights, BYPASSRLS, the
       // absence of an INSERT policy in a real catalog, or whether the real
       // project_access_insert policy admits the trigger's write. Those need the
-      // live database, and 035's header records the two catalog queries that
+      // live database, and 036's header records the two catalog queries that
       // settled the RLS half. What is under test here is the RULE each
       // migration encodes.
       const tokenFor = userId => {
@@ -23176,7 +23176,7 @@ const repoRoot = require('../lib/repo-root');
       // What a team member can do for themselves: anon key + their own token.
       const postProjectAsMember = (userId, row) =>
         postProject({ apikey: 'anon-test', Authorization: `Bearer ${tokenFor(userId)}` }, row);
-      // What survives 035: a writer that bypasses row security entirely.
+      // What survives 036: a writer that bypasses row security entirely.
       const postProjectBypassingRls = row =>
         postProject({ apikey: mock17.serviceKey }, row);
       const rowsForProject = projectId =>
@@ -23258,11 +23258,11 @@ const repoRoot = require('../lib/repo-root');
         }
       });
 
-      await check('035: a member POSTing straight to /rest/v1/projects is refused — unconditionally, because no INSERT policy is left to satisfy', async () => {
+      await check('036: a member POSTing straight to /rest/v1/projects is refused — unconditionally, because no INSERT policy is left to satisfy', async () => {
         // THIS CHECK USED TO ASSERT 201. Under `projects_insert` the first
         // request below satisfied `is_team_member(team_id) and created_by =
         // auth.uid()` and created a real project row, skipping every check
-        // link_project performs. 035 dropped the policy on the live database, so
+        // link_project performs. 036 dropped the policy on the live database, so
         // the same request now raises 42501 and PostgREST returns 403.
         //
         // The point of listing three callers is that the refusal has NO
@@ -23294,8 +23294,8 @@ const repoRoot = require('../lib/repo-root');
           'a refused insert must not materialize project_access rows');
       });
 
-      await check('035 is safe because nothing in the tree takes that path: link_project is the only writer of public.projects', async () => {
-        // The load-bearing half of 035's justification, pinned in the suite
+      await check('036 is safe because nothing in the tree takes that path: link_project is the only writer of public.projects', async () => {
+        // The load-bearing half of 036's justification, pinned in the suite
         // rather than left as a claim in a migration header. If someone later
         // adds a direct write to `projects` from lib/, they would get a 403 from
         // a real backend with no explanation; this check fails first and names
@@ -23334,8 +23334,8 @@ const repoRoot = require('../lib/repo-root');
           'link_project is called from exactly one place in lib/teamsync.js; more than one is a second creation path to review');
       });
 
-      await check('035 leaves the RPC path alone: link_project still creates a project and materializes access rows', async () => {
-        // The other half of safety. 035's header argues from two live catalog
+      await check('036 leaves the RPC path alone: link_project still creates a project and materializes access rows', async () => {
+        // The other half of safety. 036's header argues from two live catalog
         // facts (link_project is owned by `postgres` with rolbypassrls = true,
         // and public.projects has relforcerowsecurity = false) that the RPC's
         // insert never evaluated `projects_insert` and so cannot be broken by
@@ -23357,14 +23357,14 @@ const repoRoot = require('../lib/repo-root');
       });
 
       await check("032 closes the ACCESS gap and no more: link_project's repo_url dedup is still bypassed by any non-RPC insert", async () => {
-        // Stated so nobody reads 032 — or 035 — as having made a non-RPC insert
+        // Stated so nobody reads 032 — or 036 — as having made a non-RPC insert
         // equivalent to the RPC. It is not. link_project adopts an existing
         // project with a matching repo_url; an insert that goes round it cannot,
         // because `unique (team_id, name)` (schema.sql:33) is the only constraint
         // that binds this path. Two rows for one repository under different names
         // is a REAL remaining difference — it is the duplicate-project problem,
         // tracked separately, and it needs a data write to resolve, not a policy
-        // change. NOTE 035 DOES NOT FIX IT: the live `membridge` / `Membridge`
+        // change. NOTE 036 DOES NOT FIX IT: the live `membridge` / `Membridge`
         // pair came from link_project matching on exact name, not from the POST.
         const repo = 'https://git.test/t17-direct';
         const existing = mock17.projects.filter(p => p.teamId === t17Team.team_id && p.repoUrl === repo);

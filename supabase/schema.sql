@@ -117,7 +117,7 @@ create policy projects_select on public.projects
 
 -- NO INSERT POLICY ON public.projects, DELIBERATELY. This file used to create
 -- `projects_insert` (`for insert with check (is_team_member(team_id) and
--- created_by = auth.uid())`); migrations/035_drop_projects_insert.sql dropped it
+-- created_by = auth.uid())`); migrations/036_drop_projects_insert.sql dropped it
 -- from the live database and it is not recreated here, so a fresh project starts
 -- without the hole rather than opening and then closing it.
 --
@@ -127,8 +127,8 @@ create policy projects_select on public.projects
 -- is never evaluated against a policy on this table. What the policy did grant
 -- was a direct POST /rest/v1/projects with a member's own token, which skipped
 -- link_project's repo_url adoption, archived-project handling and audit trail.
--- See 035's header for the measurements, and supabase/rollback/
--- pre-035-projects-insert.sql for the exact prior body if it ever has to return.
+-- See 036's header for the measurements, and supabase/rollback/
+-- pre-036-projects-insert.sql for the exact prior body if it ever has to return.
 
 create policy memory_entries_select on public.memory_entries
   for select using (
