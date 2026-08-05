@@ -36,9 +36,8 @@ export function FirstRun() {
   if (hasError) {
     return (
       <div className="first-run">
-        <p className="settings-error" role="alert">
-          Couldn't reach the daemon. {errorMessage(statusQuery.error ?? settingsQuery.error)}
-        </p>
+        <p className="settings-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="settings-group-hint">{errorMessage(statusQuery.error ?? settingsQuery.error)}</p>
       </div>
     )
   }

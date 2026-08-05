@@ -128,7 +128,8 @@ export function FeedPage() {
         <div className="feed-header">
           <h1 className="feed-title">Feed</h1>
         </div>
-        <p className="feed-error" role="alert">Couldn't reach the daemon. {errorMessage(feedQuery.error)}</p>
+        <p className="feed-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="feed-empty-note">{errorMessage(feedQuery.error)}</p>
       </div>
     )
   }

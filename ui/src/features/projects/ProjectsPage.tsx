@@ -227,7 +227,8 @@ export function ProjectsPage() {
   if (daemonError?.blocking) {
     return (
       <div className="projects-page">
-        <p className="projects-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
+        <p className="projects-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="projects-foot">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }

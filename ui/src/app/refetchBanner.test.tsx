@@ -21,11 +21,11 @@ import { TeamPage } from '../features/team/TeamPage'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { InsightsPage } from '../features/insights/InsightsPage'
 
-// The shared inline banner now names the product, not the implementation
-// ("daemon"). The full-page error regex still matches the pages that keep the
-// old wording (Today etc.), which are out of this change's scope.
+// Both now name the product, not the implementation ("daemon"): BANNER is the
+// shared inline DaemonError banner (renamed with the Team work); FULL_PAGE_ERROR
+// is the per-page blocking headline (renamed with the full-page-error work).
 const BANNER = /can't reach membridge, retrying/i
-const FULL_PAGE_ERROR = /couldn't reach the daemon/i
+const FULL_PAGE_ERROR = /couldn't reach membridge/i
 
 /** Wraps a FakeDataClient so every read starts failing on demand -- the
  *  "daemon just went away mid-session" switch. Only get* methods fail;

@@ -152,9 +152,8 @@ export function SettingsPage() {
   if (daemonError?.blocking) {
     return (
       <div className="settings-page">
-        <p className="settings-error" role="alert">
-          Couldn't reach the daemon. {errorMessage(daemonError.error)}
-        </p>
+        <p className="settings-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="settings-group-hint">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }

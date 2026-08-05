@@ -10,7 +10,7 @@ describe('SettingsPage', () => {
     renderApp({}, <SettingsPage />)
     await screen.findByText('Memory delivery')
     expect(screen.getByText('Privacy')).toBeInTheDocument()
-    expect(screen.getByText('Daemon')).toBeInTheDocument()
+    expect(screen.getByText('Background service')).toBeInTheDocument()
     expect(screen.getByText('Team')).toBeInTheDocument()
     expect(screen.queryByText(/roadmap/i)).toBeNull()
     expect(screen.queryByLabelText(/api key/i)).toBeNull()

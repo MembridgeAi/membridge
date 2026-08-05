@@ -161,7 +161,8 @@ export function ProjectPage({ slug }: ProjectPageProps) {
   if (daemonError?.blocking) {
     return (
       <div className="project-page">
-        <p className="project-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
+        <p className="project-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="project-empty-note">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }

@@ -52,7 +52,7 @@ export function DaemonGroup({ daemon }: DaemonGroupProps) {
 
   return (
     <>
-      <div className="settings-group-label">Daemon</div>
+      <div className="settings-group-label">Background service</div>
       {failure && (
         <p className="settings-error" role="alert">Couldn't save the change. {errorMessage(failure)}</p>
       )}
