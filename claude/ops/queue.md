@@ -101,11 +101,43 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
   session, and is ABSENT rather than 0 when the map cannot be read, because a
   session that genuinely produced no commits is a real 0.
 
-## Found 2026-08-04 evening by the agent team, uncommitted in three worktrees
+## Found 2026-08-04 evening by the agent team — ALL MERGED AND RELEASED 2026-08-05
 
-50 tickets. Work sits in `.claude/worktrees/{ui,hunt,search-identity}` on
-`fix/insights-solo-gate`, `agent-hunt` and `agent-search-identity`, all
-uncommitted, zero file overlap between them. `master` untouched at `549a4dd`.
+**Status correction (2026-08-05, ~00:40).** The paragraph below described this
+work as uncommitted in three worktrees. It is all on `master` and released; do
+not go looking in the worktrees for it. Landed as PRs #19 (ui, 16 tickets), #21
+(search/daemon, 9), #20 + #22 (team kit), #23 (schema/attribution, incl.
+migrations 028-034), #24 (release 0.3.1), #26 (release 0.3.2), #25/#27 (installer
+pins). `master` head after the batch: the 0.3.2 release commit.
+
+Two things went out that need stating plainly:
+
+- **0.3.1 shipped a regression and 0.3.2 fixes it.** Deriving `/api/status`'s
+  `running` from the sync loop's real last pass was wired into
+  `bin/membridge.js` only, and `app/main.js` — the tray app, the normal install —
+  never recorded a pass. Every desktop user read `running: false` / health
+  `unknown` while syncing fine. Caught by running the shipped build, not by the
+  suite. Anyone on 0.3.1 should take 0.3.2. Rule: see the standing note that
+  BOTH sync loops must be wired for any change to what a pass does or reports.
+- **The site was four releases stale.** `membridge.app/install.sh` was pinned to
+  0.2.8 and the JSON-LD said 0.2.7, so 0.2.9/0.3.0/0.3.1 never reached anyone
+  using the documented install command. Now published at 0.3.2 with a SHA
+  matching the CI asset. Nothing verifies these agree — publishing to the site
+  repo is a required release step, not an optional one.
+
+**Still open from this batch:** migrations 028-034 are committed and UNAPPLIED
+(028 then 029 in order, in the SQL editor, never `db push`; diff 031 against live
+first, it is a reconstruction). Until 033 is applied, revoking a member's access
+still does not cover what they can write. Also open: duplicate `membridge` /
+`Membridge` projects (needs a data write), `--text3` WCAG contrast, the Windows
+daemon-restart flake plus `run.js` folding a crashed suite's partial count into a
+green-looking total, `readAccess` defaulting a missing project row to open, and
+rows left behind by a pre-fix unlink never being pruned.
+
+Original entry, kept for the detail:
+
+50 tickets. Work sat in `.claude/worktrees/{ui,hunt,search-identity}` on
+`fix/insights-solo-gate`, `agent-hunt` and `agent-search-identity`.
 Slack: #handoffs 2026-08-04 evening (main message plus four thread replies).
 
 **Corrections to earlier reports, highest value first.**
