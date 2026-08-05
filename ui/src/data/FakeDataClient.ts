@@ -361,7 +361,7 @@ export class FakeDataClient implements DataClient {
     ]
   }
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }) {
-    if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null })
+    if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null, dayDigests: [] })
     let entries = this.feedFixture()
       .filter(e => !filters.author || e.authorId === filters.author)
       .filter(e => !filters.project || e.projectPath === filters.project)
@@ -370,7 +370,10 @@ export class FakeDataClient implements DataClient {
     if (opts.before) entries = entries.filter(e => e.at <= opts.before!)
     const page = entries.slice(0, opts.limit)
     const nextBefore = entries.length > opts.limit ? page[page.length - 1].at : null
-    return this.guard<FeedPage>({ entries: page, nextBefore })
+    // No dayDigests: the fixture transport deliberately exercises the
+    // no-digest daemon, which is the state every client must degrade to. Tests
+    // that need one supply it by mocking getFeed.
+    return this.guard<FeedPage>({ entries: page, nextBefore, dayDigests: [] })
   }
   // The demo/test transport's search: the same fixture rows, filtered by a
   // plain case-insensitive substring over the fields the real scorer weights
