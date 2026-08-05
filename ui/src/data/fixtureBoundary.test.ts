@@ -35,7 +35,7 @@ import { FakeDataClient } from './FakeDataClient'
  */
 
 // Mappers whose fixture path goes through the real mapper.
-const CROSSED = ['mapMember', 'mapProjectRow'] as const
+const CROSSED = ['mapMember', 'mapProjectRow', 'mapSession'] as const
 
 // Mappers the fixture still bypasses, with why. Moving one of these to
 // CROSSED means converting the matching FakeDataClient builder to author the
@@ -51,10 +51,6 @@ const OUTSTANDING: Record<string, string> = {
   mapStreamEntry:
     'FakeDataClient.getProjectStream() authors StreamEntry literals. Also RawFeedEntry-based; ' +
     'same pass as the two above.',
-  mapSession:
-    'FakeDataClient.getSession() authors a Session literal. Self-contained ' +
-    '(RawSessionPayload -> Session, no second argument), so this is the cheapest one left ' +
-    'and the natural next conversion.',
 }
 
 describe('the FakeDataClient/mapper boundary', () => {
@@ -165,6 +161,30 @@ describe('the FakeDataClient/mapper boundary', () => {
       expect(projects.find(p => p.name === 'sublease')!.latestSummary?.text)
         .toBe('Listing flow validates addresses before payment')
       expect(projects.find(p => p.name === 'deleted-folder')!.latestSummary).toBeNull()
+    })
+  })
+
+  // mapSession is pure normalization: every field is `raw.x || default`. That
+  // makes it the easiest mapper for a fixture to drift away from unnoticed --
+  // author a Session directly and you silently skip every default the app
+  // relies on, so a payload the daemon really sends (sparse, with nulls and
+  // absent arrays) is never exercised.
+  describe('sessions really are mapper output', () => {
+    it('normalizes a sparse payload rather than trusting the fixture to be complete', async () => {
+      const s = await new FakeDataClient().getSession('s-f1')
+      // Arrays are guaranteed present by the mapper, never undefined -- the
+      // session page maps over all four without guarding.
+      expect(Array.isArray(s!.files)).toBe(true)
+      expect(Array.isArray(s!.changes)).toBe(true)
+      expect(Array.isArray(s!.checkpoints)).toBe(true)
+      expect(Array.isArray(s!.prompts)).toBe(true)
+      // Absent optional text normalizes to null, not undefined.
+      expect(s!.decisions).toBeNull()
+      expect(s!.gotchas).toBeNull()
+    })
+
+    it('still resolves an unknown id to null rather than a blank session', async () => {
+      expect(await new FakeDataClient().getSession('nope')).toBeNull()
     })
   })
 })

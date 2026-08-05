@@ -3,9 +3,15 @@ import type { DataClient, Capabilities } from './DataClient'
 // hands back domain objects it authored itself can never fail the way the app
 // fails -- see teamMembers() below and fixtureBoundary.test.ts.
 import {
-  mapMember, mapProjectRow,
-  type MemberActivity, type RawFeedEntry, type RawMemberRow, type RawProjectRow,
+  mapMember, mapProjectRow, mapSession,
+  type MemberActivity, type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSessionPayload,
 } from './mappers'
+
+import type {
+  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
+  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  TeamAccount,
+} from './types'
 
 /** A wire feed row with everything optional defaulted, so a fixture states only
  *  the fields it is actually about. Feed rows are what mapProjectRow derives
@@ -34,11 +40,6 @@ function rawFeedEntry(over: Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project'
     ...over,
   }
 }
-import type {
-  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
-  TeamAccount,
-} from './types'
 
 export interface FakeOptions {
   solo?: boolean
@@ -162,7 +163,12 @@ function longPromptChain(count: number): SessionPrompt[] {
 // fixture rows carry so a row's link resolves in fake mode: one live
 // (s-f1), one finished with a full brief (s-f2), one with empty
 // decisions/gotchas (s-f3), and one 60-prompt session (s-f4).
-const SESSION_FIXTURES: Record<string, Session> = {
+// Authored as WIRE payloads and mapped on read (see getSession below), not as
+// Session objects. mapSession is pure normalization -- every field is
+// `raw.x || default` -- which is exactly the kind of mapper a fixture can drift
+// away from without anything failing: author a Session directly and you get to
+// skip every default the app actually depends on.
+const SESSION_FIXTURES: Record<string, RawSessionPayload> = {
   's-f1': {
     session: 's-f1', project: 'membridge', projectPath: '/Users/x/membridge',
     author: 'Andrew', authorId: 'andrew', source: 'Codex',
@@ -456,7 +462,10 @@ export class FakeDataClient implements DataClient {
   // "evicted session" resolution, not throw, so the not-in-memory page state
   // is exercisable in tests.
   getSession(sessionId: string) {
-    return this.guard<Session | null>(SESSION_FIXTURES[sessionId] ?? null)
+    const raw = SESSION_FIXTURES[sessionId]
+    // Mapped here rather than stored mapped, so a change to mapSession's
+    // normalization reaches every test that opens a session page.
+    return this.guard<Session | null>(raw ? mapSession(raw) : null)
   }
   getProjectStream() {
     return this.guard<StreamEntry[]>([
