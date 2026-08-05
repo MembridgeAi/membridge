@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.2.9 — 2026-08-04
+
+- **Fixed: a team owner could be locked out of their own Insights page.** The
+  page read "Insights is available to team owners and admins" to someone who
+  was, in fact, the owner. The cause was not in the page: `.membridge/team.json`
+  had been deleted from the repository. Everything else under `.membridge/` is
+  per-machine derived data, but that one file is source — it pins the shared
+  backend project so every clone and fork resolves to the same team instead of
+  minting its own. With it gone no project belonged to a multi-member team, the
+  daemon reported the machine as solo, and Insights gates on that. The file is
+  restored and `.gitignore` still carries the exception that keeps it tracked.
+  If you cloned in the last day, pull before wondering where your team went.
+- **Plainer language when something is wrong.** Full-page errors say
+  "MemBridge" rather than "daemon", the Team page states what each state
+  actually means instead of naming the mechanism behind it, and the Insights
+  copy no longer promises more than it measures.
+- **The installer no longer advertises working around Gatekeeper.** The mac
+  build is signed and notarized, so the quarantine flag is left exactly where
+  macOS puts it, and the install test now asserts that it is *not* stripped.
+
 - **You can ask what a teammate is working on.** Recent activity now takes a
   person (and a project), so "what is Andrew on?" is a question with an answer
   instead of a page of everyone's work you have to read through. The filter is
