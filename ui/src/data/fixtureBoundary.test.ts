@@ -35,18 +35,12 @@ import { FakeDataClient } from './FakeDataClient'
  */
 
 // Mappers whose fixture path goes through the real mapper.
-const CROSSED = ['mapMember'] as const
+const CROSSED = ['mapMember', 'mapProjectRow'] as const
 
 // Mappers the fixture still bypasses, with why. Moving one of these to
 // CROSSED means converting the matching FakeDataClient builder to author the
 // raw wire shape. Nothing here is safe; it is only known.
 const OUTSTANDING: Record<string, string> = {
-  mapProjectRow:
-    'FakeDataClient.getProjects() authors Project literals. The heaviest conversion of the ' +
-    'set: mapProjectRow takes (row, feedEntries, intervalSec) and derives sync state from a ' +
-    'clock-sensitive comparison, so the fixture would have to author raw feed entries with ' +
-    'timestamps positioned relative to the grace period. Highest remaining exposure, since ' +
-    'Project drives Today, Projects and the project page.',
   mapFeedEntry:
     'FakeDataClient.getFeed() authors FeedEntry literals. Medium: one raw shape (RawFeedEntry) ' +
     'and no derived clock state, but the fixture builds paged results and day grouping on top ' +
@@ -115,6 +109,62 @@ describe('the FakeDataClient/mapper boundary', () => {
       // ability to tell a real zero from an unreachable one.
       expect(members.find(m => m.name === 'Andrew')?.preFixLocal).toEqual({ entries: 7, projects: 2 })
       expect(members.find(m => m.name === 'Sarah')?.preFixLocal).toEqual({ entries: 0, projects: 0 })
+    })
+  })
+
+  // mapProjectRow has FOUR derived fields, and the fixture used to state all
+  // four as literals. Each assertion below is a value the fixture no longer
+  // authors -- break the derivation and these fail, which is the whole point.
+  describe('projects really are mapper output, with the derived fields derived', () => {
+    it('derives sync state from the row own timestamps, not from an authored literal', async () => {
+      const projects = await new FakeDataClient().getProjects()
+      const membridge = projects.find(p => p.name === 'membridge')!
+      const sublease = projects.find(p => p.name === 'sublease')!
+
+      // lastActivity === lastSync, so zero lag, so inside the grace period.
+      expect(membridge.sync).toEqual({ state: 'up-to-date' })
+      // ~6 days of lag against a 2-interval grace: behind, and it reports the
+      // sync it is behind FROM.
+      expect(sublease.sync).toEqual({ state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' })
+    })
+
+    it('derives shared from the presence of a team link', async () => {
+      const team = await new FakeDataClient().getProjects()
+      expect(team.find(p => p.name === 'membridge')!.shared).toBe(true)
+      expect(team.find(p => p.name === 'sublease')!.shared).toBe(false)
+      // Solo has no team link on any row, so nothing is shared -- and this is
+      // the flag T-78's whole solo audit keys on.
+      const solo = await new FakeDataClient({ solo: true }).getProjects()
+      expect(solo.find(p => p.name === 'membridge')!.shared).toBe(false)
+    })
+
+    it('derives latestSummary from the feed page rather than stating it', async () => {
+      const projects = await new FakeDataClient().getProjects()
+      expect(projects.find(p => p.name === 'membridge')!.latestSummary).toEqual({
+        text: 'Hook ownership now decided by durability, not who ran last',
+        author: 'Andrew',
+        at: '2026-07-29T19:00:00Z',
+      })
+      // A project whose feed rows carry no text gets null FROM the mapper.
+      const archived = await new FakeDataClient({ withArchived: true }).getProjects()
+      expect(archived.find(p => p.name === 'old-prototype')!.latestSummary).toBeNull()
+    })
+
+    it('derives recentAuthorIds from feed rows that actually carry an author id', async () => {
+      const projects = await new FakeDataClient().getProjects()
+      // The summary row deliberately has authorId null (the realistic case),
+      // so Andrew is the summary's author WITHOUT appearing here.
+      expect(projects.find(p => p.name === 'membridge')!.recentAuthorIds).toEqual(['me', 'andrew', 'sarah'])
+      expect(projects.find(p => p.name === 'sublease')!.recentAuthorIds).toEqual(['me'])
+    })
+
+    it('filters one shared feed page per project, the way the real client does', async () => {
+      const projects = await new FakeDataClient({ withArchived: true }).getProjects()
+      // sublease's summary must not leak onto membridge, and vice versa --
+      // both come out of the same array handed to every mapProjectRow call.
+      expect(projects.find(p => p.name === 'sublease')!.latestSummary?.text)
+        .toBe('Listing flow validates addresses before payment')
+      expect(projects.find(p => p.name === 'deleted-folder')!.latestSummary).toBeNull()
     })
   })
 })

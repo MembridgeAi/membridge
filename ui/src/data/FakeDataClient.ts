@@ -2,7 +2,38 @@ import type { DataClient, Capabilities } from './DataClient'
 // The real mapper, deliberately imported by the FAKE client. A fixture that
 // hands back domain objects it authored itself can never fail the way the app
 // fails -- see teamMembers() below and fixtureBoundary.test.ts.
-import { mapMember, type MemberActivity, type RawMemberRow } from './mappers'
+import {
+  mapMember, mapProjectRow,
+  type MemberActivity, type RawFeedEntry, type RawMemberRow, type RawProjectRow,
+} from './mappers'
+
+/** A wire feed row with everything optional defaulted, so a fixture states only
+ *  the fields it is actually about. Feed rows are what mapProjectRow derives
+ *  `latestSummary` and `recentAuthorIds` from, so authoring them raw is how the
+ *  project fixture gets those two fields from the real mapper instead of
+ *  asserting them into existence. */
+function rawFeedEntry(over: Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project' | 'projectPath'>): RawFeedEntry {
+  return {
+    ts: '2026-07-28T10:00:00Z',
+    author: 'Someone',
+    // Null by default, and that is the REALISTIC default, not a shortcut:
+    // measured against the live daemon, authorId is null on every row (see
+    // RawFeedEntry.self in mappers.ts). A fixture where every row has an id
+    // would make recentAuthorIds look more reliable than it is.
+    authorId: null,
+    source: 'Claude Code',
+    session: null,
+    projectId: null,
+    ask: '',
+    summary: null,
+    distilled: false,
+    files: [],
+    goal: null,
+    headline: null,
+    live: false,
+    ...over,
+  }
+}
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
   Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
@@ -320,51 +351,100 @@ export class FakeDataClient implements DataClient {
     if (this.opts.solo) return [this.viewerId]
     return this.teamMembers().slice(0, 6).map(m => m.id)
   }
+  /**
+   * Projects, authored as wire rows + a wire feed page and put through the real
+   * mapProjectRow — same as teamMembers() and for the same reason.
+   *
+   * Four of Project's fields are DERIVED rather than copied, and this fixture
+   * used to assert all four into existence:
+   *   shared           <- !!row.team
+   *   recentAuthorIds  <- distinct authorIds on this project's feed rows
+   *   latestSummary    <- newest feed row carrying a headline or summary
+   *   sync             <- syncStateOf(row, intervalSec)
+   *
+   * The `sync` one was why this conversion looked blocked. It is not:
+   * syncStateOf never reads the wall clock — it compares the row's OWN
+   * lastActivity against its OWN lastSync against a grace of
+   * intervalSec * SYNC_GRACE_INTERVALS. So the states below are produced by the
+   * same timestamps the fixture already carried, not simulated:
+   *   membridge      lastActivity == lastSync            -> lag 0        -> up-to-date
+   *   sublease       2026-07-29T08 vs 2026-07-23T10      -> ~6 days      -> behind
+   *   old-prototype  paused: true                        -> paused (wins outright)
+   * Nothing here fakes a timing outcome; change a timestamp and the state
+   * changes with it, exactly as it would against the daemon.
+   *
+   * ONE FEED ARRAY FOR ALL PROJECTS, passed whole to every mapProjectRow call,
+   * because that is what the real client does: entriesForProject filters one
+   * shared page per project. Passing each project a pre-filtered array would
+   * hide the filter, which is itself part of what the mapper does.
+   */
   getProjects() {
     if (this.opts.empty) return this.guard<Project[]>([])
-    const projects: Project[] = [
+
+    // Only ONE entry per project carries text, so latestSummaryFor picks it
+    // regardless of position and the fixture does not depend on array order to
+    // stay correct.
+    const feed: RawFeedEntry[] = [
+      // membridge's summary row. authorId null on purpose: it keeps Andrew as
+      // the summary's AUTHOR NAME without adding him to recentAuthorIds, which
+      // is what lets the solo fixture keep this summary while its author list
+      // collapses to just the viewer.
+      rawFeedEntry({
+        project: 'membridge', projectPath: '/Users/x/membridge',
+        author: 'Andrew', authorId: null, ts: '2026-07-29T19:00:00Z',
+        headline: 'Hook ownership now decided by durability, not who ran last',
+      }),
+      // The people seen on membridge lately. Textless, so they cannot displace
+      // the summary above; present only to be counted as authors.
+      ...this.sharedMemberIds().map(id => rawFeedEntry({
+        project: 'membridge', projectPath: '/Users/x/membridge', authorId: id,
+      })),
+      rawFeedEntry({
+        project: 'sublease', projectPath: '/Users/x/sublease',
+        author: 'You', authorId: this.viewerId, ts: '2026-07-23T10:00:00Z',
+        headline: 'Listing flow validates addresses before payment',
+      }),
+      // Archived pair: an author but no text, so latestSummary comes back null
+      // from the mapper rather than being written as null here.
+      rawFeedEntry({ project: 'old-prototype', projectPath: '/Users/x/old-prototype', authorId: this.viewerId }),
+      rawFeedEntry({ project: 'deleted-folder', projectPath: '/Users/x/deleted-folder', authorId: this.viewerId }),
+    ]
+
+    const rows: RawProjectRow[] = [
       {
         path: '/Users/x/membridge', name: 'membridge', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
-        shared: !this.opts.solo, recentAuthorIds: this.sharedMemberIds(),
+        // `shared` is derived from this, not stated: a team link present means
+        // shared. Solo installs have no link at all.
+        team: this.opts.solo ? null : { projectId: 'tp-membridge', teamId: 'team-1' },
         sessionsThisWeek: 31, dailyCounts: [3, 5, 2, 6, 4, 5, 6], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
-        latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
-        sync: { state: 'up-to-date' },
       },
       {
         path: '/Users/x/sublease', name: 'sublease', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
-        shared: false, recentAuthorIds: [this.viewerId],
+        team: null,
         sessionsThisWeek: 4, dailyCounts: [1, 0, 1, 0, 1, 1, 0], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
-        latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
-        sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
       },
     ]
     if (this.opts.withArchived) {
-      projects.push(
+      rows.push(
         {
           path: '/Users/x/old-prototype', name: 'old-prototype', exists: true, archived: true, missing: false, paused: true,
           lastSync: '2026-06-30T10:00:00Z', lastActivity: '2026-06-30T10:00:00Z',
-          sessionsTotal: 12, tools: ['Claude Code'],
-          shared: false, recentAuthorIds: [this.viewerId],
+          sessionsTotal: 12, tools: ['Claude Code'], team: null,
           sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
-          latestSummary: null,
-          sync: { state: 'paused' },
         },
         {
           path: '/Users/x/deleted-folder', name: 'deleted-folder', exists: false, archived: true, missing: true, paused: true,
           lastSync: '2026-06-01T10:00:00Z', lastActivity: '2026-06-01T10:00:00Z',
-          sessionsTotal: 3, tools: ['Codex'],
-          shared: false, recentAuthorIds: [this.viewerId],
+          sessionsTotal: 3, tools: ['Codex'], team: null,
           sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
-          latestSummary: null,
-          sync: { state: 'paused' },
         },
       )
     }
-    return this.guard<Project[]>(projects)
+    return this.guard<Project[]>(rows.map(row => mapProjectRow(row, feed)))
   }
   getLiveSessions() {
     return this.guard<LiveSession[]>(this.opts.empty ? [] : [
