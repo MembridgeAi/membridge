@@ -33,7 +33,7 @@ const util = require('../../lib/util');
 const teamsync = require('../../lib/teamsync');
 const teamArchive = require('../../lib/team-archive');
 const activity = require('../../lib/activity');
-const { createMockSupabase } = require('../mock-supabase');
+const { createMockSupabase, pgTimestamptz } = require('../mock-supabase');
 
 const MOCK_PORT = P(67);
 const TEAMMATE_ID = '99999999-8888-7777-6666-555555555555';
@@ -252,13 +252,22 @@ async function main() {
 
 // The stored (mapped) shape of everything the backend holds for this project —
 // used only to build the "pulled under an older build" pre-state.
+//
+// `ts` goes through pgTimestamptz because these rows stand in for rows that
+// were PULLED, and a pull renders timestamptz the way Postgres does rather
+// than handing back the bytes that were stored (see test/mock-supabase.js).
+// Reading mock.entries directly is a fixture shortcut past the pull path, and
+// without this the shortcut produces a spelling no real pull ever yields: the
+// archive is deduped on a key containing ts, so the seeded rows and the
+// re-pulled ones would key differently and the archive would appear to double.
+// That would be a bug in this fixture, not in compaction.
 function archiveRowsFromBackend(mock, projectId) {
   return mock.entries
     .filter(e => e.project_id === projectId)
     .map(e => ({
       author: e.author_name,
       authorId: e.author_id,
-      ts: e.ts,
+      ts: pgTimestamptz(e.ts),
       source: e.source,
       session: e.session,
       ask: e.ask || null,

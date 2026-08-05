@@ -24,7 +24,7 @@ const { check, ROOT, P } = h;
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { createMockSupabase } = require('../mock-supabase');
+const { createMockSupabase, pgTimestamptz } = require('../mock-supabase');
 const util = require('../../lib/util');
 const teamsync = require('../../lib/teamsync');
 const activity = require('../../lib/activity');
@@ -136,9 +136,18 @@ async function main() {
       const row = plant({ ts: '2026-07-03T10:00:00.000Z', session: 'legacy-session' });
       const p = {
         // Exactly what an old install has on disk: no authorId at all.
+        //
+        // `ts` is written in the spelling a PULL yields, not the one the
+        // fixture pushed. Every row in this cache got there through
+        // pullProject, and PostgREST renders a timestamptz through Postgres's
+        // own to_json ('...000Z' comes back as '+00:00'; see
+        // test/mock-supabase.js pgTimestamptz). Hand-writing the pushed
+        // spelling here would model a stored row no install has ever held, and
+        // the merge key contains ts, so it would fail to heal for a reason
+        // that cannot happen in production.
         teamEntries: [{
           author: 'andrewludwigbrown',
-          ts: '2026-07-03T10:00:00.000Z',
+          ts: pgTimestamptz('2026-07-03T10:00:00.000Z'),
           source: 'Claude Code',
           session: 'legacy-session',
           ask: null,
