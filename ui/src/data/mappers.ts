@@ -66,6 +66,14 @@ export interface RawFeedEntry {
   // ciphertext it could not decrypt, so summary/headline are null ON PURPOSE.
   // Optional because only such rows carry it at all.
   undecryptable?: boolean
+  // "This row is the viewer's own work", decided by the daemon. Measured
+  // against the live daemon: `authorId` is null on EVERY row -- local and
+  // teammate alike -- so `self` is the only field that actually identifies
+  // whose work a row is, and it is a real boolean on every row. It was being
+  // dropped here, which is why the person filter and "Hide mine" cannot work.
+  // Carried but deliberately NOT read yet: whether the filter moves to `self`
+  // or the daemon starts sending a real author id is the daemon ticket's call.
+  self?: boolean
   // Stamped by the daemon (lib/feed.js) from the session's newest event of any
   // kind, against util.LIVE_WINDOW_MS. The UI does not recompute it: this
   // field is the single source both the live dot and Today's LIVE NOW count
@@ -328,6 +336,7 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     // -- both arrive with an empty `outcome`, and only these say which.
     distilled: !!e.distilled,
     undecryptable: !!e.undecryptable,
+    self: !!e.self,
     summaryFull: e.summaryFull || null,
     decisions: e.decisions || null,
     gotchas: e.gotchas || null,
@@ -474,7 +483,7 @@ export function groupLiveSessions(sessions: LiveSession[]): LiveSessionGroup[] {
 
 // ---------------------------------------------------------------------------
 // Projects: /api/projects carries the lifetime/week/day counters directly
-// (Step 1b). latestSummary and memberIds are not on that payload at all --
+// (Step 1b). latestSummary and recentAuthorIds are not on that payload at all --
 // they are derived from the SAME /api/feed page getProjects() already fetches
 // for the Today screen, never a second per-project request.
 // ---------------------------------------------------------------------------
@@ -495,10 +504,31 @@ export function latestSummaryFor(entries: RawFeedEntry[]): Project['latestSummar
   return null
 }
 
-// Distinct authors seen on this project's feed entries -- the closest thing
-// to "who has access" the daemon exposes today without a dedicated access
-// endpoint (that's Task 10's getAccessMatrix).
-export function memberIdsFor(entries: RawFeedEntry[]): string[] {
+// Distinct authors seen on this project's slice of ONE shared, capped,
+// newest-first feed page.
+//
+// NOT A ROSTER AND NOT A HEADCOUNT, and it must never be rendered as either.
+// It was called memberIds for a release, and both misreadings duly shipped: a
+// "0 of 5" access count on the projects grid, and a "N people" figure on the
+// project page.
+//
+// This is the same paging assumption the Member comment below documents failing
+// three times: the page is /api/feed?limit=100 for EVERY project at once, so one
+// busy project can fill it and a second, genuinely shared project contributes
+// zero entries -- whose author set is then the empty set. Read as "who can see
+// this", that is a shared project claiming nobody can. Read as a headcount, it
+// is "31 sessions, 0 people" in one breath.
+//
+// It also carries NO time window, so it cannot be paired with a windowed number
+// (sessionsThisWeek) in one sentence even if the cap were not an issue.
+//
+// The authoritative access reads are getAccessMatrix() and getProjectAccess()
+// -- both effectively owner/admin, since public.project_access's select policy
+// is is_team_manager and RLS filters silently rather than erroring, so a
+// member's read of either reports the whole team as able to see the project.
+// What this set legitimately answers is "who has shown up here lately", which
+// is why its consumers render it as faces and never as a figure.
+export function recentAuthorIdsFor(entries: RawFeedEntry[]): string[] {
   const ids = new Set<string>()
   for (const e of entries) if (e.authorId) ids.add(e.authorId)
   return [...ids]
@@ -518,7 +548,7 @@ export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[], i
     sessionsTotal: row.sessionsTotal,
     tools: row.tools,
     shared: !!row.team,
-    memberIds: memberIdsFor(entries),
+    recentAuthorIds: recentAuthorIdsFor(entries),
     sessionsThisWeek: row.sessionsThisWeek,
     dailyCounts: row.dailyCounts,
     latestSummary: latestSummaryFor(entries),

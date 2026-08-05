@@ -75,6 +75,41 @@ describe('ConfirmDialog modal behavior (Fix 11)', () => {
   })
 })
 
+// U-4 (`detail`) and U-3 (`errorTone`) are both additive props whose whole
+// safety argument is that omitting them renders what this component rendered
+// before they existed. That argument is only true if something checks it, and
+// checking it HERE covers every caller at once -- present and future -- rather
+// than one screen's dialog at a time.
+describe('ConfirmDialog optional props default to the original rendering', () => {
+  it('renders exactly one paragraph when no detail is given', () => {
+    render(<ConfirmDialog {...confirmProps()} />)
+    const paragraphs = screen.getByRole('dialog').querySelectorAll('.dialog-message')
+    expect(paragraphs).toHaveLength(1)
+    expect(paragraphs[0]).toHaveTextContent('This is immediate.')
+  })
+
+  it('renders detail as a second paragraph, after the message', () => {
+    render(<ConfirmDialog {...confirmProps({ detail: 'Anything already synced is cleaned up later.' })} />)
+    const paragraphs = [...screen.getByRole('dialog').querySelectorAll('.dialog-message')]
+    expect(paragraphs).toHaveLength(2)
+    expect(paragraphs[0]).toHaveTextContent('This is immediate.')
+    expect(paragraphs[1]).toHaveTextContent('Anything already synced is cleaned up later.')
+  })
+
+  it('treats an empty detail as no detail rather than an empty paragraph', () => {
+    render(<ConfirmDialog {...confirmProps({ detail: '' })} />)
+    expect(screen.getByRole('dialog').querySelectorAll('.dialog-message')).toHaveLength(1)
+  })
+
+  it('tones an error as final unless the caller says otherwise', () => {
+    render(<ConfirmDialog {...confirmProps({ error: 'That did not work.' })} />)
+    // Absent errorTone must never read as retryable: a caller that has not been
+    // taught the distinction is describing a failure, not an outage.
+    expect(screen.getByRole('alert')).toHaveAttribute('data-tone', 'error')
+    expect(screen.getByRole('alert')).not.toHaveClass('dialog-error-retryable')
+  })
+})
+
 describe('FormDialog modal behavior (Fix 11)', () => {
   it('moves focus into the dialog on open and closes on Escape', async () => {
     const onClose = vi.fn()

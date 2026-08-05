@@ -66,9 +66,26 @@ export function DayCard({ card, showAvatar, targetSession, from }: DayCardProps)
         <span className="day-card-avatar-cell">
           {showAvatar && <Avatar id={card.authorId} name={card.author} size={19} />}
         </span>
+        {/* Both of these carry arbitrary-length user data (a display name and a
+            project name), so both are bounded by .wrap-anywhere -- see
+            styles/base.css. The author's own `white-space: nowrap` was removed
+            with it, because nowrap makes even a spaced name unbreakable.
+
+            NO LINE CLAMP, which is the one deviation from T1's companion
+            treatment, and it is a measured decision rather than an omission. A
+            clamp needs `display: -webkit-box`, which would blockify these spans
+            -- and unlike .proj-path (a text-only element), .day-card-who has a
+            SIBLING on its line, so blockifying would push .day-card-sub onto its
+            own row permanently, for every card in the feed. The vertical cost it
+            would be buying off is small: the cell is 556px wide at the 900px
+            floor, so a name only reaches a second line past ~65 characters, and
+            a 140-character name measures 3 lines / +34px of card height. Paying
+            a layout regression on 100% of rows to save 34px on an absurd name is
+            the wrong trade. Nothing is truncated, so nothing needs `title` to
+            stay recoverable -- the full value is on screen. */}
         <span className="day-card-who-cell">
-          <span className="day-card-who">{card.author}</span>
-          <span className="day-card-sub">
+          <span className="day-card-who wrap-anywhere">{card.author}</span>
+          <span className="day-card-sub wrap-anywhere">
             <span className="mono">{card.project}</span>
             {' · '}{relativeAgo(card.at, { justNow: 'now' })}
           </span>

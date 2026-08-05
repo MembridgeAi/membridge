@@ -12,7 +12,7 @@ function project(overrides: Partial<Project> = {}): Project {
   return {
     path: '/x/p', name: 'p', exists: true, archived: false, missing: false, paused: false,
     lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
-    sessionsTotal: 10, tools: ['Claude Code'], shared: false, memberIds: ['me'],
+    sessionsTotal: 10, tools: ['Claude Code'], shared: false, recentAuthorIds: ['me'],
     sessionsThisWeek: 1, dailyCounts: [0, 0, 0, 0, 0, 0, 1],
     latestSummary: null, sync: { state: 'up-to-date' },
     ...overrides,
@@ -121,6 +121,43 @@ describe('TodayPage', () => {
   it('renders an empty state without crashing', async () => {
     renderApp({ empty: true }, <TodayPage />)
     expect(await screen.findByText(/no projects yet/i)).toBeInTheDocument()
+  })
+
+  // T16: the avatar group on a project row is Project.recentAuthorIds -- who
+  // has shown up here lately, off one capped cross-project feed page. It cannot
+  // answer "who is this shared with", but unlabelled faces sitting immediately
+  // right of the Shared/Private tag answer it anyway. Naming the group is the
+  // fix; the same treatment ProjectPage's header stack got.
+  describe('the avatar group names what it is', () => {
+    it('announces recent activity and every face in it, not the share roster', async () => {
+      renderApp({}, <TodayPage />)
+      const rows = await screen.findAllByTestId('project-row')
+      const shared = rows.find(r => within(r).queryByText('Shared'))!
+      const group = within(shared).getByRole('img', { name: /recently active here/i })
+      const label = group.getAttribute('aria-label')!
+      // Today resolves names only from what it has observed (live sessions), so
+      // 'sarah' is legitimately unresolved here -- she must still be accounted
+      // for by her id rather than dropped from a label covering her avatar.
+      expect(label).toContain('Andrew')
+      expect(label).toContain('sarah')
+      expect(group.querySelectorAll('.avatar')).toHaveLength(3)
+      expect(label).not.toMatch(/shared with|can see|access/i)
+    })
+
+    it('renders no faces element at all when there is nobody to name', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'getProjects').mockImplementation(async () =>
+        [project({ path: '/x/quiet', name: 'quiet', shared: true, recentAuthorIds: [], sessionsThisWeek: 4 })])
+      renderWith(client, <TodayPage />)
+      const row = await screen.findByTestId('project-row')
+      // The span is gone, not merely unlabelled. An empty span still consumed
+      // .project-left-top's 8px flex gap, leaving a dead hole to the right of
+      // the Shared tag on a project nobody has touched lately. Asserted on the
+      // faces span itself, not on role=img across the row -- the sparkline is a
+      // role=img too, and matching it here would pass for the wrong reason.
+      expect(row.querySelector('.project-faces')).toBeNull()
+      expect(within(row).queryByRole('img', { name: /recently active here/i })).toBeNull()
+    })
   })
 
   it('surfaces a load failure instead of rendering a blank page', async () => {

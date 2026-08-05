@@ -3,6 +3,7 @@ import { Link, useLocation, useRoute } from 'wouter'
 import { MembridgeMark } from '../assets/MembridgeMark'
 import { useDataClient } from '../data/DataClientProvider'
 import { useSettings, useStatus, useTeamAccount } from '../data/queries'
+import type { Status } from '../data/types'
 import { ROUTES } from './routes'
 import { TeamSwitcher } from './TeamSwitcher'
 
@@ -23,6 +24,39 @@ import { TeamSwitcher } from './TeamSwitcher'
  *  what first run renders -- whether the takeover should be escapable at all
  *  is a product decision that lands separately. */
 const RouteReflectedContext = createContext(true)
+
+/**
+ * The rail's health dot: the one status indicator present on every screen.
+ *
+ * It used to render on `status.running` alone, so the two `running: false`
+ * states -- a WEDGED sync loop and a daemon nobody has observed yet -- both made
+ * it simply disappear, and the degraded-but-alive 'erroring' state showed the
+ * same healthy green as 'ok'. A dot that is absent asserts nothing, which is
+ * right for "not observed" and wrong for "stalled": that is precisely when the
+ * rail should be telling the user to go look.
+ *
+ * Colour is never the only carrier -- the state is in `aria-label`/`title` here,
+ * and the Settings page states it in words with the remedy beside it.
+ *
+ * `health` ABSENT falls back to the original behaviour exactly (green iff
+ * running): an older daemon sends `running` alone, and this must not editorialise
+ * about a field it cannot see.
+ */
+function HealthDot({ status }: { status: Status | undefined }) {
+  const health = status?.health
+  if (!health) {
+    if (!status?.running) return null
+    return <span className="status-dot" role="img" aria-label="MemBridge running" title="MemBridge running" />
+  }
+  if (health.state === 'unknown') return null
+  const label = health.state === 'ok'
+    ? 'MemBridge running'
+    : health.state === 'erroring'
+      ? 'MemBridge running, last sync failed'
+      : 'MemBridge sync stalled'
+  const tone = health.state === 'ok' ? '' : health.state === 'erroring' ? ' status-dot-warn' : ' status-dot-bad'
+  return <span className={`status-dot${tone}`} role="img" aria-label={label} title={label} />
+}
 
 interface NavLinkProps {
   to: string
@@ -171,9 +205,7 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
             a freshly installed, signed-out app looked exactly like a signed-in
             one and offered no route in from anywhere in the rail. */}
         <div className="rail-footer">
-          {status?.running && (
-            <span className="status-dot" role="img" aria-label="Daemon running" title="Daemon running" />
-          )}
+          <HealthDot status={status} />
           {/* A Link, not a button-plus-navigate like the create-team CTA
               above: this only ever changes route, so anchor semantics give it
               keyboard and middle-click behaviour for free. It points at the

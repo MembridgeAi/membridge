@@ -244,12 +244,48 @@ export function SearchPage() {
         <p className="search-error" role="alert">Couldn't search. {errorMessage(searchQuery.error)}</p>
       )}
 
-      {asked && !searchQuery.isError && !searchQuery.isPending && (
+      {/* A query in flight said NOTHING before: the count line is gated on
+          !isPending and the rows have not arrived, so the whole area below the
+          filters was blank. Blank is the same thing an answered-with-nothing
+          search looks like, so the reader could not tell "still working" from
+          "found nothing". */}
+      {asked && !searchQuery.isError && searchQuery.isPending && (
+        <p className="search-count" role="status">Searching…</p>
+      )}
+
+      {asked && !searchQuery.isError && !searchQuery.isPending && total > 0 && (
         <p className="search-count">
-          {total === 0 ? 'No matches.' : `${total} ${total === 1 ? 'match' : 'matches'}`}
+          {`${total} ${total === 1 ? 'match' : 'matches'}`}
           {total > results.length && ` · showing the top ${results.length}`}
           {hideMine && !author && ' · yours hidden'}
         </p>
+      )}
+
+      {/* Zero results used to be one dim 10.5px line reading "No matches."
+          above an otherwise empty full-height pane -- which is what the screen
+          "going black" actually was. It is a real state and gets a real
+          treatment: what was searched, why nothing came back, and the way out.
+          The filter case is called out separately because it is the recoverable
+          one, and because a filter is by far the likeliest reason a machine
+          with thousands of sessions returns nothing. */}
+      {asked && !searchQuery.isError && !searchQuery.isPending && total === 0 && (
+        <div className="search-empty">
+          <p className="search-empty-title">No matches for "{query}".</p>
+          {anyFilter ? (
+            <>
+              <p className="search-empty-hint">
+                Filters are narrowing this search. Clearing them searches every project on this machine.
+              </p>
+              <button type="button" className="search-clear search-empty-clear" onClick={clearFilters}>
+                Clear filters
+              </button>
+            </>
+          ) : (
+            <p className="search-empty-hint">
+              Try fewer words, or a word you would expect in the summary rather than the code.
+            </p>
+          )}
+        </div>
       )}
 
       {results.map(r => (

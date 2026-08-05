@@ -76,9 +76,13 @@ export function MemberRow({ member, isSelf, canManage, onSetRole, onRequestRemov
     <div className="member-row" data-testid={`member-row-${member.id}`}>
       <div className="member-id">
         <Avatar id={member.id} name={member.name} size={19} />
+        {/* Both are arbitrary-length user data. The email is capped in practice
+            (RFC 5321 allows 64 octets for the local part, which measures well
+            under the overflow threshold at the 900px floor), so bounding it is a
+            correctness cleanup rather than a bug fix -- see members.css. */}
         <div>
-          <div className="member-name">{member.name}</div>
-          <div className="mono member-email">{member.email}</div>
+          <div className="member-name wrap-anywhere">{member.name}</div>
+          <div className="mono member-email wrap-anywhere">{member.email}</div>
         </div>
       </div>
 

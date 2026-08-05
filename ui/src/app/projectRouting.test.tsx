@@ -15,7 +15,7 @@ function project(overrides: Partial<Project>): Project {
   return {
     path: '/x/p', name: 'p', exists: true, archived: false, missing: false, paused: false,
     lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
-    sessionsTotal: 10, tools: ['Claude Code'], shared: false, memberIds: ['me'],
+    sessionsTotal: 10, tools: ['Claude Code'], shared: false, recentAuthorIds: ['me'],
     sessionsThisWeek: 1, dailyCounts: [0, 0, 0, 0, 0, 0, 1],
     latestSummary: null, sync: { state: 'up-to-date' },
     ...overrides,
@@ -48,23 +48,27 @@ describe('project routing by path (P0 Fix 3)', () => {
     visit(`/projects/${encodeURIComponent('/x/client/api')}`)
     renderWith(new TwoApisClient(), <App />)
     // The two "api" pages are only tellable apart by their own data --
-    // SyncPanel's "This week" line carries each one's sessionsThisWeek.
-    expect(await screen.findByText(/^3 sessions · /)).toBeInTheDocument()
-    expect(screen.queryByText(/^7 sessions · /)).toBeNull()
+    // SyncPanel's "This week" line carries each one's sessionsThisWeek. Matched
+    // exactly, not with a trailing separator: that separator existed only to
+    // introduce a "N people" figure, which was removed in T15 because it was
+    // derived from a capped cross-project page and could contradict the session
+    // count beside it.
+    expect(await screen.findByText(/^3 sessions$/)).toBeInTheDocument()
+    expect(screen.queryByText(/^7 sessions$/)).toBeNull()
   })
 
   it('resolves the second of two same-named projects to its own page', async () => {
     visit(`/projects/${encodeURIComponent('/x/server/api')}`)
     renderWith(new TwoApisClient(), <App />)
-    expect(await screen.findByText(/^7 sessions · /)).toBeInTheDocument()
-    expect(screen.queryByText(/^3 sessions · /)).toBeNull()
+    expect(await screen.findByText(/^7 sessions$/)).toBeInTheDocument()
+    expect(screen.queryByText(/^3 sessions$/)).toBeNull()
   })
 
   it('round-trips a name containing "#" via the name-match fallback', async () => {
     visit(`/projects/${encodeURIComponent('api#2')}`)
     renderWith(new TwoApisClient(), <App />)
     expect(await screen.findByRole('heading', { name: 'api#2' })).toBeInTheDocument()
-    expect(await screen.findByText(/^5 sessions · /)).toBeInTheDocument()
+    expect(await screen.findByText(/^5 sessions$/)).toBeInTheDocument()
   })
 
   it('still resolves an old name-based deep link (back-compat)', async () => {
