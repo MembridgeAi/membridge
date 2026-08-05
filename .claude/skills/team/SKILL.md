@@ -14,6 +14,34 @@ job is a conversation with the boss — approving plans, triaging audits, making
 must not make alone. A lead buried inside a subagent cannot take direction mid-flight, and nearly
 every valuable correction arrives mid-flight.
 
+## First action: put the board up
+
+Before you write a ticket or spawn anyone, run this once:
+
+```bash
+~/Documents/agent-board/bin/board
+```
+
+It starts the board if it is not already running and opens it in the boss's browser. It is
+safe to run repeatedly — if the board is already up it just opens the tab. Say one line that
+it is up, and nothing more about it.
+
+The board is how the boss watches the run without asking you. It reads `~/.claude/tasks`
+directly, so **every ticket you create appears on it within three seconds**, which changes
+what your board hygiene is worth:
+
+- **An owner-less ticket shows as `unowned`.** Set `owner` on every ticket at creation, to the
+  role name exactly as the role file spells it.
+- **A status you forget to update never clears.** A ticket left `in_progress` after its agent
+  finished sits there looking live, and after thirty minutes the board marks it red as though
+  the lane had stalled. Close tickets as work lands, not in a batch at the end.
+- **Priority only exists if you write it.** There is no priority field. The board reads the
+  level from the head of the description — `HIGH. …`, `LOW, cosmetic. …` — so open every
+  description that way when the ticket has a real priority, and leave it off when it does not.
+
+The board never claims an agent is alive; it reports when a ticket last changed. That is
+another reason the statuses have to be yours to keep honest.
+
 ## What the boss is for — and the bar for reaching them
 
 The boss says what they want in plain language. **You** turn it into tickets, pick the roles,
