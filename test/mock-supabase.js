@@ -105,6 +105,11 @@ function createMockSupabase() {
     // memory_entries write check, restoring the pre-033 backend where a revoked
     // member could still push into a project they cannot read.
     noWriteAccessCheck: false,
+    // Stands in for a backend that refuses PostgREST's logical `or=` filter
+    // (an older PostgREST, a proxy that rejects it): every or= page 400s, so
+    // the forward pull's documented degrade-to-the-timestamp-cursor path is
+    // reachable from a test instead of being taken on faith.
+    rejectOr: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -606,15 +611,47 @@ function createMockSupabase() {
     const idRaw = p.get('id') || '';
     const isIdLt = /^lt\./.test(idRaw);
     const idBound = isIdLt ? Number(decodeURIComponent(idRaw.replace(/^lt\./, ''))) : null;
+    // The forward pull's KEYSET page (lib/teamsync.js fetchPullPage), the one
+    // shape of PostgREST's logical `or=` this stand-in understands:
+    //
+    //   or=(created_at.gt.<C>,and(created_at.eq.<C>,id.gt.<I>))
+    //
+    // Both legs are modelled with tsCmp, not a string compare, and that is the
+    // point of modelling it at all: the client sends back a cursor it READ, so
+    // `created_at.eq.` arrives spelled '...55+00:00' against a stored
+    // '...550Z'. Postgres casts both to timestamptz and finds them equal; a
+    // mock comparing the two spellings as text would find the tie group empty
+    // and quietly pass a pull that skips rows in production.
+    //
+    // An `or=` in any OTHER shape is a 400, deliberately: PostgREST parses
+    // this filter, and a stand-in that silently ignored a shape it did not
+    // understand would return a full unfiltered page and call a malformed
+    // query green. flags.rejectOr forces that 400 for every shape, standing in
+    // for a backend too old to accept the filter at all.
+    const orRaw = p.get('or') || '';
+    const orM = /^\(created_at\.gt\.([^,]+),and\(created_at\.eq\.([^,]+),id\.gt\.(\d+)\)\)$/.exec(orRaw);
+    if (orRaw && (flags.rejectOr || !orM)) {
+      return json(res, 400, { message: `"failed to parse logical tree ((${orRaw}))" (line 1, column 1)` });
+    }
     const order = p.get('order') || '';
     const descById = order === 'id.desc';
     const descByCreatedAt = order === 'created_at.desc';
+    // Ties on created_at are broken by id when the caller asked for that sort
+    // key — the forward pull's whole boundary fix depends on the page coming
+    // back in a total order, and without the secondary key the tie group's
+    // order is whatever the storage array happens to hold.
+    const tieById = /(^|,)id\.asc$/.test(order);
     // 025 §2: memory_entries_select ANDs can_see_project onto the membership
     // check — a revoked member's direct pull sees nothing for this project.
     if (!isMember(projectTeam(eq), userId) || !canSeeProject(eq, userId)) return json(res, 200, []);
     let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
     if (isGt) rows = rows.filter(e => tsCmp(e.created_at, createdAtBound) > 0);
     if (isIdLt) rows = rows.filter(e => Number(e.id) < idBound);
+    if (orM) {
+      const [, gtBound, eqBound, idGt] = orM;
+      rows = rows.filter(e => tsCmp(e.created_at, gtBound) > 0 ||
+        (tsCmp(e.created_at, eqBound) === 0 && Number(e.id) > Number(idGt)));
+    }
     // Order THEN limit — a descending page must return the NEWEST rows below
     // the bound (the tail closest to the cursor), not just the first `limit`
     // rows encountered in storage order before sorting.
@@ -622,7 +659,11 @@ function createMockSupabase() {
       .slice()
       .sort((a, b) => {
         if (descById) return b.id - a.id;
-        return descByCreatedAt ? b.created_at.localeCompare(a.created_at) : a.created_at.localeCompare(b.created_at);
+        const byTime = descByCreatedAt
+          ? tsCmp(b.created_at, a.created_at)
+          : tsCmp(a.created_at, b.created_at);
+        if (byTime !== 0 || !tieById) return byTime;
+        return Number(a.id) - Number(b.id);
       })
       .slice(0, parseInt(p.get('limit') || '200', 10));
     // Real PostgREST only returns the requested columns — project to

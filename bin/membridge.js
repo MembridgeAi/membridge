@@ -1134,6 +1134,10 @@ async function cmdTeamRepull(config) {
         continue;
       }
       st.projects[key].teamPullTs = null;
+      // The forward cursor is a PAIR — timestamp plus row id (lib/teamsync.js
+      // fetchPullPage). Resetting only the timestamp would leave the id half
+      // describing a position in a page this walk is about to re-read.
+      st.projects[key].teamPullId = null;
       util.saveState(st);
     }
 
@@ -1143,17 +1147,23 @@ async function cmdTeamRepull(config) {
       const r = await teamsync.syncTeams({ project: key });
       for (const e of r.errors) console.log(`  ${name}: ${e}`);
       const proj = (util.loadState().projects || {})[key];
-      const next = proj ? (proj.teamPullTs || null) : null;
+      // Progress is the PAIR moving, not the timestamp moving. A run of rows
+      // pushed in one batch shares one created_at, so a walk through a tie
+      // group larger than a page advances only the id half — real progress
+      // that a timestamp-only comparison reads as a stalled cursor and
+      // abandons, leaving the rest of the tie group unpulled.
+      const next = proj ? (proj.teamPullTs ? `${proj.teamPullTs}#${proj.teamPullId ?? ''}` : null) : null;
+      const shown = proj ? (proj.teamPullTs || null) : null;
       if (!r.changed.includes(key)) break; // a pass that pulled nothing is the end of history
       if (next && next === cursor) {
         // The cursor stopped moving while rows kept arriving: pulling the same
         // page forever would be an infinite loop, so stop and say so rather
         // than spin. Reported, never silently treated as completion.
-        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${next} while rows were still arriving.`);
+        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${shown} while rows were still arriving.`);
         break;
       }
       cursor = next;
-      console.log(`  ${name}: pass ${passes + 1} · cursor now ${cursor || 'start of history'}`);
+      console.log(`  ${name}: pass ${passes + 1} · cursor now ${shown || 'start of history'}`);
     }
     if (passes >= REPULL_MAX_PASSES) console.log(`  ${name}: stopped at the ${REPULL_MAX_PASSES}-pass safety limit; re-run to continue.`);
 
