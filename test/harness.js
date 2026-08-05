@@ -12,6 +12,15 @@
 // would churn every line number in a file teammates have in-flight branches
 // against; sections migrate out of it into test/suites/ instead, and the
 // legacy prelude dies when the last section leaves.
+// FIRST of all: no suite talks to a real host unless it says so. The four baked
+// production defaults, and why an empty env var is not a way to turn them off,
+// are documented in test/no-egress.js. This was missing here entirely -- the
+// counters opt-out existed only in run-tests.js's setupFixtures, so all 26
+// split suites ran with counters, diagnostics and TEAM SYNC pointed at the
+// live backend.
+const noEgress = require('./no-egress');
+noEgress.install();
+
 const assert = require('assert');
 const fs = require('fs');
 const http = require('http');
@@ -41,6 +50,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 // Real-file leak guards (see the incident history in run-tests.js): snapshot
 // before any fixture code runs, assert at finish(). The state guard keys off
 // the 'membridge-test-' ROOT prefix above — keep the two in sync.
+//
+// KNOWN_READS_UNOWNED_FILE: ~/.membridge/config.json — leak-detection snapshot. Rare-writer file (only when a user runs membridge signup/login), so external-writer flake is not the practical concern mcp-wiring's ~/.claude.json is. Cannot use a fixture: the whole point is to prove no fixture leaked into the real path. See test/suites/tests-own-their-state.test.js.
+// KNOWN_READS_UNOWNED_FILE: ~/.membridge/state.json — same, for the state file. Detected leak = a fixture path ended up in the real user's state (see the incident history in run-tests.js's top-of-file comment).
 const REAL_CONFIG_PATH = path.join(os.homedir(), '.membridge', 'config.json');
 function snapshotRealConfig() {
   try { return fs.readFileSync(REAL_CONFIG_PATH, 'utf8'); } catch { return null; }
@@ -59,40 +71,35 @@ function realStateLeakedFixtureKeys() {
 // run-tests.js, so concurrent suites — or a suite next to a live daemon —
 // land on disjoint blocks) ----
 const PORT_BASE = (() => {
-  // test/run.js assigns each concurrent suite a distinct verified-free block;
-  // the pid-based probe below is the fallback for running a suite directly.
+  // test/run.js assigns each concurrent suite a distinct verified-free block.
   const assigned = Number(process.env.MEMBRIDGE_TEST_PORT_BASE || '');
   if (Number.isFinite(assigned) && assigned >= 17900) return assigned;
-  const net = require('net');
-  const free = port => {
-    try {
-      const s = net.createServer();
-      s.listen(port, '127.0.0.1');
-      const r = s.listening;
-      s.close();
-      return r;
-    } catch { return false; }
-  };
-  const start = 17900 + ((process.pid % 40) * 100);
-  for (let i = 0; i < 40; i++) {
-    const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
-    if (free(base + 41) && free(base + 96) && free(base + 99)) return base;
-  }
-  return start;
+  // Running this suite DIRECTLY: the block is derived from the pid and is not
+  // verified free. There used to be a probe loop here that claimed to verify
+  // it; the probe read `server.listening` synchronously after
+  // `listen(port, '127.0.0.1')`, which is always false because that overload
+  // defers through a DNS lookup, so it reported every port busy, every block
+  // failed, and this returned the same unverified pid guess it returns now —
+  // while reading like a checked answer. The keeper bind below is the only
+  // real signal, and it warns when the block is already taken.
+  return 17900 + ((process.pid % 40) * 100);
 })();
 const P = n => PORT_BASE + n;
 
-// RESERVE the block for this process's lifetime by holding base+99 (checks
-// above probe it). Probing alone reserves nothing: a suite may not bind its
-// first real server for minutes, and a second run starting in that window
-// would adopt the same block and cross-talk — observed live as two concurrent
-// runs corrupting each other's results in both directions. +99 is above the
-// highest offset any suite binds (+96). unref() so the keeper never holds the
-// process open; a bind error just means no reservation, never a crash.
+// RESERVE the block for this process's lifetime by holding base+99 (test/run.js
+// probes it before handing the block out). A suite may not bind its first real
+// server for minutes, and a second run starting in that window would adopt the
+// same block and cross-talk — observed live as two concurrent runs corrupting
+// each other's results in both directions. +99 is above the highest offset any
+// suite binds (+96). unref() so the keeper never holds the process open; a bind
+// error is not fatal, but it is the one hard evidence that this block is
+// already in use, so it is said out loud rather than swallowed.
 {
   const net = require('net');
   const keeper = net.createServer();
-  keeper.on('error', () => {});
+  keeper.on('error', () => {
+    process.stderr.write(`warning: port block ${PORT_BASE} is already held by another run; this suite may cross-talk with it\n`);
+  });
   keeper.listen(PORT_BASE + 99, '127.0.0.1');
   keeper.unref();
 }
@@ -185,6 +192,7 @@ function finish() {
 module.exports = {
   ROOT, P, PORT_BASE, BIN,
   check, results, finish,
+  noEgress,
   jsonl, read, readSource, count, notRoot, realCanon,
   startJsonMock, waitForHttp, post, httpGet, httpPost,
 };

@@ -1466,8 +1466,7 @@ async function main() {
       assert.ok(row.summary.includes('[redacted:anthropic-key]'), `pushed summary not redacted -> ${row.summary}`);
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    h.noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock5.server.close(r));
   }
 
