@@ -21,6 +21,16 @@ one of the moved sections, the edit belongs in the suite file now — the
 breadcrumb comment says which. New tests go in `test/suites/` (require
 `../harness` first, end with `h.finish()`), not in run-tests.js.
 
+**The feed screen is rewritten (2026-08-05).** `dayCardKey` is day+author
+only, the card is a link into a new `/days/:daySlug` route, and
+`collapseSessionCheckpoints` is gone from the feed path (ProjectPage keeps
+it). Any branch touching `ui/src/features/feed/` rebases before further work.
+Two hard-won rules from the same night: never set `pool: 'threads'` in
+`ui/vite.config.ts` (it silently disables the TZ pin, red CI on UTC, green
+everywhere else; the comment in that file has the mechanism), and a new test
+suite must use port offsets no other suite file uses (`delete-my-data` copied
+`shared-delete-outage`'s and Windows CI hit EADDRINUSE).
+
 ## In flight
 
 **`feat/alpha-readiness-backfill`**, three commits, not merged and not pushed.
@@ -43,10 +53,34 @@ seconds from install to visible memory. Merges cleanly into `master`.
    copy have drifted; fetch the live script before touching either.
 5. **Task 8**, the Windows asset.
 
+## Waiting on a human (2026-08-05)
+
+- **The PITR/backup retention window, read off the Supabase dashboard.**
+  Migration 035 (self-serve deletion) is applied live and verified, but
+  `/security` on the site cannot state how long deleted data persists in
+  backups until someone reads the retention number from Settings, Database,
+  Backups. Asked of Marco in the 08-05 handoff. One number unblocks the copy.
+- **Prompt-sharing default sign-off**, from Andrew's Aug 2 brief. Still open.
+
 ## Logged, not scheduled
 
 These are real gaps found while doing other work. Neither is a defect in
 something that was asked for, and neither is being fixed yet.
+
+- **Digest lead-ins that announce instead of report (found 2026-08-05).**
+  The filler fix stops short conversational clauses becoming day headlines,
+  but a second class survives because it is long: "Now let me look at the
+  digest/memorydb pipeline..." renders as a day-card clause today. Same rule
+  the digest already enforces on `goal` (an intent is never promoted into an
+  outcome), one field over, and it needs a different signal than a length
+  floor. Lives in `pickSessionStatement`, `lib/digest.js`.
+- **Pre-existing Supabase advisor warnings (surveyed 2026-08-05).** Nothing
+  new from 035, but the standing list is worth a pass: `team_feed`,
+  `team_feed_counts`, `peek_invite`, `can_see_project`, `is_team_member`,
+  `is_team_member_uid`, `projects_materialize_access` and
+  `set_project_access_default` are anon-callable SECURITY DEFINER functions;
+  four ops tables have RLS enabled with no policy; leaked-password
+  protection is off in Auth.
 
 - **`membridge remove` purges memory but does not untrack, and there is no CLI
   untrack command at all.** `remove` strips the injected blocks and deletes
