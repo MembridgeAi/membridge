@@ -76,6 +76,8 @@ function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
   const refreshTokens = new Map();  // refreshToken -> userId
+  const tokenSession = new Map();   // access OR refresh token -> sessionId (see newSession)
+  const tokenExpiry = new Map();    // accessToken -> ms epoch (see authedUser)
   // PKCE auth codes: authCode -> { userId, challenge }. GoTrue hands one of
   // these to the redirect target when the authorize request carried a
   // code_challenge, and only trades it for a session against the matching
@@ -110,6 +112,10 @@ function createMockSupabase() {
     // the forward pull's documented degrade-to-the-timestamp-cursor path is
     // reachable from a test instead of being taken on faith.
     rejectOr: false,
+    // A backend that refuses to end the session (outage, proxy, an auth
+    // service that is down while the network is up). Sign-out must still
+    // clear this machine AND must not claim the session was revoked.
+    failLogout: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -194,11 +200,24 @@ function createMockSupabase() {
     }
   };
 
-  function newSession(user) {
+  // GoTrue issues tokens that belong to a SESSION, not to each other: a
+  // refresh ROTATES the pair within the same session (see the refresh grant
+  // below, which carries the session id across), and /auth/v1/logout revokes
+  // the session — every token ever minted under it, not just the one
+  // presented. Modelling the session id is what makes the sign-out test mean
+  // anything: a machine whose token was refreshed on its way out must still
+  // kill the older refresh token sitting in a COPY of credentials.json, and a
+  // mock that revoked one pair would show that copy still working (or, worse,
+  // show it dying for the wrong reason).
+  function newSession(user, sessionId) {
     const access = `at-${uuid()}`;
     const refresh = `rt-${uuid()}`;
+    const sid = sessionId || uuid();
     sessions.set(access, user.id);
     refreshTokens.set(refresh, user.id);
+    tokenExpiry.set(access, Date.now() + 3600_000); // matches the expires_in below
+    tokenSession.set(access, sid);
+    tokenSession.set(refresh, sid);
     return {
       access_token: access,
       refresh_token: refresh,
@@ -207,9 +226,21 @@ function createMockSupabase() {
     };
   }
 
+  // An access token is a JWT with an `exp`, and a real backend rejects an
+  // expired one with 401 — including at /auth/v1/logout, which is why signing
+  // out has to refresh BEFORE it revokes. Without an expiry here that ordering
+  // cannot be tested: a stale token would keep working and the test would pass
+  // for a build that skips the refresh and leaves the session alive.
+  //
+  // Only tokens this mock ISSUED carry an expiry. A test that seeds
+  // `mock.sessions` directly (several do, to stand in for an OAuth round trip)
+  // gets a token with no expiry entry, which never expires — unchanged.
   function authedUser(req) {
     const m = String(req.headers.authorization || '').match(/^Bearer (.+)$/);
-    return m ? sessions.get(m[1]) || null : null;
+    if (!m) return null;
+    const exp = tokenExpiry.get(m[1]);
+    if (exp != null && Date.now() > exp) return null;
+    return sessions.get(m[1]) || null;
   }
 
   const json = (res, code, data) => {
@@ -728,7 +759,34 @@ function createMockSupabase() {
         if (!userId) return json(res, 400, { error_description: 'Invalid refresh token' });
         stats.refreshCalls++;
         const user = [...users.values()].find(u => u.id === userId);
-        return json(res, 200, newSession(user));
+        // Rotation stays INSIDE the session it came from, exactly as GoTrue
+        // does — otherwise a refresh would quietly launder a token out of the
+        // session a later logout is meant to kill.
+        return json(res, 200, newSession(user, tokenSession.get(body.refresh_token)));
+      }
+      // POST /auth/v1/logout: 204, no body, authenticated by the USER's bearer
+      // token rather than the anon key. `scope=local` ends the presented
+      // session; anything else (GoTrue's default) ends every session the user
+      // has. flags.failLogout stands in for a backend that refuses — the case
+      // where sign-out must NOT report a revocation it did not get.
+      if (url.pathname === '/auth/v1/logout') {
+        if (flags.failLogout) return json(res, 500, { msg: 'logout unavailable' });
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { msg: 'invalid JWT' });
+        const bearer = String(req.headers.authorization || '').replace(/^Bearer /, '');
+        const scope = url.searchParams.get('scope') || 'global';
+        const sid = tokenSession.get(bearer);
+        const killsToken = tok => (scope === 'local'
+          ? tokenSession.get(tok) === sid
+          : true);
+        for (const [tok, uid] of [...sessions]) {
+          if (uid === userId && killsToken(tok)) { sessions.delete(tok); tokenSession.delete(tok); }
+        }
+        for (const [tok, uid] of [...refreshTokens]) {
+          if (uid === userId && killsToken(tok)) { refreshTokens.delete(tok); tokenSession.delete(tok); }
+        }
+        res.writeHead(204);
+        return res.end();
       }
       const rpcMatch = url.pathname.match(/^\/rest\/v1\/rpc\/(\w+)$/);
       if (rpcMatch) return handleRpc(res, rpcMatch[1], body, authedUser(req));
@@ -1050,7 +1108,10 @@ function createMockSupabase() {
     return inserted;
   };
 
-  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, serviceKey: SERVICE_ROLE_KEY };
+  // Age an issued access token past its expiry, without sleeping an hour.
+  const expireToken = accessToken => tokenExpiry.set(accessToken, Date.now() - 1000);
+
+  return { server, expireToken, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, serviceKey: SERVICE_ROLE_KEY };
 }
 
 module.exports = { createMockSupabase, pgTimestamptz };

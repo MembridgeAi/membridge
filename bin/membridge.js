@@ -817,8 +817,28 @@ async function cmdLogin() {
   console.log(`Logged in as ${r.email} (display name: ${r.displayName}).`);
 }
 
-function cmdLogout() {
-  console.log(teamsync.clearCredentials() ? 'Logged out.' : 'Already logged out.');
+// Two outcomes, reported as two (see teamsync.signOut). "Logged out." over a
+// session the backend still honours would be the one sentence a user acts on
+// — and the copy of credentials.json they are worried about would still work.
+// The remedy line is there because "we could not revoke it" is useless without
+// "here is what to do instead".
+async function cmdLogout() {
+  const out = await teamsync.signOut(util.getConfig());
+  if (!out.wasSignedIn) {
+    console.log('Already logged out.');
+    return;
+  }
+  if (out.revoked) {
+    console.log('Logged out. The session was ended on the server too.');
+    return;
+  }
+  console.log('Logged out on this machine ONLY.');
+  console.log(`The session could NOT be ended on the server: ${out.error}`);
+  // Deliberately NOT "try again later": the credentials are gone from this
+  // machine now, so there is nothing left here to revoke WITH. Retrying is
+  // not a remedy, and offering it as one would be the comfortable lie.
+  console.log('A copy of this machine\'s credentials taken before now can still use that session until it expires.');
+  console.log('Changing your account password is the way to end it for certain.');
 }
 
 // One command from invite to member: `membridge join <link-or-token-or-code>`.
