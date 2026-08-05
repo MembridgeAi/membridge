@@ -62,7 +62,13 @@
 -- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` IN THIS PROJECT, for
 -- the reason 031, 032 and 033 all give. Re-runnable via `if not exists`.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- APPLIED — LIVE. Verified against the running database on 2026-08-05, in the
+-- audit that also confirmed 030, 032 and 033. This line previously read
+-- "UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any
+-- database." That was true when written and false since. Corrected in place
+-- because a stale applied-status marker is not a harmless nit: anyone reasoning
+-- about what the backend actually enforces reads it and concludes this index is
+-- not in force.
 --
 -- WHAT THIS COMMIT CANNOT DEMONSTRATE. No database was available while writing
 -- it, so the improvement is argued from the index/predicate mismatch above, not

@@ -65,7 +65,13 @@
 -- Paste this file into the SQL editor, which runs it in one transaction. Every
 -- statement below is re-runnable.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- APPLIED — LIVE. Verified against the running database on 2026-08-05, in the
+-- audit that also confirmed 030, 033 and 034. This line previously read
+-- "UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any
+-- database." That was true when written and false since. Corrected in place
+-- because a stale applied-status marker is not a harmless nit: anyone reasoning
+-- about what the backend actually enforces reads it and concludes this
+-- hardening is not in force.
 
 -- ---------------------------------------------------------------------------
 -- 1. The trigger function.
