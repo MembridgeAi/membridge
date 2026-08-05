@@ -1,0 +1,8 @@
+# Files carried into a fresh `claude --worktree` checkout that git would not
+# bring along. No .env files exist in this repo, so this list is short.
+#
+# verify-finding.js is currently UNTRACKED in the main checkout. The whole agent
+# team design depends on it, and a worktree teammate without it cannot run the
+# phantom-failure gate. Committing the script makes this line a no-op; until
+# then it is the only thing that gets it into a worktree.
+scripts/verify-finding.js

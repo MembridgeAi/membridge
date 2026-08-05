@@ -33,6 +33,11 @@ CLAUDE.md
 AGENTS.md
 
 .worktrees/
+.claude/worktrees/
 .superpowers/
 .claude/settings.local.json
 node_modules
+
+# Local agent-team config (Agent Teams AI import folder). Personal harness
+# setup, not project source -- shared between machines over Slack, not git.
+docs/agent-team/

@@ -63,6 +63,71 @@ async function main() {
     });
   }
 
+  // --- the edit-capturing inference: what it costs, pinned deliberately ---
+  //
+  // classify decides shareability from edits, and decides WHICH SOURCES CAN BE
+  // JUDGED BY EDITS by observing whether that source has emitted at least one
+  // edit in this project's retained history. That is order-dependent, and the
+  // question of whether it should instead key on a DECLARED per-adapter
+  // capability was investigated and answered NO. These two checks record both
+  // halves of the answer so the next person does not repeat the attempt without
+  // seeing the cost.
+  //
+  // THE COST OF KEEPING IT (check 1). On a project with no recorded Claude Code
+  // edits, Claude Code does not yet look edit-capturing, so its zero-edit ops
+  // sessions are shareable — they reach the feed, the CLAUDE.md block and the
+  // team push. Identical sessions are suppressed later in the same project's
+  // life, once any edit has been recorded. The push is one-way and filtered on
+  // the emitting machine, so the later re-classification CANNOT retract what the
+  // earlier one already sent: a teammate keeps those ops sessions permanently.
+  //
+  // THE COST OF REPLACING IT, measured rather than assumed. Declaring
+  // `reportsEdits: true` on the Claude Code adapter and consulting that instead
+  // failed 21 checks across the whole product — team push, injection, feed, MCP
+  // and, decisively, backfill/adoption. Those are the HISTORY-RECOVERY paths: a
+  // project adopted with `add --backfill` recovers prompts and summaries from
+  // transcripts without necessarily reconstructing edits, so a declaration would
+  // suppress genuinely useful history exactly where a user is trying to get it
+  // back. Silently hiding real work is a worse failure than showing some ops
+  // noise, so the fail-open bias stays.
+  //
+  // What would change the answer: making edit capture reliable enough on the
+  // recovery paths that absence of edits really does mean absence of work. That
+  // is a product decision about prompt-only history, not a mechanical fix.
+  {
+    const classify = require('../../lib/classify');
+    const ccOps = [
+      { ts: '2026-07-20T09:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'ops1', text: 'what does this do' },
+      { ts: '2026-07-20T09:01:00.000Z', source: 'Claude Code', kind: 'summary', session: 'ops1', text: 'explained it' },
+    ];
+
+    check('classify: a zero-edit session IS shareable while its source has no recorded edits (fresh/backfilled project)', () => {
+      assert.ok(classify.isShareableLocal(ccOps, 'ops1'),
+        'with no Claude Code edit anywhere in history, edits cannot be the yardstick yet — '
+        + 'this is what keeps backfilled prompt-only history visible, and it is also how '
+        + 'fresh-project ops noise reaches the team push');
+    });
+
+    check('classify: the SAME session stops being shareable once any edit is recorded — the verdict is history-dependent', () => {
+      // One unrelated edit, in a DIFFERENT session, flips the verdict for ops1.
+      // Nothing about ops1 changed. That is the order-dependence, stated as a
+      // property rather than left to be rediscovered.
+      const withEdit = ccOps.concat([
+        { ts: '2026-07-20T10:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'work1', text: 'fix the bug' },
+        { ts: '2026-07-20T10:01:00.000Z', source: 'Claude Code', kind: 'edit', session: 'work1', file: '/p/a.js' },
+      ]);
+      assert.ok(!classify.isShareableLocal(withEdit, 'ops1'),
+        'once Claude Code is observed edit-capturing, its zero-edit sessions are suppressed');
+      assert.ok(classify.isShareableLocal(withEdit, 'work1'), 'and the session that edited stays');
+      // Codex is never judged by edits, whatever else is in history.
+      const withCodex = withEdit.concat([
+        { ts: '2026-07-20T11:00:00.000Z', source: 'Codex', kind: 'prompt', session: 'cx1', text: 'review this' },
+      ]);
+      assert.ok(classify.isShareableLocal(withCodex, 'cx1'),
+        'a source that never reports edits must never be suppressed by another source\'s edits');
+    });
+  }
+
   h.finish();
 }
 
