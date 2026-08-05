@@ -70,8 +70,19 @@ export function TeamGroup({ team }: TeamGroupProps) {
   const [confirming, setConfirming] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [rotating, setRotating] = useState(false)
+  // The code a rotation just minted. NOT the only place a code is displayed
+  // (see inviteCode below) -- it is an override for the window before the
+  // refreshed /api/settings read catches up, on the same "the mutation result
+  // is the newer truth about the same thing" precedent as the MCP rows.
   const [rotatedTo, setRotatedTo] = useState<string | null>(null)
+  // 'copied' is set ONLY by a clipboard write that resolved, matching
+  // TeamPage's share flow -- a denied or unavailable clipboard must never read
+  // as a success and leave someone pasting nothing. The code stays on screen
+  // either way, so a failed copy just needs saying.
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
+
+  const inviteCode = rotatedTo ?? team.inviteCode
 
   async function confirmLeave() {
     try {
@@ -89,8 +100,27 @@ export function TeamGroup({ team }: TeamGroupProps) {
       const code = await rotateInvite.mutateAsync(team.id)
       setRotating(false)
       setRotatedTo(code)
+      // The old code is on the clipboard and in someone's draft message; a
+      // stale "copied" beside the NEW value would be a lie.
+      setCopyState('idle')
     } catch (err) {
       setError(errorMessage(err))
+    }
+  }
+
+  // The code is a shared secret: it is never logged, never interpolated into an
+  // error message, and the failure path below reports only that the copy did
+  // not happen.
+  async function copyInviteCode(code: string) {
+    if (!navigator.clipboard?.writeText) {
+      setCopyState('failed')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopyState('copied')
+    } catch {
+      setCopyState('failed')
     }
   }
 
@@ -113,20 +143,38 @@ export function TeamGroup({ team }: TeamGroupProps) {
 
       {/* The standing invite code is long-lived and unlimited-use, so a leak
           has no remedy except replacing it. That was CLI-only, which meant a
-          leaked code had no in-app fix at all. */}
+          leaked code had no in-app fix at all.
+
+          The code itself is now the row's PERSISTENT value. Before, rotation
+          stashed the new code in local state with no copy affordance, it
+          vanished on navigation, and the current code was displayed nowhere in
+          the app -- so the only route back to a code you had to send teammates
+          was rotating again, which invalidated the one you may have just sent.
+          Rotation updates this value in place: exactly one code on screen, and
+          it is always the live one. */}
       {isTeamAdmin && (
         <SettingRow
           label="Invite code"
-          description="Rotate it if the code has been shared somewhere it shouldn't be. This also cancels every invite link you've handed out."
+          description="Share this with a teammate to let them join. Rotate it if it has been shared somewhere it shouldn't be — that also cancels every invite link you've handed out."
           testId="setting-invite-code"
         >
-          {rotatedTo
-            ? <span className="mono settings-value">New code: {rotatedTo}</span>
-            : (
-              <button type="button" className="settings-btn" onClick={() => { setError(null); setRotating(true) }}>
-                Rotate code
-              </button>
-            )}
+          {inviteCode
+            ? (
+              <>
+                <span className="mono settings-value">{inviteCode}</span>
+                <button type="button" className="settings-btn" onClick={() => copyInviteCode(inviteCode)}>
+                  Copy
+                </button>
+                {copyState === 'copied' && <span className="settings-metric">copied</span>}
+                {copyState === 'failed' && (
+                  <span className="settings-metric">couldn't copy — select it above</span>
+                )}
+              </>
+            )
+            : <span className="settings-unknown">not reported by this machine</span>}
+          <button type="button" className="settings-btn" onClick={() => { setError(null); setRotating(true) }}>
+            Rotate code
+          </button>
         </SettingRow>
       )}
 

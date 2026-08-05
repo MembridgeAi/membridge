@@ -137,6 +137,19 @@
 @media (prefers-reduced-motion: no-preference) {
   .status-dot { animation: pulse-live 2.4s ease-in-out infinite; }
 }
+/* Degraded but alive: the loop is still rescheduling itself and its work is
+   failing. Keeps the pulse, because something IS still happening. */
+.status-dot-warn {
+  background: var(--amber);
+}
+/* Wedged. Drops the pulse deliberately: pulse-live reads as activity, and the
+   whole point of this state is that no sync is completing. */
+.status-dot-bad {
+  background: var(--red);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .status-dot-bad { animation: none; }
+}
 
 /* Reads as the primary action in the footer rather than as body text: a
    signed-out user has exactly one thing to do here, and the previous plain

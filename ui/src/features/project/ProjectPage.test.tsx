@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
@@ -152,5 +152,110 @@ describe('a shared project opens shared', () => {
     renderApp({}, <ProjectPage slug="sublease" />)
     await screen.findByText(/sublease/)
     expect(screen.queryByTestId('project-member-stack')).toBeNull()
+  })
+
+  // T15: Project.recentAuthorIds is who has shown up here lately, off one
+  // capped cross-project feed page. Rendered as an unlabelled stack of faces
+  // immediately right of the "Shared" tag it read as the share roster, and
+  // rendered as a figure in the Sync panel it read as a headcount. It is
+  // neither. The faces stay (approximate is honest for "who's been active");
+  // the label is what stops them answering the wrong question, and the figure
+  // is gone.
+  describe('recent-author faces are not a roster or a headcount', () => {
+    /** A shared project with a real week of sessions but NO entries on the
+     *  shared feed page -- the case that produced "31 sessions · 0 people". */
+    function quietSharedClient(role: 'owner' | 'member' = 'member') {
+      const client = new FakeDataClient({ role })
+      const real = client.getProjects.bind(client)
+      vi.spyOn(client, 'getProjects').mockImplementation(async () =>
+        (await real()).map(p => (p.shared ? { ...p, recentAuthorIds: [] } : p)))
+      return client
+    }
+
+    it('names the avatar group as recent activity, never as who it is shared with', async () => {
+      renderApp({ role: 'member' }, <ProjectPage slug="membridge" />)
+      await screen.findByText(/Hook ownership/)
+      const group = screen.getByRole('img', { name: /recently active here/i })
+      expect(group).toBe(screen.getByTestId('project-member-stack'))
+      // Every face shown is accounted for in the one announced label.
+      expect(group.getAttribute('aria-label')).toContain('Marco')
+      expect(group.getAttribute('aria-label')).toContain('Andrew')
+      expect(group.getAttribute('aria-label')).not.toMatch(/shared with|can see|access/i)
+    })
+
+    it('never pairs the week\'s session count with a people figure', async () => {
+      renderWith(quietSharedClient(), <ProjectPage slug="membridge" />)
+      await screen.findByText(/Hook ownership/)
+      // The row that used to contradict itself: 31 real sessions beside 0 people.
+      const row = screen.getByText('This week').parentElement!
+      expect(row.textContent).toContain('31 sessions')
+      expect(row.textContent).not.toMatch(/people/i)
+      expect(row.textContent).not.toMatch(/\b0\b/)
+    })
+
+    it('hides the faces entirely rather than showing an empty group', async () => {
+      renderWith(quietSharedClient(), <ProjectPage slug="membridge" />)
+      await screen.findByText(/Hook ownership/)
+      expect(screen.queryByTestId('project-member-stack')).toBeNull()
+      expect(screen.queryByRole('img', { name: /recently active here/i })).toBeNull()
+    })
+  })
+
+  // The Sync panel's encryption chip. It already branched on plaintextOff, so
+  // the encrypted-but-dual-write case was not hidden -- but it labelled that
+  // case "plaintext shared", the words for the encryption-OFF case, and toned
+  // encryption-off itself `muted` under the label "off". Muted is this system's
+  // neutral/absence tone, so the one state where the server can read everything
+  // was the only one rendered as unremarkable, described as a switch position
+  // rather than as a consequence.
+  describe('encryption state in the Sync panel', () => {
+    async function withEncryption(encryption: { enabled: boolean; plaintextOff: boolean }) {
+      const client = new FakeDataClient()
+      const status = await client.getStatus()
+      vi.spyOn(client, 'getStatus').mockResolvedValue({
+        ...status,
+        encryption: { ...status.encryption, ...encryption },
+      })
+      renderWith(client, <ProjectPage slug="membridge" />)
+      await screen.findByText('Encryption')
+      return screen.getByText('Encryption').closest('.kv') as HTMLElement
+    }
+
+    // Substring regexes, not exact strings: StateChip renders the glyph and the
+    // label as two text nodes in one span, so the element's text is "✓ end-to-
+    // end" and an exact-string matcher never sees the label on its own.
+    it('reassures only when nothing readable is retained', async () => {
+      const row = await withEncryption({ enabled: true, plaintextOff: true })
+      const chip = within(row).getByText(/end-to-end/)
+      expect(chip.className).toMatch(/chip-ok/)
+    })
+
+    it('warns, in its own words, when a readable copy is stored beside the ciphertext', async () => {
+      const row = await withEncryption({ enabled: true, plaintextOff: false })
+      const chip = within(row).getByText(/readable copy stored/)
+      expect(chip.className).toMatch(/chip-warn/)
+      // Must not borrow the encryption-OFF wording for this state -- that is
+      // what left the two unsafe states labelled as each other.
+      expect(within(row).queryByText(/plaintext shared/)).toBeNull()
+    })
+
+    // The state of a real incident: a config with team.encrypt false shipped a
+    // full plaintext history while this chip read a neutral, unalarming "off".
+    it('warns rather than muting when encryption is off entirely', async () => {
+      const row = await withEncryption({ enabled: false, plaintextOff: true })
+      const chip = within(row).getByText(/plaintext shared/)
+      expect(chip.className).toMatch(/chip-warn/)
+      expect(row.querySelector('.chip-muted')).toBeNull()
+      expect(within(row).queryByText(/\boff\b/)).toBeNull()
+    })
+
+    // plaintextOff is INERT with no key: the daemon's nulling lives inside
+    // encryptRow, which never runs. A ciphertext-only reading must not soften
+    // the encryption-off state into anything reassuring.
+    it('gives ciphertext-only no credit while encryption is off', async () => {
+      const row = await withEncryption({ enabled: false, plaintextOff: true })
+      expect(row.querySelector('.chip-ok')).toBeNull()
+      expect(within(row).queryByText(/end-to-end/)).toBeNull()
+    })
   })
 })

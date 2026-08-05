@@ -18,15 +18,40 @@ function agentLabel(agent: string): string {
   return KNOWN_AGENT_LABELS[agent] ?? agent.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
+// The chips used to interpolate lib/mcp-register.js's raw status token, so
+// they read "Codex: skipped" and "Cursor: removed" -- the daemon's internal
+// vocabulary, describing its own control flow rather than the user's machine.
+// Each status now maps to a phrase about what is true on this machine.
+//
+// 'skipped' is the load-bearing one: mcp-register.js sets it whenever it
+// declined to write (no `claude` binary, a config file that isn't ours, an
+// undeclared agent, auto-registration switched off), and it ALWAYS attaches a
+// `detail` sentence naming the cause and usually the config key that fixes it.
+// So the phrase stays deliberately short and the detail carries the specifics.
+function phraseFor(status: McpRowStatus): string {
+  if (status === 'registered') return 'registered now'
+  if (status === 'unchanged') return 'already registered'
+  if (status === 'removed') return 'registration removed'
+  if (status === 'failed') return "couldn't register"
+  return 'nothing changed' // 'skipped'
+}
+
+// 'skipped' was muted alongside 'removed', so the tone said "fine" while the
+// word said something hadn't happened. A skip means the MCP server is NOT
+// wired into that tool and its detail names what to do about it, which is the
+// definition of warn. 'removed' stays muted: that is a deliberate outcome of
+// asking for a removal, not a problem to fix.
 function toneFor(status: McpRowStatus): StateTone {
   if (status === 'registered' || status === 'unchanged') return 'ok'
   if (status === 'failed') return 'bad'
-  return 'muted' // 'removed' | 'skipped'
+  if (status === 'skipped') return 'warn'
+  return 'muted' // 'removed'
 }
 
 function glyphFor(status: McpRowStatus): string {
   if (status === 'registered' || status === 'unchanged') return '✓'
   if (status === 'failed') return '✕'
+  if (status === 'skipped') return '⚠'
   return '•'
 }
 
@@ -74,7 +99,7 @@ export function McpRegisterControl() {
       </button>
       {rows.map(row => (
         <StateChip key={row.agent} tone={toneFor(row.status)} glyph={glyphFor(row.status)}>
-          {`${agentLabel(row.agent)}: ${row.status}${row.detail ? `, ${row.detail}` : ''}`}
+          {`${agentLabel(row.agent)}: ${phraseFor(row.status)}${row.detail ? ` · ${row.detail}` : ''}`}
         </StateChip>
       ))}
       {registerMcp.isError && (

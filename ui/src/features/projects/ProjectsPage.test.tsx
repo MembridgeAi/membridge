@@ -36,10 +36,32 @@ describe('ProjectsPage', () => {
     expect(screen.queryByRole('columnheader', { name: /Andrew/ })).toBeNull()
   })
 
-  it('never scrolls the page sideways: the constant-width table needs no scroll wrapper', async () => {
+  // Renamed: this only ever asserted that team size does not add columns. It
+  // was titled "never scrolls the page sideways", which it never checked and
+  // which was in fact false -- an arbitrary-length project path could push the
+  // table past the window regardless of the column count. jsdom does no
+  // layout, so the width bound itself is unassertable here; it lives in
+  // projects.css and was verified by measuring min-content in a real browser.
+  it('adds no columns as the team grows, so it needs no scroll wrapper', async () => {
     const { container } = renderApp({ teamSize: 30 }, <ProjectsPage />)
     await screen.findByTestId('project-row-membridge')
     expect(container.querySelector('.scroll-x')).toBeNull()
+  })
+
+  // The width fix clamps the path to two lines, which can hide its tail -- and
+  // the tail is the only thing telling two worktrees of one repo apart. What
+  // IS assertable in jsdom is that the full value stays recoverable, so this
+  // guards the `title` the clamp depends on rather than the clamp itself.
+  it('keeps a long project path fully recoverable via title, even though it is clamped', async () => {
+    const longPath = '/Users/marco/Documents/Membridge/checkouts/experimental/packages/serverRuntimeInternal/src'
+    const client = new FakeDataClient()
+    const [first, ...rest] = await client.getProjects()
+    vi.spyOn(client, 'getProjects').mockResolvedValue([{ ...first, path: longPath }, ...rest])
+    renderWith(client, <ProjectsPage />)
+
+    const row = await screen.findByTestId(`project-row-${first.name}`)
+    const path = within(row).getByText(longPath)
+    expect(path).toHaveAttribute('title', longPath)
   })
 
   // Finding 2: asserting only the cell's rendered `checked` state would still

@@ -6,9 +6,9 @@ import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { SyncStateView } from '../../components/SyncState'
 import { useDataClient } from '../../data/DataClientProvider'
 import { relativeAgo } from '../../data/relativeTime'
-import { useAccessMatrix, useArchiveProject, useDeleteProject, useMembers, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
+import { isRetryableDeleteRefusal, useAccessMatrix, useArchiveProject, useDeleteProject, useMembers, useProjectAccess, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
-import { AccessPopover } from './AccessPopover'
+import { AccessPopover, type PopoverRoster } from './AccessPopover'
 import { AccessSummary, type AccessMemberRef } from './AccessSummary'
 import { AddProjectDialog } from './AddProjectDialog'
 import './projects.css'
@@ -23,7 +23,8 @@ const COLUMN_COUNT = 6
 
 interface ProjectTableRowProps {
   project: Project
-  roster: AccessMemberRef[]
+  /** Authoritative roster, or null when this page cannot know it (rosterFor). */
+  roster: AccessMemberRef[] | null
   teamSize: number
   showAccess: boolean
   onSync: () => void
@@ -58,7 +59,12 @@ function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPe
       <td className="proj-name">
         <Link href={projectHref(project.path)} className="proj-name-link">{project.name}</Link>
         {' '}<span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>{project.shared ? 'Shared' : 'Private'}</span>
-        <span className="mono proj-path">{project.path}</span>
+        {/* `title` is load-bearing, not a nicety: projects.css clamps the path
+            to two lines, and what a clamp drops is the TAIL -- which is the
+            only thing distinguishing two worktrees of one repo
+            (.../worktrees/ui vs .../worktrees/hunt). The full path has to stay
+            recoverable without leaving the row. */}
+        <span className="mono proj-path" title={project.path}>{project.path}</span>
       </td>
       <td className="mono num">{project.sessionsThisWeek}</td>
       <td className="mono num">{project.lastActivity ? relativeAgo(project.lastActivity) : 'never'}</td>
@@ -71,7 +77,7 @@ function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPe
             // A private project renders NO control here at all (spec: the
             // dead dashed cells are removed, not restyled) -- nobody else
             // can be granted access until the project is shared.
-            <span className="access-private"><span aria-hidden="true">🔒</span> Only you</span>
+            <span className="access-private">Only you</span>
           )}
         </td>
       )}
@@ -144,6 +150,13 @@ export function ProjectsPage() {
   const archiveProject = useArchiveProject()
   const unarchiveProject = useUnarchiveProject()
   const deleteProject = useDeleteProject()
+  // POST /api/team/archive-project answers 200 on a REFUSAL as well as on a
+  // success, and useDeleteProject turns a refusal into a rejection so no
+  // success path can run for a destruction that never happened. Two very
+  // different refusals arrive that way, though: "you are not a manager" (final)
+  // and "we could not tell whether you are, and changed nothing" (an outage or
+  // an expired sign-in -- entirely retryable). They used to render identically.
+  const deleteRefusalRetryable = isRetryableDeleteRefusal(deleteProject.error)
 
   const projects = projectsQuery.data ?? []
   // Archived rows leave the main table and live in the collapsed section at
@@ -199,6 +212,25 @@ export function ProjectsPage() {
 
   const teamSize = membersQuery.data?.length ?? matrixQuery.data?.members.length ?? 0
 
+  // The per-project access read (GET /api/project/access), as the OWNER/ADMIN's
+  // fallback for a project the matrix carries no row for. Fired only while a
+  // popover is open, so it is one request for one project, triggered by the
+  // user opening that cell -- never a per-project request on page load, which
+  // the constant-width grid spec forbids (lib/api-access.js accessMatrix:
+  // "N+1 here is a spec violation").
+  //
+  // ADMIN ONLY, deliberately, even though the daemon route is not role-gated
+  // the way the matrix is: public.project_access's select policy is
+  // `is_team_manager(team_id)` (migration 025 section 6) and RLS filters
+  // instead of erroring, so a member's read returns ZERO rows and
+  // readAccess's correct-for-a-manager "no row means visible" default then
+  // reports the whole team as able to see the project. Calling this as a
+  // member would replace the wrong count this ticket removes with a wrong
+  // roster -- the popover shows them the `restricted` state instead.
+  // Must sit above the blocking-error return below, hooks being hooks.
+  const popoverFromMatrix = canEditAccess && !!(accessFor && matrixByPath.get(accessFor))
+  const popoverAccessQuery = useProjectAccess(canEditAccess && accessFor && !popoverFromMatrix ? accessFor : null)
+
   // Deleting a SHARED project is manager-only on the daemon
   // (lib/server.js archiveSharedProject: a non-manager's request is REFUSED,
   // and refused only after unlinkProject has already pruned that machine's
@@ -209,15 +241,33 @@ export function ProjectsPage() {
     return !project.shared || canEditAccess
   }
 
-  // Who can see this project: the access matrix's row for an admin (the
-  // authoritative grant list), the project's own member roster otherwise.
-  function rosterFor(project: Project): AccessMemberRef[] {
+  // A member id as {id, name}, with the viewer named "You" when no member row
+  // resolves them (they left the team, or membersQuery has not landed).
+  function memberRef(id: string): AccessMemberRef {
+    return { id, name: nameById.get(id) ?? (id === viewerId ? 'You' : id) }
+  }
+
+  // Who can see this project -- or NULL, meaning this page cannot answer that
+  // for this row.
+  //
+  // The only whole-grid authority is the access matrix, and it is owner/admin
+  // only (lib/api-access.js accessMatrix 403s a member). This used to fall back
+  // to project.recentAuthorIds, which is the distinct author set of the project's
+  // slice of ONE capped /api/feed page -- so a shared project quiet enough to
+  // have no entry on that page reported "0 of 5" for a project the whole team
+  // could see, on the one surface whose entire job is answering "who can see
+  // this". No count at all is strictly better than a wrong one. What the
+  // popover can add is fetched there, per project and on demand (see
+  // popoverAccessQuery above), so cost at rest is unchanged: zero extra
+  // requests on load, and this page does not poll (useProjects has a staleTime,
+  // not a refetchInterval).
+  function rosterFor(project: Project): AccessMemberRef[] | null {
     if (!project.shared) return []
     const row = matrixByPath.get(project.path)
     if (canEditAccess && row) {
       return (matrixQuery.data?.members ?? []).filter(m => row.access[m.id]).map(m => ({ id: m.id, name: m.name }))
     }
-    return project.memberIds.map(id => ({ id, name: nameById.get(id) ?? (id === viewerId ? 'You' : id) }))
+    return null
   }
 
   // Full error page only for a first-load failure (no data at all); a failed
@@ -247,17 +297,35 @@ export function ProjectsPage() {
 
   const deleteTarget = deleteFor ? projects.find(p => p.path === deleteFor) ?? null : null
   const accessProject = accessFor ? projects.find(p => p.path === accessFor) ?? null : null
-  const accessRoster = accessProject ? rosterFor(accessProject) : []
-  // An admin's popover lists the whole team (grant and revoke); a member's
-  // read-only popover lists exactly who can see the project.
-  const popoverMembers: AccessMemberRef[] = canEditAccess
-    ? (matrixQuery.data?.members ?? []).map(m => ({ id: m.id, name: m.name }))
-    : accessRoster
-  const popoverAccess: Record<string, boolean> = accessProject
-    ? (canEditAccess
-      ? matrixByPath.get(accessProject.path)?.access ?? {}
-      : Object.fromEntries(accessRoster.map(m => [m.id, true])))
-    : {}
+
+  // What the open popover knows. An admin's popover lists the whole team with
+  // their real flags, so they can grant as well as revoke, from an
+  // AUTHORITATIVE source: the matrix when it has a row for this project, the
+  // per-project read above when it does not. That read's in-flight and failed
+  // states are carried through as themselves rather than collapsed to an empty
+  // list, which would read as "nobody can see this project". A member gets
+  // `restricted`: nothing this app can call will tell them the truth (see the
+  // RLS note above), so it names the boundary rather than guessing.
+  function popoverRosterOf(): PopoverRoster {
+    if (!canEditAccess) return { state: 'restricted' }
+    const matrixRow = accessProject ? matrixByPath.get(accessProject.path) : undefined
+    if (popoverFromMatrix && matrixRow) {
+      return {
+        state: 'known',
+        members: (matrixQuery.data?.members ?? []).map(m => ({ id: m.id, name: m.name })),
+        access: matrixRow.access,
+      }
+    }
+    if (popoverAccessQuery.isError) return { state: 'error', message: errorMessage(popoverAccessQuery.error) }
+    const data = popoverAccessQuery.data
+    if (!data) return { state: 'loading' }
+    return {
+      state: 'known',
+      members: data.members.map(m => memberRef(m.memberId)),
+      access: Object.fromEntries(data.members.map(m => [m.memberId, m.canSee])),
+    }
+  }
+  const popoverRoster = popoverRosterOf()
 
   return (
     <div className="projects-page">
@@ -304,9 +372,13 @@ export function ProjectsPage() {
         </div>
       </div>
 
-      {/* No scroll-x wrapper anymore: the column set is fixed (one Access
-          cell instead of one column per member), so the table's width no
-          longer grows with the team and the page never scrolls sideways. */}
+      {/* No scroll-x wrapper: the column set is fixed (one Access cell instead
+          of one column per member), so the table's width does not grow with
+          the team. A fixed column set was never enough to keep the page from
+          scrolling sideways, though -- the name and path are arbitrary-length,
+          and under `table-layout: auto` their min-content sets a floor that
+          `width: 100%` cannot override. projects.css bounds that; see the note
+          on .projects-table for the measurements. */}
       <table className="projects-table">
         <thead>
           <tr>
@@ -366,7 +438,7 @@ export function ProjectsPage() {
               {archivedProjects.map(p => (
                 <li key={p.path} className="archived-row" data-testid={`archived-row-${p.name}`}>
                   <span className="archived-name">{p.name}</span>
-                  <span className="mono proj-path">{p.path}</span>
+                  <span className="mono proj-path" title={p.path}>{p.path}</span>
                   {p.missing && <span className="archived-missing">folder missing</span>}
                   <button
                     type="button"
@@ -413,8 +485,7 @@ export function ProjectsPage() {
       {accessProject && (
         <AccessPopover
           projectName={accessProject.name}
-          members={popoverMembers}
-          access={popoverAccess}
+          roster={popoverRoster}
           canEdit={canEditAccess}
           viewerId={viewerId}
           onToggle={(memberId, canSee) => setAccess.mutate({ projectPath: accessProject.path, memberId, canSee })}
@@ -425,10 +496,22 @@ export function ProjectsPage() {
         <ConfirmDialog
           title={`Delete ${deleteTarget.name}?`}
           message={`This permanently deletes what MemBridge holds for ${deleteTarget.name}: the .membridge/ folder (its memory and history), the MemBridge block in its context files (CLAUDE.md and AGENTS.md), and its team archive. If you only want it out of this list, Archive it instead: that destroys nothing.`}
-          confirmLabel="Delete project"
+          // "Try again" only when the daemon itself said the refusal was
+          // retryable. It could not establish the caller's role -- no
+          // connection, an expired sign-in -- so it changed nothing and the
+          // identical delete may succeed on the next attempt. The button IS the
+          // retry (the typed confirmation survives, so it is enabled already);
+          // what was missing was any sign that retrying was the right move
+          // rather than going to argue about a role.
+          //
+          // Gated on `retryable`, never on the refusal code: a determinate
+          // refusal the daemon adds later must read as final here without this
+          // screen being taught its name.
+          confirmLabel={deleteRefusalRetryable ? 'Try again' : 'Delete project'}
           destructive
           pending={deleteProject.isPending}
           error={deleteProject.isError ? errorMessage(deleteProject.error) : null}
+          errorTone={deleteRefusalRetryable ? 'retryable' : 'error'}
           confirmInput={{ requiredText: deleteTarget.name, label: 'Type the project name to confirm' }}
           onConfirm={() => deleteProject.mutate(deleteTarget.path, { onSuccess: () => setDeleteFor(null) })}
           onCancel={() => setDeleteFor(null)}

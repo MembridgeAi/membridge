@@ -90,10 +90,26 @@
 .day-card-who-cell {
   min-width: 0;
 }
+/* `white-space: nowrap` REMOVED. It was the worst version of the width defect
+ * in this app: nowrap made the author's whole display name one unbreakable
+ * unit, so its spaces stopped helping and min-content became the full string —
+ * measured at the 900px floor, a 48-character name produced 16px of horizontal
+ * scroll inside the content column and a 140-character one produced 803px. That
+ * is realistic human input, not pathological input. The name now wraps, and
+ * `.wrap-anywhere` in the markup handles the no-space case.
+ *
+ * No line clamp here, deliberately, and this is the one place T1's companion
+ * treatment is NOT applied — see DayCard.tsx for the measurement that decided
+ * it. */
 .day-card-who {
   font-weight: var(--fw-medium);
-  white-space: nowrap;
 }
+/* Carries the project name, which is arbitrary-length user data. Its
+ * `.wrap-anywhere` inherits down to the name, which is the point: this span
+ * used to overflow its own grid cell and collide with .day-card-meta well
+ * BELOW any scrolling threshold — measured at the 900px floor, a 53-character
+ * project name painted to x=792 while the cell ended at 771 and the meta
+ * column began at 781. */
 .day-card-sub {
   margin-left: 6px;
   color: var(--text3);

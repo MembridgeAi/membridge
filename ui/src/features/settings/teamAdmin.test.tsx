@@ -57,7 +57,7 @@ describe('rotating the standing invite code', () => {
     expect(dialog).toHaveTextContent(/already on the team are unaffected/i)
   })
 
-  it('shows the new code, since nothing else on this screen will', async () => {
+  it('shows the new code', async () => {
     const client = onTeam()
     const spy = vi.spyOn(client, 'rotateInviteCode')
     renderWith(client, <SettingsPage />)
@@ -72,5 +72,68 @@ describe('rotating the standing invite code', () => {
     renderWith(onTeam({ role: 'member' }), <SettingsPage />)
     await screen.findByTestId('setting-team')
     expect(screen.queryByRole('button', { name: /rotate code/i })).toBeNull()
+  })
+
+  // Finding 8: rotation stashed the new code in local component state with no
+  // copy affordance, it vanished on navigation, and the CURRENT code was shown
+  // nowhere in the app. So the only route back to a code you had to send a
+  // teammate was rotating again -- which invalidates the code you may have just
+  // sent them, and every invite link with it.
+  describe('the live code itself', () => {
+    it('is visible without rotating anything, with a way to copy it', async () => {
+      renderWith(onTeam(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-invite-code')
+      expect(within(row).getByText(/INV-7F3K9Q/)).toBeInTheDocument()
+      expect(within(row).getByRole('button', { name: /^copy$/i })).toBeInTheDocument()
+    })
+
+    it('copies the live code to the clipboard', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.assign(navigator, { clipboard: { writeText } })
+      renderWith(onTeam(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-invite-code')
+      await userEvent.click(within(row).getByRole('button', { name: /^copy$/i }))
+      expect(writeText).toHaveBeenCalledWith('INV-7F3K9Q')
+      expect(await within(row).findByText(/^copied$/i)).toBeInTheDocument()
+    })
+
+    // A denied clipboard must never read as a success -- the code is still on
+    // screen to select by hand, which is the whole point of showing it.
+    it('never claims copied when the clipboard write is refused', async () => {
+      Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+      renderWith(onTeam(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-invite-code')
+      await userEvent.click(within(row).getByRole('button', { name: /^copy$/i }))
+      expect(await within(row).findByText(/couldn't copy/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/^copied$/i)).toBeNull()
+      expect(within(row).getByText(/INV-7F3K9Q/)).toBeInTheDocument()
+    })
+
+    // Exactly one code on screen, always the live one: a rotation replaces the
+    // row's value in place rather than appending a second "New code:" line
+    // beside a code that no longer works.
+    it('replaces the displayed code in place when rotated, leaving no dead code on screen', async () => {
+      renderWith(onTeam(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-invite-code')
+      await userEvent.click(within(row).getByRole('button', { name: /rotate code/i }))
+      const dialog = await screen.findByRole('dialog')
+      await userEvent.click(within(dialog).getByRole('button', { name: /rotate code/i }))
+      expect(await within(row).findByText(/INV-NEW42X/)).toBeInTheDocument()
+      expect(within(row).queryByText(/INV-7F3K9Q/)).toBeNull()
+    })
+
+    it('clears a stale "copied" note when the code is rotated out from under it', async () => {
+      Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+      renderWith(onTeam(), <SettingsPage />)
+      const row = await screen.findByTestId('setting-invite-code')
+      await userEvent.click(within(row).getByRole('button', { name: /^copy$/i }))
+      expect(await within(row).findByText(/^copied$/i)).toBeInTheDocument()
+
+      await userEvent.click(within(row).getByRole('button', { name: /rotate code/i }))
+      const dialog = await screen.findByRole('dialog')
+      await userEvent.click(within(dialog).getByRole('button', { name: /rotate code/i }))
+      expect(await within(row).findByText(/INV-NEW42X/)).toBeInTheDocument()
+      expect(within(row).queryByText(/^copied$/i)).toBeNull()
+    })
   })
 })

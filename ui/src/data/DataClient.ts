@@ -157,6 +157,25 @@ export interface DataClient {
   // reject anything that doesn't look like a code.
   joinTeam(codeOrLink: string): Promise<{ id: string; name: string }>
 
+  // Drop whatever the TRANSPORT has cached, so the next read of anything goes
+  // back to the daemon for real. Nothing to do with the react-query cache --
+  // this is the layer below it (LocalDaemonClient's short-TTL request cache,
+  // which coalesces the duplicate /api/status and /api/team reads that mounting
+  // useStatus() and useSettings() together produces).
+  //
+  // Exists for one caller: Settings' "Recheck". Without it that button was a
+  // false confirmation of exactly the kind the page exists to remove -- pressed
+  // inside the TTL window it re-stamped "checked just now" over answers the
+  // transport had cached up to five seconds earlier, and the Status chip in
+  // particular is served entirely from that cache. A user pressing Recheck is
+  // asking to be told the truth right now, which means the coalescing that is
+  // correct for incidental duplicate reads has to be stood down for that one
+  // press. Imperative, and NOT a parameter on getSettings/getStatus, because
+  // the caller wants a state of the world refreshed, not one endpoint re-read.
+  //
+  // Implementations with no transport cache (the test fake) legitimately no-op.
+  forgetCachedReads(): void
+
   // Which of the viewer's teams every team-scoped read is about: the members
   // list, the audit trail, invites, the access matrix, insights, and the team
   // shown in Settings and the rail. Null means "whichever the daemon lists

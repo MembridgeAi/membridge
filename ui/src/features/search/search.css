@@ -92,6 +92,33 @@
 .search-resting { max-width: 60ch; }
 .search-error { color: var(--danger, var(--text)); }
 
+/* Zero results. The count line's --text3 at --fs-sm is right for "27 matches"
+ * sitting above the answer, and wrong as the ONLY thing on the page: at that
+ * size and colour, against an empty pane, it reads as a blank screen rather
+ * than as an answer. The title steps up to body size and --text so there is
+ * something to land on, the hint says what to do next, and the whole block
+ * stays left-aligned in the content column rather than floating in the middle
+ * of a pane whose height it does not know. */
+.search-empty {
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+  max-width: 60ch;
+}
+.search-empty-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+  /* The echoed query is arbitrary user input with no break opportunities. */
+  overflow-wrap: anywhere;
+}
+.search-empty-hint {
+  margin: 4px 0 0;
+  color: var(--text3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+}
+.search-empty-clear { margin-top: 10px; }
+
 .search-result {
   display: block;
   padding: var(--sp-3) var(--sp-4);

@@ -88,7 +88,7 @@ describe('FakeDataClient', () => {
       // Access cell has a real "+N chip and count label" case to render.
       const shared = (await c.getProjects()).find(p => p.shared)
       expect(shared).toBeTruthy()
-      expect(shared!.memberIds).toHaveLength(6)
+      expect(shared!.recentAuthorIds).toHaveLength(6)
     }
   })
 

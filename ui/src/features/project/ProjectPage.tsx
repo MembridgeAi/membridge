@@ -117,6 +117,14 @@ export function ProjectPage({ slug }: ProjectPageProps) {
     [membersQuery.data],
   )
 
+  // Names for the header avatar group's one accessible label. An id with no
+  // member row (they left the team) falls back to the id rather than being
+  // dropped, so the label always accounts for every face shown.
+  const recentAuthorNames = useMemo(
+    () => (project?.recentAuthorIds ?? []).map(id => memberNameById.get(id) ?? id),
+    [project?.recentAuthorIds, memberNameById],
+  )
+
   const accessRows: AccessRow[] = useMemo(() => {
     if (!accessQuery.data || !membersQuery.data) return []
     const membersById = new Map(membersQuery.data.map(m => [m.id, m]))
@@ -188,17 +196,29 @@ export function ProjectPage({ slug }: ProjectPageProps) {
         <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
           {project.shared ? 'Shared' : 'Private'}
         </span>
-        {/* Spec section 4: a shared project shows WHO shares it, at every
-            role -- the read-only avatar stack is not gated the way the
-            admin access panel is. Names resolve via getMembers(); an id
-            with no member row (left the team) still gets an avatar. */}
-        {project.shared && project.memberIds.length > 0 && (
-          <span className="project-member-stack" data-testid="project-member-stack">
-            {project.memberIds.slice(0, 4).map(id => (
+        {/* Faces of who has SHOWN UP here lately, not who the project is
+            shared with -- recentAuthorIds cannot answer the second question
+            (see its doc in types.ts). Unlabelled, sitting immediately right of
+            the "Shared" tag, a stack of faces states the share roster whether
+            or not it means to, so the label is the fix rather than decoration:
+            role="img" + aria-label makes the group one announced thing instead
+            of four unexplained avatars. Still gated on a non-empty set, so a
+            quiet shared project shows nothing here rather than an empty frame.
+            Names resolve via getMembers(); an id with no member row (left the
+            team) still gets an avatar. */}
+        {project.shared && project.recentAuthorIds.length > 0 && (
+          <span
+            className="project-member-stack"
+            data-testid="project-member-stack"
+            role="img"
+            aria-label={`Recently active here: ${recentAuthorNames.join(', ')}`}
+            title={`Recently active here: ${recentAuthorNames.join(', ')}`}
+          >
+            {project.recentAuthorIds.slice(0, 4).map(id => (
               <Avatar key={id} id={id} name={memberNameById.get(id) ?? id} size={19} />
             ))}
-            {project.memberIds.length > 4 && (
-              <span className="project-member-more">+{project.memberIds.length - 4}</span>
+            {project.recentAuthorIds.length > 4 && (
+              <span className="project-member-more">+{project.recentAuthorIds.length - 4}</span>
             )}
           </span>
         )}
@@ -270,7 +290,6 @@ export function ProjectPage({ slug }: ProjectPageProps) {
             encryptionEnabled={statusQuery.data?.encryption.enabled ?? false}
             plaintextOff={statusQuery.data?.encryption.plaintextOff ?? false}
             sessionsThisWeek={project.sessionsThisWeek}
-            peopleCount={project.memberIds.length}
           />
         </div>
       </div>

@@ -383,7 +383,14 @@ export function TeamPage() {
 
           {team && (
             <section className="team-card" aria-labelledby="team-current-heading">
-              <h2 className="team-card-title" id="team-current-heading">{team.name}</h2>
+              {/* .wrap-anywhere here and NOT on .team-card-title itself: every
+                  other use of that class is a fixed heading ("People", "Join a
+                  team"), and this is the only one holding user data. The team
+                  name is uncapped -- the rename dialog validates nothing -- and
+                  measured at the 900px floor a 78-character single-token name
+                  produced horizontal scroll inside the content column, a
+                  150-character one 648px of it. */}
+              <h2 className="team-card-title wrap-anywhere" id="team-current-heading">{team.name}</h2>
               <p className="team-note">
                 You are the {roleLabel(team.role)}
                 {memberCountLabel(team.memberCount) && ` · ${memberCountLabel(team.memberCount)}`}
