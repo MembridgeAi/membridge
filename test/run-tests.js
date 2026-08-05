@@ -23120,63 +23120,80 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(await feedCountFor('late'), 0);
       });
 
-      // ===== 032: the invariant 029 could only ASSUME =====
+      // ===== 032 + 035: the invariant 029 could only ASSUME, and the hole =====
       // 029 §3 says in its own header that "every (member, project) pair has a
       // row" holds "only for as long as callers use the RPC; it is not enforced
-      // anywhere", because `projects_insert` (schema.sql:118) lets a member POST
-      // straight to /rest/v1/projects. Two things established before writing the
-      // migration, both of which the checks below depend on:
+      // anywhere", because the `projects_insert` policy let a member POST
+      // straight to /rest/v1/projects. Two migrations answer that, and both
+      // are under test here:
       //
-      //   * NOTHING IN THE CLIENT TAKES THAT PATH. link_project at
-      //     lib/teamsync.js:1206 is the only writer of public.projects in the
-      //     tree. This mock had no POST route for /rest/v1/projects at all until
-      //     this ticket added one, which is the same fact from another angle.
-      //   * SO THE POST ROUTE HERE IS NOT MODELLING A CLIENT. It models the
-      //     CAPABILITY THE POLICY GRANTS — what a member could do with the anon
-      //     key and their own bearer token. That is the surface under test.
+      //   * 032 adds an AFTER INSERT trigger on public.projects, so the access
+      //     rows are written by the INSERT rather than by the RPC and every
+      //     insert path is covered. mock17.flags.noProjectInsertTrigger
+      //     suppresses it and is how the trigger checks are proven
+      //     non-vacuous — with it set, every one of them fails.
+      //   * 035 DROPS `projects_insert` outright, so the member-reachable path
+      //     is closed as well as covered. That is live: public.projects now has
+      //     `projects_select` only, with RLS still on and the trigger intact.
       //
-      // 032 adds an AFTER INSERT trigger on public.projects so the rows are
-      // written by the INSERT rather than by the RPC, which covers this path
-      // too. mock17.flags.noProjectInsertTrigger suppresses it and is how these
-      // checks are proven non-vacuous — with it set, every one of them fails.
+      // WHY THERE IS STILL A POST ROUTE IN THE MOCK, AND WHY IT IS NOT
+      // MODELLING A CLIENT EITHER WAY. Nothing in the tree POSTs to
+      // public.projects — link_project (lib/teamsync.js:1206) is its only
+      // writer, pinned below — so the route exists purely to reach the two
+      // things a POST can now be:
+      //
+      //   * as a MEMBER (bearer token, `authenticated` role): refused, because
+      //     035 left no INSERT policy to satisfy. This is the surface 029 §3
+      //     flagged, and it is now closed.
+      //   * with the SERVICE-ROLE key (BYPASSRLS): admitted, because row
+      //     security is not applied to that role at all. This stands in for the
+      //     insert paths production still has — link_project's `security
+      //     definer` insert and an operator's insert in the SQL editor — and it
+      //     is what keeps the 032 trigger checks testing the TRIGGER rather
+      //     than accidentally testing a policy.
       //
       // WHAT THESE CANNOT PROVE: the mock is JavaScript. It cannot exercise
-      // PL/pgSQL, trigger ordering, `security definer` rights, or whether the
-      // real project_access_insert policy admits the trigger's write. Those need
-      // the live database. What is under test here is the RULE 032 encodes.
+      // PL/pgSQL, trigger ordering, `security definer` rights, BYPASSRLS, the
+      // absence of an INSERT policy in a real catalog, or whether the real
+      // project_access_insert policy admits the trigger's write. Those need the
+      // live database, and 035's header records the two catalog queries that
+      // settled the RLS half. What is under test here is the RULE each
+      // migration encodes.
       const tokenFor = userId => {
         const hit = [...mock17.sessions.entries()].find(([, id]) => id === userId);
         assert.ok(hit, `no live session for ${userId}`);
         return hit[0];
       };
-      const postProjectDirect = async (userId, row) => {
+      const postProject = async (headers, row) => {
         const r = await fetch(`http://127.0.0.1:${MOCK17_PORT}/rest/v1/projects`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            apikey: 'anon-test',
-            Authorization: `Bearer ${tokenFor(userId)}`,
-          },
+          headers: { 'Content-Type': 'application/json', ...headers },
           body: JSON.stringify(row),
         });
         const text = await r.text();
         return { status: r.status, body: text ? JSON.parse(text) : null };
       };
+      // What a team member can do for themselves: anon key + their own token.
+      const postProjectAsMember = (userId, row) =>
+        postProject({ apikey: 'anon-test', Authorization: `Bearer ${tokenFor(userId)}` }, row);
+      // What survives 035: a writer that bypasses row security entirely.
+      const postProjectBypassingRls = row =>
+        postProject({ apikey: mock17.serviceKey }, row);
       const rowsForProject = projectId =>
         mock17.projectAccess.filter(r => r.project_key === projectId);
 
-      await check('032: a project created by direct POST — never through link_project — still materializes a row for every current member', async () => {
+      await check('032: a project inserted outside link_project still materializes a row for every current member', async () => {
         const before = mock17.projectAccess.length;
-        const res = await postProjectDirect(memberCreds.userId, {
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct', repo_url: 'https://git.test/t17-direct',
           created_by: memberCreds.userId,
         });
-        assert.strictEqual(res.status, 201, `direct POST should be permitted by projects_insert: ${JSON.stringify(res.body)}`);
+        assert.strictEqual(res.status, 201, `an RLS-bypassing insert must land: ${JSON.stringify(res.body)}`);
         const projectId = res.body[0].id;
-        // An ordinary MEMBER created it, not a manager. Under project_access_insert
-        // (024:78, `with check is_team_manager`) they could not write these rows
-        // themselves — the trigger's `security definer` is what makes it possible,
-        // and 029 §3 already depends on exactly that.
+        // created_by is an ordinary MEMBER, not a manager. Under
+        // project_access_insert (024:78, `with check is_team_manager`) they could
+        // not write these rows themselves — the trigger's `security definer` is
+        // what makes it possible, and 029 §3 already depends on exactly that.
         const rows = rowsForProject(projectId);
         assert.strictEqual(rows.length, 3,
           'owner, member and late are all current members, so all three need a row');
@@ -23198,10 +23215,10 @@ const repoRoot = require('../lib/repo-root');
 
       await check("032: the trigger records the project's OWN default, so a closed project stays closed instead of leaning on tier 2", async () => {
         // The catcher for a trigger that hardcodes `true` instead of reading
-        // NEW.default_access. Without this, a directly-created closed project
-        // would materialize three can_see = true rows and be MORE open than one
-        // created through link_project — a fix that inverted the bug.
-        const res = await postProjectDirect(ownerCreds.userId, {
+        // NEW.default_access. Without this, a closed project created off the RPC
+        // path would materialize three can_see = true rows and be MORE open than
+        // one created through link_project — a fix that inverted the bug.
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct-closed', created_by: ownerCreds.userId,
           default_access: false,
         });
@@ -23224,7 +23241,7 @@ const repoRoot = require('../lib/repo-root');
         // a second writer to rows a manager may have set by hand, and flipping
         // the flag would move existing members — the precise behaviour 028/029
         // exist to remove.
-        const res = await postProjectDirect(ownerCreds.userId, {
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct-flip', created_by: ownerCreds.userId,
         });
         assert.strictEqual(res.status, 201);
@@ -23241,38 +23258,118 @@ const repoRoot = require('../lib/repo-root');
         }
       });
 
-      await check('032 does not widen projects_insert: a non-member is refused, and created_by cannot be spoofed', async () => {
-        // Pinning both halves of the policy predicate
-        // (`is_team_member(team_id) and created_by = auth.uid()`), because 032
-        // leaves the policy in place on purpose and a later "cleanup" that
-        // loosened it would otherwise be invisible.
+      await check('035: a member POSTing straight to /rest/v1/projects is refused — unconditionally, because no INSERT policy is left to satisfy', async () => {
+        // THIS CHECK USED TO ASSERT 201. Under `projects_insert` the first
+        // request below satisfied `is_team_member(team_id) and created_by =
+        // auth.uid()` and created a real project row, skipping every check
+        // link_project performs. 035 dropped the policy on the live database, so
+        // the same request now raises 42501 and PostgREST returns 403.
+        //
+        // The point of listing three callers is that the refusal has NO
+        // predicate: it does not depend on membership, on role, or on created_by
+        // agreeing with auth.uid(). A "fix" that reinstated any of those
+        // conditions — which is what recreating the policy would do — fails on
+        // the first two rows here, not the third.
         const outsider = await teamsync.signup(util.getConfig(), 't17-outsider@test.dev', 'pw-t17x', 'Outsider17');
-        const refused = await postProjectDirect(outsider.userId, {
-          team_id: t17Team.team_id, name: 't17-outsider', created_by: outsider.userId,
-        });
-        assert.strictEqual(refused.status, 403, 'a non-member must not be able to create a project in this team');
-        assert.strictEqual(mock17.projects.some(p => p.name === 't17-outsider'), false,
-          'and no project row may survive the refusal');
-
-        const spoofed = await postProjectDirect(memberCreds.userId, {
-          team_id: t17Team.team_id, name: 't17-spoofed', created_by: ownerCreds.userId,
-        });
-        assert.strictEqual(spoofed.status, 403, 'created_by must equal auth.uid(); a member cannot blame the owner');
-        assert.strictEqual(mock17.projects.some(p => p.name === 't17-spoofed'), false);
+        const attempts = [
+          ['an ordinary member, with their own id in created_by (the request that used to succeed)',
+            memberCreds.userId, { name: 't17-post-member', created_by: memberCreds.userId }],
+          ['the team OWNER — role buys nothing, there is no policy to pass',
+            ownerCreds.userId, { name: 't17-post-owner', created_by: ownerCreds.userId }],
+          ['a non-member of the team',
+            outsider.userId, { name: 't17-post-outsider', created_by: outsider.userId }],
+        ];
+        const accessBefore = mock17.projectAccess.length;
+        for (const [who, userId, row] of attempts) {
+          const refused = await postProjectAsMember(userId, { team_id: t17Team.team_id, ...row });
+          assert.strictEqual(refused.status, 403, `${who} must be refused: ${JSON.stringify(refused.body)}`);
+          assert.match(String(refused.body && refused.body.message), /row-level security policy/,
+            'and refused as an RLS violation, not as a validation or membership error');
+          assert.strictEqual(mock17.projects.some(p => p.name === row.name), false,
+            `no project row may survive the refusal (${who})`);
+        }
+        // The refusal is total, not partial: a refused insert cannot have fired
+        // the 032 trigger, so it cannot have left access rows behind either.
+        assert.strictEqual(mock17.projectAccess.length, accessBefore,
+          'a refused insert must not materialize project_access rows');
       });
 
-      await check("032 closes the ACCESS gap and no more: link_project's repo_url dedup is still bypassed by a direct POST", async () => {
-        // Stated so nobody reads 032 as having made the direct path equivalent
-        // to the RPC. It is not. link_project adopts an existing project with a
-        // matching repo_url; a direct POST cannot, because `unique (team_id,
-        // name)` (schema.sql:33) is the only constraint that binds this path.
-        // Two rows for one repository under different names is a REAL remaining
-        // difference — it is the duplicate-project problem, tracked separately,
-        // and it needs a data write to resolve, not a policy change.
+      await check('035 is safe because nothing in the tree takes that path: link_project is the only writer of public.projects', async () => {
+        // The load-bearing half of 035's justification, pinned in the suite
+        // rather than left as a claim in a migration header. If someone later
+        // adds a direct write to `projects` from lib/, they would get a 403 from
+        // a real backend with no explanation; this check fails first and names
+        // the reason.
+        const libFiles = [];
+        (function walk(dir) {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, ent.name);
+            if (ent.isDirectory()) walk(p);
+            else if (ent.name.endsWith('.js')) libFiles.push(p);
+          }
+        })(path.join(__dirname, '..', 'lib'));
+        assert.ok(libFiles.length > 40, `expected to scan the whole of lib/, got ${libFiles.length} files`);
+        // Every PostgREST write in lib/ goes through a rest(config, creds,
+        // METHOD, '<table>...') call — teamsync.js:326 and the identical pair in
+        // api-access.js:27. Collect the table each write targets.
+        const written = new Map();
+        for (const file of libFiles) {
+          const src = fs.readFileSync(file, 'utf8');
+          const re = /'(POST|PATCH|PUT|DELETE)',\s*(?:\/\/[^\n]*\n\s*)?[`'"]([A-Za-z_][A-Za-z0-9_]*)/g;
+          let m;
+          while ((m = re.exec(src))) {
+            if (!written.has(m[2])) written.set(m[2], []);
+            written.get(m[2]).push(`${path.relative(path.join(__dirname, '..'), file)} (${m[1]})`);
+          }
+        }
+        assert.ok(written.size > 0, 'the scan found no PostgREST writes at all, so it is not testing anything');
+        assert.strictEqual(written.has('projects'), false,
+          `lib/ must never write public.projects directly — use the link_project RPC: ${JSON.stringify(written.get('projects'))}`);
+        // And the RPC that does write it is still reached, so the absence above
+        // is "goes through link_project", not "project creation was deleted".
+        assert.ok(written.has('rpc'), 'link_project is called through rest(..., \'POST\', `rpc/${fn}`)');
+        const teamsyncSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'teamsync.js'), 'utf8');
+        const linkCalls = teamsyncSrc.match(/'link_project'/g) || [];
+        assert.strictEqual(linkCalls.length, 1,
+          'link_project is called from exactly one place in lib/teamsync.js; more than one is a second creation path to review');
+      });
+
+      await check('035 leaves the RPC path alone: link_project still creates a project and materializes access rows', async () => {
+        // The other half of safety. 035's header argues from two live catalog
+        // facts (link_project is owned by `postgres` with rolbypassrls = true,
+        // and public.projects has relforcerowsecurity = false) that the RPC's
+        // insert never evaluated `projects_insert` and so cannot be broken by
+        // dropping it. THE MOCK CANNOT VERIFY THAT — it has no RLS engine and no
+        // roles. What it can do is pin that the supported creation path still
+        // works end to end while the direct POST is refused, and catch a "fix"
+        // that routed link_project through the refusing endpoint.
+        process.env.MEMBRIDGE_HOME = homeFor.owner;
+        const PROJECT_C = path.join(ROOT, 't17-project-c');
+        fs.mkdirSync(PROJECT_C, { recursive: true });
+        const stC = util.loadState();
+        stC.projects[PROJECT_C] = { events: [] };
+        util.saveState(stC);
+        const linkC = await teamsync.linkProject(util.getConfig(), PROJECT_C, t17Team.team_id, 'T17Co');
+        assert.ok(linkC && linkC.projectId, 'link_project must still create a project with no INSERT policy present');
+        assert.ok(mock17.projects.some(p => p.id === linkC.projectId), 'and the row must exist');
+        assert.strictEqual(rowsForProject(linkC.projectId).length, 3,
+          'every current member still gets a materialized row on the RPC path');
+      });
+
+      await check("032 closes the ACCESS gap and no more: link_project's repo_url dedup is still bypassed by any non-RPC insert", async () => {
+        // Stated so nobody reads 032 — or 035 — as having made a non-RPC insert
+        // equivalent to the RPC. It is not. link_project adopts an existing
+        // project with a matching repo_url; an insert that goes round it cannot,
+        // because `unique (team_id, name)` (schema.sql:33) is the only constraint
+        // that binds this path. Two rows for one repository under different names
+        // is a REAL remaining difference — it is the duplicate-project problem,
+        // tracked separately, and it needs a data write to resolve, not a policy
+        // change. NOTE 035 DOES NOT FIX IT: the live `membridge` / `Membridge`
+        // pair came from link_project matching on exact name, not from the POST.
         const repo = 'https://git.test/t17-direct';
         const existing = mock17.projects.filter(p => p.teamId === t17Team.team_id && p.repoUrl === repo);
         assert.strictEqual(existing.length, 1, 'precondition: one project already holds this repo_url');
-        const res = await postProjectDirect(ownerCreds.userId, {
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct-twin', repo_url: repo, created_by: ownerCreds.userId,
         });
         assert.strictEqual(res.status, 201, 'the unique constraint is on (team_id, name), so a new NAME is accepted');

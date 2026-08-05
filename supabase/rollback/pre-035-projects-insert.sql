@@ -1,0 +1,53 @@
+-- Rollback for 035_drop_projects_insert.sql.
+--
+-- OUTSIDE supabase/migrations/ ON PURPOSE so nothing applies it by accident —
+-- same placement and reasoning as the other files in this directory. This one
+-- matters more than most: running it silently re-opens a member-reachable write
+-- path into public.projects.
+--
+-- WHAT 035 REMOVED. One policy, `projects_insert` on public.projects, restored
+-- verbatim below:
+--
+--   for insert to authenticated
+--   with check (public.is_team_member(team_id) and created_by = auth.uid())
+--
+-- PROVENANCE, because it decides how much this file can be trusted. The WITH
+-- CHECK predicate is corroborated by two independent places in the repo that
+-- agree — supabase/schema.sql, which used to `create policy` it and now quotes it
+-- in the comment standing where that statement was, and 032's header, which
+-- quotes it while explaining why the policy was left alone. The `to
+-- authenticated` clause is NOT in either: it comes from the live policy as
+-- reported by the person who inspected and dropped it, and this file's author had
+-- no database access to re-read it. Verify it against `pg_policies` before
+-- relying on it if that ever becomes possible again. It is stated explicitly
+-- rather than left to default to PUBLIC because it is the narrower of the two —
+-- a policy granted to PUBLIC would also cover the `anon` role — so an error here
+-- fails in the safe direction.
+--
+-- WHAT IT CANNOT UNDO. Nothing was written or deleted by 035, so there is no
+-- data to restore — but restoring the policy does NOT restore the state of the
+-- world before it was dropped. Any direct POST refused while the policy was
+-- absent was refused for good, and the caller saw a 403; those attempts are not
+-- replayed. In the other direction, any project row created through the policy
+-- BEFORE the drop still exists and keeps its materialized project_access rows
+-- (written by the 032 trigger); this file neither creates nor removes any.
+--
+-- WHY YOU ALMOST CERTAINLY SHOULD NOT RUN THIS. The drop cannot break project
+-- creation: link_project is `security definer` owned by `postgres`, which has
+-- `rolbypassrls = true`, and public.projects has `relforcerowsecurity = false`,
+-- so the RPC's insert was never evaluated against this policy. Either fact alone
+-- is sufficient (both were measured live — see 035's header). If project
+-- creation is failing after 035, this policy is not the cause and recreating it
+-- will not fix it; look at link_project itself, at team membership, and at the
+-- `unique (team_id, name)` constraint. The only legitimate reason to run this
+-- file is a deliberate decision to let clients POST projects directly again,
+-- which no code in this repo does.
+--
+-- Safe to run twice, and safe to run if 035 was never applied: the policy is
+-- dropped first because `create policy` has no `if not exists` / `or replace` in
+-- the Postgres versions this project targets — the same convention 024's
+-- policies use.
+drop policy if exists projects_insert on public.projects;
+create policy projects_insert on public.projects
+  for insert to authenticated
+  with check (public.is_team_member(team_id) and created_by = auth.uid());

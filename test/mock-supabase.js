@@ -63,6 +63,15 @@ function tsCmp(a, b) {
   return String(a).localeCompare(String(b));
 }
 
+// The service-role key this stand-in recognises. In real Supabase this key
+// authenticates as `service_role`, which is BYPASSRLS — row security is not
+// applied to it on any table. Only the POST /rest/v1/projects route consults it,
+// and only so the suite can reach an RLS-bypassing insert (see that route).
+// Nothing in lib/ has or should have a service-role key: the client uses the
+// anon key plus a user bearer token, and every check that matters depends on
+// that. Exported as `serviceKey` on the returned mock.
+const SERVICE_ROLE_KEY = 'service-role-test';
+
 function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
@@ -152,8 +161,13 @@ function createMockSupabase() {
   };
   // 032_materialize_project_access_on_insert.sql: the AFTER INSERT trigger on
   // public.projects. Same materialization as 029 §3, but reached from the INSERT
-  // itself rather than from the RPC, so it also covers the direct
-  // POST /rest/v1/projects that `projects_insert` permits and no client uses.
+  // itself rather than from the RPC, so it covers every other way a row can land
+  // in public.projects. Since 035 dropped `projects_insert` there is no
+  // member-reachable direct POST left; what remains is the set of RLS-bypassing
+  // writers (link_project's definer insert, a service-role write, an operator's
+  // insert in the SQL editor), and the trigger fires on all of them. The POST
+  // route below models the service-role case, which is the only one of the three
+  // an offline JS mock can reach.
   //
   // A SEPARATE FUNCTION, not a call to materializeForProject inlined at the
   // route, so the trigger can be disabled on its own to prove the checks that
@@ -702,26 +716,48 @@ function createMockSupabase() {
           });
         return json(res, 200, rows);
       }
-      // POST /rest/v1/projects — the capability schema.sql:118's `projects_insert`
-      // policy grants and NO CLIENT USES. It is routed here purely so the suite
-      // can exercise the path a member could take with the anon key and a bearer
-      // token, which is what 029 §3 flagged and 032 closes. Do not reach for this
-      // from lib/ — the only supported way to create a project is link_project.
+      // POST /rest/v1/projects — public.projects has NO INSERT POLICY since
+      // 035_drop_projects_insert.sql, so this route exists to model that refusal
+      // and the one insert path that survives it.
+      //
+      //   * With a member's bearer token the caller is the `authenticated` role.
+      //     RLS is on (`relrowsecurity = true`) and no permissive INSERT policy
+      //     exists, so the INSERT raises 42501 and PostgREST returns 403. That is
+      //     unconditional: it does not depend on team membership or on the value
+      //     of created_by, because there is no predicate left to satisfy. Before
+      //     035 this same request succeeded under `projects_insert`
+      //     (`is_team_member(team_id) and created_by = auth.uid()`) — its exact
+      //     body is at supabase/rollback/pre-035-projects-insert.sql.
+      //   * With the SERVICE-ROLE key the caller is a BYPASSRLS role, so row
+      //     security is not applied at all and the insert lands. This is the
+      //     offline stand-in for the writers that remain in production —
+      //     link_project's `security definer` insert (owner `postgres`,
+      //     `rolbypassrls = true`, on a table that is not FORCE-RLS) and an
+      //     operator's insert in the SQL editor. It is what keeps the 032 trigger
+      //     checks below testing the trigger rather than testing a policy.
+      //
+      // NO CLIENT USES EITHER PATH. `grep -rn "v1/projects"` over the repo
+      // matches only this file and the suite; the only writer of public.projects
+      // in lib/ is the link_project RPC (lib/teamsync.js:1206). Do not reach for
+      // this route from lib/, and do not give lib/ a service-role key.
       if (url.pathname === '/rest/v1/projects' && req.method === 'POST') {
+        const bypassRls = String(req.headers.apikey || '') === SERVICE_ROLE_KEY;
         const userId = authedUser(req);
-        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        if (!bypassRls && !userId) return json(res, 401, { message: 'not authenticated' });
+        // The whole of 035: no INSERT policy, so an `authenticated` caller is
+        // refused whatever the row says — before the row is even looked at. The
+        // membership and created_by checks that used to live here are gone on
+        // purpose; reinstating either would make the mock model a policy that no
+        // longer exists.
+        if (!bypassRls) {
+          return json(res, 403, { message: 'new row violates row-level security policy for table "projects"' });
+        }
         const rows = Array.isArray(body) ? body : [body];
         const created = [];
         for (const r of rows) {
-          // projects_insert: `is_team_member(team_id) and created_by = auth.uid()`.
-          // Both halves, or the mock would be more permissive than the policy.
-          if (!isMember(r.team_id, userId)) return json(res, 403, { message: 'not a member of this team' });
-          if (r.created_by && r.created_by !== userId) {
-            return json(res, 403, { message: 'new row violates row-level security policy for table "projects"' });
-          }
-          // `unique (team_id, name)` (schema.sql:33) is a table constraint, so it
-          // binds this path too — unlike link_project's repo_url dedup, which is
-          // RPC logic and is genuinely bypassed here.
+          // `unique (team_id, name)` (schema.sql:33) is a table CONSTRAINT, not a
+          // policy, so it binds even the bypassing path — unlike link_project's
+          // repo_url dedup, which is RPC logic and is genuinely bypassed here.
           if (projects.some(p => p.teamId === r.team_id && p.name === r.name)) {
             return json(res, 409, { message: 'duplicate key value violates unique constraint "projects_team_id_name_key"' });
           }
@@ -973,7 +1009,7 @@ function createMockSupabase() {
     return inserted;
   };
 
-  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess };
+  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, serviceKey: SERVICE_ROLE_KEY };
 }
 
 module.exports = { createMockSupabase, pgTimestamptz };
