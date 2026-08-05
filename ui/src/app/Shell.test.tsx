@@ -183,4 +183,61 @@ describe('Shell', () => {
       expect(document.querySelectorAll('.nav-item-active').length).toBeGreaterThan(0)
     })
   })
+  // The rail's health dot is the only status indicator on every screen. It used
+  // to render on `status.running` alone, so BOTH running:false states -- a
+  // wedged sync loop and a daemon nobody has observed -- made it silently
+  // vanish, and the degraded-but-alive 'erroring' state showed the same healthy
+  // green as 'ok'. An absent dot asserts nothing, which is right for "not
+  // observed" and wrong for "stalled": that is exactly when the rail should be
+  // sending the user to look.
+  describe('rail health dot', () => {
+    const dot = () => document.querySelector('.status-dot')
+    // `Insights` only renders once Shell's `ready` is true, i.e. once the status
+    // AND settings queries have both resolved. Anchoring on the Settings link
+    // instead reads the dot mid-load, when status is still undefined and the dot
+    // is legitimately absent for every state -- which would make the two
+    // "no dot" cases pass for the wrong reason.
+    const railReady = () => screen.findByRole('link', { name: 'Insights' })
+
+    it('is green and says running when a pass completed', async () => {
+      renderWith(new FakeDataClient({ health: { state: 'ok', lastTickAt: '2026-07-29T21:00:00Z', lastTickError: null, staleForSec: 5 } }), <App />)
+      await railReady()
+      expect(dot()).toBeTruthy()
+      expect(dot()!.className).not.toMatch(/status-dot-(warn|bad)/)
+      expect(dot()!.getAttribute('aria-label')).toMatch(/running/i)
+    })
+
+    it('goes amber and names the failure while erroring, rather than reading healthy', async () => {
+      renderWith(new FakeDataClient({ health: { state: 'erroring', lastTickAt: '2026-07-29T21:00:00Z', lastTickError: 'boom', staleForSec: 9 } }), <App />)
+      await railReady()
+      expect(dot()!.className).toMatch(/status-dot-warn/)
+      expect(dot()!.getAttribute('aria-label')).toMatch(/last sync failed/i)
+    })
+
+    // The dot must be PRESENT here. Hiding it was the old behaviour and it is
+    // the wrong one: a stalled loop is the state most worth surfacing.
+    it('stays visible and turns red when the loop is stalled', async () => {
+      renderWith(new FakeDataClient({ health: { state: 'stalled', lastTickAt: '2026-07-29T18:00:00Z', lastTickError: null, staleForSec: 900 } }), <App />)
+      await railReady()
+      expect(dot()).toBeTruthy()
+      expect(dot()!.className).toMatch(/status-dot-bad/)
+      expect(dot()!.getAttribute('aria-label')).toMatch(/stalled/i)
+    })
+
+    // A dot is an assertion, so an unobserved state renders none.
+    it('shows no dot at all when health was never observed', async () => {
+      renderWith(new FakeDataClient({ health: { state: 'unknown', lastTickAt: null, lastTickError: null, staleForSec: null } }), <App />)
+      await railReady()
+      expect(dot()).toBeNull()
+    })
+
+    // An older daemon sends `running` alone; the rail keeps its original
+    // behaviour rather than editorialising about a field it cannot see.
+    it('falls back to the plain running dot when the daemon sends no health', async () => {
+      renderWith(new FakeDataClient({ health: null }), <App />)
+      await railReady()
+      expect(dot()).toBeTruthy()
+      expect(dot()!.className).not.toMatch(/status-dot-(warn|bad)/)
+    })
+  })
 })

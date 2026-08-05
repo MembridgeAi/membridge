@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
@@ -34,6 +34,58 @@ describe('FirstRun', () => {
     renderWith(client, <FirstRun />)
     await user.click(await screen.findByRole('button', { name: /get started/i }))
     expect(setSpy).toHaveBeenCalledWith('setupCompletedAt', expect.any(String))
+  })
+
+  // Settings honesty finding: this screen SHOWED the summaries switch as on
+  // (`summaries?.enabled ?? true` -- an assumption whenever the daemon has
+  // not reported a choice) while "Get started" wrote only setupCompletedAt.
+  // A user who read the consent, left the switch alone and pressed the button
+  // had agreed to something nothing recorded.
+  describe('summaries consent', () => {
+    it('records the consent it displayed, not just the completion stamp', async () => {
+      const client = new FakeDataClient()
+      const base = await client.getSettings()
+      // The daemon has reported nothing about this channel, so ON is purely
+      // the screen's own default -- exactly the case that used to go
+      // unrecorded.
+      vi.spyOn(client, 'getSettings').mockResolvedValue({
+        ...base,
+        delivery: base.delivery.map(c => c.id === 'summaries' ? { ...c, enabled: null } : c),
+      })
+      const setSpy = vi.spyOn(client, 'setSetting')
+      renderWith(client, <FirstRun />)
+      expect(await screen.findByRole('switch', { name: 'Session summaries' })).toHaveAttribute('aria-checked', 'true')
+      await userEvent.click(screen.getByRole('button', { name: /get started/i }))
+      await waitFor(() => expect(setSpy).toHaveBeenCalledWith('distill', { enabled: true }))
+      expect(setSpy).toHaveBeenCalledWith('setupCompletedAt', expect.any(String))
+    })
+
+    it('records the OFF choice when that is what the screen is showing', async () => {
+      const client = new FakeDataClient()
+      const base = await client.getSettings()
+      vi.spyOn(client, 'getSettings').mockResolvedValue({
+        ...base,
+        delivery: base.delivery.map(c => c.id === 'summaries' ? { ...c, enabled: false } : c),
+      })
+      const setSpy = vi.spyOn(client, 'setSetting')
+      renderWith(client, <FirstRun />)
+      await screen.findByRole('button', { name: /get started/i })
+      await userEvent.click(screen.getByRole('button', { name: /get started/i }))
+      await waitFor(() => expect(setSpy).toHaveBeenCalledWith('distill', { enabled: false }))
+    })
+
+    // Setup must not complete over a consent write the daemon refused --
+    // App.tsx takes this takeover down on setupDone, so that is the last
+    // moment the failure can be seen at all.
+    it('does not complete setup when the consent write is refused', async () => {
+      const client = new FakeDataClient()
+      const setSpy = vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('consent write rejected'))
+      renderWith(client, <FirstRun />)
+      await userEvent.click(await screen.findByRole('button', { name: /get started/i }))
+      expect(await screen.findByText(/consent write rejected/i)).toBeInTheDocument()
+      expect(setSpy).toHaveBeenCalledWith('distill', { enabled: true })
+      expect(setSpy).not.toHaveBeenCalledWith('setupCompletedAt', expect.any(String))
+    })
   })
 
   it('surfaces a load failure instead of rendering a blank page', async () => {

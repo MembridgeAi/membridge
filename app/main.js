@@ -223,6 +223,13 @@ function installNavigationGuards(contents) {
   });
 }
 
+// Window geometry. See the comment in openDashboard for how the floors are
+// derived and why the default is clamped rather than fixed.
+const DEFAULT_WINDOW_WIDTH = 1100;
+const DEFAULT_WINDOW_HEIGHT = 800;
+const MIN_WINDOW_WIDTH = 900;
+const MIN_WINDOW_HEIGHT = 600;
+
 function openDashboard() {
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore();
@@ -230,9 +237,46 @@ function openDashboard() {
     win.focus();
     return;
   }
+  // 1100x800 is the size the layout is built around, but it is not safe to
+  // request unconditionally: 800 is taller than the usable work area of a
+  // 1280x800 display once the menu bar and Dock are subtracted, so a fixed 800
+  // opens a window taller than the screen on those machines. Clamping to the
+  // display's work area opens at 1100x800 where there is room and shrinks to
+  // fit where there is not. `screen` is read here rather than at module scope
+  // because it is unavailable until the app is ready, and every caller of
+  // openDashboard runs post-ready.
+  //
+  // The floors are floors, not preferences — the window must not be draggable
+  // narrower or shorter than the layout survives — so they win over the work
+  // area: on a display smaller than the floor the window is intentionally
+  // larger than the work area, which is what minWidth/minHeight would enforce
+  // anyway.
+  //   minWidth 900 — the rail is a fixed 170px column (measured: 170px),
+  //     leaving 730px of content. The Projects table is the widest thing the
+  //     app renders and is therefore the binding constraint: its min-content is
+  //     646px with the full column set, 496px in select mode, 517px solo, so
+  //     730px clears all three. It only clears them because projects.css bounds
+  //     the project name and path with `overflow-wrap: anywhere`; without that
+  //     bound a single 90-character path takes the table to 1132px and no
+  //     window width this side of ~1300 contains it. See the note on
+  //     .projects-table in ui/src/features/projects/projects.css. If that bound
+  //     is ever removed this floor stops meaning anything.
+  //   minHeight 600 — the rail carries the app's only persistent navigation.
+  //     The tallest rail that can actually render measures 445px (logo, team
+  //     switcher, nav, footer). It is not the sum of every element in Shell.tsx:
+  //     the create-team CTA requires !onTeam, which is mutually exclusive with
+  //     both the team nav group and the team switcher, so those three can never
+  //     stack. 600 clears 445 and still leaves the Projects header plus a
+  //     useful run of rows.
+  //
+  // There is deliberately no window-state persistence: size is not remembered
+  // between launches. Adding it is a separate change, not a side effect here.
+  const workArea = require('electron').screen.getPrimaryDisplay().workAreaSize;
   win = new BrowserWindow({
-    width: 920,
-    height: 720,
+    width: Math.max(MIN_WINDOW_WIDTH, Math.min(DEFAULT_WINDOW_WIDTH, workArea.width)),
+    height: Math.max(MIN_WINDOW_HEIGHT, Math.min(DEFAULT_WINDOW_HEIGHT, workArea.height)),
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     title: 'MemBridge',
     autoHideMenuBar: true,
     icon: nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png')),

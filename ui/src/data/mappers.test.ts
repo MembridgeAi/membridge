@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf,
   latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
-  memberActivity, memberIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
+  memberActivity, recentAuthorIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import type { LiveSession, StreamEntry } from './types'
@@ -358,7 +358,7 @@ describe('groupLiveSessions', () => {
   })
 })
 
-describe('latestSummaryFor and memberIdsFor', () => {
+describe('latestSummaryFor and recentAuthorIdsFor', () => {
   it('picks the first entry (newest-first) that carries a headline or summary', () => {
     const stale = entry({ headline: 'old work', ts: '2026-07-28T00:00:00Z', author: 'You', authorId: 'me' })
     const fresh = entry({ headline: 'fresh work', ts: '2026-07-29T00:00:00Z', author: 'Andrew', authorId: 'andrew' })
@@ -368,7 +368,7 @@ describe('latestSummaryFor and memberIdsFor', () => {
     expect(latestSummaryFor([entry()])).toBeNull()
   })
   it('collects distinct non-null authorIds', () => {
-    const ids = memberIdsFor([entry({ authorId: 'andrew' }), entry({ authorId: 'andrew' }), entry({ authorId: 'sarah' }), entry({ authorId: null })])
+    const ids = recentAuthorIdsFor([entry({ authorId: 'andrew' }), entry({ authorId: 'andrew' }), entry({ authorId: 'sarah' }), entry({ authorId: null })])
     expect(ids.sort()).toEqual(['andrew', 'sarah'])
   })
 })
@@ -395,7 +395,7 @@ describe('mapProjectRow', () => {
     const team = entry({ projectPath: null, projectId: 'proj-1', authorId: 'sarah' })
     const other = entry({ projectPath: '/Users/x/other', projectId: 'proj-9', authorId: 'ghost' })
     const p = mapProjectRow(row, [local, team, other])
-    expect(p.memberIds.sort()).toEqual(['me', 'sarah'])
+    expect(p.recentAuthorIds.sort()).toEqual(['me', 'sarah'])
   })
   it('carries the daemon archived and missing flags, defaulting absence to false', () => {
     const p = mapProjectRow({ ...row, archived: true, missing: true }, [])

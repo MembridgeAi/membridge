@@ -65,11 +65,32 @@ describe('SearchPage', () => {
     expect(await screen.findByText('files', {}, SETTLED)).toBeInTheDocument()
   })
 
+  // Was `findByText('No matches.')` -- a bare dim line above an empty pane,
+  // which is what users reported as the screen "going black". The empty state
+  // now has to name what was searched and say what to do next, so the
+  // assertions moved onto those two facts.
   it('reports an empty result set honestly once a search HAS run', async () => {
     const user = userEvent.setup()
     renderApp({}, <SearchPage />)
     await search(user, 'zzzz-nothing-matches')
-    expect(await screen.findByText('No matches.', {}, SETTLED)).toBeInTheDocument()
+    expect(await screen.findByText(/No matches for "zzzz-nothing-matches"/, {}, SETTLED)).toBeInTheDocument()
+    expect(screen.getByText(/Try fewer words/i)).toBeInTheDocument()
+  })
+
+  // The recoverable half of empty: a filter, not the query, is why nothing came
+  // back -- so the state has to say so and offer the way out in place. Without
+  // this the person filter (which returns nothing for every person on real
+  // data) looks exactly like a corpus that holds nothing.
+  it('blames the filters, and offers a way out, when a filtered search finds nothing', async () => {
+    const user = userEvent.setup()
+    renderApp({}, <SearchPage />)
+    await search(user, 'zzzz-nothing-matches')
+    await user.selectOptions(await screen.findByLabelText('Filter by project', {}, SETTLED), '/Users/x/membridge')
+
+    expect(await screen.findByText(/Filters are narrowing this search/i, {}, SETTLED)).toBeInTheDocument()
+    const clear = screen.getByRole('button', { name: 'Clear filters' })
+    await user.click(clear)
+    await waitFor(() => expect(screen.getByLabelText('Filter by project')).toHaveValue(''), SETTLED)
   })
 
   it('surfaces a failure as a retryable error, not as an empty list', async () => {
@@ -104,6 +125,17 @@ describe('SearchPage', () => {
   // it is what makes the daemon drop self rows BEFORE ranking and before the
   // page limit. Filtering the returned page in the browser instead would leave
   // the reported match count describing rows the reader cannot see.
+  //
+  // KNOWN COVERAGE GAP -- read this before trusting this test.
+  // It asserts ONLY that `author: '!<viewerId>'` was handed to the client. It
+  // does NOT assert that a single row was hidden, and it cannot: measured
+  // against a live daemon, `authorId` is null on every row it serves, so
+  // '!<viewerId>' matches nothing, the negation keeps everything, and "Hide
+  // mine" hides nothing at all. This test passes over that. An
+  // outcome-asserting version (rows actually absent) is red until the daemon
+  // exposes a usable person identity -- that is the daemon ticket, and these
+  // assertions stay exactly as they are until it lands. Do not read green here
+  // as "Hide mine works".
   it('hides your own rows by negating the person filter, not by trimming the page', async () => {
     const user = userEvent.setup()
     const client = new FakeDataClient({ viewerId: 'usr_9f2a' })
@@ -118,6 +150,12 @@ describe('SearchPage', () => {
     )
   })
 
+  // KNOWN COVERAGE GAP, same shape as the test above: this asserts the
+  // outgoing filter is the chosen person's id and that Hide mine goes disabled.
+  // It does NOT assert that the results are that person's work -- on real data
+  // an id filter returns ZERO rows for every person, because no row carries an
+  // author id. The fixtures do carry ids, which is the only reason this is
+  // green. Blocked on the same daemon ticket.
   it('lets a chosen person supersede Hide mine instead of combining the two', async () => {
     const user = userEvent.setup()
     const client = new FakeDataClient({ viewerId: 'usr_9f2a' })

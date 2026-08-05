@@ -5,7 +5,7 @@
 // document.hidden and blanked the dashboard mid screen-recording).
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDataClient } from './DataClientProvider'
-import type { AccessMatrix, DeleteProjectResult, FeedFilters, Role } from './types'
+import type { AccessMatrix, DeleteProjectResult, FeedFilters, Role, Settings } from './types'
 
 const LIVE = { refetchInterval: 10_000, refetchIntervalInBackground: false } as const
 
@@ -173,6 +173,13 @@ export function useSkeletonStats() {
   return useQuery({ queryKey: ['skeletonStats'], queryFn: () => c.getSkeletonStats(), staleTime: STANDARD_STALE_MS })
 }
 
+// Deliberately NOT live-polled. getSettings() fans out to /api/settings,
+// /api/status and /api/team, so a refetchInterval here would triple this
+// page's request volume forever to solve a problem a button solves: the
+// Settings page owns an explicit Recheck control plus a "checked <when>"
+// stamp, so a stale reading is visible and fixable rather than silently
+// believed. Anything on the page that genuinely changes on its own -- the
+// daemon being up -- is read from the polled ['status'] query instead.
 export function useSettings() {
   const c = useDataClient()
   return useQuery({ queryKey: ['settings'], queryFn: () => c.getSettings(), staleTime: STANDARD_STALE_MS })
@@ -264,15 +271,59 @@ export function useUnarchiveProject() {
 // left intact). Returns the refusal reason, or null when the delete really
 // happened. Success is asserted positively -- an unrecognized body is treated
 // as "not confirmed" rather than assumed to have worked.
-export function deleteRefusalOf(result: DeleteProjectResult): string | null {
+export interface DeleteRefusal {
+  /** What to show the user. The daemon's own sentence when it sent one -- it
+   *  knows which of the three causes applied and already words each of them
+   *  actionably; only the fallbacks below are ours. */
+  message: string
+  /** Whether trying the identical delete again could succeed. Read straight off
+   *  the daemon's `retryable`, never re-derived from `refusal` here: the daemon
+   *  owns the indeterminate set, so a determinate refusal it adds later is
+   *  correctly non-retryable for this client without this client being changed.
+   *  An older daemon sends neither field, which lands on false -- the behaviour
+   *  this code had before the discriminator existed. */
+  retryable: boolean
+}
+
+export function deleteRefusalOf(result: DeleteProjectResult): DeleteRefusal | null {
   if (result.deleted === true || result.archived === true) return null
-  if (result.message) return result.message
-  if (result.archived === false) return 'The daemon did not delete this project.'
+  const retryable = result.retryable === true
+  if (result.message) return { message: result.message, retryable }
+  if (result.archived === false) return { message: 'The daemon did not delete this project.', retryable }
   // Fail closed. Every branch the daemon ships today sets one of the fields
   // above, so this is unreachable now, but a body we do not recognize must
   // never be read as a completed destruction: a future fourth branch would
   // otherwise close the dialog and report success for work that never ran.
-  return 'The daemon did not confirm this delete.'
+  return { message: 'The daemon did not confirm this delete.', retryable }
+}
+
+/**
+ * A refusal, carried through react-query's error channel.
+ *
+ * A refusal has to REJECT (see useDeleteProject below) so that no success path
+ * can run for a destruction that never happened -- but a plain `new
+ * Error(message)` threw away the one bit the screen needs, so the dialog drew
+ * an outage and a genuine "you are not a manager" identically: same weight,
+ * same finality, no retry affordance for the case that is entirely retryable.
+ * The distinction is NOT recoverable by matching on the sentence, and a copy
+ * edit that tried would change behaviour silently.
+ */
+export class DeleteRefusedError extends Error {
+  readonly retryable: boolean
+  constructor(refusal: DeleteRefusal) {
+    super(refusal.message)
+    this.name = 'DeleteRefusedError'
+    this.retryable = refusal.retryable
+  }
+}
+
+/** True only for a refusal the DAEMON marked retryable. A transport failure
+ *  (the request itself threw) is deliberately excluded: it is a different
+ *  error type, nothing is known about what the daemon did or did not do, and
+ *  inviting a retry on an unknown local outcome is not the same promise as
+ *  "nothing on this machine was changed". */
+export function isRetryableDeleteRefusal(error: unknown): boolean {
+  return error instanceof DeleteRefusedError && error.retryable
 }
 
 // Destructive single-project delete (Task 6). Refreshes the projects list
@@ -292,7 +343,7 @@ export function useDeleteProject() {
     mutationFn: async (projectPath: string) => {
       const result = await c.deleteProject(projectPath)
       const refusal = deleteRefusalOf(result)
-      if (refusal) throw new Error(refusal)
+      if (refusal) throw new DeleteRefusedError(refusal)
       return result
     },
     onSuccess: () => {
@@ -531,11 +582,58 @@ function settingsRefresh(qc: ReturnType<typeof useQueryClient>): void {
   qc.invalidateQueries({ queryKey: ['status'] })
 }
 
+// The optimistic half of useSetSetting, for the keys whose control on the
+// Settings page is a LIVE switch or select rather than a dialog. Returns null
+// for anything else, which means "no cache patch" -- every other setting on
+// that page is edited in a dialog that stays open with its own pending state
+// until the write resolves, so it already shows in-flight honestly and a
+// speculative patch would only add a way to be wrong.
+//
+// Why this exists: a switch that does not move until the write returns and the
+// query refetches reads as "it didn't take", so users flip it again, which
+// queues a second write and lands them on the opposite value from the one they
+// wanted. Same shape of fix as useSetProjectAccess above, and the same
+// obligation: rollback on failure, and the rollback has to be VISIBLE (the
+// Settings rows name the failed action inline) -- a switch that silently snaps
+// back is worse than one that lags.
+function isEnabledFlag(value: unknown): value is { enabled: boolean } {
+  return typeof value === 'object' && value !== null && typeof (value as { enabled?: unknown }).enabled === 'boolean'
+}
+
+function optimisticSettings(prev: Settings, key: string, value: unknown): Settings | null {
+  if (key === 'startAtLogin' && typeof value === 'boolean') {
+    return { ...prev, daemon: { ...prev.daemon, startAtLogin: value } }
+  }
+  if (key === 'intervalSec' && typeof value === 'number') {
+    return { ...prev, daemon: { ...prev.daemon, intervalSec: value } }
+  }
+  if (key === 'distill' && isEnabledFlag(value)) {
+    const enabled = value.enabled
+    return { ...prev, delivery: prev.delivery.map(c => c.id === 'summaries' ? { ...c, enabled } : c) }
+  }
+  return null
+}
+
 export function useSetSetting() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (vars: { key: string; value: unknown }) => c.setSetting(vars.key, vars.value),
+    onMutate: async (vars): Promise<{ previous?: Settings }> => {
+      const previous = qc.getQueryData<Settings>(['settings'])
+      if (!previous) return {}
+      const next = optimisticSettings(previous, vars.key, vars.value)
+      if (!next) return {}
+      // Only cancelled once there is really a patch to apply -- cancelling an
+      // in-flight settings refetch for a key we are not going to touch would
+      // discard a good answer for nothing.
+      await qc.cancelQueries({ queryKey: ['settings'] })
+      qc.setQueryData<Settings>(['settings'], next)
+      return { previous }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) qc.setQueryData(['settings'], context.previous)
+    },
     onSuccess: () => settingsRefresh(qc),
   })
 }
@@ -582,9 +680,27 @@ export function useSetProjectAccessDefault() {
 // refresh `settings` once the write lands (checkForUpdates writes the
 // on-disk cache GET /api/settings reads).
 // ---------------------------------------------------------------------------
+// A restart moves every value on the Settings page (port, version, uptime,
+// hook vintages) AND status.running, and this mutation used to invalidate
+// nothing at all -- so pressing Restart left the whole page, Status chip
+// included, serving the pre-restart snapshot indefinitely.
+//
+// The invalidation is NOT the confirmation, and callers must not treat it as
+// one. lib/server.js's /api/daemon/restart writes { ok: true, restarting: true }
+// to the socket BEFORE the replacement process is spawned, and only logs a
+// throw from the spawn -- so this mutation resolving proves the request was
+// accepted, never that a restart happened. The only observable proof is the
+// daemon answering a later request; DaemonGroup therefore holds "restarting…"
+// until a fresh ['status'] answer lands (that query polls, so the confirmation
+// arrives even if the invalidated refetch below lands inside the down window
+// and fails).
 export function useRestartDaemon() {
   const c = useDataClient()
-  return useMutation({ mutationFn: () => c.restartDaemon() })
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => c.restartDaemon(),
+    onSuccess: () => settingsRefresh(qc),
+  })
 }
 
 export function useCheckForUpdates() {

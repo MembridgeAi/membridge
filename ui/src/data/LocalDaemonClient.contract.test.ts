@@ -28,6 +28,10 @@ const LEGITIMATELY_UNBACKED = new Set<DataClientMethod>([
   // nothing for this test's "did it try a real request" check to observe.
   'selectTeam',
   'selectedTeamId',
+  // Drops the transport's own short-TTL read cache so the NEXT read is a real
+  // round trip. It issues no request of its own -- there is nothing here for
+  // this test's "did it try a real request" check to observe.
+  'forgetCachedReads',
   // pickPaths never has a daemon endpoint to attempt -- it is routed through
   // the Electron IPC bridge (window.membridge, set by app/preload.js), not
   // fetch, because the daemon is a separate process with no GUI to show a
@@ -69,6 +73,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   // Synchronous, local, and deliberately request-free -- exempted below.
   selectTeam: async c => { c.selectTeam(null) },
   selectedTeamId: async c => { c.selectedTeamId() },
+  forgetCachedReads: async c => { c.forgetCachedReads() },
   renameTeam: c => c.renameTeam('team-1', 'Acme AI'),
   rotateInviteCode: c => c.rotateInviteCode('team-1'),
   getInvites: c => c.getInvites(),

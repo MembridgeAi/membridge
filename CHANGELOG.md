@@ -2,18 +2,65 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-08-04
+
+- **Insights opens for whoever owns the team, full stop.** 0.2.9 restored the
+  file whose absence locked the owner out; this removes the reason that
+  absence could lock anyone out in the first place. The page was asking
+  `solo` — a flag that answers "is anyone else actually here", which the
+  daemon works out from whether a *linked project* belongs to a multi-member
+  team. That is a different question from "do you have a team", and the gap
+  between them is where an owner fell through: own a real team, have no repo
+  linked yet, and the page told you Insights was for owners and admins.
+  Authorization now turns on membership and role, which is what it always
+  meant. The navigation rail had already been corrected this way, so the link
+  and the page behind it finally agree — an owner of a one-person team can see
+  their own numbers too.
+
+## 0.2.9 — 2026-08-04
+
+- **Fixed: a team owner could be locked out of their own Insights page.** The
+  page read "Insights is available to team owners and admins" to someone who
+  was, in fact, the owner. The cause was not in the page: `.membridge/team.json`
+  had been deleted from the repository. Everything else under `.membridge/` is
+  per-machine derived data, but that one file is source — it pins the shared
+  backend project so every clone and fork resolves to the same team instead of
+  minting its own. With it gone no project belonged to a multi-member team, the
+  daemon reported the machine as solo, and Insights gates on that. The file is
+  restored and `.gitignore` still carries the exception that keeps it tracked.
+  If you cloned in the last day, pull before wondering where your team went.
+- **Plainer language when something is wrong.** Full-page errors say
+  "MemBridge" rather than "daemon", the Team page states what each state
+  actually means instead of naming the mechanism behind it, and the Insights
+  copy no longer promises more than it measures.
+- **The installer no longer advertises working around Gatekeeper.** The mac
+  build is signed and notarized, so the quarantine flag is left exactly where
+  macOS puts it, and the install test now asserts that it is *not* stripped.
+
 - **You can ask what a teammate is working on.** Recent activity now takes a
   person (and a project), so "what is Andrew on?" is a question with an answer
   instead of a page of everyone's work you have to read through. The filter is
   applied before the page is cut, which is the part that actually broke it
   before: narrowing a page of fifty to one person routinely left nothing, and
   nothing reads as "they are idle" rather than "ask for more rows".
-  The answer is deliberately phrased as **"as of four minutes ago"** rather
-  than "right now". This reads memory that has already synced to your machine,
-  so there is always some lag, and a live badge means a row arrived recently —
-  good evidence of recent work, never proof someone is at the keyboard. That
-  distinction only became trustworthy now that timestamps come from a real
-  clock (below).
+- **"Working now" is a thing MemBridge can actually say.** Liveness used to be
+  one flat fifteen-minute flag, so a teammate whose work landed twenty seconds
+  ago and one who stopped fourteen minutes ago looked identical — which meant
+  the only safe thing to report about either was a hedge. Activity is now
+  graded **active / recent / idle**, and `active` is a claim worth making: a
+  teammate's work reaches the backend within one sync cycle, so a row that new
+  cannot exist unless their tooling was running. The threshold follows your
+  configured sync interval instead of being a fixed number, because a team
+  syncing every ten seconds and one syncing every five minutes cannot both be
+  described by the same window.
+  Grading is on **newest activity, not the last prompt**. Someone asks a
+  question and their agent then works for twenty minutes: judged on the ask
+  they look gone, judged on what they are actually doing they are plainly
+  still going. So "asked about the invite flow 13 minutes ago and still
+  working on it" is now expressible, and it is the honest answer.
+  Anything older still gets its real age rather than a present-tense claim,
+  and that whole distinction only became trustworthy now that timestamps come
+  from a real clock (below).
 
 - **Search runs on a real search engine now.** Memory is indexed into SQLite
   FTS5 and ranked by BM25 instead of being scored by a hand-rolled scan over

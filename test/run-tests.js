@@ -768,7 +768,13 @@ async function main() {
   });
   check('install.sh template carries the safety-critical steps', () => {
     const tmpl = readSource(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
-    assert.ok(tmpl.includes('com.apple.quarantine'), 'quarantine strip missing');
+    // The installer used to strip com.apple.quarantine. Now that the app is
+    // signed and notarized under the hardened runtime, Gatekeeper clears it on
+    // its own, and stripping the attribute would only suppress the check that
+    // proves the bundle is the one we signed. Asserted as an absence so the
+    // strip cannot quietly come back as "belt-and-suspenders".
+    assert.ok(!tmpl.includes('com.apple.quarantine'),
+      'installer must not strip quarantine — notarization is what clears Gatekeeper');
     assert.ok(tmpl.includes('ELECTRON_RUN_AS_NODE=1'), 'CLI wrapper runtime missing');
     assert.ok(tmpl.includes('shasum -a 256'), 'sha256 verification missing');
     assert.ok(tmpl.includes('__MEMBRIDGE_VERSION__') && tmpl.includes('__MEMBRIDGE_SHA256__'),

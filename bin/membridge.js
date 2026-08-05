@@ -31,7 +31,7 @@ const memorydb = require('../lib/memorydb');
 // pulling in the whole server"; that move would buy nothing while line 28
 // requires the server anyway, and it would churn a file three other branches
 // are editing. Revisit if the CLI ever stops loading the server eagerly.
-const { startServer, adoptProjects } = require('../lib/server');
+const { startServer, adoptProjects, noteTick } = require('../lib/server');
 const autostart = require('../lib/autostart');
 const teamsync = require('../lib/teamsync');
 const hooks = require('../lib/hooks');
@@ -179,8 +179,18 @@ function cmdDaemon() {
       if (idx && idx.refreshed) util.log(`search index: refreshed ${idx.refreshed} project(s)`);
       teamTick();
       countersTick();
+      // Record that a pass completed, so /api/status can report the sync loop's
+      // real state instead of asserting a healthy one. This covers the
+      // SYNCHRONOUS work above (local sync + search index) and claims nothing
+      // about teamTick/countersTick, which are fire-and-forget and surface
+      // their own outcomes through state (teamLastSync, teamAuthPaused).
+      noteTick({ ok: true });
     } catch (err) {
       util.log(`sync error: ${err.stack || err}`);
+      // A throwing pass is NOT a dead loop — this catch is why the loop keeps
+      // going — so it is recorded as erroring rather than left to age into
+      // "stalled", which would describe the wrong problem.
+      noteTick({ ok: false, error: err.message });
     }
   };
   // Anonymous product-health counters, on the same tick and guarded the same
@@ -336,8 +346,12 @@ function printMcpStatus(config) {
 
 // Teammate activity is still something to inject, so a project with no local
 // sessions of its own says which of the two it is rather than reading as dead.
+// Through util.teamRowsFor, never proj.teamEntries directly (lib/util.js's own
+// note on that function): a revoked project still has its last pulled rows in
+// the local cache, and reading them raw made `status` report teammate work
+// waiting to be injected for a project nothing will ever inject again.
 function emptyProjectDetail(proj) {
-  const n = (proj.teamEntries || []).length;
+  const n = util.teamRowsFor(proj).length;
   if (!n) return 'no sessions captured yet, nothing to inject';
   return `no local sessions yet, ${n} teammate entr${n === 1 ? 'y' : 'ies'} synced`;
 }
@@ -1000,6 +1014,8 @@ async function cmdTeam() {
     return;
   }
 
+  if (sub === 'repull') return cmdTeamRepull(config);
+
   if (sub === 'list') {
     const creds = teamsync.loadCredentials();
     console.log(creds ? `Logged in as ${creds.email} (${creds.displayName})` : 'Not logged in.');
@@ -1025,7 +1041,131 @@ async function cmdTeam() {
     return;
   }
 
-  die(`Unknown team subcommand: ${sub}\nUsage: membridge team <setup|create|invite|revoke-invite|join|link|unlink|list|share-prompts|fingerprint|trust>`);
+  die(`Unknown team subcommand: ${sub}\nUsage: membridge team <setup|create|invite|revoke-invite|join|link|unlink|list|repull|share-prompts|fingerprint|trust>`);
+}
+
+// ---------------------------------------------------------------------------
+// team repull — re-walk a linked project's team history from the beginning.
+// ---------------------------------------------------------------------------
+// WHY THIS EXISTS. Rows pulled before the daemon carried author_id have no
+// stable identity on this disk (lib/teamsync.js mapPulledRow), and the two
+// features built on that id — filtering search by person, and resolving one
+// account's several display names to one person — are forward-only by
+// construction. A full re-walk is the ONLY way rows already on disk acquire it.
+// It self-heals both stores: proj.teamEntries is replaced in place by the
+// pull's own name-key fallback, and the durable archive heals because readRows
+// is last-line-wins per rowKey, so a re-appended line carrying the id beats the
+// original.
+//
+// EXPLICITLY OPT-IN, NEVER AUTOMATIC, and a CLI verb rather than a setting: a
+// toggle would imply standing state something has to clear later, while this is
+// a one-shot maintenance walk with a real cost (one page per pass, every pass
+// marks the project dirty so the injected block is rewritten each time).
+//
+// It adds NO pull machinery. The cursor is reset once, then this loops the
+// ordinary syncTeams({ project }) pass the daemon already runs every tick — so
+// every state.json write here is exactly as wide as one the daemon does anyway,
+// which matters on a file with no locking. Nothing new is persisted: progress
+// is printed, not stored, because it is worthless once this process exits.
+//
+// COMPACTION IS A PRECONDITION, not a nicety. Before lib/team-archive.js
+// rewrote on duplicate keys, this walk re-appended every row it re-fetched and
+// roughly doubled the .ndjson permanently. Do not ship one without the other.
+const REPULL_MAX_PASSES = 400; // 400 * PULL_LIMIT(200) = 80k rows/project, well past the 50k archive cap
+
+function repullTargets(all, projectPath) {
+  const state = util.loadState();
+  const linked = Object.keys(state.projects || {}).filter(k => teamsync.loadTeamLink(k));
+  if (all) return linked;
+  const key = findProjectKey(state, projectPath);
+  if (!key) die(`Not a tracked project: ${projectPath}\n(Use --project <path>, or --all for every linked project.)`);
+  if (!linked.includes(key)) die(`${key} is not linked to a team, so there is no team history to re-pull.`);
+  return [key];
+}
+
+// Distinct archived rows, and how many carry the stable author id — the actual
+// point of the walk, read once per project rather than per pass.
+function archiveIdCoverage(projectId) {
+  try {
+    const rows = require('../lib/team-archive').loadArchive(projectId).rows;
+    return { total: rows.length, withId: rows.filter(r => r && r.authorId).length };
+  } catch {
+    return { total: 0, withId: 0 };
+  }
+}
+
+async function cmdTeamRepull(config) {
+  if (!teamsync.isConfigured(config)) die('Team sync is not set up on this machine. Run `membridge signup` (or `membridge login`) first.');
+  if (!teamsync.loadCredentials()) die('Not logged in. Run `membridge login` first.');
+  const all = flag('--all');
+  const targets = repullTargets(all, path.resolve(opt('--project') || process.cwd()));
+  if (!targets.length) {
+    console.log('No linked projects to re-pull.');
+    return;
+  }
+
+  console.log(`Re-pulling team history for ${targets.length} project(s), one page per pass.`);
+  console.log('This re-fetches history you already have, so it is safe to interrupt and safe to re-run.');
+  if (isRunning(readPid())) {
+    // Not a refusal: the daemon and this command both go through syncTeams, so
+    // they interleave safely. But every pass marks the project dirty, so the
+    // user's context files get rewritten repeatedly for the duration, and they
+    // should hear that from the command rather than notice it in git.
+    console.log('NOTE: the MemBridge daemon is running, so your CLAUDE.md/AGENTS.md blocks will be rewritten repeatedly while this runs.');
+  }
+  // The one way this opt-in operation continues without being asked to. Said
+  // here, in the command's own output, because a user who hits Ctrl-C is owed
+  // the fact that it has not fully stopped.
+  console.log('If you interrupt this, the reset cursor stays reset: the running daemon will keep walking the');
+  console.log('remaining history on its own, one page per sync tick. Re-run this command to finish it in the foreground.\n');
+
+  for (const key of targets) {
+    const link = teamsync.loadTeamLink(key);
+    const before = archiveIdCoverage(link.projectId);
+    const name = path.basename(key);
+
+    // Reset the FORWARD cursor only, in one narrow load->save. The archive's
+    // backward backfill cursor is deliberately untouched: it walks the other
+    // direction and is separately capped.
+    {
+      const st = util.loadState();
+      if (!st.projects || !st.projects[key]) {
+        console.log(`${name}: no longer tracked, skipped.`);
+        continue;
+      }
+      st.projects[key].teamPullTs = null;
+      util.saveState(st);
+    }
+
+    let passes = 0;
+    let cursor = null;
+    for (; passes < REPULL_MAX_PASSES; passes += 1) {
+      const r = await teamsync.syncTeams({ project: key });
+      for (const e of r.errors) console.log(`  ${name}: ${e}`);
+      const proj = (util.loadState().projects || {})[key];
+      const next = proj ? (proj.teamPullTs || null) : null;
+      if (!r.changed.includes(key)) break; // a pass that pulled nothing is the end of history
+      if (next && next === cursor) {
+        // The cursor stopped moving while rows kept arriving: pulling the same
+        // page forever would be an infinite loop, so stop and say so rather
+        // than spin. Reported, never silently treated as completion.
+        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${next} while rows were still arriving.`);
+        break;
+      }
+      cursor = next;
+      console.log(`  ${name}: pass ${passes + 1} · cursor now ${cursor || 'start of history'}`);
+    }
+    if (passes >= REPULL_MAX_PASSES) console.log(`  ${name}: stopped at the ${REPULL_MAX_PASSES}-pass safety limit; re-run to continue.`);
+
+    // Rebuild what the pulled rows feed, exactly as a normal sync pass would.
+    syncOnce({ project: key });
+    rebuildNotesForChanged([key]);
+
+    const after = archiveIdCoverage(link.projectId);
+    console.log(`${name}: ${passes} pass(es) · archive holds ${after.total} row(s), ` +
+      `${after.withId} with an author id (was ${before.withId} of ${before.total}).\n`);
+  }
+  console.log('Done. Search person-filters and display-name resolution now cover the re-walked history.');
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1263,11 @@ Team sync (share project memory with your team, see README):
   team link [--project <path>] [--team <id>]   sync this project with the team
   team unlink [--project <path>]               stop syncing this project
   team list                your login, teams and linked projects
+  team repull [--project <path>|--all]         re-walk team history so older entries gain a
+                           stable author id (search person-filters, one name per teammate).
+                           Opt-in and one-shot; safe to interrupt and re-run. If you do
+                           interrupt it, a running daemon keeps walking the rest one page
+                           per tick.
   team share-prompts <on|off>  also upload your (redacted) prompts; off = summaries/files only
   team setup ...           advanced: point at your own self-hosted backend
 

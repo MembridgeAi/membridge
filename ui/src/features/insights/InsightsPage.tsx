@@ -60,7 +60,11 @@ function deltaNote(delta: number | null): string | undefined {
 // can still run out of pages -- `exact: false` with `truncated: true`. That
 // combination is the ONLY thing this note is for, and it should never be
 // seen against a current backend.
-const CAP_NOTE = 'approximate — backend needs migration 027'
+const CAP_NOTE = 'approximate — this MemBridge server is out of date'
+
+// Shown wherever a figure reads "pending" (a fresh install whose ledger has
+// nothing yet): names what it's waiting on so it doesn't read as stuck.
+const PENDING_NOTE = 'No data yet — fills in as your tools run'
 
 function countValue(count: number, capped: boolean): string {
   return capped ? `≥${formatCount(count)}` : formatCount(count)
@@ -190,7 +194,8 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
   if (daemonError?.blocking) {
     return (
       <div className="insights-page">
-        <p className="insights-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
+        <p className="insights-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="insights-foot">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -212,11 +217,23 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
       label: 'sessions',
       note: insights.truncated ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
     },
-    { value: assistsHeadlineValue(insights.assists), label: 'times memory helped' },
+    {
+      value: assistsHeadlineValue(insights.assists),
+      label: 'times memory helped',
+      // Unlike the windowed cells around it, this is cumulative: assistsFrom
+      // (lib/api-insights.js) sums savingsPayload's per-project ledger totals
+      // with no window filter, so the honest scope is all time, not windowDays.
+      note: insights.assists.available ? 'all time' : PENDING_NOTE,
+    },
     {
       value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
       label: 'members syncing',
-      note: insights.membersSyncing.ok === insights.membersSyncing.total ? 'all healthy' : undefined,
+      // "ok" = members who have shared into the window; the rest we can only
+      // observe as quiet, never diagnose as broken (their machine is not
+      // visible from here), so the unequal note states what we can see.
+      note: insights.membersSyncing.ok === insights.membersSyncing.total
+        ? 'all healthy'
+        : `${insights.membersSyncing.total - insights.membersSyncing.ok} haven't shared recently`,
     },
     {
       value: countValue(insights.entriesShared.count, insights.truncated),
@@ -261,24 +278,28 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
           <PersonBars people={insights.perPerson} />
 
           <div className="insights-sect">
-            How well the skeleton is working <span className="insights-hint">last {windowDays} days</span>
+            How well shared memory is working <span className="insights-hint">last {windowDays} days</span>
           </div>
           <div className="skeleton-panel" data-testid="skeleton-panel">
             <div className="lrow" role="row">
               <span className="lrow-name">Repeat file opens</span>
-              <span className="mono lrow-value">
+              <span className="mono lrow-value" title={insights.skeleton.available ? undefined : PENDING_NOTE}>
                 {insights.skeleton.available ? formatCount(insights.skeleton.repeatOpens) : 'pending'}
               </span>
             </div>
             <div className="lrow" role="row">
               <span className="lrow-name">Answered by our memory first</span>
-              <span className="mono lrow-value lrow-value-good">
+              <span className="mono lrow-value lrow-value-good" title={insights.skeleton.available ? undefined : PENDING_NOTE}>
                 {insights.skeleton.available
                   ? `${formatCount(insights.skeleton.answeredFirst)} · ${headlinePercentLabel(insights.skeleton)}`
                   : 'pending'}
               </span>
             </div>
           </div>
+          <p className="insights-foot">
+            Repeat file opens: a file a past session already read, opened again. Answered first: how often
+            memory served it before the re-read — higher is better.
+          </p>
 
           <div className="insights-sect">
             Where memory helped <span className="insights-hint">behind the headline above</span>
@@ -335,7 +356,7 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
  * the nav entry, but a member could still type the URL, so this page holds
  * its own gate too and never mounts InsightsContent (and therefore never
  * calls getInsights()) for anyone else. Unknown (still loading, or failed)
- * defaults to solo/no-role, same as Shell.tsx and MembersPage.tsx -- this
+ * defaults to no-team/no-role, same as Shell.tsx and MembersPage.tsx -- this
  * screen never flashes on before its data confirms the viewer actually
  * holds an admin role on an actual team.
  */
@@ -353,7 +374,8 @@ export function InsightsPage() {
   if (outerError?.blocking) {
     return (
       <div className="insights-page">
-        <p className="insights-error" role="alert">Couldn't reach the daemon. {errorMessage(outerError.error)}</p>
+        <p className="insights-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="insights-foot">{errorMessage(outerError.error)}</p>
       </div>
     )
   }
@@ -363,10 +385,17 @@ export function InsightsPage() {
     return <div className="insights-page" />
   }
 
-  const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
-  const authorized = !solo && client.capabilities.teamAdminSupported && isTeamAdmin
+  // Membership, not `solo` -- the same correction Shell.tsx already carries.
+  // `solo` answers "is anyone else actually here", which it derives from
+  // whether a LINKED PROJECT belongs to a multi-member team. That is a
+  // different question from "do you have a team", and gating on it locked the
+  // owner of a real team out of their own Insights whenever no project
+  // happened to be linked. Membership is what authorization actually turns on;
+  // an owner with a team of one still owns the team.
+  const onTeam = !!settingsQuery.data?.team
+  const authorized = onTeam && client.capabilities.teamAdminSupported && isTeamAdmin
 
   if (!authorized) {
     return (

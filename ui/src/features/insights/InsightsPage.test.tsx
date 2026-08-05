@@ -160,13 +160,13 @@ describe('InsightsPage', () => {
 
   it('renders no dollar figure anywhere', async () => {
     const { container } = renderApp({}, <InsightsPage />)
-    await screen.findByText(/repeat file opens/i)
+    await screen.findByText('Repeat file opens')
     expect(container.textContent).not.toMatch(/\$/)
   })
 
   it('has no heat grid', async () => {
     renderApp({}, <InsightsPage />)
-    await screen.findByText(/repeat file opens/i)
+    await screen.findByText('Repeat file opens')
     expect(screen.queryByText(/when the team works/i)).toBeNull()
   })
 
@@ -184,6 +184,26 @@ describe('InsightsPage', () => {
     renderWith(client, <InsightsPage />)
     expect(await screen.findByText(/owners and admins/i)).toBeInTheDocument()
     expect(insightsSpy).not.toHaveBeenCalled()
+  })
+
+  // The owner-locked-out bug. `status.solo` does not mean "has no team": the
+  // daemon derives it from whether a LINKED PROJECT belongs to a multi-member
+  // team, so an owner whose repo link is missing -- or whose team is still
+  // just them -- reports solo while genuinely owning a team. Gating the page
+  // on !solo showed that owner "Insights is available to team owners and
+  // admins", which is exactly what happened in 0.2.8 when .membridge/team.json
+  // was deleted from the repo. The fake ties its own `solo` option to "no
+  // team", so the two have to be pulled apart by hand here.
+  it('renders for an owner whose machine reports solo but who is on a team', async () => {
+    const client = new FakeDataClient()
+    const status = await client.getStatus()
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, solo: true })
+    const settings = await client.getSettings()
+    expect(settings.team?.role).toBe('owner')
+
+    renderWith(client, <InsightsPage />)
+    expect(await screen.findByText('Repeat file opens')).toBeInTheDocument()
+    expect(screen.queryByText(/owners and admins/i)).toBeNull()
   })
 
   // Assists breakdown (owner's ask: "answered by our memory first should be
@@ -269,7 +289,7 @@ describe('InsightsPage', () => {
     const client = new FakeDataClient()
     const insightsSpy = vi.spyOn(client, 'getInsights')
     renderWith(client, <InsightsPage />)
-    await screen.findByText(/repeat file opens/i)
+    await screen.findByText('Repeat file opens')
     expect(insightsSpy).toHaveBeenCalledWith(30)
 
     await userEvent.click(screen.getByRole('button', { name: '7 days' }))

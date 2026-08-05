@@ -2,8 +2,11 @@ import { useState } from 'react'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
+import { readEncryption } from '../../components/encryptionState'
+import { useDataClient } from '../../data/DataClientProvider'
 import { useOpenConfigFile, useSetSetting, useSettings, useStatus } from '../../data/queries'
-import type { DeliveryChannel, HooksVersionStatus } from '../../data/types'
+import { absoluteTime, relativeAgo } from '../../data/relativeTime'
+import type { DeliveryChannel, HooksVersionStatus, Settings } from '../../data/types'
 import { ContextFilesDialog } from './ContextFilesDialog'
 import { DaemonGroup } from './DaemonGroup'
 import { EditListDialog } from './EditListDialog'
@@ -29,6 +32,9 @@ interface DeliveryControlProps {
   onSetSetting: SetSettingFn
   onChooseFiles: () => void
   hooksVersion: HooksVersionStatus
+  /** A delivery write is in flight, so the summaries switch must not accept a
+   *  second flip (which would queue an opposite write) -- see Toggle. */
+  settingPending: boolean
 }
 
 // A channel's dynamic specifics (which tools, when last checked) -- '' when
@@ -52,7 +58,7 @@ function ChannelDetail({ detail }: { detail: string }) {
 // through this early return too: Re-register (McpRegisterControl) must stay
 // available even when the daemon has never reported a check, since running
 // it IS how a check happens.
-function DeliveryControl({ channel, onSetSetting, onChooseFiles, hooksVersion }: DeliveryControlProps) {
+function DeliveryControl({ channel, onSetSetting, onChooseFiles, hooksVersion, settingPending }: DeliveryControlProps) {
   if (channel.installed === null) {
     return (
       <>
@@ -90,6 +96,7 @@ function DeliveryControl({ channel, onSetSetting, onChooseFiles, hooksVersion }:
           <Toggle
             label={channel.label}
             on={channel.enabled}
+            pending={settingPending}
             onChange={next => onSetSetting('distill', { enabled: next })}
           />
         )}
@@ -123,6 +130,55 @@ function DeliveryControl({ channel, onSetSetting, onChooseFiles, hooksVersion }:
   )
 }
 
+/**
+ * The whole state of team-memory encryption, in one row. The three-state
+ * decision itself lives in components/encryptionState.ts, shared with the
+ * project page's Sync panel; this component owns only the wording.
+ *
+ * It used to key off `endToEnd` alone, which collapsed two different facts:
+ * whether rows are encrypted at all, and whether a READABLE copy is written
+ * beside each encrypted one (`plaintextShared`, i.e. the daemon's team
+ * .plaintextOff being off). The dual-write middle state therefore rendered
+ * identically to the safe one -- a green "end-to-end" chip over a server that
+ * can read your memory. That distinction is the exact fact behind the plaintext
+ * history that made this row read-only, so showing half of it defeated the row.
+ *
+ * The encryption-off branch deliberately does NOT report plaintextShared: with
+ * no key, the daemon's nulling never runs (it lives inside encryptRow, which is
+ * skipped), so ciphertext-only is inert there. Reporting it would let a
+ * ciphertext-only reading imply a protection that is not in force.
+ */
+function EncryptionDetail({ privacy }: { privacy: Settings['privacy'] }) {
+  // Converted into the daemon's own vocabulary, which is what readEncryption
+  // takes: Settings' `plaintextShared` is the INVERSE of status.encryption
+  // .plaintextOff (see settingsMapper). Only the state and its tone come from
+  // the shared reading; the words below are this row's own, because it has room
+  // for a sentence and the project page's 300px side panel does not.
+  const { state, tone, glyph } = readEncryption(privacy.endToEnd, !privacy.plaintextShared)
+
+  if (state === 'off') {
+    return (
+      <>
+        <StateChip tone={tone} glyph={glyph}>plaintext shared</StateChip>
+        <span className="settings-note">
+          Encryption is off, so everything this machine syncs is readable on the server. Ciphertext-only has no effect until encryption is on.
+        </span>
+      </>
+    )
+  }
+  if (state === 'dual-write') {
+    return (
+      <>
+        <StateChip tone={tone} glyph={glyph}>end-to-end, readable copy also stored</StateChip>
+        <span className="settings-note">
+          Rows are encrypted, but a readable copy is still written beside each one, so the server can read your memory.
+        </span>
+      </>
+    )
+  }
+  return <StateChip tone={tone} glyph={glyph}>end-to-end, ciphertext only</StateChip>
+}
+
 type ActiveDialog = 'contextFiles' | 'redaction' | 'exclude' | null
 
 /**
@@ -138,6 +194,7 @@ type ActiveDialog = 'contextFiles' | 'redaction' | 'exclude' | null
  * patterns, Edit excluded folders).
  */
 export function SettingsPage() {
+  const client = useDataClient()
   const settingsQuery = useSettings()
   const statusQuery = useStatus()
   const setSetting = useSetSetting()
@@ -152,9 +209,8 @@ export function SettingsPage() {
   if (daemonError?.blocking) {
     return (
       <div className="settings-page">
-        <p className="settings-error" role="alert">
-          Couldn't reach the daemon. {errorMessage(daemonError.error)}
-        </p>
+        <p className="settings-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="settings-group-hint">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -170,6 +226,27 @@ export function SettingsPage() {
 
   const onSetSetting: SetSettingFn = (key, value) => setSetting.mutate({ key, value })
 
+  // Everything on this page except the Status chip is a one-shot read taken
+  // when the page mounted: hook vintages, MCP registration, update
+  // availability, stale excluded paths. Any of them can be minutes out of
+  // date by the time it is read, and nothing on screen said so. The fix is an
+  // explicit recheck plus a stamp, NOT a refetchInterval -- getSettings()
+  // fans out to three endpoints, so polling would triple this page's request
+  // volume forever to solve what a button solves once.
+  const checkedAt = settingsQuery.dataUpdatedAt
+    ? new Date(settingsQuery.dataUpdatedAt).toISOString()
+    : null
+  // forgetCachedReads FIRST, or this button is itself a false confirmation:
+  // getSettings()'s /api/status and /api/team reads (and the Status chip's own
+  // query) go through the transport's 5s coalescing cache, so a Recheck pressed
+  // inside that window re-stamped "checked just now" over answers up to five
+  // seconds old. Refetching react-query alone cannot reach that layer.
+  const recheck = () => {
+    client.forgetCachedReads()
+    settingsQuery.refetch()
+    statusQuery.refetch()
+  }
+
   return (
     <div className="settings-page">
       {daemonError && <DaemonErrorBanner className="settings-error" error={daemonError.error} />}
@@ -177,6 +254,14 @@ export function SettingsPage() {
         <h1 className="settings-title">Settings</h1>
         <span className="mono settings-scope">this machine</span>
         <div className="settings-header-right">
+          {checkedAt && (
+            <span className="settings-metric" title={absoluteTime(checkedAt) || undefined}>
+              {`checked ${relativeAgo(checkedAt)}`}
+            </span>
+          )}
+          <button type="button" className="settings-btn" onClick={recheck} disabled={settingsQuery.isFetching}>
+            {settingsQuery.isFetching ? 'Rechecking…' : 'Recheck'}
+          </button>
           <button type="button" className="settings-btn" onClick={() => openConfigFile.mutate()} disabled={openConfigFile.isPending}>
             Open config file
           </button>
@@ -190,34 +275,51 @@ export function SettingsPage() {
         Memory delivery
         <span className="settings-group-hint">how agents on this machine receive project memory</span>
       </div>
-      {setSetting.isError && (
-        <p className="settings-error" role="alert">Couldn't save the change. {errorMessage(setSetting.error)}</p>
-      )}
+      {/* The group used to carry one "Couldn't save the change." line above
+          every row. The only write in this group is the summaries switch, so
+          the message now names that control and sits on its row -- same rule
+          as the Background service group. */}
       {settings.delivery.map(channel => (
         <SettingRow
           key={channel.id}
           label={channel.label}
           description={channel.description}
           testId={`setting-${channel.id}`}
+          error={channel.id === 'summaries' && setSetting.isError
+            ? `Couldn't change Session summaries. ${errorMessage(setSetting.error)}`
+            : null}
         >
           <DeliveryControl
             channel={channel}
             onSetSetting={onSetSetting}
             onChooseFiles={() => setActiveDialog('contextFiles')}
             hooksVersion={settings.hooksVersion}
+            settingPending={setSetting.isPending}
           />
         </SettingRow>
       ))}
 
       <div className="settings-group-label">Privacy</div>
+      {/* READ-ONLY ON PURPOSE -- do not turn this back into a toggle.
+       *
+       * It used to read "Share plaintext with team" and be described as "Off
+       * means...", i.e. exactly like a switch, while its only child was a chip
+       * and it ignored clicks. Restated as a status row: the label names the
+       * state, and the description says where the state is actually changed.
+       *
+       * Marco's reasoning for keeping it read-only (his call, 2026-08-05): an
+       * accidental `encrypt: false` in his own config already shipped a full
+       * plaintext history to the server once. A privacy DOWNGRADE one click
+       * away, on a page with no confirmation step, is how that recurs. This
+       * row's job is to let him SEE the state, not to change it here; the
+       * config file is deliberately the only way in, and "Open config file"
+       * above is how you get there. */}
       <SettingRow
-        label="Share plaintext with team"
-        description="Off means teammates' apps decrypt locally; nothing readable is stored on the server"
+        label="Team memory encryption"
+        description="End-to-end means teammates' apps decrypt locally and nothing readable is stored on the server. Change it in your config file (team.encrypt, team.plaintextOff), not here."
         testId="setting-plaintext"
       >
-        {settings.privacy.endToEnd
-          ? <StateChip tone="ok" glyph="✓">end-to-end</StateChip>
-          : <StateChip tone="warn" glyph="⚠">plaintext shared</StateChip>}
+        <EncryptionDetail privacy={settings.privacy} />
       </SettingRow>
       <SettingRow
         label="Redaction patterns"

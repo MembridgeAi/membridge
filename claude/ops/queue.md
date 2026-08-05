@@ -101,6 +101,103 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
   session, and is ABSENT rather than 0 when the map cannot be read, because a
   session that genuinely produced no commits is a real 0.
 
+## Found 2026-08-04 evening by the agent team, uncommitted in three worktrees
+
+50 tickets. Work sits in `.claude/worktrees/{ui,hunt,search-identity}` on
+`fix/insights-solo-gate`, `agent-hunt` and `agent-search-identity`, all
+uncommitted, zero file overlap between them. `master` untouched at `549a4dd`.
+Slack: #handoffs 2026-08-04 evening (main message plus four thread replies).
+
+**Corrections to earlier reports, highest value first.**
+
+- **`scripts/verify-finding.js` is not on `master`.** It exists only on
+  `agent-hunt` and is not in the distributed kit zip. The Aug 4 setup handoff
+  told Andrew to confirm it exists as precondition 4, and the Aug 4 brief said
+  deciding whether a red test is real "is now a command instead of a judgment
+  call". Both are true on one unmerged branch only. Land it before anyone else
+  runs the team.
+
+- **The version-lockstep guard could not fail where it mattered, and CI proved
+  nothing.** `test/run-tests.js:661` spawns `scripts/prepare-app.js`, which
+  rewrites the tracked `app/package.json` from the root manifest
+  (`prepare-app.js:198-211`), so the assertion below compared the root version
+  against a copy of itself. `master` with real drift (root 0.3.0, app 0.2.8)
+  passed 1288/1288 unpatched, through CI on every push and through `npm
+  publish`'s `prepublishOnly`, across 0.2.9 and 0.3.0. `docs/releasing-macos.md`
+  step 1 told people to rely on the build to sync it, which is what produced the
+  drift. Now three independent checks plus `scripts/stamp-version.js` and an
+  `npm version` hook. **Landing consequence: the new check goes red until
+  someone runs `node scripts/stamp-version.js` and commits `app/package.json`
+  at 0.3.0 in the same commit.**
+
+- **The 2026-08-02 cwd-attribution entry below is FIXED**, and deliberately not
+  by re-homing. `rehomeEvents` now clears `ev.project` when an edit resolves to
+  no tracked root; a file genuinely inside the project keeps it. 235 of 5,188
+  edits were misattributions; zero were genuinely in-project-but-unresolvable,
+  so there was no re-attribution target. **16 sessions stop appearing** (13
+  Membridge, 2 AI, 1 Websites). The ask survives in the local memory DB with an
+  empty file list; the block, feed and team push drop it. Marco signed off.
+
+**Needs a human to apply, nothing is applied.**
+
+- Migrations `028`/`029` (enforce the project access default, then materialize
+  grants so the flag only governs new members), `030` (commit the live-only
+  `is_team_member_uid` behind `team_keys_insert`), `031` (commit the live-only
+  `ensure_rls` trigger, now fatal on failure per Marco). SQL editor only, `028`
+  then `029` together, **never `supabase db push`** — only 2 of 30+ migrations
+  are tracked as applied. Rollback read from live at
+  `hunt/supabase/rollback/pre-028-029-snapshot.sql`. `031` §1 is a
+  reconstruction, so diff it against live first.
+- Normalise Andrew's 100 `Andrew Brown` rows to `andrewludwigbrown` (approved).
+- The duplicate `membridge` / `Membridge` projects: 21 rows stranded in the
+  lowercase one, excluded from every search. Code half (case-insensitive
+  matching in `link_project`) not started; deliberately held so schema and data
+  land together.
+
+**Open, in flight at time of writing.**
+
+- `readAccess` reports the whole team as able to see a restricted project, for
+  any non-manager. `project_access`'s select policy is `is_team_manager` and RLS
+  *filters rather than errors*, so a member's read returns zero rows and the "no
+  row means visible" default fires. `028` does NOT close it: the fallback
+  becomes `defaultAccess`, still `true`.
+- `projects_insert` lets a member POST straight to `/rest/v1/projects`, bypassing
+  `link_project` and 029's materialization. 029's invariant is a client
+  convention, not a schema constraint.
+- `memory_entries_insert`/`_update` gate on membership and `author_id` only, so
+  a revoked member can still write to a project they cannot read. Pre-existing.
+- `project_access` needs an index on `(project_key, member_id)` — not a PK
+  prefix, so `can_see_project` sequentially scans per row inside `team_feed` and
+  the `memory_entries` policy.
+- Archive compaction, then the opt-in re-pull that makes the identity fixes
+  retroactive. Blocked on compaction because `appendRows` writes every line
+  unconditionally, so the `.ndjson` would double permanently.
+- **`lib/team-archive.js` `rewriteRows` runs outside `withAppendLock`** — a live
+  data-loss bug, pre-existing: the eviction rewrite can discard another
+  process's `appendFileSync` landing between read and rename. `writeAtomic` also
+  has no fsync. Being fixed in the compaction commit.
+- `classify` infers "is this source edit-capturing" from observed edits, so a
+  project whose only captured edits were foreign ones now has every zero-edit
+  session *spared* rather than suppressed. 0 instances here; mechanism is real.
+- `test/run-tests.js:23258-23272` pins a link-agnostic backfill contract, so the
+  teammate-notes reconciler cannot self-heal an install unlinked before that fix.
+
+**Logged, not scheduled.**
+
+- `--text3` is `#94A3B8`, roughly 2.8:1 on a light-theme panel. Fails WCAG
+  wherever it lands on a light surface, not just the one dialog it was found in.
+- Audit whether anything else in the monolith asserts on state a fixture step
+  just wrote. The version guard was one instance of that shape, not the class.
+- `ConfirmDialog` hierarchy, and an 8px dead gap from an empty faces span (both
+  small, both in the `ui` worktree already).
+
+**Method note worth keeping.** Requiring a RED proof on every ticket (revert
+only the behavioural change, paste the failures) caught tests that were green
+over live bugs four separate times in one session, including the version guard
+above, a delete-outage test, and one case where a measurement helper was
+silently changing the thing it measured. It is in
+`.claude/skills/team/SKILL.md`.
+
 ## Found 2026-08-03, not yet fixed
 
 - **A distilled summary's `ts` is written by the MODEL and trusted verbatim, so
@@ -185,7 +282,7 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
   returning the `#<token>` form. Deferred only because `lib/teamsync.js` was
   being edited by a parallel session.
 
-## Found 2026-08-02 while dogfooding, not yet fixed
+## Found 2026-08-02 while dogfooding (cwd attribution now FIXED, see 08-04)
 
 These came out of using the app rather than reading the code. Ordered by how
 much they distort what a user sees. The first two are FIXED, see the section

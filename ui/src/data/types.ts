@@ -1,8 +1,43 @@
 export type Role = 'owner' | 'admin' | 'member'
 export type SyncState = { state: 'up-to-date' } | { state: 'behind'; lastSyncedAt: string | null } | { state: 'paused' }
 
+/**
+ * The sync loop's own health, as the daemon reports it (lib/server.js's
+ * tickHealth). Four reachable states, and the distinction between the last two
+ * is the point: a WEDGED loop is not a dead process, and telling someone their
+ * daemon is not running when it is sends them to start something already
+ * started.
+ *
+ * 'ok'       — a pass completed inside the freshness window.
+ * 'erroring' — the newest pass threw, but the loop is alive and rescheduling.
+ *              Neither healthy nor dead; `lastTickError` says what failed.
+ * 'stalled'  — nothing completed inside the window. The loop is wedged.
+ * 'unknown'  — no pass has ever been observed in this process. Not a verdict:
+ *              nobody has checked yet.
+ */
+export type DaemonHealthState = 'ok' | 'erroring' | 'stalled' | 'unknown'
+
+export interface DaemonHealth {
+  state: DaemonHealthState
+  /** When the newest pass was observed. Null in 'unknown'. */
+  lastTickAt: string | null
+  /** The newest pass's failure, present in 'erroring'. Null otherwise. */
+  lastTickError: string | null
+  /** How stale the newest pass is. Null in 'unknown'. */
+  staleForSec: number | null
+}
+
 export interface Status {
+  // Still a required boolean, still sent by every daemon: `health` below is
+  // ADDITIVE and this stays the field a client can always rely on. The daemon
+  // derives it as `health.state === 'ok' || health.state === 'erroring'` -- an
+  // erroring loop is a running one -- so it can never disagree with `health`.
   running: boolean
+  // OPTIONAL on purpose, and the absence is a real shape to defend against, not
+  // a hypothetical: a daemon older than this field sends `running` alone, and
+  // rendering "not checked yet" at that user would be reporting our own ignorance
+  // as theirs. Every consumer must fall back to `running` when this is missing.
+  health?: DaemonHealth
   version: string
   solo: boolean
   setupDone: boolean
@@ -34,7 +69,20 @@ export interface Project {
   sessionsTotal: number
   tools: string[]
   shared: boolean
-  memberIds: string[]
+  /** Authors seen on this project's slice of the ONE capped feed page
+   *  getProjects() fetches. Named for what it is after it spent a release
+   *  called `memberIds`, which invited every reader to treat it as a roster:
+   *  it answers "who has shown up here lately", and it is NOT who can see the
+   *  project and NOT a count of people.
+   *
+   *  Two independent reasons it cannot carry either of those meanings: the page
+   *  is shared across every project, so a busy project fills it and a quiet
+   *  shared project's set comes back EMPTY while the whole team has access; and
+   *  it has no time window at all, so it cannot be paired with a windowed
+   *  figure like sessionsThisWeek. Faces are a fair rendering. A number is not.
+   *  For access use getAccessMatrix() or getProjectAccess(path); see
+   *  mappers.ts recentAuthorIdsFor. */
+  recentAuthorIds: string[]
   sessionsThisWeek: number
   dailyCounts: number[]     // exactly 7 entries, oldest first
   latestSummary: { text: string; author: string; at: string } | null
@@ -130,6 +178,12 @@ export interface StreamEntry {
   // different facts and must stay tellable apart.
   distilled?: boolean
   undecryptable?: boolean
+  // `self`: the daemon's own answer to "is this row the viewer's work". Carried
+  // through mapStreamEntry because it is the ONLY field that answers it --
+  // `authorId` is null on every row the daemon actually serves, local and
+  // teammate alike. Nothing reads this yet on purpose; see the person-filter
+  // note in features/search/SearchPage.tsx.
+  self?: boolean
 }
 
 // The Feed screen's entries are the same StreamEntry shape plus the project
@@ -511,6 +565,12 @@ export interface Settings {
 //   scope 'local' -> local-only outcome: `deleted` true is a real delete of an
 //                    unlinked project; `archived: false` with a `message` is a
 //                    refusal.
+//
+// WHY it was refused arrives as `refusal` + `retryable` (lib/server.js REFUSAL
+// / RETRYABLE_REFUSALS). Both are absent from every SUCCESS body and from an
+// older daemon's refusal, which is why they are optional -- absent reads as
+// "not retryable", the safe default, and preserves the behaviour this client
+// had before the fields existed.
 export interface DeleteProjectResult {
   path?: string
   scope?: 'team' | 'local'
@@ -518,6 +578,20 @@ export interface DeleteProjectResult {
   deleted?: boolean
   unlinked?: boolean
   message?: string
+  /** The three codes the daemon ships today. NOT to be treated as exhaustive
+   *  and NOT to be switched on: the daemon may add a fourth, and a client that
+   *  branched on the value list would then have to be taught about it before it
+   *  could behave correctly. Branch on `retryable` instead -- see below. Kept
+   *  here because it is the contract, and because a log or a bug report wants
+   *  the code rather than a translated sentence. */
+  refusal?: 'role-unknown' | 'not-manager' | 'not-a-member'
+  /** Could the very same delete succeed on a second attempt? True only for an
+   *  INDETERMINATE refusal -- the daemon could not establish the caller's role
+   *  (no connection, expired sign-in, a backend that listed no teams) and so
+   *  changed nothing locally. Derived by the daemon from its own set, never
+   *  re-derived here: that is what makes a future determinate refusal correctly
+   *  non-retryable for a client that never hears about it. */
+  retryable?: boolean
 }
 
 // GET /api/scan's per-project row (lib/server.js scanPayload): every folder

@@ -37,6 +37,20 @@ interface ProjectRowProps {
 function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: ProjectRowProps) {
   const behind = project.sync.state === 'behind'
   const handleSync = useCallback(() => onSyncProject(project.path), [onSyncProject, project.path])
+  // One announced label for the avatar group below. Same treatment, and the
+  // same reason, as ProjectPage's header stack: recentAuthorIds is who has
+  // SHOWN UP here lately, and a row of unlabelled faces sitting immediately
+  // right of the Shared/Private tag states the share roster whether it means to
+  // or not. The set genuinely cannot answer that (see its doc in types.ts), so
+  // the faces get named for what they are.
+  //
+  // Falls back to the raw id, never dropping the person: memberNames here is
+  // built only from what Today has actually observed (live sessions), so a
+  // teammate active earlier in the week is legitimately absent from it, and a
+  // label that omitted them would not account for every face shown.
+  const recentAuthorNames = project.recentAuthorIds.map(id => memberNames[id] ?? id)
+  const hasFaces = recentAuthorNames.length > 0
+  const facesLabel = `Recently active here: ${recentAuthorNames.join(', ')}`
   return (
     <div className="project-row" data-testid="project-row">
       <div className="project-left">
@@ -49,11 +63,22 @@ function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: Pr
           <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
             {project.shared ? 'Shared' : 'Private'}
           </span>
-          <span className="project-faces">
-            {project.memberIds.map(id => (
-              <Avatar key={id} id={id} name={memberNames[id] ?? id} size={16} />
-            ))}
-          </span>
+          {/* Gated on a non-empty set, the same way ProjectPage's header stack
+              is. An empty span still costs .project-left-top's 8px flex gap, so
+              a project with no recent authors used to sit with a visible hole
+              between its Shared/Private tag and nothing at all. */}
+          {hasFaces && (
+            <span
+              className="project-faces"
+              role="img"
+              aria-label={facesLabel}
+              title={facesLabel}
+            >
+              {project.recentAuthorIds.map(id => (
+                <Avatar key={id} id={id} name={memberNames[id] ?? id} size={16} />
+              ))}
+            </span>
+          )}
         </div>
         {project.latestSummary && (
           <div className="project-summary">
