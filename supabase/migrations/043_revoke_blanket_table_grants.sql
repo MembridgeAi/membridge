@@ -1,0 +1,76 @@
+-- 043_revoke_blanket_table_grants.sql — take Supabase's default grant off the
+-- three tables whose only protection is "RLS on, zero policies".
+--
+-- THE SITUATION. A table created in `public` on Supabase starts with the
+-- default privileges: the full `arwdDxtm` set granted to `anon` and
+-- `authenticated`. For a table with policies that is the design — RLS decides,
+-- the grant merely permits the attempt. For a table with RLS enabled and NO
+-- policies, the whole protection is a single property: deny-by-default, because
+-- there is no policy to allow anything. The blanket grant is still underneath
+-- it, untouched, waiting.
+--
+-- That property is one ordinary statement away from gone, in two ways, neither
+-- of which requires malice:
+--
+--   * `alter table public.onboarding_invites disable row level security` —
+--     typed by someone debugging why a query returns nothing, which is exactly
+--     what a zero-policy table looks like from the outside.
+--   * one later `create policy ... for all using (true)` written loosely, at
+--     which point the grant underneath decides what that means.
+--
+-- 031's event trigger covers NEITHER: it fires on CREATE only. It has nothing
+-- to say about an existing table having RLS switched back off.
+--
+-- THE PRECEDENT. 010:153 already did this, for a table in precisely this
+-- position, with the reasoning written beside it:
+--
+--     alter table public.invite_attempts enable row level security;
+--     revoke all on table public.invite_attempts from public, anon, authenticated;
+--
+--     "Clients never touch this table — only the SECURITY DEFINER functions
+--      below do, as the table owner, whom RLS does not bind."
+--
+-- Every table below is in the same position and none of them inherited the
+-- habit. This file is that one line, three times.
+--
+-- WHY IT BREAKS NOTHING. All three are reached only through SECURITY DEFINER
+-- functions or by `service_role`:
+--
+--   onboarding_invites  redeem_onboarding_invite() (definer, 038) and the
+--                       ops_* RPCs. Runs as the owner; RLS and table grants
+--                       do not bind the owner.
+--   ops_audit           ops_log() / ops_audit_recent(), definer, and granted
+--                       to service_role alone (021:281-282).
+--   ops_team_meta       the ops_* RPCs, same shape.
+--
+-- The ops dashboard reads these through cloudflare/ops-api, which authenticates
+-- with SUPABASE_SERVICE_KEY. `service_role` bypasses RLS outright and is NOT
+-- named in the revokes below, so nothing it does changes.
+--
+-- WHICH ONE ACTUALLY MATTERS. `onboarding_invites` holds UNREDEEMED invite
+-- tokens. If its RLS is ever lost, the blanket grant makes it an anon-readable
+-- token dump — and an onboarding token is not a read, it is
+-- redeem_onboarding_invite calling create_team as the redeemer. The other two
+-- are an audit log and an internal notes table; worth closing, but they are not
+-- this.
+--
+-- NOT INCLUDED, and the reason is the point. `public.feedback` (015) and
+-- `public.waitlist` (018) also have RLS on and also still carry the default
+-- grant — and they are LEFT ALONE deliberately. Both exist to receive an
+-- anonymous INSERT (the site's feedback form and waitlist signup), both have an
+-- explicit anon INSERT policy with validation, and feedback carries an explicit
+-- `grant insert on public.feedback to anon` (015). Revoking there would break a
+-- shipped public feature in the name of hardening it. A zero-policy table and a
+-- table whose policy is "anon may insert" look similar in a grants listing and
+-- are opposites in intent.
+--
+-- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` in this project, for
+-- the reason 031, 032 and 033 all give. `revoke` is idempotent; re-running this
+-- file is a no-op.
+--
+-- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- ---------------------------------------------------------------------------
+
+revoke all on table public.onboarding_invites from public, anon, authenticated;
+revoke all on table public.ops_audit          from public, anon, authenticated;
+revoke all on table public.ops_team_meta      from public, anon, authenticated;

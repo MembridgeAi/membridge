@@ -11,6 +11,61 @@
 -- migration, by the dashboard, or by a `create table as` in a one-off script —
 -- ships readable by anyone with the anon key until somebody notices.
 --
+-- UNAPPLIED AS OF 2026-08-05, and the ONLY numbered migration that still is.
+-- Verify: select pg_get_functiondef(oid) from pg_proc where proname =
+-- 'rls_auto_enable'; -- the live body still has the log-and-continue exception
+-- branch this file replaces. State is recorded in supabase/MIGRATION-STATE.md
+-- and nowhere else; do not restate it in claude/ops/ or a handoff.
+--
+-- THE LIVE BODY HAS NOW BEEN READ (read-only, 2026-08-05) AND DIFFED AGAINST
+-- THIS FILE. Three differences, one of which must be fixed before applying:
+--
+--   1. The exception branch. Live logs and continues; this file logs and then
+--      RAISES, rolling back the CREATE. This is the intended change and the
+--      whole reason the file exists.
+--
+--   2. **object_type — WAS A DEFECT IN THIS FILE. FIXED (SEC-6).** Live filters
+--      `object_type IN ('table','partitioned table')`. §1 below used to filter
+--      `obj.object_type = 'table'`, which dropped partitioned tables from the
+--      guardrail entirely: one created in `public` would be skipped before the
+--      begin/exception block is even reached, so it got no RLS AND no error —
+--      created silently without row-level security, the exact outcome this
+--      migration exists to prevent. A guardrail with a hole in its own filter is
+--      worse than the permissive version it replaces, because it reads as
+--      protection. §1 now matches the live filter exactly. Pinned by
+--      test/suites/rls-guardrail.test.js so it cannot be re-narrowed later.
+--
+--   3. Live also RAISE LOGs on success and on skip; this file logged neither.
+--      **RESTORED (SEC-6).** Without them the net can only ever be observed
+--      FAILING, so "is the guardrail actually firing?" had no answer short of
+--      creating a table to find out — and a skip line is what would have made
+--      defect (2) visible from the logs rather than only from a hand diff.
+--
+-- WITH (2) AND (3) FIXED, THIS FILE IS NOW A FAITHFUL RECONSTRUCTION OF THE
+-- LIVE BODY PLUS EXACTLY ONE INTENDED CHANGE: difference (1), the fail-closed
+-- exception branch. That was always what it claimed to be; it is now true.
+--
+-- IS IT SAFE TO APPLY (once (2) is fixed)? Yes, on the evidence:
+--   * All 15 tables in `public` are owned by `postgres`, and rls_auto_enable is
+--     also owned by `postgres`, so its SECURITY DEFINER `alter table` runs as
+--     the owner of every table it touches. The most common failure — "new table
+--     is not owned by the owner of rls_auto_enable" — cannot arise in the
+--     current configuration.
+--   * Every table in `public` currently HAS RLS enabled. That is the evidence
+--     that the alter has never failed in practice, which means the permissive
+--     exception branch has never actually fired. Nothing today relies on it.
+--   * Migrations here are applied through the SQL editor, which runs as
+--     `postgres`, so tables created in future land under the same ownership.
+-- Applying it therefore converts a branch that has never been taken from silent
+-- to loud. That is the entire behavioural change.
+--
+-- WHAT IT STILL DOES NOT COVER. This net only fires on CREATE. It does nothing
+-- about a table that already exists having RLS turned back off, and nothing
+-- about table-level GRANTs — see the note on onboarding_invites in
+-- supabase/MIGRATION-STATE.md, which is protected by RLS alone because its
+-- blanket anon/authenticated grant was never revoked the way 010:153 revoked
+-- invite_attempts.
+--
 -- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` IN THIS PROJECT.
 -- supabase_migrations.schema_migrations holds only TWO rows, so none of the
 -- repo's numbered files is recorded as applied and a push would attempt all
@@ -154,13 +209,24 @@ declare
 begin
   for obj in select * from pg_event_trigger_ddl_commands()
   loop
+    -- `partitioned table` is a DISTINCT object_type from `table` in
+    -- pg_event_trigger_ddl_commands(). Narrowing to 'table' alone dropped
+    -- partitioned tables out of the guardrail entirely: the skip happens BEFORE
+    -- the begin/exception block, so such a table would be created with no RLS
+    -- and no error — the precise outcome this migration exists to prevent.
+    -- Restored to match the live filter exactly.
     if obj.command_tag in ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
-       and obj.object_type = 'table'
+       and obj.object_type in ('table', 'partitioned table')
        and obj.schema_name = 'public'
     then
       begin
         execute format('alter table if exists %s enable row level security',
                        obj.object_identity);
+        -- Restored from the live body: without a success line the net can only
+        -- ever be observed FAILING, so "is the guardrail actually firing?" has
+        -- no answer short of creating a table to find out.
+        raise log 'rls_auto_enable: enabled row level security on % (%)',
+          obj.object_identity, obj.object_type;
       exception when others then
         -- Logged FIRST and separately: log output is not rolled back with the
         -- transaction, so the cause is recorded even for a caller who only ever
@@ -178,6 +244,14 @@ begin
               obj.object_identity, sqlerrm, sqlstate),
             hint = 'Most often the new table is not owned by the owner of public.rls_auto_enable(), so its SECURITY DEFINER alter is not permitted. Create the table as that role, or reassign ownership, then retry. Fix the cause -- do not drop the ensure_rls event trigger, and do not restore the log-and-continue exception branch this replaced.';
       end;
+    else
+      -- Also restored from live. A skip is the common case (every CREATE
+      -- outside public, every non-table object), but it is the line that tells
+      -- you WHY a table you expected the net to catch was not caught — which is
+      -- exactly the question the partitioned-table defect above would have
+      -- raised, and could not have answered.
+      raise log 'rls_auto_enable: skipped % (command_tag %, object_type %, schema %)',
+        obj.object_identity, obj.command_tag, obj.object_type, obj.schema_name;
     end if;
   end loop;
 end;

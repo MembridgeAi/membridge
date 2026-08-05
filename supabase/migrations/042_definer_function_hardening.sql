@@ -1,4 +1,4 @@
--- 040_definer_function_hardening.sql — close the two gaps the SEC-5 audit of
+-- 042_definer_function_hardening.sql — close the two gaps the SEC-5 audit of
 -- the `security definer` surface actually found, out of 37 functions.
 --
 -- WHY THIS SURFACE GETS ITS OWN AUDIT. A `security definer` function runs with
