@@ -35,7 +35,7 @@ const { createMockSupabase, pgTimestamptz } = require('../mock-supabase');
 const HOME_OWNER = path.join(ROOT, 'home-del-owner');
 const HOME_MEMBER = path.join(ROOT, 'home-del-member');
 const homeFor = { owner: HOME_OWNER, member: HOME_MEMBER };
-const portFor = { owner: P(64), member: P(65) };
+const portFor = { owner: P(75), member: P(76) };
 
 // One project per identity, each with its own machine-local memory. The
 // member's is the one that gets deleted and then pushed again.
@@ -62,8 +62,8 @@ function seedSessions(slug, projectPath, asks) {
 
 async function main() {
   const mock = createMockSupabase();
-  await new Promise(r => mock.server.listen(P(63), '127.0.0.1', r));
-  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(63)}`;
+  await new Promise(r => mock.server.listen(P(74), '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(74)}`;
   process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
   // Plaintext push: this suite is about which ROWS exist on the backend, not
   // about the crypto layer, and an encrypted push would hold every batch when
