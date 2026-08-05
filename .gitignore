@@ -26,6 +26,10 @@ BUSINESS.md
 **/.membridge-beta/*
 !**/.membridge-beta/team.json
 CLAUDE.md
+# ...but the agent-team kit's lead prompt is source, not MemBridge output. The
+# bare pattern above matches at any depth and was silently swallowing it, which
+# is why its roster drifted out of sync with the role files beside it.
+!docs/agent-team/CLAUDE.md
 AGENTS.md
 
 .worktrees/
