@@ -489,7 +489,26 @@ async function main() {
     assert.strictEqual(usage[0].usage.cache_read_input_tokens, 900);
   });
 
-  check('adapter: sidechain assistant record emits usage with sidechain:true, no read/edit', () => {
+  // REVERSED ON PURPOSE, do not "restore" the old rule. This test used to
+  // assert that a sidechain tool_use emitted NO edit event. That was wrong and
+  // it silently gutted capture: a subagent's transcript is a separate file
+  // (<session-id>/subagents/agent-<id>.jsonl) that the scanner already reads,
+  // every record in it carries isSidechain:true, and so every Edit/Write a
+  // delegating session made was thrown away. On real data that was 72% of the
+  // tracked edits. Two things broke as a result: the Stop hook's worthiness
+  // gate counts kind:'edit' per session, so a session that delegated ALL its
+  // editing never checkpointed and produced no summary at all; and
+  // lib/project-resolve.js builds its per-session project-dominance map only
+  // from edits, so such a session's prompts could not be attributed to a repo
+  // and surfaced as "Ask: (not captured)".
+  // Reads stay excluded, and that part is NOT a leftover: the read stream
+  // feeds the ledger's waste accounting, which measures a single context being
+  // re-derived, and a subagent request is a separate stream with its own
+  // context (lib/ledger-fold-recall-ride.js already drops sidechain requests).
+  // Todos, tasks and the closing summary stay excluded too, because renderers
+  // keep only the latest snapshot per session and a subagent's private
+  // checklist or report to its caller would overwrite the session's own.
+  check('adapter: sidechain assistant record emits usage AND edits, but no read', () => {
     const entries = [
       { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
         message: { id: 'msg_sc', model: 'claude-opus-4-6',
@@ -506,7 +525,35 @@ async function main() {
     assert.strictEqual(usage[0].messageId, 'msg_sc');
     assert.strictEqual(usage[0].session, 's1');
     assert.strictEqual(events.some(e => e.kind === 'read'), false, 'sidechain tool_use must not emit a read event');
-    assert.strictEqual(events.some(e => e.kind === 'edit'), false, 'sidechain tool_use must not emit an edit event');
+    // Reversed deliberately. This asserted `false` until subagent edits were
+    // found to be dropped entirely: a session that delegated its work wrote no
+    // summary at all, and one that did wrote a file list covering only what the
+    // operator typed. The edit MUST now be emitted, and carry the PARENT
+    // session so it lands with the work that delegated it rather than in a
+    // session invented from the subagent transcript's filename.
+    const edits = events.filter(e => e.kind === 'edit');
+    assert.strictEqual(edits.length, 1, 'sidechain tool_use MUST now emit an edit event');
+    assert.strictEqual(edits[0].file, '/repo/sub2.js', 'the edited file must be the one the subagent touched');
+    assert.strictEqual(edits[0].session, 's1', 'a subagent edit must be attributed to the parent session');
+    // The other three exclusions, pinned. Each is asserted in the comment
+    // above as load-bearing, and the summary one is the easiest to
+    // reintroduce by accident: moving the sidechain `continue` below the
+    // fileState.lastText assignment would let a subagent's report to its
+    // caller become the SESSION's summary, with the whole suite still green.
+    const withText = entries.concat([
+      { type: 'assistant', timestamp: '2026-07-28T10:01:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
+        message: { id: 'msg_sc2', model: 'claude-opus-4-6',
+          content: [{ type: 'text', text: 'subagent report to its caller' }] } },
+      { type: 'assistant', timestamp: '2026-07-28T10:02:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
+        message: { id: 'msg_sc3', model: 'claude-opus-4-6',
+          content: [{ type: 'tool_use', id: 'tu_sc3', name: 'TodoWrite', input: { todos: [{ content: 'sub task', status: 'completed' }] } }] } },
+      { type: 'user', timestamp: '2026-07-28T10:03:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
+        message: { role: 'user', content: 'the orchestrator briefing, not a human ask' } },
+    ]);
+    const all = claudeAdapter.extractEvents(withText, { pendingCreates: {}, tasks: {} });
+    assert.strictEqual(all.some(e => e.kind === 'summary'), false, 'a subagent report must not become the session summary');
+    assert.strictEqual(all.some(e => e.kind === 'todos'), false, 'a subagent checklist must not clobber the session todos');
+    assert.strictEqual(all.some(e => e.kind === 'prompt'), false, 'a subagent briefing must not become a human prompt');
   });
 
   check('codex adapter: emits usage from last_token_usage, not the cumulative total', () => {
