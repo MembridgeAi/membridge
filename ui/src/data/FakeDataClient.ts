@@ -1,4 +1,8 @@
 import type { DataClient, Capabilities } from './DataClient'
+// The real mapper, deliberately imported by the FAKE client. A fixture that
+// hands back domain objects it authored itself can never fail the way the app
+// fails -- see teamMembers() below and fixtureBoundary.test.ts.
+import { mapMember, type MemberActivity, type RawMemberRow } from './mappers'
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
   Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
@@ -259,6 +263,19 @@ export class FakeDataClient implements DataClient {
   // memberCount, the shared project's roster) reads THIS so a scaled fixture
   // cannot drift into different answers per surface.
   private teamMembers(): Member[] {
+    // AUTHORED AS WIRE ROWS, THEN PUT THROUGH THE REAL MAPPER. This fixture
+    // used to return `Member` literals directly, which meant no component test
+    // could ever see what mapMember does to a row -- a field the mapper drops
+    // stayed visible here and the app was the only place it went missing. That
+    // is not hypothetical: it is exactly how #59's `preFixLocal` would have
+    // vanished, and it is why `member.email` looked populated on every screen
+    // while production rendered a blank (mapMember hardcodes email: '',
+    // because the members RPC has never returned one).
+    //
+    // The rule for this file: if a mapper exists for a type, the fixture
+    // authors the RAW shape and maps it. See fixtureBoundary.test.ts for which
+    // types are covered and which are still outstanding.
+    //
     // #59: `preFixLocal` splits this roster into the two cases the person
     // filter cannot otherwise tell apart, so a fixture that gave everyone the
     // same value would let the UI hardcode either answer and stay green.
@@ -266,17 +283,29 @@ export class FakeDataClient implements DataClient {
     //             by him can return zero over rows that exist.
     //   Marco, Sarah, and the scaled-out members -- an explicit zero, the
     //             case where a zero result really does mean nothing found.
-    const base: Member[] = [
-      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false, preFixLocal: { entries: 0, projects: 0 } },
-      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false, preFixLocal: { entries: 7, projects: 2 } },
-      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false, preFixLocal: { entries: 0, projects: 0 } },
+    const base: Array<{ row: RawMemberRow; activity: MemberActivity }> = [
+      {
+        row: { user_id: this.viewerId, display_name: 'Marco', role: this.opts.role ?? 'owner', joined_at: '2026-07-22T18:58:00Z', preFixLocal: { entries: 0, projects: 0 } },
+        activity: { projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z' },
+      },
+      {
+        row: { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-20T09:00:00Z', preFixLocal: { entries: 7, projects: 2 } },
+        activity: { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
+      },
+      {
+        row: { user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z', preFixLocal: { entries: 0, projects: 0 } },
+        activity: { projectCount: 1, lastSharedAt: null },
+      },
     ]
     const size = this.opts.teamSize ?? base.length
     const out = base.slice(0, Math.min(size, base.length))
     for (let i = base.length + 1; i <= size; i++) {
-      out.push({ id: `m${i}`, name: `Member ${i}`, email: `member${i}@acme.dev`, role: 'member', joinedAt: '2026-07-25T12:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false, preFixLocal: { entries: 0, projects: 0 } })
+      out.push({
+        row: { user_id: `m${i}`, display_name: `Member ${i}`, role: 'member', joined_at: '2026-07-25T12:00:00Z', preFixLocal: { entries: 0, projects: 0 } },
+        activity: { projectCount: 1, lastSharedAt: null },
+      })
     }
-    return out
+    return out.map(({ row, activity }) => mapMember(row, activity))
   }
   // The shared project's ACCESS roster: a strict subset (6 of N) once the team
   // is bigger than 6, so the Access cell's "+N chip and count label" case is a

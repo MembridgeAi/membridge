@@ -76,13 +76,16 @@ export function MemberRow({ member, isSelf, canManage, onSetRole, onRequestRemov
     <div className="member-row" data-testid={`member-row-${member.id}`}>
       <div className="member-id">
         <Avatar id={member.id} name={member.name} size={19} />
-        {/* Both are arbitrary-length user data. The email is capped in practice
-            (RFC 5321 allows 64 octets for the local part, which measures well
-            under the overflow threshold at the 900px floor), so bounding it is a
-            correctness cleanup rather than a bug fix -- see members.css. */}
+        {/* Name only. There was a second line here rendering `member.email`,
+            which mapMember filled with '' on every row because the members RPC
+            has never returned an address -- so it painted a blank 10.5px line
+            under every name, reading as a field that failed to load. Same
+            defect InviteRow already fixed for `invite.email`; the field is now
+            gone from `Member` entirely. What the app actually knows about a
+            member (role, projects posted into, last shared, key alerts) is in
+            .member-mid below. Arbitrary-length user data, so it still wraps. */}
         <div>
           <div className="member-name wrap-anywhere">{member.name}</div>
-          <div className="mono member-email wrap-anywhere">{member.email}</div>
         </div>
       </div>
 

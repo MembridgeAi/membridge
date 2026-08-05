@@ -306,7 +306,14 @@ export interface FeedPage {
 export interface Member {
   id: string
   name: string
-  email: string
+  // There is no `email`. The members RPC has never returned one, so mapMember
+  // filled this with '' on every row and MemberRow rendered a permanently
+  // blank address line under every name -- the same defect, and the same
+  // remedy, as `Invite.email` above. It survived because FakeDataClient
+  // authored Member literals with plausible addresses instead of going
+  // through mapMember, so every test and every screenshot saw data the app
+  // could not produce. Removed from the TYPE, not just the row, so nothing
+  // can render it again.
   role: Role
   joinedAt: string
   // Distinct projects this member has POSTED team-feed entries into -- NOT

@@ -619,7 +619,8 @@ export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
   return {
     id: row.user_id,
     name: row.display_name,
-    email: '',
+    // No `email`: the RPC has never sent one, and filling the field with ''
+    // is what put a blank address line on every member row. See Member's doc.
     role: row.role,
     // schema.sql has joined_at NOT NULL, but the RPC's return type is
     // nullable -- fall back rather than assert a value we don't have.

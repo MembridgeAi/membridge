@@ -490,7 +490,10 @@ describe('mapMember', () => {
       { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
     )
     expect(m).toEqual({
-      id: 'andrew', name: 'Andrew', email: '', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
+      // No `email` key at all. It used to be here as '' -- a field the members
+      // RPC never returns -- and that empty string is what MemberRow painted
+      // as a blank address line under every name.
+      id: 'andrew', name: 'Andrew', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
       projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false,
       // #59. A daemon too old to report the field degrades to an explicit
       // zero, not undefined: zero means "no gap", which keeps the UI quiet.

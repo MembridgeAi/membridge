@@ -178,6 +178,31 @@ describe('MembersSection (the People section of the Team page)', () => {
     expect(screen.queryByText(/token expired|hook not installed/i)).toBeNull()
   })
 
+  // Found by routing FakeDataClient through the real mapMember. The fixture
+  // used to author Member literals with plausible addresses
+  // ('andrew@acme.dev'), so every screenshot and every test saw a populated
+  // email -- while mapMember hardcodes `email: ''`, because the members RPC
+  // has never returned one. Production rendered a permanently blank 10.5px
+  // line under every name and nothing could catch it, because the only data
+  // the tests ever saw came from the fixture rather than the mapper.
+  //
+  // Exactly the defect InviteRow already documents and fixed for
+  // `invite.email`. Same remedy: the field is gone from the type, so no
+  // future row can render it either.
+  it('shows no address line under a name, because no endpoint supplies one', async () => {
+    renderApp({}, <MembersSection />)
+    const andrewRow = await screen.findByTestId('member-row-andrew')
+    expect(within(andrewRow).getByText('Andrew')).toBeInTheDocument()
+    // The blank line itself is the bug: an empty element still occupies its
+    // row and reads as a field that failed to load.
+    expect(andrewRow.querySelector('.member-email')).toBeNull()
+    // Nothing in the row is an empty text slot waiting for data that will
+    // never arrive.
+    const blanks = [...andrewRow.querySelectorAll('div, span')]
+      .filter(el => el.children.length === 0 && el.textContent === '')
+    expect(blanks).toHaveLength(0)
+  })
+
   it('does not offer role changes on the owner row', async () => {
     renderApp({}, <MembersSection />)
     const ownerRow = await screen.findByTestId('member-row-me')
