@@ -199,6 +199,39 @@ describe('Insights when the current window itself was cut short', () => {
     expect(screen.queryByRole('button', { name: /send setup steps/i })).toBeNull()
   })
 
+  // T-84. `exact` and `truncated` are two independent bits describing two
+  // different things: `exact` says the two headline COUNTS were counted in the
+  // database (027_team_feed_counts.sql), `truncated` says the paged FEED FETCH
+  // stopped at its cap. AND-ing them wrongly is what masked feedTruncated on
+  // the wire for four releases (3b0a97f); the mirror-image mistake is here --
+  // marking a database-exact count as a floor just because the feed was cut.
+  //
+  // A "≥" on a number that is in fact the real total is not a safe hedge. It
+  // tells the reader their figure is a lower bound and invites them to assume
+  // the truth is higher, which is a different wrong answer, not a softer one.
+  it('does not mark the database-exact counts as floors just because the feed was cut', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+    await screen.findByTestId('insights-truncated')
+
+    // Counted in the database, so these are the real totals however short the
+    // feed fetch was.
+    expect(screen.getByText('267')).toBeInTheDocument()
+    expect(screen.getByText('2,000')).toBeInTheDocument()
+    expect(screen.queryByText('≥267')).toBeNull()
+    expect(screen.queryByText('≥2,000')).toBeNull()
+
+    // CAP_NOTE blames an out-of-date server, and the server is not out of
+    // date -- `exact` is true. Its own doc says it is for `exact:false +
+    // truncated:true` and nothing else.
+    expect(screen.queryByText(/approximate/)).toBeNull()
+    expect(screen.queryByText(/out of date/)).toBeNull()
+  })
+
+  // The counterpart, and the reason this is not simply "drop the floor mark":
+  // members-syncing is NOT one of the database-counted figures. `ok` is
+  // derived from the fetched pages, so a short fetch really can undercount it
+  // and `exact` says nothing about it either way. It keeps its floor mark on
+  // exactly the same payload the assertion above requires to be unmarked.
   it('marks members-syncing as a floor instead of counting people out', async () => {
     renderWith(await clientServing(await cut()), <InsightsPage />)
 

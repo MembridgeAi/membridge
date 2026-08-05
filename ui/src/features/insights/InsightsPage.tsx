@@ -376,11 +376,36 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
   const broken = insights.problems.filter(p => p.severity === 'broken')
   const minor = insights.problems.filter(p => p.severity === 'minor')
 
+  // T-84. The two headline counts are floors only when BOTH bits say so, and
+  // the bits are not interchangeable:
+  //   `exact`     -- the counts came from the database (027_team_feed_counts)
+  //                  rather than from summing fetched rows, so they are true
+  //                  totals at any window size.
+  //   `truncated` -- the paged FEED FETCH hit its cap, which floors everything
+  //                  built from those pages.
+  // A database-counted total stays the real number however short the fetch
+  // was, so `truncated` alone marked exact figures as lower bounds -- the
+  // mirror image of the wire bug that masked feedTruncated behind
+  // `truncated && !exact` for four releases (3b0a97f).
+  //
+  // "≥" on a number that is in fact exact is not a safe hedge; it is a
+  // different wrong answer, and one that invites the reader to assume the
+  // truth is higher than it is.
+  //
+  // Applies to THESE TWO CELLS ONLY. membersSyncing below is not database-
+  // counted -- see its own comment.
+  const countsAreFloors = insights.truncated && !insights.exact
+
   const stats: StatItem[] = [
     {
-      value: countValue(insights.sessions.count, insights.truncated),
+      value: countValue(insights.sessions.count, countsAreFloors),
       label: STAT_SESSIONS,
-      note: insights.truncated ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
+      // CAP_NOTE names an out-of-date server, which is only true in this same
+      // combination -- see its own doc. When the counts are exact and the feed
+      // was merely cut, the delta is null and trendNote yields no note at all;
+      // the truncation notice above the strip is what explains the gap, and it
+      // does so without calling an exact figure approximate.
+      note: countsAreFloors ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
     },
     {
       value: assistsHeadlineValue(insights.assists),
@@ -393,8 +418,13 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
     {
       // `ok` counts members with a row in the fetched window, so a fetch that
       // stopped short can only ever UNDERCOUNT it -- which makes the plain
-      // fraction read as a diagnosis of the people it left out. Marked as a
-      // floor for the same reason the two counts either side of it are.
+      // fraction read as a diagnosis of the people it left out.
+      //
+      // T-84: gated on `truncated` ALONE, deliberately unlike the two count
+      // cells either side of it. `exact` describes the two database-counted
+      // headline figures (027_team_feed_counts) and says nothing about this
+      // one -- it is derived from the fetched pages, so it is a genuine floor
+      // whenever the fetch was cut, exact counts or not.
       value: `${countValue(insights.membersSyncing.ok, insights.truncated)}/${insights.membersSyncing.total}`,
       label: STAT_SYNCING,
       // "ok" = members who have shared into the window; the rest we can only
@@ -409,9 +439,10 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
           : `${insights.membersSyncing.total - insights.membersSyncing.ok} haven't shared recently`,
     },
     {
-      value: countValue(insights.entriesShared.count, insights.truncated),
+      // Same pair of bits as the sessions cell above, same reason.
+      value: countValue(insights.entriesShared.count, countsAreFloors),
       label: STAT_SHARED,
-      note: insights.truncated ? CAP_NOTE : deltaNote(insights.entriesShared.delta),
+      note: countsAreFloors ? CAP_NOTE : deltaNote(insights.entriesShared.delta),
     },
   ]
 
