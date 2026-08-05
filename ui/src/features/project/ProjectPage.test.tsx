@@ -315,3 +315,43 @@ describe('ProjectPage while its data is still in flight', () => {
     expect(screen.queryByTestId('project-stream-loading')).toBeNull()
   })
 })
+
+// T-78 item 12: opening a project that carries a stray .membridge/team.json
+// on a solo (or signed-out) install used to render three separate assertions
+// about a team the user is not in -- the "Shared" chip in the header, a "Team
+// sync ✓ up to date" line in the Sync panel, and an Encryption chip labelled
+// "end-to-end" or worse. All three land elsewhere on this page under a team
+// install, so this suite asserts absence in solo view without stripping the
+// SyncPanel's local-sync row.
+describe('ProjectPage on a stray-shared solo install', () => {
+  it('drops the Shared chip from the header', async () => {
+    // membridge is the fixture's team-linked project; on a solo, signed-out
+    // install its "shared" flag has to be treated as noise.
+    renderApp({ solo: true, authenticated: false }, <ProjectPage slug="membridge" />)
+    await screen.findByText(/membridge/)
+    expect(screen.queryByText('Shared')).toBeNull()
+    expect(screen.queryByText('Private')).toBeNull()
+  })
+
+  it('drops the Team-sync framing and the Encryption row from the Sync panel', async () => {
+    renderApp({ solo: true, authenticated: false }, <ProjectPage slug="membridge" />)
+    await screen.findByText(/membridge/)
+    // The row itself stays -- the daemon still processes the project
+    // locally, and that's useful to see -- but the "Team" adjective is gone.
+    expect(screen.queryByText('Team sync')).toBeNull()
+    // Anchored on the row's own key cell so this can't collide with the
+    // panel's "Sync" section-label heading, which reads identically.
+    const syncRow = document.querySelector('.panel-last .kv .kv-key')
+    expect(syncRow?.textContent).toBe('Sync')
+    // Encryption keys are meaningless without a team to encrypt for.
+    expect(screen.queryByText('Encryption')).toBeNull()
+  })
+
+  it('keeps all three surfaces on a team install', async () => {
+    renderApp({}, <ProjectPage slug="membridge" />)
+    await screen.findByText(/Hook ownership/)
+    expect(screen.getByText('Shared')).toBeInTheDocument()
+    expect(screen.getByText('Team sync')).toBeInTheDocument()
+    expect(screen.getByText('Encryption')).toBeInTheDocument()
+  })
+})

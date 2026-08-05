@@ -56,6 +56,34 @@ describe('TeamPage, signed out', () => {
     expect(document.body.textContent).not.toContain('wrong-password-value')
   })
 
+  // T-78 item 9: the rail's Team link lands here for a fresh install, and it
+  // used to imply signing in was the only way to make MemBridge useful. The
+  // shell already routes correctly; the missing piece was one honest sentence
+  // saying solo works.
+  it('says solo works too, so the fresh install does not read like a defect', async () => {
+    renderWith(new FakeDataClient({ authenticated: false }), <TeamPage />)
+    await screen.findByRole('heading', { name: /sign in/i })
+    // "MemBridge works solo too" -- the affirmative half of the pitch. The
+    // regex is intentionally loose (works\s+solo) so the sentence can be
+    // reworded without a test rewrite.
+    expect(screen.getByText(/works\s+solo/i)).toBeInTheDocument()
+  })
+
+  // T-78 item 11: the OAuth note read "Use this if you set your account up
+  // from a MemBridge invite page — that flow is GitHub-only, so your account
+  // has no password to type below." A first-time user could not decode any
+  // part of that. The button copy is now what it does, not who it is for.
+  it('describes Continue with GitHub in terms of what it does, not what an invitee already knows', async () => {
+    renderWith(new FakeDataClient({ authenticated: false }), <TeamPage />)
+    // The button itself is still labelled "Continue with GitHub" -- the fix
+    // is the sentence beneath it. The old copy assumed context ("if you set
+    // your account up from a MemBridge invite page") that a cold-start user
+    // has no way to have.
+    expect(await screen.findByRole('link', { name: /continue with github/i })).toBeInTheDocument()
+    expect(screen.queryByText(/invite page/i)).toBeNull()
+    expect(screen.queryByText(/no password to type below/i)).toBeNull()
+  })
+
   it('offers a sign-up path that asks for a name and says when the email needs confirming', async () => {
     const client = new FakeDataClient({ authenticated: false })
     const signUp = vi.spyOn(client, 'signUp')

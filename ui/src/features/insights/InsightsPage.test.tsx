@@ -346,10 +346,17 @@ describe('InsightsPage', () => {
   })
 
   it('never calls getInsights in solo mode', async () => {
+    // T-78 item 14: on a fresh solo install (no team of any kind) the copy
+    // says WHAT this screen is, not what permission it needs -- a signed-out
+    // user has no team, so "available to team owners and admins" was true
+    // but useless. The role-restricted case (a signed-in member, tested just
+    // above) keeps its original wording, since for that reader the tier is
+    // the answer.
     const client = new FakeDataClient({ solo: true })
     const insightsSpy = vi.spyOn(client, 'getInsights')
     renderWith(client, <InsightsPage />)
-    expect(await screen.findByText(/owners and admins/i)).toBeInTheDocument()
+    expect(await screen.findByText(/team surface/i)).toBeInTheDocument()
+    expect(screen.getByText(/join or create a team/i)).toBeInTheDocument()
     expect(insightsSpy).not.toHaveBeenCalled()
   })
 

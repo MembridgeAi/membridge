@@ -209,3 +209,41 @@ describe('ProjectsPage while its data is still in flight', () => {
     expect(await screen.findByText(/watched · /)).toBeInTheDocument()
   })
 })
+
+// T-78 items 2 and 3: solo installs drop the "· N shared" clause (the count
+// is derived from `project.shared`, which is a stray-team.json artefact for a
+// solo user) and the SHARED/PRIVATE tag on each row (SHARED names a team the
+// user is not on, and PRIVATE is only meaningful as the counterpart of
+// SHARED). Neither is disabled: the surface goes away entirely, matching the
+// ticket's rule.
+describe('ProjectsPage on a solo install', () => {
+  it('drops the shared count from the header entirely', async () => {
+    renderApp({ solo: true, authenticated: false }, <ProjectsPage />)
+    // Waited for a row so the header count has landed too.
+    await screen.findByTestId('project-row-sublease')
+    const header = document.querySelector('.projects-count')
+    expect(header?.textContent).toMatch(/watched/)
+    expect(header?.textContent).not.toMatch(/shared/)
+  })
+
+  it('drops the Shared/Private tag from every row', async () => {
+    renderApp({ solo: true, authenticated: false }, <ProjectsPage />)
+    // membridge is the fixture's team-linked project; the tag would say
+    // "Shared" if a stray team.json were being treated as authoritative.
+    const sharedRow = await screen.findByTestId('project-row-membridge')
+    expect(within(sharedRow).queryByText('Shared')).toBeNull()
+    expect(within(sharedRow).queryByText('Private')).toBeNull()
+    // A truly private row loses the tag too: PRIVATE is only meaningful as
+    // the counterpart of SHARED, so once one is gone the other has to be.
+    const privateRow = screen.getByTestId('project-row-sublease')
+    expect(within(privateRow).queryByText('Private')).toBeNull()
+  })
+
+  it('keeps the Shared/Private tag on a team install', async () => {
+    renderApp({}, <ProjectsPage />)
+    const sharedRow = await screen.findByTestId('project-row-membridge')
+    expect(within(sharedRow).getByText('Shared')).toBeInTheDocument()
+    const privateRow = screen.getByTestId('project-row-sublease')
+    expect(within(privateRow).getByText('Private')).toBeInTheDocument()
+  })
+})

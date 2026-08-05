@@ -91,6 +91,21 @@ describe('a shared project’s delete is manager-only', () => {
     expect(within(sharedRow).getByRole('button', { name: /delete membridge/i })).toBeInTheDocument()
   })
 
+  // T-78 item 4: a solo (or signed-out) install would carry `project.shared`
+  // only if a stray .membridge/team.json sat next to the source, so the
+  // manager-only safety net above locked the user out of deleting a project
+  // whose "team" was empty -- while every private project got a Delete
+  // button. Solo view removes the shared-flag from this gate: the daemon
+  // still enforces the real check, and there is no team here to refuse for.
+  it('offers Delete on a stray-shared project when the machine is solo and signed out', async () => {
+    // { solo: true, authenticated: false } is exactly the ticket scenario:
+    // a fresh install with no credentials whose repo folder still carries
+    // .membridge/team.json from a teammate's clone.
+    renderApp({ solo: true, authenticated: false }, <ProjectsPage />)
+    const sharedRow = await screen.findByTestId('project-row-membridge')
+    expect(within(sharedRow).getByRole('button', { name: /delete membridge/i })).toBeInTheDocument()
+  })
+
   // The second defense, exercised for the race the gate above cannot cover
   // (role changed server-side, or a stale cached role): a 200 that reports
   // the delete did NOT happen must keep the dialog open and say why.

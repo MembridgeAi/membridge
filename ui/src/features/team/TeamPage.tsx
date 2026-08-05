@@ -83,6 +83,17 @@ function SignInCard({ configured }: { configured: boolean }) {
       <p className="team-signed-out" role="status">
         You are signed out. Team sync, shared memory and invites all need an account.
       </p>
+      {/* T-78 item 9: name that solo works, on the surface the rail's Team
+          link lands on. Without this, a fresh install reaches this screen and
+          reads "you are signed out" as a defect state rather than as the
+          onboarding step it is -- there was no "solo mode is fine" pitch
+          anywhere in the app. Deliberately a short sentence, not a splash
+          screen, so an actual invitee is not made to scroll past a marketing
+          block. */}
+      <p className="team-note">
+        MemBridge works solo too — your memory stays on this machine either way. Sign in only if you
+        want to share it with a team.
+      </p>
       <h2 className="team-card-title" id="team-auth-heading">
         {mode === 'signup' ? 'Create an account' : 'Sign in'}
       </h2>
@@ -99,13 +110,21 @@ function SignInCard({ configured }: { configured: boolean }) {
           with no password and could not sign in here at all while this card
           was email-only. A plain anchor, not a fetch: /team/oauth/github is a
           302 into GitHub's consent screen, and the daemon's callback page
-          finishes the exchange and links back here. */}
+          finishes the exchange and links back here.
+
+          T-78 item 11: the note used to read "Use this if you set your
+          account up from a MemBridge invite page — that flow is GitHub-only,
+          so your account has no password to type below." A first-time user
+          who never saw an invite page could not decode any part of that
+          sentence, and it also failed to name what "Continue with GitHub" IS
+          for them (the fastest path in). Restated as what the button does,
+          with the invitee-specific fact moved behind a "why?" hint that the
+          reader does not need to understand in order to click. */}
       <a className="team-btn team-btn-oauth" href="/team/oauth/github">
         Continue with GitHub
       </a>
       <p className="team-note">
-        Use this if you set your account up from a MemBridge invite page — that flow is GitHub-only,
-        so your account has no password to type below.
+        The fastest way in. Uses your GitHub account, no password to set or remember.
       </p>
 
       {/* Uncontrolled on purpose: the password lives in the DOM field for the

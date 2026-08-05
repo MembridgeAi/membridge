@@ -398,6 +398,26 @@ describe('TodayPage', () => {
     expect(await screen.findByText('No project activity in the last 7 days.')).toBeInTheDocument()
     expect(screen.queryByTestId('project-row')).toBeNull()
   })
+
+  // T-78 item 1: on a solo (or signed-out) install, the "Shared" chip on a
+  // project card is drawn from a stray .membridge/team.json the daemon read
+  // next to the source -- not from a share the user made. The chip is a
+  // decorative <span> with no click handler, so it names a team the user is
+  // not on AND leaves them no way to disagree. Absence, per ticket, rather
+  // than reworded copy.
+  it('hides Shared/Private on a solo install even if a project carries a stray team.json', async () => {
+    class SoloWithStrayShared extends FakeDataClient {
+      constructor() { super({ solo: true, authenticated: false }) }
+      getProjects() {
+        return Promise.resolve([project({ path: '/x/stray', name: 'stray-proj', shared: true, sessionsThisWeek: 3, dailyCounts: [1, 0, 1, 0, 0, 0, 1] })])
+      }
+    }
+    renderWith(new SoloWithStrayShared(), <TodayPage />)
+    await screen.findByText('stray-proj')
+    const row = screen.getByTestId('project-row')
+    expect(within(row).queryByText('Shared')).toBeNull()
+    expect(within(row).queryByText('Private')).toBeNull()
+  })
 })
 
 // The card is the most-looked-at thing on the most-looked-at screen, and it

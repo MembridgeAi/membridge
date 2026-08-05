@@ -79,6 +79,12 @@ interface SyncPanelProps {
   encryptionEnabled: boolean
   plaintextOff: boolean
   sessionsThisWeek: number
+  /** T-78: solo/signed-out installs hide the Encryption row (there is no team
+   *  to encrypt for) and drop "Team" from the "Team sync" label -- the daemon
+   *  ticker still processes the project locally, so the row IS a fact worth
+   *  showing, but the "Team" adjective claimed a team the user is not on.
+   *  Required so the next caller cannot reintroduce the bug by omission. */
+  soloView: boolean
 }
 
 // Short by necessity: this chip lives in a fixed 300px column with ~174px left
@@ -107,21 +113,23 @@ const ENCRYPTION_LABEL: Record<EncryptionState, string> = {
  *  encrypted-but-dual-write state was already distinguished here, but borrowed
  *  the encryption-off vocabulary ("plaintext shared") for itself, which left the
  *  two unsafe states labelled as each other. */
-export function SyncPanel({ sync, onSync, encryptionEnabled, plaintextOff, sessionsThisWeek }: SyncPanelProps) {
+export function SyncPanel({ sync, onSync, encryptionEnabled, plaintextOff, sessionsThisWeek, soloView }: SyncPanelProps) {
   const encryption = readEncryption(encryptionEnabled, plaintextOff)
   return (
     <div className="panel panel-last">
       <div className="section-label">Sync</div>
       <div className="kv">
-        <span className="kv-key">Team sync</span>
+        <span className="kv-key">{soloView ? 'Sync' : 'Team sync'}</span>
         <span className="kv-value"><SyncStateView state={sync} onSync={onSync} /></span>
       </div>
-      <div className="kv">
-        <span className="kv-key">Encryption</span>
-        <StateChip tone={encryption.tone} glyph={encryption.glyph}>
-          {ENCRYPTION_LABEL[encryption.state]}
-        </StateChip>
-      </div>
+      {!soloView && (
+        <div className="kv">
+          <span className="kv-key">Encryption</span>
+          <StateChip tone={encryption.tone} glyph={encryption.glyph}>
+            {ENCRYPTION_LABEL[encryption.state]}
+          </StateChip>
+        </div>
+      )}
       {/* Sessions only. This read "N sessions · M people", where M was the
           length of Project.recentAuthorIds -- the author set of this project's
           slice of one capped, cross-project feed page. Two things were wrong

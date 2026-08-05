@@ -232,11 +232,19 @@ export function SearchPage() {
         )}
       </div>
 
-      {/* Resting state: never "no results" for a search nobody ran. */}
+      {/* Resting state: never "no results" for a search nobody ran.
+          T-78: the reference copy claimed "your teammates', and the archive
+          going back further than the feed does" on every install -- but a
+          solo user has neither teammates NOR a team archive, and reading that
+          line as a promise about what search sees would send them looking for
+          rows that structurally cannot exist. `solo` here is the SAME flag
+          the filter row and Hide-mine below already gate on -- there is
+          nothing to filter by person on a solo machine either. */}
       {!asked && (
         <p className="search-resting">
-          Ranked across every project on this machine — your sessions, your teammates', and the
-          archive going back further than the feed does.
+          {solo
+            ? 'Ranked across every project on this machine — your own sessions across every tool that captures here.'
+            : 'Ranked across every project on this machine — your sessions, your teammates\', and the archive going back further than the feed does.'}
         </p>
       )}
 

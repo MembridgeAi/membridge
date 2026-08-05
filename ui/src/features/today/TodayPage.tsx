@@ -5,7 +5,7 @@ import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { weekdayMonthDay } from '../../data/localTime'
 import { groupLiveSessions } from '../../data/mappers'
 import { relativeAgo } from '../../data/relativeTime'
-import { useLiveSessions, useProjects, useSkeletonStats, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
+import { useLiveSessions, useProjects, useSkeletonStats, useSoloView, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
 import type { LiveSession, Project, SkeletonStats } from '../../data/types'
 import { LiveEntry } from './LiveEntry'
 import { ProjectRow } from './ProjectRow'
@@ -86,6 +86,10 @@ export function TodayPage() {
   const skeletonQuery = useSkeletonStats()
   const syncProject = useSyncProject()
   const syncAll = useSyncAll()
+  // T-78: the SURFACE gate for team language. See useSoloView doc. Called
+  // here, alongside every other hook, because rules-of-hooks requires the
+  // call to run before any conditional return below.
+  const soloView = useSoloView()
 
   const liveSessions = liveQuery.data ?? []
   // Perf (spec §7): Today re-renders every 10s poll tick. Without this
@@ -234,6 +238,7 @@ export function TodayPage() {
                 memberNames={memberNames}
                 onSyncProject={syncProject.mutate}
                 syncPending={syncProject.isPending && syncProject.variables === project.path}
+                soloView={soloView}
               />
             ))
           )}

@@ -612,9 +612,18 @@ export function InsightsPage() {
   const authorized = onTeam && client.capabilities.teamAdminSupported && isTeamAdmin
 
   if (!authorized) {
+    // T-78 item 14: a signed-out or teamless user reading "Insights is
+    // available to team owners and admins" was told about a permission tier
+    // that has no meaning for them yet -- the honest sentence is that
+    // Insights is a team surface. The role-restricted case (a signed-in
+    // member, not an owner/admin) keeps its original wording, since for that
+    // reader the permission tier IS the answer.
+    const message = onTeam
+      ? 'Insights is available to team owners and admins.'
+      : 'Insights is a team surface. It becomes available once you join or create a team.'
     return (
       <div className="insights-page">
-        <p className="insights-restricted">Insights is available to team owners and admins.</p>
+        <p className="insights-restricted">{message}</p>
       </div>
     )
   }

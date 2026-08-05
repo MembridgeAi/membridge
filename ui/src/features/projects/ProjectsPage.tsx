@@ -7,7 +7,7 @@ import { LoadingBlock } from '../../components/LoadingBlock'
 import { SyncStateView } from '../../components/SyncState'
 import { useDataClient } from '../../data/DataClientProvider'
 import { relativeAgo } from '../../data/relativeTime'
-import { isRetryableDeleteRefusal, useAccessMatrix, useArchiveProject, useDeleteProject, useMembers, useProjectAccess, useProjects, useSetProjectAccess, useSettings, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
+import { isRetryableDeleteRefusal, useAccessMatrix, useArchiveProject, useDeleteProject, useMembers, useProjectAccess, useProjects, useSetProjectAccess, useSettings, useSoloView, useStatus, useSyncProject, useUnarchiveProject } from '../../data/queries'
 import type { AccessMatrix, Project } from '../../data/types'
 import { AccessPopover, type PopoverRoster } from './AccessPopover'
 import { AccessSummary, type AccessMemberRef } from './AccessSummary'
@@ -28,6 +28,12 @@ interface ProjectTableRowProps {
   roster: AccessMemberRef[] | null
   teamSize: number
   showAccess: boolean
+  /** T-78: hides the Shared/Private tag entirely. On a solo (or signed-out)
+   *  install `project.shared` is drawn from a stray `.membridge/team.json`
+   *  the daemon read next to the source, not from a share the user made — so
+   *  the tag would name a team the user is not on, and PRIVATE is only
+   *  meaningful as the counterpart of SHARED. Dropping the pair, per ticket. */
+  soloView: boolean
   onSync: () => void
   /** True while THIS row's sync request is in flight (Fix 9). */
   syncPending: boolean
@@ -39,7 +45,7 @@ interface ProjectTableRowProps {
   onDelete: (() => void) | null
 }
 
-function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPending, onOpenAccess, selection, onDelete }: ProjectTableRowProps) {
+function ProjectTableRow({ project, roster, teamSize, showAccess, soloView, onSync, syncPending, onOpenAccess, selection, onDelete }: ProjectTableRowProps) {
   return (
     <tr data-testid={`project-row-${project.name}`}>
       {selection && (
@@ -59,7 +65,9 @@ function ProjectTableRow({ project, roster, teamSize, showAccess, onSync, syncPe
           from the same builder, so the two can never drift apart. */}
       <td className="proj-name">
         <Link href={projectHref(project.path)} className="proj-name-link">{project.name}</Link>
-        {' '}<span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>{project.shared ? 'Shared' : 'Private'}</span>
+        {!soloView && (
+          <>{' '}<span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>{project.shared ? 'Shared' : 'Private'}</span></>
+        )}
         {/* `title` is load-bearing, not a nicety: projects.css clamps the path
             to two lines, and what a clamp drops is the TAIL -- which is the
             only thing distinguishing two worktrees of one repo
@@ -113,6 +121,10 @@ export function ProjectsPage() {
   const projectsQuery = useProjects()
   const statusQuery = useStatus()
   const settingsQuery = useSettings()
+  // T-78: the SURFACE-level team-language gate. See useSoloView doc. Called
+  // here, above the conditional matrix hook below, because rules-of-hooks
+  // needs an unconditional call order across renders.
+  const soloView = useSoloView()
   const [filter, setFilter] = useState('')
   const [showAddProject, setShowAddProject] = useState(false)
   // The project path whose access popover is open, or null.
@@ -238,7 +250,15 @@ export function ProjectsPage() {
   // durable teammate archive), so the control must not be offered to someone
   // it is going to refuse. Same gate the access popover uses, not a second
   // permission concept; a member keeps Delete on their own private projects.
+  //
+  // T-78: the shared flag is drawn from a stray `.membridge/team.json` on a
+  // solo install, so the safety net was locking a solo user out of deleting a
+  // project that appears team-linked to a team the user is not even on. On a
+  // solo view we ignore `project.shared` for this gate: there is no team, so
+  // the daemon cannot refuse for the manager-only reason above, and there is
+  // nobody else to protect. The daemon still enforces the real check.
   function canDeleteProject(project: Project): boolean {
+    if (soloView) return true
     return !project.shared || canEditAccess
   }
 
@@ -349,10 +369,22 @@ export function ProjectsPage() {
         {/* Both figures come from projectsQuery, so before it answers this read
             "0 watched · 0 shared" — measured at 1,290ms on a machine with 10
             watched and 1 shared. A bar keeps the header's shape without
-            stating a count nothing has counted yet. */}
+            stating a count nothing has counted yet.
+
+            T-78: the "· N shared" clause is dropped entirely on solo, matching
+            memberCountLabel's rule on the Team page — the count is drawn from
+            `project.shared`, which is derived from whatever stray team.json
+            the daemon happened to find on disk, so a solo user with 10
+            projects and one stray marker read "10 watched · 1 shared" for a
+            team they were not on. Dropping the clause is closer to right than
+            printing zero would be, which would make the two ends of the
+            sentence look mismatched every time the last shared project is
+            unshared. */}
         <span className="mono projects-count">
           {ready
-            ? `${activeProjects.length} watched · ${sharedCount} shared`
+            ? soloView
+              ? `${activeProjects.length} watched`
+              : `${activeProjects.length} watched · ${sharedCount} shared`
             : <><LoadingBlock variant="short" /><span className="sr-only">Loading project counts</span></>}
         </span>
         <div className="projects-header-right">
@@ -420,6 +452,7 @@ export function ProjectsPage() {
               roster={rosterFor(project)}
               teamSize={teamSize}
               showAccess={showAccess}
+              soloView={soloView}
               onSync={() => syncProject.mutate(project.path)}
               syncPending={syncProject.isPending && syncProject.variables === project.path}
               onOpenAccess={() => setAccessFor(project.path)}

@@ -194,6 +194,42 @@ export function useTeamAccount() {
   return useQuery({ queryKey: ['teamAccount'], queryFn: () => c.getTeamAccount(), staleTime: STANDARD_STALE_MS })
 }
 
+/**
+ * "Should this surface speak team-language at all?" Every affirmative team
+ * surface -- SHARED/PRIVATE tags, "N shared" counts, team-sync chips, team
+ * encryption -- is HIDDEN when this returns true, because on a solo install
+ * those assertions are drawn from noise: a stray `.membridge/team.json` in the
+ * working directory (someone else's clone, an old worktree, a repo cloned from
+ * a team member's fork) marks the project as team-linked on the daemon side,
+ * and every downstream screen then renders team language a user with no team
+ * has no context for. The one commit's-worth-of-gating half of T-78 is this
+ * hook plus its call sites.
+ *
+ * The rule is exactly what T-78 named: `status.solo === true` OR the account
+ * is not authenticated. Deliberately NOT distinguishing "genuinely solo" from
+ * "team member with no rows yet" -- both should see solo language for a stray
+ * team-labelled project. This is DIFFERENT from Shell.tsx's `onTeam`
+ * (settings.team !== null): that answers "does this identity own a team",
+ * which is the right gate for showing team NAV but the wrong one for
+ * suppressing team CLAIMS about a stray-linked project, since a real owner
+ * whose linked projects all happen to sit outside a multi-member team still
+ * reports `solo: true` and should still not see "1 shared" quoted about a
+ * project that just happens to carry a foreign team.json.
+ *
+ * Loading defaults to `true` (solo view). The failure mode this ticket exists
+ * to fix is TEAM language rendered without evidence; defaulting to solo means
+ * a flash-of-noise is empty rather than accusatory. Every consumer's real
+ * team data still lands on its own; this only decides whether the frame
+ * around it commits to team-ness before that data arrives.
+ */
+export function useSoloView(): boolean {
+  const status = useStatus()
+  const account = useTeamAccount()
+  const solo = status.data?.solo ?? true
+  const authenticated = account.data?.authenticated === true
+  return solo || !authenticated
+}
+
 // ---------------------------------------------------------------------------
 // Mutations. Every mutation invalidates the queries its change affects.
 // ---------------------------------------------------------------------------

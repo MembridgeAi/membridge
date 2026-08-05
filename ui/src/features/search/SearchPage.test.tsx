@@ -36,9 +36,13 @@ afterEach(() => {
 })
 
 describe('SearchPage', () => {
-  it('says what it searches before anything is typed -- never "no results"', () => {
+  it('says what it searches before anything is typed -- never "no results"', async () => {
+    // Awaited: the resting line now varies with useSoloView, which reads
+    // status + team-account. Sync getByText landed on the FIRST render, before
+    // either resolved, so it matched whichever variant the loading defaults
+    // produced rather than the one this fixture describes.
     renderApp({}, <SearchPage />)
-    expect(screen.getByText(/archive going back further than the feed/i)).toBeInTheDocument()
+    expect(await screen.findByText(/archive going back further than the feed/i)).toBeInTheDocument()
     expect(screen.queryByText(/No matches/i)).toBeNull()
   })
 
@@ -119,6 +123,19 @@ describe('SearchPage', () => {
   it('offers Hide mine only where there are teammates to hide yours from', () => {
     renderApp({ solo: true }, <SearchPage />)
     expect(screen.queryByRole('button', { name: 'Hide mine' })).toBeNull()
+  })
+
+  // T-78 item 5: the resting line promised "your teammates', and the archive
+  // going back further than the feed does" on every install -- but a solo
+  // user has neither teammates nor a team archive, and reading that line as
+  // a promise about what search sees would send them looking for rows that
+  // structurally cannot exist.
+  it('describes the solo scope honestly on a solo, signed-out install', async () => {
+    renderApp({ solo: true, authenticated: false }, <SearchPage />)
+    expect(await screen.findByText(/your own sessions/i)).toBeInTheDocument()
+    expect(screen.queryByText(/teammates/i)).toBeNull()
+    expect(screen.queryByText(/team archive/i)).toBeNull()
+    expect(screen.queryByText(/archive going back further/i)).toBeNull()
   })
 
   // The negation is the point of the assertion, not an implementation detail:

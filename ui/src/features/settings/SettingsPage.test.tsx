@@ -148,6 +148,29 @@ describe('SettingsPage', () => {
     expect(screen.queryByRole('button', { name: /leave team/i })).toBeNull()
   })
 
+  // T-78 items 7 & 8: Team memory encryption is the one Privacy row that
+  // describes team behaviour ("teammates' apps decrypt locally") and names
+  // two config keys (team.encrypt, team.plaintextOff) that only mean
+  // something once a team exists. Absent on solo/signed-out, not restated.
+  it('omits Team memory encryption entirely on solo, along with the config-key advisor', async () => {
+    renderApp({ solo: true, authenticated: false }, <SettingsPage />)
+    await screen.findByText('Privacy')
+    expect(screen.queryByText('Team memory encryption')).toBeNull()
+    // The advisor sentence names the config keys; those keys are meaningless
+    // to a solo user, so it must not linger on this page.
+    expect(screen.queryByText(/team\.encrypt/)).toBeNull()
+    expect(screen.queryByText(/team\.plaintextOff/)).toBeNull()
+    // Other Privacy rows must still render -- solo users still care about
+    // redaction and excluded folders on their local files.
+    expect(screen.getByText('Redaction patterns')).toBeInTheDocument()
+    expect(screen.getByText('Excluded folders')).toBeInTheDocument()
+  })
+
+  it('keeps Team memory encryption on a team install', async () => {
+    renderApp({}, <SettingsPage />)
+    expect(await screen.findByText('Team memory encryption')).toBeInTheDocument()
+  })
+
   // Task: Re-register is ALWAYS available (not only when the channel reports
   // missing), wired to the real registration path -- POST /api/mcp/register
   // -> lib/mcp-register.js's registerNow(), the same thing `membridge mcp
