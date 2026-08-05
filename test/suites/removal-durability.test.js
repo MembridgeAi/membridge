@@ -276,6 +276,66 @@ async function main() {
       assert.deepStrictEqual(unresolved.map(e => e.action), [],
         `every one of these rows was written by Owner: ${JSON.stringify(unresolved)}`);
     });
+
+    // -----------------------------------------------------------------------
+    // 5. REM-4: leaving is the same door (042).
+    // -----------------------------------------------------------------------
+    // leave_team (002:252) deleted the caller's own row and nothing else, so a
+    // voluntary departure walked around everything 041 closed. The leaver here
+    // is an ADMIN, which is the case that decides it: after 041 §2 the standing
+    // code reaches managers only, so an admin who resigns is the person most
+    // certain to be holding it, and they are never "removed" — they leave. If
+    // only removal rotated, the highest-risk departure would be the one that
+    // left the credential live.
+    //
+    // "Member" stands in for the outsider trying the old credentials: they were
+    // removed from Alpha in section 2, still have working sign-in, and are not
+    // on the roster.
+    const alphaCodeBeforeLeave = (await teamRowFor('owner', alpha.team_id)).invite_code;
+    const betaCodeBeforeLeave = (await teamRowFor('owner', beta.team_id)).invite_code;
+    const linkBeforeLeave = await asOwner(cfg => teamsync.createInvite(cfg, alpha.team_id, {}));
+    const left = await apiAs('bystander', 'POST', '/api/team/leave', { teamId: alpha.team_id });
+    assert.strictEqual(left.status, 200, `fixture: the admin must be able to leave, got ${left.status}`);
+
+    await check('leaving a team rotates its standing invite code', async () => {
+      const after = (await teamRowFor('owner', alpha.team_id)).invite_code;
+      assert.notStrictEqual(after, alphaCodeBeforeLeave,
+        'leave_team must rotate teams.invite_code: a departing admin holds it, and revoking ' +
+        'only their own outstanding invites would close nothing — the standing code is the ' +
+        "team's, not theirs, and an ordinary member cannot mint invites at all");
+    });
+
+    await check('the code held before a departure stops working after it', async () => {
+      const rejoin = await apiAs('member', 'POST', '/api/team/join', { inviteCode: alphaCodeBeforeLeave });
+      assert.notStrictEqual(rejoin.status, 200,
+        'the standing code a departing member was holding must be dead, whichever door they used');
+    });
+
+    await check('leaving revokes the team\'s outstanding invite links', async () => {
+      const redeem = await apiAs('member', 'POST', '/api/team/join', { inviteCode: linkBeforeLeave.token });
+      assert.notStrictEqual(redeem.status, 200,
+        'a link minted before the departure must not still redeem afterwards — create_invite ' +
+        'defaults to no expiry and no use cap, so the link they joined with outlives them');
+    });
+
+    // COUNTER-CHECKS — pass before AND after 042.
+    await check('a departure from one team does not rotate another team\'s invite code', async () => {
+      const after = (await teamRowFor('owner', beta.team_id)).invite_code;
+      assert.strictEqual(after, betaCodeBeforeLeave,
+        'nobody left Beta; its standing code must be byte-identical');
+    });
+
+    // 042 restates leave_team's body verbatim and adds two statements. The
+    // owner guard lives inside that body, so a transcription slip would drop
+    // it silently and hand every team an unrecoverable state (no owner, and
+    // set_role cannot mint one). Cheap to assert, catastrophic to lose.
+    await check('the owner still cannot leave their own team', async () => {
+      const res = await apiAs('owner', 'POST', '/api/team/leave', { teamId: alpha.team_id });
+      assert.notStrictEqual(res.status, 200,
+        'leave_team must still refuse the owner; 042 restates its body and must not drop the guard');
+      assert.ok(mock.members.some(m => m.teamId === alpha.team_id && m.displayName === 'Owner'),
+        'the owner is off their own roster — the team now has nobody who can manage it');
+    });
   } finally {
     await new Promise(r => mock.server.close(r));
   }

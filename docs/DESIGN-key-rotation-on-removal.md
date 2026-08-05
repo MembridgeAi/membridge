@@ -34,8 +34,14 @@ It does not touch `public.team_keys`, and there is no path that does:
 
 Net: a removed member keeps decrypting **everything they ever synced**, and
 until 041 they could also re-join and be sealed into the new epoch by the
-join-seal path. 041 closes the re-join half. This note is about the other
-half.
+join-seal path. 041 closes the re-join half, and 042 closes it for a
+voluntary departure too. This note is about the other half.
+
+Read "removed" below as "departed": everything here applies identically to
+someone who leaves of their own accord, and after 041 §2 an admin who
+resigns is the role most certain to be holding team credentials. The
+resignation case is arguably the more likely one — nobody schedules it, and
+it produces no `member-removed` row for anyone to notice.
 
 ## The part no design can fix
 

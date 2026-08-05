@@ -344,6 +344,17 @@ function createMockSupabase() {
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === userId);
       if (i !== -1) members.splice(i, 1);
       cascadeAccessRows(body.p_team, userId); // 024's FK cascade (see 029 §5)
+      // 042: a voluntary departure rotates the standing invite code and
+      // revokes outstanding invite links, exactly as a removal does. Same two
+      // statements as 041 §1 -- see 042's header for why the same remedy fits
+      // a departure nobody else chose: leaving is one-shot per membership, and
+      // after 041 §2 an admin who resigns is the role most certain to be
+      // holding the code.
+      const leftFrom = teams.get(body.p_team);
+      if (leftFrom) leftFrom.inviteCode = uuid();
+      for (const inv of invites.values()) {
+        if (inv.teamId === body.p_team && !inv.revokedAt) inv.revokedAt = new Date().toISOString();
+      }
       return json(res, 200, null);
     }
     if (fn === 'team_members_list') {

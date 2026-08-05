@@ -195,12 +195,12 @@ grant execute on function public.remove_member(uuid, uuid) to authenticated, ser
 -- ---------------------------------------------------------------------------
 -- DELIBERATELY NOT HERE
 --
--- * leave_team (002:252) is NOT changed. Someone who leaves voluntarily holds
---   the same code and can walk back in the same way. It is the identical hole
---   with a different door, but the ticket scope is removal and rotating on a
---   voluntary departure has a different cost profile (a member leaving one of
---   several teams would invalidate that team's code for everyone every time).
---   Flagged for a separate decision, not fixed by omission-as-accident.
+-- * leave_team (002:252) is not changed HERE. It is the identical hole with a
+--   different door and it is closed by 042_leave_rotates_invite_code.sql, in
+--   its own file so it can be applied, held or reverted on its own. 042's
+--   header carries the argument for why the same remedy fits a voluntary
+--   departure, including why the narrower "revoke only their own invites"
+--   closes nothing. Applying 041 without 042 leaves that door open.
 --
 -- * team_keys is NOT touched and the team key is NOT rotated. A removed member
 --   keeps every sealed key they were ever given and can still decrypt every
