@@ -138,6 +138,12 @@ deletes that project's `.membridge/` folder — its whole local memory history,
 which nothing rebuilds. Use `membridge remove --keep-memory` if you only want
 the blocks gone.
 
+That is the *local* half only: `remove` never touches the copy on the team
+backend. To delete what you have synced to a team, use `membridge team
+delete-my-data` (or Settings › Team › Danger zone in the app), which removes
+only your own entries, leaves everyone else's alone, and is recorded in the
+team audit trail.
+
 Each project also gets a structured memory database in `.membridge/`:
 `memory.json` (every update as a structured entry, plus an ignore-aware index
 of the project's files) and `memory.md` (the same memory as readable
@@ -320,6 +326,7 @@ boxes and terminal-first teammates aren't second-class:
 | `membridge join <link-or-code>` | Accept an invite (creates the account if needed) |
 | `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
 | `membridge team link` / `unlink` / `list` | Share or stop sharing a project |
+| `membridge team delete-my-data [--team <id>] [--project <path>] [--confirm DELETE]` | Delete **your own** synced entries from the team backend (irreversible). Without `--confirm` it only previews. Recorded in the team audit trail |
 | `membridge team setup` | Point at a self-hosted backend |
 | `membridge why <file>[:<line>]` | Which AI sessions edited a file, newest first; `:<line>` narrows to one line |
 | `membridge churn [--session <id>] [--since <Nd>]` | Diagnostic: how much of a session's committed work survives in `HEAD` |

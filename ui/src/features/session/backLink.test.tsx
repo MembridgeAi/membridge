@@ -6,7 +6,7 @@ import { describe, expect, it, afterEach } from 'vitest'
 import { screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp } from '../../test/renderApp'
-import { ROUTES, projectHref, searchHref, sessionHref } from '../../app/routes'
+import { ROUTES, backLink, projectHref, searchHref, sessionHref } from '../../app/routes'
 
 const SETTLED = { timeout: 8000 }
 
@@ -80,18 +80,31 @@ describe('call sites say where they are sending the reader from', () => {
     expect(new URLSearchParams(href.slice(href.indexOf('?'))).get('from')).toBe(searchHref({ q: 'ports' }))
   })
 
-  it('a feed row links to the session carrying the Feed as its origin', async () => {
+  // The Feed is day cards now and expands nothing: a session is reached from
+  // the DAY view a card opens, so that is the origin a session must carry.
+  // Walked as a reader walks it, click by click, because the two halves of
+  // this (the card's href and the day view's lookup of it) are exactly what a
+  // hand-written URL in a test would stop checking.
+  it('a day view links to the session carrying that day as its origin', async () => {
     const user = userEvent.setup()
     visit(ROUTES.feed)
     renderApp()
-    // Feed rows live inside a collapsed day card; open the first one.
-    const head = (await screen.findAllByRole('button', { expanded: false }, SETTLED))[0]
-    await user.click(head)
-    const link = (await screen.findAllByRole('link', {}, SETTLED)).find(a =>
+    const card = (await screen.findByText(/Hook ownership now decided by durability/, {}, SETTLED)).closest('a')
+    expect(card!.getAttribute('href')!.startsWith(`${ROUTES.days}/`)).toBe(true)
+    await user.click(card!)
+
+    // Wait for the day view's own content, not for "any link": the shell's
+    // nav links are in the document from the first paint, so a bare
+    // findAllByRole resolves long before this lazy route has rendered. Same
+    // trap, same fix, as the project-stream case below.
+    await screen.findByText('Prompts', {}, SETTLED)
+    const link = screen.getAllByRole('link').find(a =>
       (a.getAttribute('href') ?? '').startsWith('/sessions/'))
     expect(link).toBeDefined()
     const href = link!.getAttribute('href')!
-    expect(new URLSearchParams(href.slice(href.indexOf('?'))).get('from')).toBe(ROUTES.feed)
+    const from = new URLSearchParams(href.slice(href.indexOf('?'))).get('from')!
+    expect(from.startsWith(`${ROUTES.days}/`)).toBe(true)
+    expect(backLink(from).label).toBe('Back to the day')
   })
 
   it('a project stream row links to the session carrying that project as its origin', async () => {

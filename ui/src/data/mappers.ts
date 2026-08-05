@@ -339,8 +339,13 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
 // which project it belongs to (server.js's `project` display name and its
 // `projectPath`, for the "project name (mono)" column a cross-project
 // stream needs and a single-project stream -- StreamEntry -- doesn't.
+//
+// projectId rides along for grouping only, never for display: it is the one
+// project component a synced-back team row still shares with the local row it
+// is a copy of (see the field's doc on FeedEntry), so dropping it here is what
+// made the Feed render one person's day as two cards.
 export function mapFeedEntry(e: RawFeedEntry): FeedEntry {
-  return { ...mapStreamEntry(e), project: e.project, projectPath: e.projectPath }
+  return { ...mapStreamEntry(e), project: e.project, projectPath: e.projectPath, projectId: e.projectId }
 }
 
 // ---------------------------------------------------------------------------

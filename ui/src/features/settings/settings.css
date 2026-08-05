@@ -185,3 +185,32 @@
   color: var(--text2);
   overflow-wrap: anywhere;
 }
+
+/* Danger zone: a collapsed disclosure at the very bottom of the Team group,
+ * closed by default, holding the one control here that destroys data on the
+ * backend. Same shape as the Projects page's "Archived (N)" section (see
+ * projects.css .archived-section/.archived-toggle) rather than a second
+ * pattern for the same idea, but with its own class names -- projects.css is
+ * only loaded on the Projects route, so borrowing those selectors would leave
+ * this unstyled the moment a route split changed what Settings imports.
+ *
+ * Deliberately hard to stumble into. The label is the whole affordance: no
+ * button, no summary of what is inside, nothing that reads as an action until
+ * someone has decided to open it. */
+.settings-danger-section {
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+  padding: 8px 16px 4px;
+}
+.settings-danger-toggle {
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-danger-toggle:hover {
+  color: var(--text1);
+}

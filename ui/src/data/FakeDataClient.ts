@@ -1,7 +1,7 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  Invite, LiveSession, McpRegisterResult, Member, MyDataSummary, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
@@ -594,6 +594,28 @@ export class FakeDataClient implements DataClient {
   openConfigFile() { return this.guard<void>(undefined) }
   openMemoryFile() { return this.guard<void>(undefined) }
   leaveTeam() { return this.guard<void>(undefined) }
+
+  // Two projects, not one, and neither count round: the confirmation copy has
+  // to quote a real total, and a single-row fixture would let a component that
+  // renders `projects[0].entries` as "the total" pass.
+  getMyData() {
+    return this.guard<MyDataSummary>({
+      projects: [
+        {
+          projectId: 'proj-1', name: 'membridge', path: '/Users/x/membridge',
+          entries: 184, firstTs: '2026-05-02T09:00:00Z', lastTs: '2026-07-29T19:00:00Z',
+        },
+        {
+          // path null on purpose: a project synced from another machine, the
+          // state the row must not render as a folder it cannot point at.
+          projectId: 'proj-2', name: 'polycopy', path: null,
+          entries: 27, firstTs: '2026-06-11T12:00:00Z', lastTs: '2026-07-14T08:30:00Z',
+        },
+      ],
+      total: 211,
+    })
+  }
+  deleteMyData() { return this.guard<number>(211) }
 
   // Discovery fixture: two untracked folders with real activity plus one
   // already-watched row, so the dialog's "already added" filtering is

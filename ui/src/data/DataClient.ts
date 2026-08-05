@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  Member, MyDataSummary, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -149,6 +149,28 @@ export interface DataClient {
   openConfigFile(): Promise<void>
   openMemoryFile(projectPath: string): Promise<void>
   leaveTeam(teamId: string): Promise<void>
+
+  // Self-serve deletion of the viewer's OWN synced entries (GET
+  // /api/team/my-data, POST /api/team/delete-my-data; migration 028).
+  //
+  // UNGATED BY ROLE, unlike every neighbouring team method whose daemon route
+  // 403s a non-manager. Every member can erase what they pushed, including
+  // one who was just demoted -- the backend policy is scoped on authorship
+  // alone. Do not add a role condition at any layer above this.
+  //
+  // getMyData is a PREVIEW, and the count it returns is what the confirmation
+  // must quote: it is counted on the backend, so it includes rows this
+  // machine never pushed and rows in a project whose access was revoked,
+  // neither of which a local read would find.
+  getMyData(teamId: string): Promise<MyDataSummary>
+  /** Resolves the number of entries actually removed. `confirm` is the string
+   *  the user actually TYPED, threaded from the confirmation field through
+   *  ConfirmDialog's onConfirm, and the daemon re-checks it (lib/server.js
+   *  refuses anything that is not exactly DELETE). Callers must forward the
+   *  typed value rather than re-typing the literal: a hardcoded 'DELETE' here
+   *  would make the gate a UI-only formality, since the wire would carry the
+   *  right word whatever the field held. */
+  deleteMyData(input: { teamId: string; projectId?: string | null; confirm: string }): Promise<number>
 
   // Redeem an invite and join the team it belongs to (POST /api/team/join).
   // Takes whatever the user was actually sent: a short invite token, a legacy

@@ -1,7 +1,6 @@
-import { useMemo, useState } from 'react'
-import { FEED_SESSION_PARAM, ROUTES, feedSessionHref, useRawSearch } from '../../app/routes'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { FEED_SESSION_PARAM, useRawSearch } from '../../app/routes'
 import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
-import { collapseSessionCheckpoints } from '../../data/mappers'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import { DayCard } from './DayCard'
@@ -53,7 +52,11 @@ export function groupByDay<T extends { at: string }>(items: T[], now: Date = new
 // last entry of one page is always the first entry of the next -- dedupe by
 // id when flattening pages rather than rendering (and double-keying) that
 // one-entry overlap.
-function dedupeById(entries: FeedEntry[]): FeedEntry[] {
+//
+// Exported for DayPage, which reads the SAME query and has to fold it into the
+// same cards; two copies of this rule is how the feed's card and the day it
+// links to end up disagreeing about which day a session belongs to.
+export function dedupeById(entries: FeedEntry[]): FeedEntry[] {
   const seen = new Set<string>()
   const out: FeedEntry[] = []
   for (const e of entries) {
@@ -64,11 +67,29 @@ function dedupeById(entries: FeedEntry[]): FeedEntry[] {
   return out
 }
 
-/** The Feed screen: every session across every project the viewer can see,
- *  newest first, yours and teammates' interleaved -- the old dashboard's
- *  Activity view. Filters (person/project/tool) all route through the
- *  query, and "Show more" pages backwards by the daemon's own cursor, so
- *  filtering and paging always agree with each other. */
+/** The Feed screen: DAY CARDS, and nothing else. One card per person per
+ *  project per local calendar day, newest activity first, yours and
+ *  teammates' interleaved.
+ *
+ *  A card carries the day's sentence and 1 to 3 sentences of what was done,
+ *  and clicking it opens the day view. It used to expand in place into a stack
+ *  of session rows, which was the same volume problem the card exists to solve
+ *  one level down; the detail lives on its own page now.
+ *
+ *  Filters (person/project/tool) all route through the query, and "Show more"
+ *  pages backwards by the daemon's own cursor, so filtering and paging always
+ *  agree with each other. */
+/** How many distinct local days the feed pulls for before it stops
+ *  auto-paging. Three is enough that today is never alone on the page even
+ *  when one person dominates it, and small enough that a cold open still
+ *  settles in one or two extra requests. */
+const MIN_DAYS_LOADED = 3
+
+/** Hard ceiling on auto-paging, independent of how many days turn up. An
+ *  account whose whole history is one busy day would otherwise walk its entire
+ *  feed looking for a third day that does not exist. */
+const MAX_AUTO_PAGES = 5
+
 export function FeedPage() {
   const statusQuery = useStatus()
   const solo = statusQuery.data?.solo ?? true
@@ -91,30 +112,75 @@ export function FeedPage() {
 
   const projectsQuery = useProjects()
   const membersQuery = useMembers(!solo)
-  const feedQuery = useFeed({ author: author || null, project: project || null, source: source || null })
+  // ONE filters value, read by the query and written onto every card's link.
+  // The day view runs useFeed itself and useFeed keys its cache on the
+  // filters, so a card built here under a filter is only reachable if the day
+  // view asks the same question -- building the two apart is exactly how a
+  // filtered feed's cards started 404ing on click.
+  const filters = useMemo(
+    () => ({ author: author || null, project: project || null, source: source || null }),
+    [author, project, source],
+  )
+  const feedQuery = useFeed(filters)
 
-  // dedupeById first (the /api/feed page-boundary overlap noted above), then
-  // collapseSessionCheckpoints -- the daemon's Stop hook re-summarizes a
-  // session every few edits, so several of these deduped rows can still be
-  // the SAME session's successive checkpoints; only the newest one should
-  // read as "this session's current state".
+  // dedupeById only (the /api/feed page-boundary overlap noted above).
+  //
+  // collapseSessionCheckpoints used to run here as well, reducing a session to
+  // its single newest row so the feed did not render the same long summary
+  // several times running. It is deliberately gone: every entry off /api/feed
+  // is one captured PROMPT (lib/memorydb.js mints one per prompt event and
+  // attaches the summary to whichever one the Stop hook landed on), so
+  // collapsing threw away every prompt of a session but the last -- which is
+  // exactly the data the card's prompt roll-up is made of. Nothing regresses,
+  // because the card no longer renders one row per entry: the repetition
+  // collapsing existed to hide has no surface left to appear on, and
+  // buildDayCards folds a session's rows into one group itself.
   const entries = useMemo(
-    () => collapseSessionCheckpoints(dedupeById(feedQuery.data?.pages.flatMap(p => p.entries) ?? [])),
+    () => dedupeById(feedQuery.data?.pages.flatMap(p => p.entries) ?? []),
     [feedQuery.data],
   )
   // Entries -> day cards -> day dividers. The cards are the top level of the
   // feed now: one per person per project per local day, so a teammate's
-  // afternoon is one line with a count instead of eight near-identical rows.
+  // afternoon is one card with a count instead of eight near-identical rows.
   // The dividers stay the outer chrome, and both layers key on the SAME local
   // day (dayCardKey and dayLabel both go through localTime), so a card can
   // never land under a heading for a different day.
   const dayCards = useMemo(() => buildDayCards(entries), [entries])
-  // What a session opened from here should call "back". Carrying the
-  // ?session= target through means returning re-expands the card the reader
-  // was actually looking at; without it, a deep link into one row sends them
-  // back to a collapsed feed with that row hidden again.
-  const feedOrigin = targetSession ? feedSessionHref(targetSession) : ROUTES.feed
   const dayGroups = groupByDay(dayCards)
+
+  // Keep pulling pages until the feed covers a few whole days, not just a few
+  // rows. /api/feed pages by ROW and grouping happens after, so one busy
+  // teammate starves everyone else: 30 rows of theirs is a full page and a
+  // quieter person's card for the same day lands behind "Show more". Measured
+  // on a two-person team, 59 rows from one of them filled page one entirely.
+  //
+  // Fetching to a DAY count rather than a card count is deliberate. A card
+  // count would still be gameable by the same person (many projects, many
+  // cards, same day), and days are what the reader actually scans.
+  //
+  // Termination is tracked on PROGRESS, never on the fetching flag alone.
+  // isFetchingNextPage is both a guard and a dependency, so an effect keyed on
+  // it re-arms every time a fetch settles: with nothing recording that an
+  // attempt was already made for this state, a page that errors, repeats its
+  // cursor, or simply adds no new day loops forever. Measured at roughly 44
+  // requests a second against the daemon, for as long as the screen is open.
+  // The pageCount ref is what makes it terminate: if the last attempt did not
+  // grow data.pages, stop asking.
+  const autoPagedFrom = useRef(-1)
+  const pageCount = feedQuery.data?.pages.length ?? 0
+  useEffect(() => {
+    if (dayGroups.length >= MIN_DAYS_LOADED) return
+    if (pageCount >= MAX_AUTO_PAGES) return
+    // A failed page is a reason to stop, not to retry in a tight loop. The
+    // reader still has "Show more", which is a deliberate act.
+    if (feedQuery.isError) return
+    if (!feedQuery.hasNextPage || feedQuery.isFetchingNextPage) return
+    // Already asked at this page count and got nowhere: the next page either
+    // failed or carried no new day. Either way, asking again changes nothing.
+    if (autoPagedFrom.current === pageCount) return
+    autoPagedFrom.current = pageCount
+    feedQuery.fetchNextPage()
+  }, [dayGroups.length, pageCount, feedQuery.isError, feedQuery.hasNextPage, feedQuery.isFetchingNextPage, feedQuery.fetchNextPage])
   const projects = projectsQuery.data ?? []
   const members = membersQuery.data ?? []
   const tools = statusQuery.data?.tools ?? []
@@ -163,15 +229,24 @@ export function FeedPage() {
       {dayGroups.map(group => (
         <div key={group.day}>
           <div className="feed-day">{group.day}</div>
-          {group.entries.map(card => (
-            <DayCard
-              key={card.key}
-              card={card}
-              showAvatar={!solo}
-              targetSession={targetSession}
-              from={feedOrigin}
-            />
-          ))}
+          {group.entries.map(card => {
+            // A `?session=` deep link (every Today card links in that way)
+            // names a session, and the feed is now days. The card HOLDING it
+            // is marked, and its link carries the target through, so following
+            // it lands on that session's group inside the day rather than at
+            // the top of a day the reader then has to search.
+            const targeted = !!targetSession && card.sessions.some(s => s.session === targetSession)
+            return (
+              <DayCard
+                key={card.key}
+                card={card}
+                showAvatar={!solo}
+                targeted={targeted}
+                targetSession={targeted ? targetSession : null}
+                filters={filters}
+              />
+            )
+          })}
         </div>
       ))}
 

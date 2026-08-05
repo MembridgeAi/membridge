@@ -3,7 +3,7 @@ import { Link } from 'wouter'
 import { ROUTES } from '../../app/routes'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { FormDialog } from '../../components/FormDialog'
-import { useLeaveTeam, useRenameTeam, useRotateInviteCode } from '../../data/queries'
+import { useDeleteMyData, useLeaveTeam, useMyData, useRenameTeam, useRotateInviteCode } from '../../data/queries'
 import type { Role, Settings } from '../../data/types'
 import { SettingRow } from './SettingRow'
 
@@ -21,6 +21,126 @@ function roleLabel(role: Role): string {
 
 interface TeamGroupProps {
   team: NonNullable<Settings['team']>
+}
+
+function entriesLabel(n: number): string {
+  return n === 1 ? '1 entry' : `${n.toLocaleString()} entries`
+}
+
+/**
+ * Delete my synced data: the one control on this screen that destroys
+ * something on the backend, and the only one deliberately made hard to reach.
+ *
+ * BURIED BY DESIGN, and the burial is the feature. It sits inside a collapsed
+ * disclosure that is closed on load (the same shape the Projects page's
+ * "Archived (N)" section uses), and the ConfirmDialog behind it requires the
+ * word DELETE typed in full. Two deliberate steps before anything is
+ * destroyed. Nobody reaches this by clicking around.
+ *
+ * NOT ROLE GATED. Rename and the invite controls above are admin-only;
+ * Leave team is ungated, and so is this. Every member can erase what they
+ * pushed, including a member who was demoted five minutes ago -- the backend
+ * policy is scoped on authorship alone (migration 028 §1). Do not wrap this
+ * in an isTeamAdmin check.
+ *
+ * The dialog copy has to say three things, and each one is load-bearing:
+ *   1. The REAL count, from the preview query, never a vague "your data".
+ *   2. That teammates keep whatever they already pulled to their machines,
+ *      because this deletes backend rows and cannot reach anyone else's disk.
+ *      Someone deleting for privacy reasons must not be left believing
+ *      otherwise.
+ *   3. That the deletion is RECORDED in the team audit trail where owners and
+ *      admins can see it. Andrew's decision: people learn that here, before
+ *      they act, rather than discovering it afterwards.
+ */
+function DeleteMyDataSection({ team }: TeamGroupProps) {
+  const [open, setOpen] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const myData = useMyData(team.id, open)
+  const deleteMyData = useDeleteMyData()
+  const [deletedCount, setDeletedCount] = useState<number | null>(null)
+
+  const total = myData.data?.total ?? 0
+  const projects = myData.data?.projects ?? []
+
+  // `typed` is what the person actually put in the confirmation field, sent as
+  // it stands. The daemon re-checks it (lib/server.js /api/team/delete-my-data
+  // refuses anything that is not the exact string), and re-typing the literal
+  // here instead would have made that check a formality: the wire would say
+  // DELETE whatever the field held.
+  async function confirmDelete(typed: string) {
+    try {
+      const n = await deleteMyData.mutateAsync({ teamId: team.id, confirm: typed })
+      setConfirming(false)
+      setDeletedCount(n)
+    } catch {
+      // Swallowed here so the rejection is not unhandled, and ONLY here: the
+      // dialog stays open with deleteMyData.error rendered in it. Closing on
+      // failure would leave someone believing their data is gone when it is
+      // not, which on this particular screen is the worst thing the UI can do.
+    }
+  }
+
+  return (
+    <section className="settings-danger-section">
+      <button
+        type="button"
+        className="settings-danger-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen(v => !v)}
+      >
+        Danger zone
+      </button>
+      {open && (
+        <SettingRow
+          label="Delete my synced data"
+          description={
+            deletedCount !== null
+              ? `Deleted. ${entriesLabel(deletedCount)} removed from ${team.name}.`
+              : myData.isPending
+                ? 'Counting what you have synced to this team...'
+                : myData.isError
+                  ? 'Could not read what you have synced to this team.'
+                  : total === 0
+                    ? `You have nothing synced to ${team.name}.`
+                    : `${entriesLabel(total)} you pushed to ${team.name} are stored on the backend. Removing them is permanent, and it is recorded in the team audit trail.`
+          }
+          testId="setting-delete-my-data"
+        >
+          {deletedCount === null && (
+            <button
+              type="button"
+              className="settings-btn settings-btn-danger"
+              disabled={myData.isPending || total === 0}
+              onClick={() => setConfirming(true)}
+            >
+              Delete my data
+            </button>
+          )}
+        </SettingRow>
+      )}
+
+      {confirming && (
+        <ConfirmDialog
+          title="Delete your synced data?"
+          message={
+            `This permanently deletes ${entriesLabel(total)} you pushed to ${team.name}` +
+            `${projects.length > 1 ? ` across ${projects.length} projects` : ''}. ` +
+            'Only your own entries go; nobody else\'s are touched, and your local memory on this machine is untouched. ' +
+            'Teammates keep whatever they have already pulled to their own machines, which this cannot reach. ' +
+            'The deletion is recorded in the team audit trail, where the team\'s owners and admins can see that you did it.'
+          }
+          confirmLabel="Delete my data"
+          destructive
+          pending={deleteMyData.isPending}
+          error={deleteMyData.isError ? errorMessage(deleteMyData.error) : null}
+          confirmInput={{ requiredText: 'DELETE', label: 'Type DELETE to confirm' }}
+          onConfirm={typed => { void confirmDelete(typed) }}
+          onCancel={() => setConfirming(false)}
+        />
+      )}
+    </section>
+  )
 }
 
 /** Rename, in the same FormDialog shell every other Settings edit uses. */
@@ -129,6 +249,11 @@ export function TeamGroup({ team }: TeamGroupProps) {
             )}
         </SettingRow>
       )}
+
+      {/* Last in the group, behind its own closed disclosure. Ungated: see
+          DeleteMyDataSection's own note for why there is no isTeamAdmin here
+          and why one must never be added. */}
+      <DeleteMyDataSection team={team} />
 
       {renaming && <RenameDialog team={team} onClose={() => setRenaming(false)} />}
 

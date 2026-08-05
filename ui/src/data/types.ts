@@ -138,6 +138,18 @@ export interface StreamEntry {
 export interface FeedEntry extends StreamEntry {
   project: string
   projectPath: string | null
+  // The backend's id for that project, carried through untouched. This is the
+  // ONE project component that survives a round trip through team sync: work
+  // done in a linked project reaches this machine twice, and the synced-back
+  // twin has projectPath nulled (lib/feed.js normalizeTeam) and a differently
+  // capitalised display name, but the SAME projectId. lib/feed.js's own
+  // dedupeKey already keys on it first for exactly this reason; the Feed's day
+  // cards do the same (features/feed/dayCards.ts projectPart), and without it
+  // one person's afternoon renders as two cards of the same afternoon.
+  //
+  // Optional, so every hand-built fixture keeps compiling; null is the honest
+  // value for an unlinked local project, which genuinely has no backend id.
+  projectId?: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +295,29 @@ export interface Invite {
   maxUses: number | null
   useCount: number
   revoked: boolean
+}
+
+/** One project's worth of the viewer's OWN entries on the backend, as counted
+ *  by the my_entry_counts RPC (migration 028) rather than read off this
+ *  machine. The distinction matters: other machines push to the same account,
+ *  and the local memory log is a different set from what is synced. This is
+ *  the number the deletion confirmation quotes, so it has to be the number the
+ *  deletion will actually take. */
+export interface MyDataProject {
+  projectId: string
+  name: string
+  /** This machine's folder for that backend project, when it has one. Null for
+   *  a project only ever synced from another machine -- absent and unknown
+   *  must stay distinguishable, so this is never guessed from the name. */
+  path: string | null
+  entries: number
+  firstTs: string | null
+  lastTs: string | null
+}
+
+export interface MyDataSummary {
+  projects: MyDataProject[]
+  total: number
 }
 
 export interface AuditEvent {

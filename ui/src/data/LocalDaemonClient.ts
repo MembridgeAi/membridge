@@ -4,7 +4,7 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type {
   AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  Member, MyDataProject, MyDataSummary, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -641,6 +641,45 @@ export class LocalDaemonClient implements DataClient {
     // the request cache can't infer from the URL alone -- clear it all
     // rather than risk a stale team/status read for the rest of the TTL.
     this.requestCache.clear()
+  }
+
+  // GET /api/team/my-data. Deliberately NOT put through this.requestCache: it
+  // is the number a destructive confirmation quotes, and quoting a cached
+  // count from before the user's last sync would understate what is about to
+  // be destroyed. Tolerant at the boundary like every other raw payload here.
+  async getMyData(teamId: string): Promise<MyDataSummary> {
+    const r = await get<{ projects?: Partial<MyDataProject>[]; total?: number }>(
+      `/api/team/my-data?teamId=${encodeURIComponent(teamId)}`,
+    )
+    const projects: MyDataProject[] = (r.projects ?? []).map(p => ({
+      projectId: String(p.projectId ?? ''),
+      name: String(p.name ?? ''),
+      path: p.path ?? null,
+      entries: Number(p.entries ?? 0),
+      firstTs: p.firstTs ?? null,
+      lastTs: p.lastTs ?? null,
+    }))
+    // The daemon sends a total; recompute rather than trust it, so the
+    // headline figure can never disagree with the rows printed beneath it.
+    return { projects, total: projects.reduce((n, p) => n + p.entries, 0) }
+  }
+
+  // postReadingError, not post: the daemon's refusals here are sentences a
+  // person can act on ("confirm must be the string DELETE", or whatever
+  // PostgREST said when the 028 migration has not been applied to the
+  // backend yet). Collapsing those into a bare "400" on a screen that just
+  // asked someone to type DELETE would leave them unable to tell a missing
+  // migration from a mistyped word, and unsure whether anything was deleted.
+  async deleteMyData(input: { teamId: string; projectId?: string | null; confirm: string }): Promise<number> {
+    const r = await postReadingError<{ deleted: number }>('/api/team/delete-my-data', {
+      teamId: input.teamId,
+      projectId: input.projectId ?? null,
+      confirm: input.confirm,
+    })
+    // Rows just left the backend: the feed, insights and team reads cached
+    // here all described a world that included them.
+    this.requestCache.clear()
+    return Number(r.deleted ?? 0)
   }
 
   // GET /api/scan (lib/server.js scanPayload). Tolerant at the boundary the

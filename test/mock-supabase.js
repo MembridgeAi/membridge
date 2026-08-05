@@ -266,6 +266,84 @@ function createMockSupabase() {
       if (p) p.defaultAccess = !!body.p_default;
       return json(res, 200, null);
     }
+    // 028_delete_own_entries.sql: self-serve deletion of the caller's OWN
+    // synced rows, plus the preview the confirmation screen counts from.
+    //
+    // Both mirror the migration exactly on the point that matters: the
+    // predicate is `author_id = auth.uid()` AND the project's team, and
+    // NOTHING else. No isMember check and no canSeeProject check, because
+    // 028 §1/§2 deliberately omit both. A member who just left the team, or
+    // whose project access was revoked, must still be able to see and erase
+    // what they wrote. A mock that "helpfully" added a membership gate here
+    // would make the exact regression this feature exists to prevent pass
+    // locally.
+    //
+    // Archived projects are included, unlike team_feed / team_feed_counts:
+    // archiving hides a project, it does not remove its rows, and the preview
+    // must count what the delete will actually take.
+    if (fn === 'my_entry_counts') {
+      const mine = entries.filter(e => projectTeam(e.project_id) === body.p_team && e.author_id === userId);
+      const byProject = new Map();
+      for (const e of mine) {
+        const acc = byProject.get(e.project_id) || { entries: 0, first: null, last: null };
+        acc.entries++;
+        if (acc.first === null || e.ts < acc.first) acc.first = e.ts;
+        if (acc.last === null || e.ts > acc.last) acc.last = e.ts;
+        byProject.set(e.project_id, acc);
+      }
+      const rows = [...byProject.entries()].map(([projectId, acc]) => ({
+        project_id: projectId,
+        project_name: (projects.find(p => p.id === projectId) || {}).name || '',
+        entries: acc.entries,
+        first_ts: acc.first,
+        last_ts: acc.last,
+      })).sort((a, b) => String(a.project_name).localeCompare(String(b.project_name)));
+      return json(res, 200, rows);
+    }
+    if (fn === 'delete_my_entries') {
+      const doomed = entries.filter(e =>
+        projectTeam(e.project_id) === body.p_team &&
+        e.author_id === userId &&
+        (!body.p_project || e.project_id === body.p_project));
+      for (const e of doomed) entries.splice(entries.indexOf(e), 1);
+      // The audit row is written INSIDE the function in the real migration
+      // (028 §3), in the same transaction, because team_audit's insert policy
+      // requires is_team_manager and a plain member's own insert is refused.
+      // Mirrored here with no role check for the same reason: a mock that
+      // only logged for managers would hide the bug that motivated putting
+      // the insert in the RPC at all.
+      if (doomed.length) {
+        // unshift + the offset created_at, matching the REST insert path
+        // below, so two audit rows written in the same millisecond still sort
+        // deterministically newest-first for the GET.
+        teamAudit.unshift({
+          id: uuid(),
+          team_id: body.p_team,
+          actor_id: userId,
+          action: 'own-data-deleted',
+          object_type: 'member',
+          object_key: userId,
+          detail: {
+            memberId: userId,
+            deleted: doomed.length,
+            projectKey: body.p_project || null,
+          },
+          created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+        });
+      }
+      // One row per project actually emptied, the migration's shape (028 §3).
+      // A scalar total is what the caller cannot act on: the deletion
+      // watermark it writes on the client is per project, so a total made it
+      // mark every linked project of the team, including ones this deletion
+      // never touched. A mock that kept returning a number would let that
+      // regression back in without a single test going red.
+      const byProject = new Map();
+      for (const e of doomed) byProject.set(e.project_id, (byProject.get(e.project_id) || 0) + 1);
+      return json(res, 200, [...byProject.entries()].map(([projectId, n]) => ({
+        project_id: projectId,
+        deleted: n,
+      })));
+    }
     json(res, 404, { message: `unknown rpc ${fn}` });
   }
 

@@ -32,3 +32,4 @@ AGENTS.md
 .superpowers/
 .claude/settings.local.json
 node_modules
+docs/agent-team/

@@ -992,6 +992,76 @@ async function cmdTeam() {
     return;
   }
 
+  // Delete YOUR OWN synced entries from the backend. Available to every
+  // member, including one who was just demoted and one who has already left
+  // the team -- the DELETE policy behind it is scoped on authorship alone
+  // (028 §1). Do not add a role check here or to the routes it shares an RPC
+  // with.
+  //
+  // NO STDIN PROMPT, deliberately, for the reason already recorded above
+  // `membridge remove` (~line 400): this CLI is scriptable and the install and
+  // uninstall flows call it non-interactively, so blocking on a prompt would
+  // hang them; there is no readline anywhere in this repo. Instead the bare
+  // command is a PREVIEW that refuses to delete, prints what would go, and
+  // exits 1 with the exact line to re-run. That is the same two-deliberate-
+  // steps shape the app uses (a collapsed section, then a typed DELETE).
+  if (sub === 'delete-my-data') {
+    let teamId = opt('--team');
+    const teams = await teamsync.listTeams(config);
+    if (!teams.length) die('You are not in any team yet.');
+    if (!teamId && teams.length === 1) teamId = teams[0].team_id;
+    if (!teamId) {
+      die('You are in multiple teams. Pick one with --team <id>:\n' +
+        teams.map(t => `  ${t.team_id}  ${t.team_name || ''}`).join('\n'));
+    }
+    const team = teams.find(t => t.team_id === teamId);
+    const teamLabel = team && team.team_name ? `"${team.team_name}"` : teamId;
+
+    // --project takes a local folder, not a backend uuid: a path is the only
+    // identifier a person has in their hands. Resolved through the same
+    // team.json every other subcommand reads.
+    const projectOpt = opt('--project');
+    let projectId = null;
+    if (projectOpt) {
+      const projectPath = path.resolve(projectOpt);
+      const link = teamsync.loadTeamLink(projectPath);
+      if (!link || !link.projectId) die(`${projectPath} is not linked to a team, so it has nothing synced to delete.`);
+      if (link.teamId !== teamId) die(`${projectPath} is linked to a different team (${link.teamName || link.teamId}).`);
+      projectId = link.projectId;
+    }
+
+    const rows = (await teamsync.myEntryCounts(config, teamId))
+      .filter(r => !projectId || String(r.project_id) === String(projectId));
+    const total = rows.reduce((n, r) => n + (Number(r.entries) || 0), 0);
+    if (!total) {
+      console.log(`Nothing of yours is synced to team ${teamLabel}${projectOpt ? ' for that project' : ''}.`);
+      return;
+    }
+
+    if (opt('--confirm') !== 'DELETE') {
+      console.log(`This would delete ${total} entr${total === 1 ? 'y' : 'ies'} you pushed to team ${teamLabel}:`);
+      for (const r of rows) {
+        const range = r.first_ts && r.last_ts
+          ? `${String(r.first_ts).slice(0, 10)} to ${String(r.last_ts).slice(0, 10)}`
+          : 'dates unknown';
+        console.log(`  ${r.project_name || r.project_id}: ${r.entries} (${range})`);
+      }
+      console.log('\nOnly your own entries go. Teammates keep everything they have already pulled to their machines,');
+      console.log('and the deletion is recorded in the team audit trail, where owners and admins can see it.');
+      console.log('\nNothing has been deleted. To go ahead, re-run:');
+      console.log(`  membridge team delete-my-data --team ${teamId}${projectOpt ? ` --project ${projectOpt}` : ''} --confirm DELETE`);
+      process.exit(1);
+    }
+
+    const r = await teamsync.deleteMyEntries(config, teamId, projectId);
+    console.log(`Deleted ${r.deleted} entr${r.deleted === 1 ? 'y' : 'ies'} from team ${teamLabel}.`);
+    console.log('Recorded in the team audit trail. Teammates keep whatever they already pulled.');
+    if (r.projects.length) {
+      console.log(`Local memory is untouched, and ${r.projects.length} linked project(s) here are marked so sync will not re-upload it.`);
+    }
+    return;
+  }
+
   if (sub === 'list') {
     const creds = teamsync.loadCredentials();
     console.log(creds ? `Logged in as ${creds.email} (${creds.displayName})` : 'Not logged in.');
@@ -1017,7 +1087,7 @@ async function cmdTeam() {
     return;
   }
 
-  die(`Unknown team subcommand: ${sub}\nUsage: membridge team <setup|create|invite|revoke-invite|join|link|unlink|list|share-prompts|fingerprint|trust>`);
+  die(`Unknown team subcommand: ${sub}\nUsage: membridge team <setup|create|invite|revoke-invite|join|link|unlink|list|delete-my-data|share-prompts|fingerprint|trust>`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +1185,8 @@ Team sync (share project memory with your team, see README):
   team link [--project <path>] [--team <id>]   sync this project with the team
   team unlink [--project <path>]               stop syncing this project
   team list                your login, teams and linked projects
+  team delete-my-data [--team <id>] [--project <path>] [--confirm DELETE]
+                           delete YOUR synced entries from the backend; without --confirm it only previews
   team share-prompts <on|off>  also upload your (redacted) prompts; off = summaries/files only
   team setup ...           advanced: point at your own self-hosted backend
 

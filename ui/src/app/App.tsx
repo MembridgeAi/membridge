@@ -23,6 +23,7 @@ const SearchPage = lazy(() => import('../features/search/SearchPage').then(m => 
 const ProjectsPage = lazy(() => import('../features/projects/ProjectsPage').then(m => ({ default: m.ProjectsPage })))
 const ProjectPage = lazy(() => import('../features/project/ProjectPage').then(m => ({ default: m.ProjectPage })))
 const SessionPage = lazy(() => import('../features/session/SessionPage').then(m => ({ default: m.SessionPage })))
+const DayPage = lazy(() => import('../features/feed/DayPage').then(m => ({ default: m.DayPage })))
 const TeamPage = lazy(() => import('../features/team/TeamPage').then(m => ({ default: m.TeamPage })))
 const InsightsPage = lazy(() => import('../features/insights/InsightsPage').then(m => ({ default: m.InsightsPage })))
 const SettingsPage = lazy(() => import('../features/settings/SettingsPage').then(m => ({ default: m.SettingsPage })))
@@ -76,6 +77,16 @@ export function App() {
             </Route>
             <Route path={ROUTES.session}>
               {(params) => <SessionPage sessionId={decodeURIComponent(params.sessionId)} />}
+            </Route>
+            {/* NOT decoded, unlike the two above, and it must not be: a day
+                slug is base64url (dayCards.daySlug) precisely so that it holds
+                no percent escape for anything to decode. wouter has ALREADY
+                run decodeURI over the path by the time these params exist
+                (wouter/src/paths.js), which is what broke the encodeURIComponent
+                slug this replaced, and a decode here would be that same second
+                pass routes.useRawSearch documents for the query string. */}
+            <Route path={ROUTES.day}>
+              {(params) => <DayPage slug={params.daySlug} />}
             </Route>
             {/* Before /team/members and /team/insights only for reading
                 order -- wouter matches these patterns exactly, so '/team'

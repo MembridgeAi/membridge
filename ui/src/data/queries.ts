@@ -629,6 +629,52 @@ export function useLeaveTeam() {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Deleting your own synced data (migration 028). Ungated by role at every
+// layer, including this one -- see DataClient.getMyData.
+// ---------------------------------------------------------------------------
+
+// The preview behind the confirmation. `enabled` is not a nicety: the control
+// lives inside a collapsed section that is closed by default, and this must
+// fire when someone opens it rather than on every Settings render, both to
+// keep a backend round trip off the common path and because a count is only
+// worth fetching when it is about to be quoted.
+//
+// staleTime 0: this number appears in a destructive confirmation, so it is
+// re-read each time the section is opened rather than served from a cache
+// that predates the last sync.
+export function useMyData(teamId: string | null, enabled: boolean) {
+  const c = useDataClient()
+  return useQuery({
+    queryKey: ['myData', teamId],
+    queryFn: () => c.getMyData(teamId as string),
+    enabled: enabled && !!teamId,
+    staleTime: 0,
+  })
+}
+
+// accountRefresh, plus the reads whose contents just shrank. The three caches
+// accountRefresh covers (teamAccount, settings, status) are the account-shaped
+// ones; entries leaving the backend also changes the feed, the insights totals
+// and this feature's own preview, none of which any URL-keyed rule could
+// infer from a POST to /api/team/delete-my-data.
+export function useDeleteMyData() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { teamId: string; projectId?: string | null; confirm: string }) => c.deleteMyData(input),
+    onSuccess: () => {
+      accountRefresh(qc)
+      qc.invalidateQueries({ queryKey: ['myData'] })
+      qc.invalidateQueries({ queryKey: ['feed'] })
+      qc.invalidateQueries({ queryKey: ['insights'] })
+      // The deletion writes an `own-data-deleted` row, so the trail an owner
+      // or admin may have open is stale the moment this resolves.
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
+  })
+}
+
 // Discovery for the add-project dialog (GET /api/scan). `enabled` is the
 // whole point: scanPayload re-reads every session file on this machine from
 // byte 0, so this must fire when the dialog opens and never on its own.

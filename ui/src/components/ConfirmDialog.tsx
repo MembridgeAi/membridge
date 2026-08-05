@@ -12,7 +12,12 @@ interface ConfirmDialogProps {
    *  until the user types `requiredText` exactly. For actions whose blast
    *  radius deserves more than a click (deleting a project's memory). */
   confirmInput?: { requiredText: string; label: string }
-  onConfirm: () => void
+  /** Receives what the user actually TYPED into the confirmation field (the
+   *  empty string when there is no field). Callers whose daemon route re-checks
+   *  the word must forward this rather than re-typing the literal themselves:
+   *  a hardcoded 'DELETE' on the wire makes the gate a UI formality, since the
+   *  value the daemon checks would then never be the one the person typed. */
+  onConfirm: (typed: string) => void
   onCancel: () => void
 }
 
@@ -55,7 +60,7 @@ export function ConfirmDialog({ title, message, confirmLabel, destructive, pendi
           <button
             type="button"
             className={`dialog-btn${destructive ? ' dialog-btn-danger' : ' dialog-btn-primary'}`}
-            onClick={onConfirm}
+            onClick={() => onConfirm(typed)}
             disabled={pending || confirmBlocked}
           >
             {confirmLabel}

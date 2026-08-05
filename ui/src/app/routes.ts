@@ -1,4 +1,5 @@
 import { useSearch as useWouterSearch } from 'wouter'
+import type { FeedFilters } from '../data/types'
 
 /** Single source of route paths. No route path string may be written twice
  *  in the codebase — import ROUTES instead of re-typing a literal.
@@ -10,6 +11,7 @@ import { useSearch as useWouterSearch } from 'wouter'
 export const ROUTES = {
   today: '/', feed: '/feed', search: '/search', projects: '/projects', project: '/projects/:slug',
   session: '/sessions/:sessionId',
+  days: '/days', day: '/days/:daySlug',
   team: '/team', members: '/team/members', insights: '/team/insights', settings: '/settings',
 } as const
 
@@ -71,6 +73,70 @@ export function sessionHref(sessionId: string, from?: string | null): string {
   return from ? `${href}?${FROM_PARAM}=${encodeURIComponent(from)}` : href
 }
 
+/** The feed's active filters, carried on a day URL. Same names the Search
+ *  screen uses for the same three things ('tool' rather than 'source' because
+ *  that is what the control is labelled), written once and read back through
+ *  this constant on both sides. */
+export const DAY_FILTER_PARAMS = { author: 'author', project: 'project', source: 'tool' } as const
+
+function withDayFilters(params: URLSearchParams, filters?: FeedFilters | null): URLSearchParams {
+  if (filters?.author) params.set(DAY_FILTER_PARAMS.author, filters.author)
+  if (filters?.project) params.set(DAY_FILTER_PARAMS.project, filters.project)
+  if (filters?.source) params.set(DAY_FILTER_PARAMS.source, filters.source)
+  return params
+}
+
+function dayUrl(slug: string, params: URLSearchParams): string {
+  const href = ROUTES.day.replace(':daySlug', slug)
+  const qs = params.toString()
+  return qs ? `${href}?${qs}` : href
+}
+
+/** Concrete href for one day view: one person's work across every project on
+ *  one local calendar day, which the Feed now shows only the face of.
+ *
+ *  `slug` is the day card's own key, already made URL-safe by
+ *  features/feed/dayCards.ts daySlug -- that module owns the key's format, so
+ *  it owns the encoding of it, and this file owns the path pattern. DayPage
+ *  matches the slug against the one it rebuilds from each card, so the two only
+ *  have to agree, never round-trip.
+ *
+ *  `filters` is the feed's own filter state at the moment the card was
+ *  clicked, and carrying it is load-bearing rather than cosmetic. useFeed keys
+ *  its cache on the filters (data/queries.ts), so a day view that asked for the
+ *  UNFILTERED feed while the reader had filtered by a person was a different
+ *  query key: it started cold, fetched one 30-row page, and the card the reader
+ *  had just clicked was often not in it -- a visible card answering "That day
+ *  is not in view". With the filters on the URL the day view runs the same
+ *  query the card was built from, so arriving from the feed is a cache hit and
+ *  the card is guaranteed to be there.
+ *
+ *  `from` follows sessionHref's convention exactly, so a session opened out of
+ *  a day view can offer an honest back link to that day. */
+export function dayHref(slug: string, from?: string | null, filters?: FeedFilters | null): string {
+  const params = new URLSearchParams()
+  if (from) params.set(FROM_PARAM, from)
+  return dayUrl(slug, withDayFilters(params, filters))
+}
+
+/** Read a day URL's filters back. Defensive by contract, exactly as
+ *  parseSearchState is: this runs on every location change inside a render
+ *  path, and a hand-edited query string must degrade to "no filters" rather
+ *  than throw the screen away. Empty means null, matching what FeedPage passes
+ *  useFeed for an untouched control, so the two produce the same query key. */
+export function parseDayFilters(search: string): FeedFilters {
+  try {
+    const params = new URLSearchParams(search)
+    return {
+      author: params.get(DAY_FILTER_PARAMS.author) || null,
+      project: params.get(DAY_FILTER_PARAMS.project) || null,
+      source: params.get(DAY_FILTER_PARAMS.source) || null,
+    }
+  } catch {
+    return { author: null, project: null, source: null }
+  }
+}
+
 /** A back link's target and its label, as one value: the two must agree, and
  *  computing them apart is how "Back to the Feed" ends up pointing at a
  *  project. */
@@ -119,6 +185,7 @@ export function backLink(from: string | null | undefined): BackLink {
   if (path === ROUTES.search) return { href, label: 'Back to Search' }
   if (path === ROUTES.projects) return { href, label: 'Back to Projects' }
   if (path.startsWith(`${ROUTES.projects}/`)) return { href, label: 'Back to the project' }
+  if (path.startsWith(`${ROUTES.days}/`)) return { href, label: 'Back to the day' }
   if (path === ROUTES.today) return { href, label: 'Back to Today' }
   if (path === ROUTES.feed) return { href, label: FEED_BACK.label }
   return FEED_BACK
@@ -190,4 +257,18 @@ export const FEED_SESSION_PARAM = 'session'
 
 export function feedSessionHref(sessionId: string): string {
   return `${ROUTES.feed}?${FEED_SESSION_PARAM}=${encodeURIComponent(sessionId)}`
+}
+
+/** One day view, scrolled to one session inside it. The same param name as
+ *  the feed's, deliberately: a `?session=` deep link now arrives at the Feed,
+ *  is carried through the day card it belongs to, and is read back on the day
+ *  view by the same constant. Three readers, one literal.
+ *
+ *  Carries the feed's filters for the same reason dayHref does, and through
+ *  the same builder, so the targeted and untargeted links can never disagree
+ *  about which query the day view is going to run. */
+export function daySessionHref(slug: string, sessionId: string, filters?: FeedFilters | null): string {
+  const params = new URLSearchParams()
+  params.set(FEED_SESSION_PARAM, sessionId)
+  return dayUrl(slug, withDayFilters(params, filters))
 }

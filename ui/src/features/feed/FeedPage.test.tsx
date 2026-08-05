@@ -7,20 +7,25 @@ import { FakeDataClient } from '../../data/FakeDataClient'
 import { FEED_PAGE_SIZE } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import { dayCardStats } from './DayCard'
-import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW } from './dayCards'
-import { ROUTES, sessionHref } from '../../app/routes'
+import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, buildDayCards } from './dayCards'
+import { dayHref, daySessionHref } from '../../app/routes'
 import { FeedPage, dayLabel, groupByDay } from './FeedPage'
 
-// session defaults to null (not a shared string) so two default-built
-// entries never accidentally collapse into each other via
-// collapseSessionCheckpoints -- a null session falls back to its own entry
-// id as the group key, matching mappers.ts's own fallback rule.
+// session defaults to null (not a shared string) so two default-built entries
+// never accidentally fold into each other -- a null session is only ever
+// itself, the rule dedupeSyncedTwins and daySessions both follow.
 const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
   id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z',
-  live: false, outcome: 'done', intent: null, files: [], session: null, project: 'membridge', projectPath: '/Users/x/membridge',
+  live: false, outcome: 'done', intent: null, files: [], session: null,
+  project: 'membridge', projectPath: '/Users/x/membridge', projectId: null,
   summaryFull: null, decisions: null, gotchas: null, changes: [],
   ...overrides,
 })
+
+/** The href a day card for these entries should point at. Built through
+ *  buildDayCards rather than by hand, so a test can never assert a slug the
+ *  feed does not actually mint. */
+const hrefFor = (entries: FeedEntry[], index = 0) => dayHref(buildDayCards(entries)[index].slug)
 
 // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ),
 // so "20:00Z" is 13:00 the same day and "02:00Z" is 19:00 the PREVIOUS day
@@ -71,62 +76,68 @@ describe('groupByDay', () => {
   })
 })
 
-/** Expand the day card whose overview matches, and hand back the card element.
- *  Every "what does a row look like" assertion below goes through this: the
- *  sessions are the card's SECOND level now, and asserting on them without
- *  opening the card would silently pass against a card that renders nothing. */
-async function expandCard(overview: RegExp | string): Promise<HTMLElement> {
-  const head = (await screen.findByText(overview)).closest('.day-card-head') as HTMLElement
-  await userEvent.click(head)
-  return head.closest('.day-card') as HTMLElement
-}
-
-/** The session row inside an expanded card whose text matches. The card's own
- *  overview matches the same text (it is a PICK of one row's outcome), so
- *  every row assertion has to say "the one inside an .entry-row" explicitly. */
-function rowWithin(card: HTMLElement, text: RegExp | string): HTMLElement {
-  const hit = within(card).getAllByText(text).find(el => el.closest('.entry-row'))
-  return hit!.closest('.entry-row') as HTMLElement
-}
-
 // The stat line is a LIST of parts, not a sentence, because the owner asked
 // for a prompt count here and no daemon field carries one yet. When it lands
 // it is one more part; these cases are what says the shape already allows it.
 describe('dayCardStats', () => {
   it('says how many sessions the day holds', () => {
-    expect(dayCardStats({ sessionCount: 3 })).toEqual(['3 sessions'])
+    expect(dayCardStats({ sessionCount: 3, files: [], projects: [] })).toEqual(['3 sessions'])
   })
   it('does not say "1 sessions"', () => {
-    expect(dayCardStats({ sessionCount: 1 })).toEqual(['1 session'])
+    expect(dayCardStats({ sessionCount: 1, files: [], projects: [] })).toEqual(['1 session'])
+  })
+  it('adds the file count when the day touched anything', () => {
+    const files = [{ file: 'a.ts', touches: 1, note: null }, { file: 'b.ts', touches: 2, note: null }]
+    expect(dayCardStats({ sessionCount: 1, files, projects: [] })).toEqual(['1 session', '2 files'])
+  })
+  it('omits the file count for a day that touched nothing', () => {
+    expect(dayCardStats({ sessionCount: 2, files: [], projects: [] })).toEqual(['2 sessions'])
   })
 })
 
 describe('FeedPage', () => {
-  it('renders each entry with its outcome, intent, and the project name in mono', async () => {
-    renderApp({}, <FeedPage />)
-    const card = await expandCard(/Hook ownership now decided by durability/)
-    const row = rowWithin(card, /Hook ownership now decided by durability/)
-    const projectLabel = within(row).getByText('membridge')
-    expect(projectLabel.className).toContain('mono')
-    expect(within(row).getByText(/make the summary hook fire on session boundaries/)).toBeInTheDocument()
+  it('renders each day as a card carrying its sentence, its intent and the project in mono', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [entry({
+        id: 'a', session: 's-1', outcome: 'Hook ownership now decided by durability',
+        decisions: '- Durability beats recency\n- Merged before writing settings.json',
+      })],
+      nextBefore: null,
+    })
+    const { container } = renderWith(c, <FeedPage />)
+
+    const card = (await screen.findByText('Hook ownership now decided by durability')).closest('.day-card') as HTMLElement
+    expect(within(card).getByText('membridge').className).toContain('mono')
+    expect(card.querySelector('.day-card-intent')!.textContent).toBe('Durability beats recency.')
+    expect(container.querySelectorAll('.day-card')).toHaveLength(1)
   })
 
-  it('marks a live session', async () => {
+  it('marks a live day', async () => {
     renderApp({}, <FeedPage />)
     expect(await screen.findByLabelText('Live')).toBeInTheDocument()
   })
 
-  // Task 6: a feed row with a session is a real <a> to the session route --
-  // middle-click and cmd-click must work, so it cannot be a click handler on
-  // a div. The card that reveals it is a <button>, not a second anchor.
-  it('a row with a session renders as a link to /sessions/:id built from ROUTES', async () => {
-    renderApp({}, <FeedPage />)
-    const card = await expandCard(/Hook ownership now decided by durability/)
-    const row = rowWithin(card, /Hook ownership now decided by durability/)
-    expect(row.tagName).toBe('A')
-    // Carries ?from= so the session page's back link can say "the Feed" and
-     // mean it (Task 2), rather than saying it because it had no alternative.
-    expect(row.getAttribute('href')).toBe(sessionHref('s-f2', ROUTES.feed))
+  // The card NAVIGATES now; it does not expand. It is a real <a> so
+  // middle-click and cmd-click open the day in a new window, which is exactly
+  // why it cannot be a click handler on a div.
+  it('renders a card as a link to its day view, built from ROUTES', async () => {
+    const entries = [entry({ id: 'a', session: 's-1', outcome: 'the day\'s outcome' })]
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({ entries, nextBefore: null })
+    renderWith(c, <FeedPage />)
+
+    const card = (await screen.findByText('the day\'s outcome')).closest('.day-card') as HTMLElement
+    expect(card.tagName).toBe('A')
+    expect(card.getAttribute('href')).toBe(hrefFor(entries))
+  })
+
+  it('does not expand in place: no session rows and no toggle anywhere in the feed', async () => {
+    const { container } = renderApp({}, <FeedPage />)
+    await screen.findByText(/Hook ownership/)
+    expect(container.querySelectorAll('.entry-row')).toHaveLength(0)
+    expect(container.querySelector('.day-card')!.getAttribute('aria-expanded')).toBeNull()
+    expect(screen.queryByRole('button', { expanded: false })).toBeNull()
   })
 
   // Fix 16: an infinite query refetches EVERY loaded page on window
@@ -213,13 +224,66 @@ describe('FeedPage', () => {
     )
   })
 
-  it('"Show more" pages backwards using the previous page\'s cursor, keeping the earlier page visible', async () => {
-    // Distinct days, so the two pages are two cards -- one card per person per
-    // project per day would otherwise fold both pages' single entries together
-    // and this would be asserting on the overview pick instead of on paging.
+  it('auto-pages until the feed covers a few whole days, without a click', async () => {
+    // The starvation Andrew hit: /api/feed pages by ROW and grouping happens
+    // after, so one busy teammate's 30 rows fill page one and a quieter
+    // person's card for the same day lands behind "Show more". The feed now
+    // keeps pulling until it has MIN_DAYS_LOADED days.
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'getFeed')
-      .mockResolvedValueOnce({ entries: [entry({ id: 'page1', session: 'p1', outcome: 'first page entry' })], nextBefore: '2026-07-20T00:00:00Z' })
+      .mockResolvedValueOnce({ entries: [entry({ id: 'p1', session: 'p1', outcome: 'busy teammate' })], nextBefore: '2026-07-20T00:00:00Z' })
+      .mockResolvedValueOnce({ entries: [entry({ id: 'p2', session: 'p2', at: '2026-07-19T20:00:00Z', outcome: 'quiet teammate' })], nextBefore: '2026-07-18T00:00:00Z' })
+      .mockResolvedValueOnce({ entries: [entry({ id: 'p3', session: 'p3', at: '2026-07-17T20:00:00Z', outcome: 'older still' })], nextBefore: null })
+    renderWith(client, <FeedPage />)
+
+    // No click anywhere in this test.
+    expect(await screen.findByText('older still')).toBeInTheDocument()
+    expect(screen.getByText('quiet teammate')).toBeInTheDocument()
+    expect(spy).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops auto-paging when a page errors, instead of hammering the daemon', async () => {
+    // REAL latency on purpose. With synchronously-resolved mocks React batches
+    // the fetching-true render away, the effect's dependencies never change,
+    // and a runaway pager looks perfectly healthy. Measured before the fix:
+    // 66 calls in 1.5s against an erroring second page.
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'getFeed').mockImplementation(async (_f, opts) => {
+      await new Promise(r => setTimeout(r, 5))
+      if (!opts?.before) return { entries: [entry({ id: 'p1', session: 'p1', outcome: 'only day' })], nextBefore: '2026-07-20T00:00:00Z' }
+      throw new Error('daemon went away')
+    })
+    renderWith(client, <FeedPage />)
+    await screen.findByText('only day')
+    await new Promise(r => setTimeout(r, 300))
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(3)
+  })
+
+  it('stops auto-paging when further pages add no new day', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'getFeed').mockImplementation(async () => {
+      await new Promise(r => setTimeout(r, 5))
+      return { entries: [entry({ id: 'same', session: 'same', outcome: 'one day only' })], nextBefore: '2026-07-20T00:00:00Z' }
+    })
+    renderWith(client, <FeedPage />)
+    await screen.findByText('one day only')
+    await new Promise(r => setTimeout(r, 300))
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(6)
+  })
+
+  it('"Show more" pages backwards using the previous page\'s cursor, keeping the earlier page visible', async () => {
+    // Page one already carries enough days that auto-paging is satisfied, so
+    // this exercises the MANUAL control rather than racing the effect.
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'getFeed')
+      .mockResolvedValueOnce({
+        entries: [
+          entry({ id: 'd1', session: 'd1', at: '2026-07-29T20:00:00Z', outcome: 'first page entry' }),
+          entry({ id: 'd2', session: 'd2', at: '2026-07-28T20:00:00Z', outcome: 'day two' }),
+          entry({ id: 'd3', session: 'd3', at: '2026-07-27T20:00:00Z', outcome: 'day three' }),
+        ],
+        nextBefore: '2026-07-20T00:00:00Z',
+      })
       .mockResolvedValueOnce({ entries: [entry({ id: 'page2', session: 'p2', at: '2026-07-19T20:00:00Z', outcome: 'second page entry' })], nextBefore: null })
     renderWith(client, <FeedPage />)
 
@@ -234,67 +298,10 @@ describe('FeedPage', () => {
     )
     expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull()
   })
-
-  // BUG 2: the Stop hook re-summarizes a WORKING session every few edits, so
-  // /api/feed can carry several checkpoint rows for the same session --
-  // uncollapsed, the Feed read as the same long summary repeated several
-  // times in a row. These three tests pin the fix at the real component,
-  // not just at the mapper unit level.
-  it('collapses several checkpoint entries of the same session into one row showing the newest text', async () => {
-    const client = new FakeDataClient()
-    vi.spyOn(client, 'getFeed').mockResolvedValueOnce({
-      entries: [
-        entry({ id: 'c3', session: 's1', at: '2026-07-29T20:10:00Z', outcome: 'third checkpoint of the session' }),
-        entry({ id: 'c2', session: 's1', at: '2026-07-29T20:05:00Z', outcome: 'second checkpoint of the session' }),
-        entry({ id: 'c1', session: 's1', at: '2026-07-29T20:00:00Z', outcome: 'first checkpoint of the session' }),
-      ],
-      nextBefore: null,
-    })
-    renderWith(client, <FeedPage />)
-
-    expect(await screen.findByText('third checkpoint of the session')).toBeInTheDocument()
-    expect(screen.queryByText('second checkpoint of the session')).toBeNull()
-    expect(screen.queryByText('first checkpoint of the session')).toBeNull()
-  })
-
-  it('keeps two distinct sessions with byte-identical outcome text as two separate rows', async () => {
-    const client = new FakeDataClient()
-    vi.spyOn(client, 'getFeed').mockResolvedValueOnce({
-      entries: [
-        entry({ id: 'x1', session: 's1', authorId: 'andrew', author: 'Andrew', at: '2026-07-29T20:10:00Z', outcome: 'identical summary text' }),
-        entry({ id: 'x2', session: 's2', authorId: 'andrew', author: 'Andrew', at: '2026-07-29T20:05:00Z', outcome: 'identical summary text' }),
-      ],
-      nextBefore: null,
-    })
-    renderWith(client, <FeedPage />)
-
-    // One card (one person, one project, one day), and inside it two rows --
-    // the card's own overview is the third match, which is the PICK, not a
-    // third session.
-    const card = await expandCard('identical summary text')
-    expect(within(card).getAllByText('identical summary text')).toHaveLength(3)
-    expect(card.querySelectorAll('.entry-row')).toHaveLength(2)
-  })
-
-  it('keeps the collapsed rows newest-first', async () => {
-    const client = new FakeDataClient()
-    vi.spyOn(client, 'getFeed').mockResolvedValueOnce({
-      entries: [
-        entry({ id: 'older', session: 's-old', at: '2026-07-29T18:00:00Z', outcome: 'older session outcome' }),
-        entry({ id: 'newer', session: 's-new', at: '2026-07-29T21:00:00Z', outcome: 'newer session outcome' }),
-      ],
-      nextBefore: null,
-    })
-    renderWith(client, <FeedPage />)
-
-    const card = await expandCard('newer session outcome')
-    const rows = within(card).getAllByText(/session outcome/).filter(el => el.closest('.entry-row'))
-    expect(rows.map(r => r.textContent)).toEqual(['newer session outcome', 'older session outcome'])
-  })
 })
 
-// The owner's ask: "there shouldnt be a bunch of sessions from marco just
-// today. it should be one singular one with the proper overview sentance."
+// The owner's ask: "i want feed simply to contain the day cards with the one
+// snetance header one what was done and the brief 1-3 sentance intent".
 // These pin that at the real component; dayCards.test.ts pins the pure rules.
 describe('feed: consolidated day cards', () => {
   const marcosDay = () => {
@@ -316,35 +323,30 @@ describe('feed: consolidated day cards', () => {
     expect(container.querySelectorAll('.day-card')).toHaveLength(1)
   })
 
-  it('leads with ONE picked overview sentence, not every session\'s summary', async () => {
-    renderWith(marcosDay(), <FeedPage />)
-    expect(await screen.findByText('the day\'s distilled outcome')).toBeInTheDocument()
-    expect(screen.queryByText('a raw harvested line')).toBeNull()
-    expect(screen.queryByText('another harvested line')).toBeNull()
+  it('leads with ONE picked sentence, never every session\'s summary', async () => {
+    const { container } = renderWith(marcosDay(), <FeedPage />)
+    await screen.findByText('the day\'s distilled outcome')
+    const overviews = [...container.querySelectorAll('.day-card-overview')].map(el => el.textContent)
+    expect(overviews).toEqual(['the day\'s distilled outcome'])
   })
 
-  it('states the session count', async () => {
+  it('carries a brief intent under the sentence, capped by how much was done', async () => {
+    const { container } = renderWith(marcosDay(), <FeedPage />)
+    await screen.findByText('the day\'s distilled outcome')
+    // Three sessions, so two sentences of intent, and never a repeat of the
+    // sentence directly above it.
+    const intent = container.querySelector('.day-card-intent')!.textContent!
+    expect(intent).toBe('another harvested line. a raw harvested line.')
+    expect(intent).not.toContain('the day\'s distilled outcome')
+  })
+
+  it('states the session and file counts', async () => {
     renderWith(marcosDay(), <FeedPage />)
     await screen.findByText('the day\'s distilled outcome')
     expect(screen.getByText('3 sessions')).toBeInTheDocument()
   })
 
-  it('is collapsed by default', async () => {
-    const { container } = renderWith(marcosDay(), <FeedPage />)
-    await screen.findByText('the day\'s distilled outcome')
-    expect(container.querySelector('.day-card-head')!.getAttribute('aria-expanded')).toBe('false')
-    expect(container.querySelectorAll('.entry-row')).toHaveLength(0)
-  })
-
-  it('reveals the day\'s sessions on expand, each still linking to its session page', async () => {
-    const { container } = renderWith(marcosDay(), <FeedPage />)
-    const card = await expandCard('the day\'s distilled outcome')
-    expect(card.querySelectorAll('.entry-row')).toHaveLength(3)
-    const hrefs = [...container.querySelectorAll('.entry-row')].map(r => r.getAttribute('href'))
-    expect(hrefs).toEqual(['s-m1', 's-m2', 's-m3'].map(id => sessionHref(id, ROUTES.feed)))
-  })
-
-  it('splits one person\'s day across the two projects they worked in', async () => {
+  it('keeps one person\'s day in ONE card even across two projects', async () => {
     const c = new FakeDataClient()
     vi.spyOn(c, 'getFeed').mockResolvedValue({
       entries: [
@@ -354,9 +356,36 @@ describe('feed: consolidated day cards', () => {
       nextBefore: null,
     })
     const { container } = renderWith(c, <FeedPage />)
+    // One person, one day, one card. The card carries a single overview
+    // sentence for the day, so only the picked outcome renders as text; both
+    // projects are still named on the card.
     await screen.findByText('membridge work')
-    expect(screen.getByText('sublease work')).toBeInTheDocument()
-    expect(container.querySelectorAll('.day-card')).toHaveLength(2)
+    expect(container.querySelectorAll('.day-card')).toHaveLength(1)
+    const card = container.querySelector('.day-card')!
+    expect(card.textContent).toContain('membridge')
+    expect(card.textContent).toContain('sublease')
+  })
+
+  // THE DUPLICATION Andrew reported: the same work reaching this machine
+  // twice, once local and once as its own synced-back twin, rendering as two
+  // cards of the same afternoon. lib/feed.js nulls projectPath on the team
+  // copy and the backend capitalises the name; only projectId is common.
+  it('renders one card, not two, when a day\'s work synced back as its own twin', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'local-1', session: 's-1', at: '2026-07-29T20:00:00Z', outcome: 'the real outcome', project: 'membridge', projectPath: '/Users/x/membridge', projectId: 'proj-1' }),
+        entry({ id: 'team-1', session: 's-1', at: '2026-07-29T20:00:00Z', outcome: 'the real outcome', project: 'Membridge', projectPath: null, projectId: 'proj-1' }),
+        entry({ id: 'local-2', session: 's-2', at: '2026-07-29T19:00:00Z', outcome: 'the earlier outcome', project: 'membridge', projectPath: '/Users/x/membridge', projectId: 'proj-1' }),
+        entry({ id: 'team-2', session: 's-2', at: '2026-07-29T19:00:00Z', outcome: 'the earlier outcome', project: 'Membridge', projectPath: null, projectId: 'proj-1' }),
+      ],
+      nextBefore: null,
+    })
+    const { container } = renderWith(c, <FeedPage />)
+    await screen.findByText('the real outcome')
+    expect(container.querySelectorAll('.day-card')).toHaveLength(1)
+    // And the count has not doubled either: two sessions, not four.
+    expect(screen.getByText('2 sessions')).toBeInTheDocument()
   })
 
   it('orders cards by their newest entry, under one day divider', async () => {
@@ -394,14 +423,15 @@ describe('feed: consolidated day cards', () => {
   // The trap: EntryRow renders an empty outcome and a failed decrypt
   // identically ("No summary yet"), so a reader cannot tell them apart. A day
   // card must not inherit that ambiguity.
-  it('says an un-summarized day is un-summarized', async () => {
+  it('says an un-summarized day is un-summarized, and adds no intent to fill the gap', async () => {
     const c = new FakeDataClient()
     vi.spyOn(c, 'getFeed').mockResolvedValue({
       entries: [entry({ id: 'a', session: 'a', outcome: '', intent: 'wire the recall hook' })],
       nextBefore: null,
     })
-    renderWith(c, <FeedPage />)
+    const { container } = renderWith(c, <FeedPage />)
     expect(await screen.findByText(NO_SUMMARY_OVERVIEW)).toBeInTheDocument()
+    expect(container.querySelector('.day-card-intent')).toBeNull()
   })
 
   it('says an ENCRYPTED day is encrypted, never passing it off as un-summarized', async () => {
@@ -410,38 +440,34 @@ describe('feed: consolidated day cards', () => {
       entries: [entry({ id: 'a', session: 'a', outcome: '', undecryptable: true })],
       nextBefore: null,
     })
-    renderWith(c, <FeedPage />)
+    const { container } = renderWith(c, <FeedPage />)
     expect(await screen.findByText(OPAQUE_OVERVIEW)).toBeInTheDocument()
     expect(screen.queryByText(NO_SUMMARY_OVERVIEW)).toBeNull()
+    expect(container.querySelector('.day-card-intent')).toBeNull()
   })
 })
 
-// Arriving from a Today card: the feed has to say WHICH row you were sent to,
-// or the link may as well not exist. `?session=` is the target.
+// Arriving from a Today card: `?session=` names a session, and the feed is
+// days. The card holding it has to say so and has to carry the target
+// through, or the link may as well not exist.
 describe('feed: a session targeted by ?session=', () => {
+  const entries = [
+    entry({ id: 'e1', session: 'sess-a', outcome: 'the targeted work' }),
+    entry({ id: 'e2', session: 'sess-b', at: '2026-07-28T20:00:00Z', outcome: 'some other work' }),
+  ]
   const client = () => {
     const c = new FakeDataClient()
-    vi.spyOn(c, 'getFeed').mockResolvedValue({
-      entries: [
-        entry({ id: 'e1', session: 'sess-a', outcome: 'the targeted work' }),
-        entry({ id: 'e2', session: 'sess-b', outcome: 'some other work' }),
-      ],
-      nextCursor: null,
-    } as never)
+    vi.spyOn(c, 'getFeed').mockResolvedValue({ entries, nextBefore: null })
     return c
   }
 
-  // Day cards are collapsed by default, so the card HOLDING the target has to
-  // open itself -- otherwise the row every Today card links at is unreachable
-  // and the link may as well not exist.
-  it('opens the card holding the target, and marks the matching row only', async () => {
+  it('marks the card holding the target and links straight at that session', async () => {
     window.history.replaceState({}, '', '/feed?session=sess-a')
     const { container } = renderWith(client(), <FeedPage />)
-    await screen.findAllByText('the targeted work')
-    expect(container.querySelector('.day-card-head')!.getAttribute('aria-expanded')).toBe('true')
-    const targeted = container.querySelectorAll('.entry-row-targeted')
+    await screen.findByText('the targeted work')
+    const targeted = container.querySelectorAll('.day-card-targeted')
     expect(targeted).toHaveLength(1)
-    expect(targeted[0].textContent).toContain('the targeted work')
+    expect(targeted[0].getAttribute('href')).toBe(daySessionHref(buildDayCards(entries)[0].slug, 'sess-a'))
   })
 
   it('renders the feed normally when the target is not on the loaded pages', async () => {
@@ -451,14 +477,14 @@ describe('feed: a session targeted by ?session=', () => {
     window.history.replaceState({}, '', '/feed?session=sess-not-loaded')
     const { container } = renderWith(client(), <FeedPage />)
     await screen.findByText('the targeted work')
-    expect(container.querySelector('.day-card-head')!.getAttribute('aria-expanded')).toBe('false')
-    expect(container.querySelectorAll('.entry-row-targeted')).toHaveLength(0)
+    expect(container.querySelectorAll('.day-card-targeted')).toHaveLength(0)
+    expect(container.querySelector('.day-card')!.getAttribute('href')).toBe(hrefFor(entries))
   })
 
   it('marks nothing when there is no session param at all', async () => {
     window.history.replaceState({}, '', '/feed')
     const { container } = renderWith(client(), <FeedPage />)
     await screen.findByText('the targeted work')
-    expect(container.querySelectorAll('.entry-row-targeted')).toHaveLength(0)
+    expect(container.querySelectorAll('.day-card-targeted')).toHaveLength(0)
   })
 })
