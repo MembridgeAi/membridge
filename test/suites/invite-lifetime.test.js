@@ -190,15 +190,53 @@ async function main() {
         'materialization — access to every project whose default_access is true');
     });
 
-    // And it is invisible: join_team is reached by the daemon route only in the
-    // happy path, and the audit insert it attempts is manager-only anyway, so
-    // there is no record of the re-entry on either side.
-    await check('a re-join after removal is recorded in the audit trail', async () => {
+    // AMENDED — SUPERSEDED BY REM-1, ruled on by the lead 2026-08-05, not
+    // weakened. This check was written as "a re-join after removal is recorded
+    // in the audit trail" and asserted TWO member-joined events, because at the
+    // time it was written the re-join was possible and therefore ought to have
+    // left a record. Migration 041 §1 makes the re-join impossible, so a second
+    // member-joined event can never exist — the original assertion now says
+    // that a security hole still functions, which is the opposite of what it
+    // was for.
+    //
+    // BOTH HALVES ARE KEPT. They fail independently and belong to different
+    // lanes:
+    //
+    //   Half B (REM-1, agent-removal — GREEN here) asserts the re-join is
+    //     refused and leaves the roster alone. It is checked FIRST and reads
+    //     nothing from the audit trail, so it keeps discriminating while half A
+    //     is red — otherwise a REM-1 regression would hide behind the audit bug
+    //     (a re-join that succeeds but is never audited yields zero join events,
+    //     exactly like a re-join that never happened).
+    //
+    //   Half A (the join-audit lane — still RED) asserts the ONE join that
+    //     really happened is recorded. team_audit_insert is
+    //     `is_team_manager(team_id) and actor_id = auth.uid()` (024:98,
+    //     tightened by 025:144) and a fresh joiner is always role 'member', so
+    //     the insert is refused and recordAudit swallows it. Not this lane's to
+    //     fix, and deliberately not deleted just because REM-1 made its
+    //     original fixture unreachable.
+    //
+    // The count is 1, and it is failable in both directions: 0 means the join
+    // was never audited (half A today), 2 means a re-join happened and was
+    // recorded (a REM-1 regression).
+    await check('the join that happened is audited, and a post-removal re-join is refused', async () => {
+      // Half B first — independent of the audit trail on purpose.
+      const rejoin = await apiAs('member', 'POST', '/api/team/join', { inviteCode: seenCode });
+      assert.notStrictEqual(rejoin.status, 200,
+        'REM-1: the credential a removed member holds must be dead, so a re-join attempt ' +
+        `must not succeed. got ${rejoin.status}: ${JSON.stringify(rejoin.body)}`);
+      assert.strictEqual(
+        mock.members.some(m => m.teamId === alpha.team_id && m.displayName === 'Member'), false,
+        'REM-1: the removed member is back on the roster, so the refusal above was cosmetic');
+      // Half A — the join-audit lane's, still failing at this commit.
       const audit = await apiAs('owner', 'GET', `/api/team/audit?teamId=${alpha.team_id}`);
       const joins = audit.body.events.filter(e => e.action === 'member-joined');
-      assert.strictEqual(joins.length, 2,
-        'the original join and the post-removal re-join must both be recorded; ' +
-        `neither is. events: ${JSON.stringify(audit.body.events)}`);
+      assert.strictEqual(joins.length, 1,
+        'exactly one member-joined event must exist: the real join must be recorded (the RLS ' +
+        'insert policy is manager-only, so a joining member\'s own row is refused and silently ' +
+        'dropped — join-audit lane), and the refused re-join must not appear (REM-1). ' +
+        `events: ${JSON.stringify(audit.body.events)}`);
     });
 
     // -----------------------------------------------------------------------
