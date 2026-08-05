@@ -63,11 +63,53 @@ it does not make the repo self-verifying, and nothing offline could.
 | 028 `enforce_project_access_default` | applied | `can_see_project()` exists |
 | 029 `materialize_project_access` | applied | `project_access` populated (13 rows / 7 projects) |
 | 030 `team_keys_definer_membership` | applied | `team_keys_insert` check contains `is_team_member_uid` |
-| 031 `ensure_rls_event_trigger` | **NOT applied** | `ensure_rls` trigger exists but predates the repo; live `rls_auto_enable` lacks 031's fail-closed body. The file is a RECONSTRUCTION — diff before applying, `create or replace` would overwrite production's copy |
+| 031 `ensure_rls_event_trigger` | **NOT applied** | `ensure_rls` trigger exists but predates the repo; live `rls_auto_enable` lacks 031's fail-closed body. The file is a RECONSTRUCTION — and diffing it against the live body (done 2026-08-05) found a real defect: it drops `partitioned table` from the guardrail's filter. **Fix that line before applying.** Full diff and safety analysis in 031's header; pinned by `test/suites/rls-guardrail.test.js` |
 | 032 `materialize_project_access_on_insert` | applied | `projects_materialize_access` trigger on `projects` |
 | 033 `enforce_project_access_on_write` | applied | `memory_entries_insert`/`_update` both contain `can_see_project` |
 | 034 `project_access_lookup_index` | applied | index `project_access_project_member_idx` exists |
 | 035 `delete_own_entries` | applied | `memory_entries_delete` policy + `delete_my_entries()` + `my_entry_counts()` exist |
+
+## Live RLS survey — 2026-08-05, read-only
+
+Prompted by `031` being unapplied: production has a version of the RLS net that
+notices a failure and continues, so the guarantee "no table in `public` without
+row-level security" is not actually enforced. What that has cost so far:
+
+**Nothing yet. No table in `public` has RLS disabled — all 15 have it enabled.**
+Reported as the headline because it is the useful answer, and because the
+permissive branch never having fired is also the evidence that applying `031`
+is safe (see its header).
+
+Four `public` tables have **RLS enabled with zero policies**, which denies
+everything. That is safe, and in all four cases it is also correct rather than a
+broken feature — each one's real access path bypasses RLS legitimately:
+
+| Table | Reached by | PostgREST-reachable? |
+|---|---|---|
+| `invite_attempts` | `check_invite_attempt()`, `security definer` | **No** — `010:153` revoked anon/authenticated |
+| `onboarding_invites` | `redeem_onboarding_invite()`, `security definer` | Yes, but denied (no policy) |
+| `ops_audit` | `ops_log()` / `ops_audit_recent()`, `security definer`, `service_role` only | Yes, but denied |
+| `ops_team_meta` | ops RPCs, `service_role` only | Yes, but denied |
+
+The ops dashboard reads these through `cloudflare/ops-api`, which authenticates
+with `SUPABASE_SERVICE_KEY` — `service_role` bypasses RLS outright — so the
+zero-policy state breaks no feature. Checked rather than assumed.
+
+**The one thing worth fixing (latent, not live).** `invite_attempts` was
+explicitly revoked from `anon, authenticated` in `010:153`. The other three
+never were, so they still carry Supabase's default blanket `arwdDxtm` grant to
+both roles, and their *only* protection is the single property "RLS on with zero
+policies". `onboarding_invites` holds unredeemed invite tokens. One
+`alter table ... disable row level security`, or one later `for all` policy
+scoped more loosely than intended, turns it into an anon-readable token dump —
+and `031`'s net does not help, because it only fires on CREATE. The house pattern
+for this already exists; it is one `revoke all on table ... from anon,
+authenticated` per table, matching `010:153`. Product change, so not made here.
+
+Also checked and clean: `public.project_stats` is the only view in `public` and
+has `security_invoker = on`, so it respects the caller's RLS rather than running
+as its owner. Tables in `auth`, `storage`, `realtime` and `vault` are
+Supabase-managed and out of scope.
 
 ## Migration history table
 
