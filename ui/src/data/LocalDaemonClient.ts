@@ -7,7 +7,7 @@ import type {
   Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
-  dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
+  dedupeLiveSessions, feedQueryString, mapDayDigests, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
   mapSession, mapStreamEntry, memberActivity, syncStateOf,
   type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawSearchPayload, type RawSessionPayload, type RawTeamFeedEntry,
 } from './mappers'
@@ -414,7 +414,7 @@ export class LocalDaemonClient implements DataClient {
   async getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }): Promise<FeedPage> {
     const qs = feedQueryString(filters, opts)
     const raw = await this.requestCache.get(`feed:page:${qs}`, () => get<RawFeedPayload>(`/api/feed?${qs}`))
-    return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null }
+    return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null, dayDigests: mapDayDigests(raw.dayDigests) }
   }
 
   async search(query: string, filters: FeedFilters, limit: number): Promise<SearchPage> {

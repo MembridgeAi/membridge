@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import type { FeedEntry } from '../../data/types'
-import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, buildDayCards, dayCardKey, pickDayOverview } from './dayCards'
+import type { DayDigest, FeedEntry } from '../../data/types'
+import {
+  NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, PARTIAL_DIGEST_NOTE, UNDATED_DAY,
+  buildDayCards, dayBullets, dayCardKey, dayFiles, dayIntent, dayIntentSentences,
+  dayProjects, daySessions, daySlug, daySlugDay, dedupeSyncedTwins, digestKey, pickDayOverview, projectPart,
+} from './dayCards'
 
 // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ), so
 // "20:00Z" is 13:00 the same day and "02:00Z" is 19:00 the PREVIOUS day
@@ -9,13 +13,13 @@ import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, buildDayCards, dayCardKey, pickDa
 const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
   id: 'e1', author: 'Marco', authorId: 'marco', tool: 'Claude Code', at: '2026-07-29T20:00:00Z',
   live: false, outcome: 'done', intent: null, files: [], session: 's1',
-  project: 'membridge', projectPath: '/Users/x/membridge',
+  project: 'membridge', projectPath: '/Users/x/membridge', projectId: null,
   summaryFull: null, decisions: null, gotchas: null, changes: [],
   ...overrides,
 })
 
 describe('dayCardKey', () => {
-  it('keys on author + project + LOCAL calendar day', () => {
+  it('keys on author + LOCAL calendar day', () => {
     const a = dayCardKey(entry({ at: '2026-07-29T20:00:00Z' }))
     const b = dayCardKey(entry({ at: '2026-07-29T23:30:00Z' }))
     expect(a).toBe(b)
@@ -29,39 +33,193 @@ describe('dayCardKey', () => {
     expect(evening).toBe(afternoon)
   })
 
-  it('splits the same person on the same day across two projects', () => {
+  // THE CHANGE. A person's day is one thing to them, not one thing per repo.
+  it('keeps one person\'s day on ONE card across two projects', () => {
     const one = dayCardKey(entry({ project: 'membridge', projectPath: '/Users/x/membridge' }))
     const two = dayCardKey(entry({ project: 'sublease', projectPath: '/Users/x/sublease' }))
-    expect(one).not.toBe(two)
+    expect(one).toBe(two)
   })
 
-  it('splits two people on the same day in the same project', () => {
+  it('splits two people on the same day', () => {
     const marco = dayCardKey(entry({ author: 'Marco', authorId: 'marco' }))
     const andrew = dayCardKey(entry({ author: 'Andrew', authorId: 'andrew' }))
     expect(marco).not.toBe(andrew)
   })
 
-  it('prefers the ids over the display names, so a renamed person stays one card', () => {
+  it('prefers the id over the display name, so a renamed person stays one card', () => {
     const before = dayCardKey(entry({ author: 'Marco', authorId: 'marco' }))
     const after = dayCardKey(entry({ author: 'Marco P.', authorId: 'marco' }))
     expect(after).toBe(before)
   })
 
-  it('falls back to the display name when a row carries no author id', () => {
-    // Team rows pushed before author_id existed come back with a null id
-    // (lib/feed.js normalizeTeam). Falling back to '' would fold every such
-    // teammate into ONE card for the day.
+  it('falls back to the display name rather than to an empty key', () => {
+    // Defensive only: author_id is NOT NULL in the original schema and the RLS
+    // insert policy requires it, so no real row arrives without one. The point
+    // of the case is that IF one did, two people would not merge.
     const marco = dayCardKey(entry({ authorId: '', author: 'Marco' }))
     const sarah = dayCardKey(entry({ authorId: '', author: 'Sarah' }))
     expect(marco).not.toBe(sarah)
   })
 
-  it('falls back to the project display name when a row carries no path', () => {
-    // Team rows never carry projectPath (lib/feed.js normalizeTeam sets it
-    // null), so path-only keying folds every teammate project into one card.
-    const one = dayCardKey(entry({ projectPath: null, project: 'membridge' }))
-    const two = dayCardKey(entry({ projectPath: null, project: 'sublease' }))
-    expect(one).not.toBe(two)
+  it('buckets a row whose timestamp is not a time, instead of keying it NaN', () => {
+    // lib/feed.js emits `ts: e.ts || ''`. Unguarded this keyed "NaN-NaN-NaN",
+    // which sorts above every real date and parks the row at the top forever.
+    expect(dayCardKey(entry({ at: '' })).startsWith(UNDATED_DAY)).toBe(true)
+  })
+})
+
+describe('projectPart', () => {
+  // lib/feed.js's own dedupeKey precedence, and canonical for this problem.
+  it('prefers projectId, the one component that survives team sync', () => {
+    const local = projectPart(entry({ projectId: 'p1', projectPath: '/Users/x/membridge', project: 'membridge' }))
+    const synced = projectPart(entry({ projectId: 'p1', projectPath: null, project: 'Membridge' }))
+    expect(synced).toBe(local)
+  })
+
+  it('falls back to the path, so two unlinked projects sharing a folder name stay apart', () => {
+    const a = projectPart(entry({ projectId: null, projectPath: '/Users/x/site', project: 'site' }))
+    const b = projectPart(entry({ projectId: null, projectPath: '/Users/y/site', project: 'site' }))
+    expect(a).not.toBe(b)
+  })
+
+  it('falls back to the display name for a team row with neither', () => {
+    const a = projectPart(entry({ projectId: null, projectPath: null, project: 'membridge' }))
+    const b = projectPart(entry({ projectId: null, projectPath: null, project: 'sublease' }))
+    expect(a).not.toBe(b)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The synced-back twin.
+//
+// CONFIRMED against real Postgres 17: '...:00.550Z'::timestamptz serializes as
+// "...:00.55+00:00". Every fixture here carries that REAL asymmetry -- a
+// different ts string, a nulled projectPath, a capitalised project name and a
+// clipped ask -- because test/mock-supabase.js returns pushed rows verbatim,
+// so a fixture built from one shape proves nothing at all.
+// ---------------------------------------------------------------------------
+const localRow = (overrides: Partial<FeedEntry> = {}): FeedEntry => entry({
+  id: 's-1|2026-07-29T20:00:00.550Z', at: '2026-07-29T20:00:00.550Z', session: 's-1',
+  project: 'membridge', projectPath: '/Users/x/membridge', projectId: 'proj-1',
+  intent: 'wire the recall hook into the Stop path',
+  ...overrides,
+})
+const syncedTwin = (overrides: Partial<FeedEntry> = {}): FeedEntry => entry({
+  id: 's-1|2026-07-29T20:00:00.55+00:00', at: '2026-07-29T20:00:00.55+00:00', session: 's-1',
+  project: 'Membridge', projectPath: null, projectId: 'proj-1',
+  intent: '(prompt not shared)',
+  ...overrides,
+})
+
+describe('dedupeSyncedTwins', () => {
+  it('folds a row against its synced-back twin, which differs in the ts STRING', () => {
+    expect(dedupeSyncedTwins([localRow(), syncedTwin()])).toHaveLength(1)
+  })
+
+  it('keeps the LOCAL row, the one carrying the verbatim prompt', () => {
+    const folded = dedupeSyncedTwins([syncedTwin(), localRow()])
+    expect(folded).toHaveLength(1)
+    expect(folded[0].projectPath).toBe('/Users/x/membridge')
+    expect(folded[0].intent).toBe('wire the recall hook into the Stop path')
+  })
+
+  it('folds a SESSION-LESS row against its twin too', () => {
+    // daySessions keys such a row off `entry:${id}`, and the id embeds the ts,
+    // so an unfolded pair renders as two sessions a millisecond apart.
+    const folded = dedupeSyncedTwins([
+      localRow({ session: null, id: 'none|2026-07-29T20:00:00.550Z' }),
+      syncedTwin({ session: null, id: 'none|2026-07-29T20:00:00.55+00:00' }),
+    ])
+    expect(folded).toHaveLength(1)
+  })
+
+  it('never folds two DIFFERENT sessions that happen to share an instant', () => {
+    const folded = dedupeSyncedTwins([
+      localRow({ session: 's-1', id: 'a' }),
+      localRow({ session: 's-2', id: 'b' }),
+    ])
+    expect(folded).toHaveLength(2)
+  })
+
+  it('never folds two people, however alike their rows look', () => {
+    const folded = dedupeSyncedTwins([
+      localRow({ id: 'a', authorId: 'marco', author: 'Marco' }),
+      localRow({ id: 'b', authorId: 'sarah', author: 'Sarah' }),
+    ])
+    expect(folded).toHaveLength(2)
+  })
+
+  it('never folds the same session in two different projects', () => {
+    const folded = dedupeSyncedTwins([
+      localRow({ id: 'a', projectId: 'proj-1' }),
+      localRow({ id: 'b', projectId: 'proj-2' }),
+    ])
+    expect(folded).toHaveLength(2)
+  })
+
+  it('leaves a genuinely distinct second prompt of the same session alone', () => {
+    const folded = dedupeSyncedTwins([
+      localRow({ id: 'a', at: '2026-07-29T20:00:00.550Z' }),
+      localRow({ id: 'b', at: '2026-07-29T20:05:00.000Z' }),
+    ])
+    expect(folded).toHaveLength(2)
+  })
+
+  it('is idempotent, so a caller folding twice cannot lose a row', () => {
+    const once = dedupeSyncedTwins([localRow(), syncedTwin()])
+    expect(dedupeSyncedTwins(once)).toEqual(once)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The slug. wouter runs decodeURI over location.pathname BEFORE it matches, so
+// a percent-escaped slug arrives decoded and matches nothing.
+// ---------------------------------------------------------------------------
+describe('daySlug', () => {
+  it('survives decodeURI unchanged, which encodeURIComponent does not', () => {
+    const slug = daySlug(dayCardKey(entry({ authorId: '', author: 'Renée o~brien Melika' })))
+    expect(decodeURI(slug)).toBe(slug)
+    // And it holds nothing for a router to decode in the first place.
+    expect(slug).toMatch(/^[A-Za-z0-9\-_~]+$/)
+  })
+
+  it('gives two different keys two different slugs, even across the separator', () => {
+    // The tilde is the separator, and a name containing one is exactly what
+    // defeated the escaping this replaced.
+    const a = daySlug(dayCardKey(entry({ authorId: '', author: 'a~b' })))
+    const b = daySlug(dayCardKey(entry({ authorId: '', author: 'a' })))
+    expect(a).not.toBe(b)
+  })
+
+  it('reads the day half back for the pager, and only the day half', () => {
+    const slug = daySlug(dayCardKey(entry({ at: '2026-07-29T20:00:00Z' })))
+    expect(daySlugDay(slug)).toBe('2026-07-29')
+  })
+
+  it('returns no day for a hand-edited slug rather than throwing', () => {
+    expect(daySlugDay('not-a-slug')).toBeNull()
+    expect(daySlugDay('')).toBeNull()
+    expect(daySlugDay(daySlug(`${UNDATED_DAY}\x00id:marco`))).toBeNull()
+  })
+})
+
+describe('dayProjects', () => {
+  it('lists every project of the day, busiest first', () => {
+    const projects = dayProjects([
+      entry({ id: 'a', projectPath: '/Users/x/sublease', project: 'sublease' }),
+      entry({ id: 'b', projectPath: '/Users/x/membridge', project: 'membridge' }),
+      entry({ id: 'c', projectPath: '/Users/x/membridge', project: 'membridge' }),
+    ])
+    expect(projects.map(p => p.name)).toEqual(['membridge', 'sublease'])
+    expect(projects[0].count).toBe(2)
+  })
+
+  it('does not list a linked project twice under its two capitalisations', () => {
+    const projects = dayProjects([localRow(), syncedTwin({ id: 'other' })])
+    expect(projects).toHaveLength(1)
+    // And it renders the name off the LOCAL row, the one the reader's own
+    // folder is called, not the backend's copy of it.
+    expect(projects[0].name).toBe('membridge')
   })
 })
 
@@ -152,8 +310,153 @@ describe('pickDayOverview', () => {
   })
 })
 
+describe('dayFiles', () => {
+  it('ranks by how often the day came back to a file', () => {
+    const files = dayFiles([
+      entry({ id: 'a', files: ['lib/hooks.js', 'README.md'] }),
+      entry({ id: 'b', files: ['lib/hooks.js'] }),
+    ])
+    expect(files.map(f => f.file)).toEqual(['lib/hooks.js', 'README.md'])
+    expect(files[0].touches).toBe(2)
+  })
+
+  it('annotates a file from `changes` without counting the note as a visit', () => {
+    const files = dayFiles([
+      entry({ id: 'a', files: ['lib/hooks.js'], changes: [{ file: 'lib/hooks.js', status: 'edited', add: 1, del: 0, note: 'gate extracted', dep: false }] }),
+    ])
+    expect(files[0].touches).toBe(1)
+    expect(files[0].note).toBe('gate extracted')
+  })
+
+  it('sinks supporting churn below real code touched the same number of times', () => {
+    const files = dayFiles([entry({ id: 'a', files: ['docs/plan.md', 'lib/hooks.js'] })])
+    expect(files.map(f => f.file)).toEqual(['lib/hooks.js', 'docs/plan.md'])
+  })
+})
+
+describe('daySessions', () => {
+  // The consequence of dropping collapseSessionCheckpoints from the feed:
+  // buildEntries emits one entry per PROMPT, so a session with several prompts
+  // is several rows sharing a session id. Collapsing on the id alone kept only
+  // the newest, discarding every prompt but the last -- which is exactly what
+  // "prompts underneath" is made of.
+  it('renders one session\'s many prompts as ONE group holding all of them', () => {
+    const sessions = daySessions([
+      entry({ id: 'p1', session: 's1', at: '2026-07-29T20:00:00Z', intent: 'first ask' }),
+      entry({ id: 'p2', session: 's1', at: '2026-07-29T20:05:00Z', intent: 'second ask' }),
+      entry({ id: 'p3', session: 's1', at: '2026-07-29T20:10:00Z', intent: 'third ask' }),
+    ])
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0].prompts.map(p => p.text)).toEqual(['first ask', 'second ask', 'third ask'])
+  })
+
+  it('keeps two distinct sessions apart even when their text is byte-identical', () => {
+    const sessions = daySessions([
+      entry({ id: 'x1', session: 's1', at: '2026-07-29T20:10:00Z', outcome: 'identical summary text', intent: 'identical ask' }),
+      entry({ id: 'x2', session: 's2', at: '2026-07-29T20:05:00Z', outcome: 'identical summary text', intent: 'identical ask' }),
+    ])
+    expect(sessions).toHaveLength(2)
+  })
+
+  it('orders sessions newest first and each session\'s prompts oldest first', () => {
+    const sessions = daySessions([
+      entry({ id: 'o1', session: 'old', at: '2026-07-29T18:00:00Z', intent: 'older ask' }),
+      entry({ id: 'n1', session: 'new', at: '2026-07-29T21:00:00Z', intent: 'newer ask' }),
+      entry({ id: 'o2', session: 'old', at: '2026-07-29T17:00:00Z', intent: 'oldest ask' }),
+    ])
+    expect(sessions.map(s => s.key)).toEqual(['new', 'old'])
+    expect(sessions[1].prompts.map(p => p.text)).toEqual(['oldest ask', 'older ask'])
+  })
+
+  it('drops a repeated ask rather than listing it once per checkpoint row', () => {
+    const sessions = daySessions([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T20:00:00Z', intent: 'the same ask' }),
+      entry({ id: 'b', session: 's1', at: '2026-07-29T20:05:00Z', intent: 'The same ask.' }),
+    ])
+    expect(sessions[0].prompts).toHaveLength(1)
+  })
+
+  it('gives a session-less row its own group rather than folding them together', () => {
+    const sessions = daySessions([
+      entry({ id: 'p1', session: null, at: '2026-07-29T20:00:00Z' }),
+      entry({ id: 'p2', session: null, at: '2026-07-29T19:00:00Z' }),
+    ])
+    expect(sessions).toHaveLength(2)
+    expect(sessions.every(s => s.session === null)).toBe(true)
+  })
+
+  it('contributes nothing for an entry that carried no prompt, not a blank bullet', () => {
+    const sessions = daySessions([entry({ id: 'a', session: 's1', intent: null })])
+    expect(sessions[0].prompts).toHaveLength(0)
+  })
+})
+
+describe('dayBullets', () => {
+  const overview = { kind: 'distilled' as const, text: 'the day\'s sentence', fromEntryId: 'x', coverageNote: null, source: 'pick' as const }
+
+  it('reads oldest work first, one outcome per session', () => {
+    const sessions = daySessions([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'the morning\'s outcome' }),
+      entry({ id: 'b', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'the afternoon\'s outcome' }),
+    ])
+    expect(dayBullets(sessions, overview).map(b => b.text))
+      .toEqual(['the morning\'s outcome', 'the afternoon\'s outcome'])
+  })
+
+  it('never repeats the sentence already on the card above it', () => {
+    const sessions = daySessions([entry({ id: 'a', session: 's1', outcome: 'The day\'s sentence.' })])
+    expect(dayBullets(sessions, overview)).toEqual([])
+  })
+
+  it('splits decisions the writer actually wrote as a list', () => {
+    const sessions = daySessions([entry({
+      id: 'a', session: 's1', outcome: '',
+      decisions: '- Durability beats recency\n- Merged before writing settings.json',
+    })])
+    expect(dayBullets(sessions, overview).map(b => b.text))
+      .toEqual(['Durability beats recency', 'Merged before writing settings.json'])
+  })
+
+  it('never shreds a flattened paragraph back into half-sentences', () => {
+    // Pre-v0.2.8 text was flattened to one line on the way out of storage and
+    // the structure is not recoverable. Sentence-splitting it produces the
+    // garbage this list was rejected for once already.
+    const long = `${'a decision that runs on and on. '.repeat(12)}`
+    const sessions = daySessions([entry({ id: 'a', session: 's1', outcome: '', decisions: long })])
+    expect(dayBullets(sessions, overview)).toEqual([])
+  })
+
+  it('invents nothing for a day it could not read', () => {
+    const sessions = daySessions([entry({ id: 'a', session: 's1', outcome: '', undecryptable: true, intent: null })])
+    const opaque = { kind: 'undecryptable' as const, text: OPAQUE_OVERVIEW, fromEntryId: null, coverageNote: null, source: 'pick' as const }
+    expect(dayBullets(sessions, opaque)).toEqual([])
+  })
+})
+
+describe('dayIntent', () => {
+  it('scales 1 to 3 sentences by how much was done that day', () => {
+    expect(dayIntentSentences(1)).toBe(1)
+    expect(dayIntentSentences(3)).toBe(2)
+    expect(dayIntentSentences(9)).toBe(3)
+  })
+
+  it('joins the day\'s own bullets whole, never re-worded', () => {
+    const bullets = [{ key: 'a', text: 'first thing' }, { key: 'b', text: 'second thing' }]
+    expect(dayIntent(bullets, 2)).toBe('first thing. second thing.')
+  })
+
+  it('adds no second full stop to a line that already ends in one', () => {
+    expect(dayIntent([{ key: 'a', text: 'already punctuated.' }], 1)).toBe('already punctuated.')
+    expect(dayIntent([{ key: 'a', text: 'clipped mid sen…' }], 1)).toBe('clipped mid sen…')
+  })
+
+  it('says nothing at all for a day that landed nothing', () => {
+    expect(dayIntent([], 1)).toBe('')
+  })
+})
+
 describe('buildDayCards', () => {
-  it('folds a person\'s many sessions in one project on one day into ONE card', () => {
+  it('folds a person\'s many sessions on one day into ONE card', () => {
     const cards = buildDayCards([
       entry({ id: '1', session: 's1', at: '2026-07-29T20:00:00Z' }),
       entry({ id: '2', session: 's2', at: '2026-07-29T18:00:00Z' }),
@@ -162,7 +465,31 @@ describe('buildDayCards', () => {
     expect(cards).toHaveLength(1)
     expect(cards[0].sessionCount).toBe(3)
     expect(cards[0].author).toBe('Marco')
-    expect(cards[0].project).toBe('membridge')
+  })
+
+  // The owner's ask, exactly: a team of two working is two cards.
+  it('renders two people working today as exactly two cards', () => {
+    const cards = buildDayCards([
+      entry({ id: 'a', session: 'a', authorId: 'marco', author: 'Marco', project: 'membridge', projectPath: '/Users/x/membridge' }),
+      entry({ id: 'b', session: 'b', authorId: 'marco', author: 'Marco', project: 'sublease', projectPath: '/Users/x/sublease' }),
+      entry({ id: 'c', session: 'c', authorId: 'andrew', author: 'Andrew', project: 'membridge', projectPath: '/Users/x/membridge' }),
+    ])
+    expect(cards).toHaveLength(2)
+  })
+
+  it('names every project a card spans, and never a single one as the scope', () => {
+    // Seven membridge sessions and one sublease session. Copying `project` off
+    // the newest entry would have labelled the whole day "sublease".
+    const cards = buildDayCards([
+      entry({ id: 'x', session: 'x', at: '2026-07-29T21:00:00Z', project: 'sublease', projectPath: '/Users/x/sublease' }),
+      ...Array.from({ length: 7 }, (_, i) => entry({
+        id: `m${i}`, session: `m${i}`, at: `2026-07-29T1${i}:00:00Z`,
+        project: 'membridge', projectPath: '/Users/x/membridge',
+      })),
+    ])
+    expect(cards).toHaveLength(1)
+    expect(cards[0].projects.map(p => p.name)).toEqual(['membridge', 'sublease'])
+    expect(cards[0].projects[0].count).toBe(7)
   })
 
   it('stamps the card with its NEWEST entry\'s timestamp and orders cards by it', () => {
@@ -175,18 +502,7 @@ describe('buildDayCards', () => {
     expect(cards[0].at).toBe('2026-07-29T19:00:00Z')
   })
 
-  it('keeps each card\'s own entries newest-first', () => {
-    const cards = buildDayCards([
-      entry({ id: 'b', session: 'b', at: '2026-07-29T18:00:00Z' }),
-      entry({ id: 'a', session: 'a', at: '2026-07-29T20:00:00Z' }),
-    ])
-    expect(cards[0].entries.map(e => e.id)).toEqual(['a', 'b'])
-  })
-
-  it('counts SESSIONS, not rows -- successive checkpoints of one session are one session', () => {
-    // FeedPage collapses checkpoints before it gets here, but the count must
-    // not depend on that having happened: an inflated "12 sessions" for one
-    // session summarized twelve times is exactly the noise this screen removes.
+  it('counts SESSIONS, not rows -- several prompts of one session are one session', () => {
     const cards = buildDayCards([
       entry({ id: 'c2', session: 's1', at: '2026-07-29T20:10:00Z' }),
       entry({ id: 'c1', session: 's1', at: '2026-07-29T20:00:00Z' }),
@@ -202,6 +518,21 @@ describe('buildDayCards', () => {
     expect(cards[0].sessionCount).toBe(2)
   })
 
+  // THE DUPLICATION the owner reported, with the real asymmetry.
+  it('does not double a day\'s counts when its work synced back as its own twin', () => {
+    const cards = buildDayCards([
+      localRow({ id: 's-1|2026-07-29T20:00:00.550Z', files: ['lib/hooks.js'] }),
+      syncedTwin({ id: 's-1|2026-07-29T20:00:00.55+00:00', files: ['lib/hooks.js'] }),
+    ])
+    expect(cards).toHaveLength(1)
+    expect(cards[0].sessionCount).toBe(1)
+    expect(cards[0].files).toHaveLength(1)
+    expect(cards[0].files[0].touches).toBe(1)
+    expect(cards[0].sessions[0].prompts).toHaveLength(1)
+    // And it kept the real prompt, not the placeholder the wire copy carries.
+    expect(cards[0].sessions[0].prompts[0].text).toBe('wire the recall hook into the Stop path')
+  })
+
   it('is live when ANY of its entries is live', () => {
     const cards = buildDayCards([
       entry({ id: 'a', session: 'a', at: '2026-07-29T20:00:00Z', live: false }),
@@ -215,14 +546,6 @@ describe('buildDayCards', () => {
     expect(cards[0].live).toBe(false)
   })
 
-  it('splits one person\'s day across the two projects they worked in', () => {
-    const cards = buildDayCards([
-      entry({ id: 'a', session: 'a', at: '2026-07-29T20:00:00Z', project: 'membridge', projectPath: '/Users/x/membridge' }),
-      entry({ id: 'b', session: 'b', at: '2026-07-29T19:00:00Z', project: 'sublease', projectPath: '/Users/x/sublease' }),
-    ])
-    expect(cards.map(c => c.project)).toEqual(['membridge', 'sublease'])
-  })
-
   it('splits one person\'s work across two LOCAL days even inside one UTC day', () => {
     // 21:00 Jul 28 and 09:00 Jul 29 locally, both Jul 29 in UTC.
     const cards = buildDayCards([
@@ -230,8 +553,8 @@ describe('buildDayCards', () => {
       entry({ id: 'lastnight', session: 'b', at: '2026-07-29T04:00:00Z' }),
     ])
     expect(cards).toHaveLength(2)
-    expect(cards[0].entries.map(e => e.id)).toEqual(['morning'])
-    expect(cards[1].entries.map(e => e.id)).toEqual(['lastnight'])
+    expect(cards[0].sessions[0].entries.map(e => e.id)).toEqual(['morning'])
+    expect(cards[1].sessions[0].entries.map(e => e.id)).toEqual(['lastnight'])
   })
 
   it('carries the overview pick onto the card', () => {
@@ -243,7 +566,133 @@ describe('buildDayCards', () => {
     expect(cards[0].overview.kind).toBe('distilled')
   })
 
+  it('carries a slug the day view can be addressed by', () => {
+    const cards = buildDayCards([entry()])
+    expect(cards[0].slug).toBe(daySlug(cards[0].key))
+    expect(daySlugDay(cards[0].slug)).toBe('2026-07-29')
+  })
+
   it('returns nothing for no entries rather than one empty card', () => {
     expect(buildDayCards([])).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The daemon's day digest (GET /api/feed `dayDigests`). This is the general
+// one-sentence day header the owner asked for -- "Worked on UI fixes, app
+// install and dmg" -- which no pick of one session's outcome can be, and which
+// this module must never compose for itself.
+// ---------------------------------------------------------------------------
+const digest = (overrides: Partial<DayDigest> = {}): DayDigest => ({
+  // The daemon joins the two key halves with a SPACE; dayCardKey uses NUL.
+  key: '2026-07-29 id:marco',
+  kind: 'distilled',
+  text: 'Worked on UI fixes, app install and dmg',
+  sources: [{ entryId: 's1|2026-07-29T20:00:00Z', session: 's1', ts: '2026-07-29T20:00:00Z', project: 'membridge', projectId: null, distilled: true, text: 'x' }],
+  entries: 1,
+  complete: true,
+  coverageNote: null,
+  ...overrides,
+})
+
+describe('digestKey', () => {
+  it('reconciles the daemon\'s space separator with the card\'s NUL', () => {
+    expect(digestKey('2026-07-29 id:marco')).toBe(dayCardKey(entry()))
+  })
+
+  it('splits on the FIRST space only, so a display-name fallback survives', () => {
+    // "name:marco melika" contains spaces of its own; splitting on all of them
+    // would shred exactly the keys the name fallback exists for.
+    expect(digestKey('2026-07-29 name:marco melika'))
+      .toBe(dayCardKey(entry({ authorId: '', author: 'Marco Melika' })))
+  })
+
+  it('leaves a key with no separator alone rather than mangling it', () => {
+    expect(digestKey('nonsense')).toBe('nonsense')
+    expect(digestKey('')).toBe('')
+  })
+})
+
+describe('pickDayOverview with a digest', () => {
+  it('renders the daemon\'s sentence verbatim, over any session outcome', () => {
+    const pick = pickDayOverview([entry({ distilled: true, outcome: 'one session\'s outcome' })], digest())
+    expect(pick.text).toBe('Worked on UI fixes, app install and dmg')
+    expect(pick.source).toBe('digest')
+    expect(pick.kind).toBe('distilled')
+  })
+
+  it('links the sentence at the session it was drawn from', () => {
+    expect(pickDayOverview([entry()], digest()).fromEntryId).toBe('s1|2026-07-29T20:00:00Z')
+  })
+
+  it('keeps un-summarized and undecryptable as DISTINCT states', () => {
+    expect(pickDayOverview([], digest({ kind: 'none', text: NO_SUMMARY_OVERVIEW })).kind).toBe('none')
+    expect(pickDayOverview([], digest({ kind: 'undecryptable', text: OPAQUE_OVERVIEW })).kind).toBe('undecryptable')
+  })
+
+  it('degrades a kind this build has never heard of to the weakest honest one', () => {
+    // There is text and nothing claims it was distilled. Never rendered raw:
+    // the value reaches a CSS class name.
+    expect(pickDayOverview([], digest({ kind: 'something-new' })).kind).toBe('summary')
+  })
+
+  it('falls back to its own pick when no digest arrived for the day', () => {
+    const pick = pickDayOverview([entry({ distilled: true, outcome: 'one session\'s outcome' })])
+    expect(pick.text).toBe('one session\'s outcome')
+    expect(pick.source).toBe('pick')
+    expect(pick.coverageNote).toBeNull()
+  })
+
+  it('renders the daemon\'s coverage note rather than swallowing it', () => {
+    const note = 'Two sessions of this day could not be summarized.'
+    expect(pickDayOverview([entry()], digest({ coverageNote: note })).coverageNote).toBe(note)
+  })
+
+  it('says so itself when this client has loaded more of the day than the digest saw', () => {
+    // The digest is derived from the page it was served with, so a reader who
+    // paged further back is looking at sessions the sentence never saw.
+    const entries = [entry({ id: 'a' }), entry({ id: 'b' }), entry({ id: 'c' })]
+    expect(pickDayOverview(entries, digest({ entries: 1 })).coverageNote).toBe(PARTIAL_DIGEST_NOTE)
+  })
+
+  it('claims no shortfall when the digest saw the whole card', () => {
+    expect(pickDayOverview([entry()], digest({ entries: 1 })).coverageNote).toBeNull()
+  })
+})
+
+describe('buildDayCards with digests', () => {
+  it('joins a digest to its card across the separator difference', () => {
+    const cards = buildDayCards([entry()], [digest()])
+    expect(cards[0].overview.text).toBe('Worked on UI fixes, app install and dmg')
+  })
+
+  it('leaves a card whose day has no digest on its own pick', () => {
+    const cards = buildDayCards(
+      [entry({ authorId: 'sarah', author: 'Sarah', outcome: 'sarah\'s only outcome' })],
+      [digest()],
+    )
+    expect(cards[0].overview.source).toBe('pick')
+    expect(cards[0].overview.text).toBe('sarah\'s only outcome')
+  })
+
+  it('picks the digest that saw the most of the day, never merging two', () => {
+    // A reader three pages deep holds one digest per page for the same day.
+    const cards = buildDayCards([entry()], [
+      digest({ text: 'the page-two slice', entries: 1 }),
+      digest({ text: 'the fuller statement', entries: 9 }),
+    ])
+    expect(cards[0].overview.text).toBe('the fuller statement')
+  })
+
+  it('is unchanged by an empty digest list, which is what an older daemon sends', () => {
+    expect(buildDayCards([entry()], [])).toEqual(buildDayCards([entry()]))
+  })
+
+  it('still drops a bullet that merely restates the digest sentence', () => {
+    const cards = buildDayCards(
+      [entry({ session: 's1', outcome: 'Worked on UI fixes, app install and dmg.' })],
+      [digest()],
+    )
+    expect(cards[0].bullets).toEqual([])
   })
 })

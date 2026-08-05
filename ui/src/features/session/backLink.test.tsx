@@ -80,18 +80,38 @@ describe('call sites say where they are sending the reader from', () => {
     expect(new URLSearchParams(href.slice(href.indexOf('?'))).get('from')).toBe(searchHref({ q: 'ports' }))
   })
 
-  it('a feed row links to the session carrying the Feed as its origin', async () => {
+  // The Feed no longer opens a session directly: it opens a DAY, and the day
+  // view is where the sessions are. So the origin a session carries from here
+  // is that day's own URL, and the label has to follow it -- without the
+  // ROUTES.days case in backLink this said "Back to the Feed" and dropped the
+  // reader a screen further out than they came from.
+  it('a session opened from a day view comes back to that day, not to the Feed', async () => {
     const user = userEvent.setup()
     visit(ROUTES.feed)
     renderApp()
-    // Feed rows live inside a collapsed day card; open the first one.
-    const head = (await screen.findAllByRole('button', { expanded: false }, SETTLED))[0]
-    await user.click(head)
-    const link = (await screen.findAllByRole('link', {}, SETTLED)).find(a =>
-      (a.getAttribute('href') ?? '').startsWith('/sessions/'))
-    expect(link).toBeDefined()
-    const href = link!.getAttribute('href')!
-    expect(new URLSearchParams(href.slice(href.indexOf('?'))).get('from')).toBe(ROUTES.feed)
+
+    // Wait for a real day card, not for "any link": the shell's own nav links
+    // are in the document from the first paint, so a bare findAllByRole
+    // resolves long before the feed's entries have arrived.
+    const overview = await screen.findByText(/Hook ownership now decided by durability/, {}, SETTLED)
+    const card = overview.closest('a')!
+    expect(card.getAttribute('href')!.startsWith(`${ROUTES.days}/`)).toBe(true)
+    const dayUrl = card.getAttribute('href')!
+    await user.click(card)
+
+    // Same rule again: wait for the day view's own content before reading its
+    // links, or the shell's nav answers first.
+    await screen.findByText(/Back to the Feed/, {}, SETTLED)
+    const sessionLink = (await screen.findAllByRole('link', {}, SETTLED))
+      .find(a => (a.getAttribute('href') ?? '').startsWith('/sessions/'))
+    expect(sessionLink).toBeDefined()
+    const href = sessionLink!.getAttribute('href')!
+    expect(new URLSearchParams(href.slice(href.indexOf('?'))).get('from')).toBe(dayUrl)
+
+    await user.click(sessionLink!)
+    const back = await screen.findByRole('link', { name: /Back to/ }, SETTLED)
+    expect(back).toHaveTextContent('Back to the day')
+    expect(back.getAttribute('href')).toBe(dayUrl)
   })
 
   it('a project stream row links to the session carrying that project as its origin', async () => {
