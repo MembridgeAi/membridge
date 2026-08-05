@@ -445,7 +445,13 @@ export function useCreateInviteLink() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (teamId: string) => c.createInviteLink(teamId),
+    // INV-1: the lifetime rides along when a caller supplies one. No caller
+    // does yet, which is the point of the daemon-side default -- the safe
+    // value has to apply to the call the app actually makes today.
+    mutationFn: (v: string | { teamId: string; expiresDays?: number; maxUses?: number }) =>
+      typeof v === 'string'
+        ? c.createInviteLink(v)
+        : c.createInviteLink(v.teamId, { expiresDays: v.expiresDays, maxUses: v.maxUses }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['audit'] }) },
   })
 }

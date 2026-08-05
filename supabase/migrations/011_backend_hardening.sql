@@ -52,17 +52,35 @@
 -- applied — an applied migration is a historical record, not a live source of
 -- truth. Do not edit it; change the policy in a new migration.
 -- ---------------------------------------------------------------------------
-drop policy if exists team_keys_insert on public.team_keys;
-
-create policy team_keys_insert on public.team_keys
-  for insert with check (
-    public.is_team_member(team_id)
-    and exists (
-      select 1 from public.team_members tm
-      where tm.team_id = team_keys.team_id
-        and tm.user_id = team_keys.member_user_id
-    )
-  );
+-- SUPERSEDED BY 030_team_keys_definer_membership.sql, which replaced this
+-- predicate with one built on public.is_team_member_uid(...). The drop-then-
+-- create that used to stand here was correct while 011 held the newest
+-- definition of team_keys_insert — §1 above argues that case, and it was right
+-- at the time. It stopped being right when 030 landed: from that moment,
+-- re-running this file reverted 030 silently.
+--
+-- Converted to a guarded create. This does NOT edit the policy body, so it does
+-- not breach §1's "an applied migration is a historical record, do not edit it"
+-- — the predicate below is byte-for-byte what 011 applied. What changes is only
+-- whether it runs at all: on a database that already has the policy (every
+-- database this file has ever touched) it is now a no-op instead of a
+-- regression. Convention from 009:72-77; enforced by
+-- test/suites/invite-lifetime-hardening.test.js.
+do $$
+begin
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'team_keys' and policyname = 'team_keys_insert') then
+    create policy team_keys_insert on public.team_keys
+      for insert with check (
+        public.is_team_member(team_id)
+        and exists (
+          select 1 from public.team_members tm
+          where tm.team_id = team_keys.team_id
+            and tm.user_id = team_keys.member_user_id
+        )
+      );
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- §2 sealed_team_key length cap.
