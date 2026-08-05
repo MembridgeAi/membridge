@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'wouter'
 import { projectHref } from '../../app/routes'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { useDataClient } from '../../data/DataClientProvider'
 import { useInsights, useSettings, useStatus } from '../../data/queries'
@@ -173,6 +174,71 @@ function LRow({ name, sub, value, reason, href }: { name: string; sub?: string; 
   )
 }
 
+// The four stat labels, and the two section headings the loading frame below
+// reuses, hoisted so the frame and the loaded page cannot drift apart. A
+// loading strip that shows three cells for a page that renders four, or a
+// heading that changes wording when the data lands, is a layout jump plus a
+// second reading of the same page.
+const STAT_SESSIONS = 'sessions'
+const STAT_ASSISTS = 'times memory helped'
+const STAT_SYNCING = 'members syncing'
+const STAT_SHARED = 'memory entries shared'
+const SECT_PEOPLE = 'Activity by person'
+const SECT_MEMORY = 'How well shared memory is working'
+
+// Four labelled cells with no figures. Not a zero in sight: GET
+// /api/team/insights takes 3.6-4.0s on a real install (measured), and for all
+// of it this page used to render an empty <div> and then a bare "Loading…"
+// with no frame at all.
+const LOADING_STATS: StatItem[] = [STAT_SESSIONS, STAT_ASSISTS, STAT_SYNCING, STAT_SHARED]
+  .map(label => ({ value: null, label }))
+
+interface InsightsHeaderProps {
+  teamLabel: string | null
+  windowDays: WindowDays
+  onWindowChange: (w: WindowDays) => void
+  /** Omitted while the payload is in flight. There is nothing to export yet,
+   *  and an absent control is honest where a disabled one is a dead button --
+   *  the same call TodayPage makes about its missing whole-account digest. */
+  onExport?: () => void
+}
+
+/** Title, team label, window selector, export. Shared by the loading frame
+ *  and the loaded page so the header does not move when the data lands.
+ *
+ *  The window selector stays LIVE during loading on purpose: a 30-day window
+ *  that takes four seconds is exactly when a reader wants to ask for 7
+ *  instead, and disabling the control would make them wait out an answer they
+ *  have already decided against. */
+function InsightsHeader({ teamLabel, windowDays, onWindowChange, onExport }: InsightsHeaderProps) {
+  return (
+    <div className="insights-header">
+      <h1 className="insights-title">Insights</h1>
+      {teamLabel && <span className="mono insights-count">{teamLabel}</span>}
+      <div className="insights-header-actions">
+        <div className="seg" role="group" aria-label="Time window">
+          {WINDOWS.map(w => (
+            <button
+              key={w}
+              type="button"
+              aria-pressed={w === windowDays}
+              className={w === windowDays ? 'seg-btn seg-btn-on' : 'seg-btn'}
+              onClick={() => onWindowChange(w)}
+            >
+              {w} days
+            </button>
+          ))}
+        </div>
+        {onExport && (
+          <button type="button" className="insights-btn-ghost" onClick={onExport}>
+            Export CSV
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 interface InsightsContentProps {
   windowDays: WindowDays
   onWindowChange: (w: WindowDays) => void
@@ -199,10 +265,27 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
       </div>
     )
   }
+  // The whole page frame, immediately, with bars where the figures will be.
+  // This branch used to be a bare "Loading…" paragraph with no header, no stat
+  // strip and no columns, so the 3.6-4.0s GET /api/team/insights was spent on
+  // a screen that carried neither the answer nor the shape of it -- and then
+  // the entire layout arrived at once.
   if (!insightsQuery.data) {
     return (
       <div className="insights-page">
-        <p className="insights-loading-note">Loading…</p>
+        <InsightsHeader teamLabel={teamLabel} windowDays={windowDays} onWindowChange={onWindowChange} />
+        <StatStrip items={LOADING_STATS} />
+        <div className="insights-cols">
+          <div className="insights-colL">
+            <div className="insights-sect">{SECT_PEOPLE}</div>
+            <LoadingRows rows={3} label="Loading activity by person" testId="insights-people-loading" />
+            <div className="insights-sect">{SECT_MEMORY}</div>
+            <LoadingRows rows={2} label="Loading how well shared memory is working" />
+          </div>
+          <div className="insights-colR">
+            <LoadingRows rows={3} label="Loading problems" testId="insights-problems-loading" />
+          </div>
+        </div>
       </div>
     )
   }
@@ -214,12 +297,12 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
   const stats: StatItem[] = [
     {
       value: countValue(insights.sessions.count, insights.truncated),
-      label: 'sessions',
+      label: STAT_SESSIONS,
       note: insights.truncated ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
     },
     {
       value: assistsHeadlineValue(insights.assists),
-      label: 'times memory helped',
+      label: STAT_ASSISTS,
       // Unlike the windowed cells around it, this is cumulative: assistsFrom
       // (lib/api-insights.js) sums savingsPayload's per-project ledger totals
       // with no window filter, so the honest scope is all time, not windowDays.
@@ -227,7 +310,7 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
     },
     {
       value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
-      label: 'members syncing',
+      label: STAT_SYNCING,
       // "ok" = members who have shared into the window; the rest we can only
       // observe as quiet, never diagnose as broken (their machine is not
       // visible from here), so the unequal note states what we can see.
@@ -237,7 +320,7 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
     },
     {
       value: countValue(insights.entriesShared.count, insights.truncated),
-      label: 'memory entries shared',
+      label: STAT_SHARED,
       note: insights.truncated ? CAP_NOTE : deltaNote(insights.entriesShared.delta),
     },
   ]
@@ -245,40 +328,24 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
   return (
     <div className="insights-page">
       {daemonError && <DaemonErrorBanner className="insights-error" error={daemonError.error} />}
-      <div className="insights-header">
-        <h1 className="insights-title">Insights</h1>
-        {teamLabel && <span className="mono insights-count">{teamLabel}</span>}
-        <div className="insights-header-actions">
-          <div className="seg" role="group" aria-label="Time window">
-            {WINDOWS.map(w => (
-              <button
-                key={w}
-                type="button"
-                aria-pressed={w === windowDays}
-                className={w === windowDays ? 'seg-btn seg-btn-on' : 'seg-btn'}
-                onClick={() => onWindowChange(w)}
-              >
-                {w} days
-              </button>
-            ))}
-          </div>
-          <button type="button" className="insights-btn-ghost" onClick={() => exportCsv(insights)}>
-            Export CSV
-          </button>
-        </div>
-      </div>
+      <InsightsHeader
+        teamLabel={teamLabel}
+        windowDays={windowDays}
+        onWindowChange={onWindowChange}
+        onExport={() => exportCsv(insights)}
+      />
 
       <StatStrip items={stats} />
 
       <div className="insights-cols">
         <div className="insights-colL">
           <div className="insights-sect">
-            Activity by person <span className="insights-hint">sessions · summaries shared</span>
+            {SECT_PEOPLE} <span className="insights-hint">sessions · summaries shared</span>
           </div>
           <PersonBars people={insights.perPerson} />
 
           <div className="insights-sect">
-            How well shared memory is working <span className="insights-hint">last {windowDays} days</span>
+            {SECT_MEMORY} <span className="insights-hint">last {windowDays} days</span>
           </div>
           <div className="skeleton-panel" data-testid="skeleton-panel">
             <div className="lrow" role="row">
@@ -382,7 +449,24 @@ export function InsightsPage() {
 
   const ready = statusQuery.data !== undefined && settingsQuery.data !== undefined
   if (!ready) {
-    return <div className="insights-page" />
+    // Was `<div className="insights-page" />` -- a literally empty element, so
+    // the window was blank while getSettings() fanned out to /api/settings +
+    // /api/status + /api/team (measured: ~250ms, dominated by /api/team).
+    //
+    // Deliberately NOT the full frame InsightsContent's loading branch uses:
+    // this runs BEFORE the role check below, and the window selector and stat
+    // labels are the authorized page's furniture. A member who typed this URL
+    // must not watch the admin page assemble itself and then be told no. The
+    // title is the exception, and it is not a leak -- it is the app answering
+    // "where am I" about a route the user chose.
+    return (
+      <div className="insights-page">
+        <div className="insights-header">
+          <h1 className="insights-title">Insights</h1>
+        </div>
+        <LoadingRows rows={3} label="Loading insights" testId="insights-outer-loading" />
+      </div>
+    )
   }
 
   const role = settingsQuery.data?.team?.role ?? null

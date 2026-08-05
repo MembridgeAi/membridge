@@ -14,6 +14,7 @@ import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { EntryRow } from '../../components/EntryRow'
 import { SyncStateView } from '../../components/SyncState'
 import { AccessPanel, type AccessRow } from './AccessPanel'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { MemoryPanel, SyncPanel } from './SidePanels'
 import './project.css'
 
@@ -176,7 +177,20 @@ export function ProjectPage({ slug }: ProjectPageProps) {
   }
 
   if (!project) {
-    if (projectsQuery.isLoading) return null
+    // Was `return null` — a blank main region for as long as useProjects()
+    // took, measured at 1,580ms on a real install, because getProjects()
+    // awaits /api/feed alongside /api/projects. The route was chosen by the
+    // user, so the page can name itself and hold its shape while it resolves;
+    // it just must not claim the project is missing yet, which is what the
+    // branch below says.
+    if (projectsQuery.isLoading) {
+      return (
+        <div className="project-page">
+          <Link href={ROUTES.projects} className="project-back" aria-label="Back to projects">←</Link>
+          <LoadingRows rows={4} label="Loading this project" testId="project-loading" />
+        </div>
+      )
+    }
     return (
       <div className="project-page">
         <Link href={ROUTES.projects} className="project-back">← Back to projects</Link>
@@ -238,7 +252,14 @@ export function ProjectPage({ slug }: ProjectPageProps) {
 
       <div className="project-cols">
         <div className="project-stream">
-          {dayGroups.length === 0 && <p className="project-empty-note">No activity captured yet.</p>}
+          {/* "No activity captured yet." is an ANSWER about a codebase's whole
+              history, and it was being given before the question had been
+              asked: the stream comes from GET /api/feed?project=… (850ms-1.1s
+              measured), so a project with 28 captured sessions said it had
+              none for 846ms every single time this page was opened. */}
+          {streamQuery.isPending
+            ? <LoadingRows rows={3} label="Loading this project's activity" testId="project-stream-loading" />
+            : dayGroups.length === 0 && <p className="project-empty-note">No activity captured yet.</p>}
           {dayGroups.map(group => (
             <div key={group.day}>
               <div className="project-day">{group.day}</div>
@@ -275,6 +296,7 @@ export function ProjectPage({ slug }: ProjectPageProps) {
           <MemoryPanel
             project={project}
             latestEntry={latestEntry}
+            streamPending={streamQuery.isPending}
             onOpenMemory={() => openMemory.mutate(project.path)}
             openPending={openMemory.isPending}
           />

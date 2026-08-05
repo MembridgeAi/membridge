@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
   useCreateInviteLink, useCreateTeam, useJoinTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
@@ -325,7 +326,11 @@ export function TeamPage() {
           flashing "you are signed out" at someone who is signed in would be
           the same lie this page exists to remove, just pointing the other
           way. */}
-      {!account && <p className="team-loading">Loading…</p>}
+      {/* The gate itself was already right, and its comment states the rule
+          this whole sweep is about. Only the rendering changes: a bare
+          "Loading…" line where the account card will be, replaced with
+          placeholder rows that hold that card's shape. */}
+      {!account && <LoadingRows rows={2} label="Loading your account" testId="team-loading" />}
 
       {account && !account.authenticated && <SignInCard configured={account.configured} />}
 

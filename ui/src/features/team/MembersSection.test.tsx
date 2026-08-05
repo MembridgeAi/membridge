@@ -363,3 +363,47 @@ describe('MembersSection (the People section of the Team page)', () => {
     expect(await screen.findByText(/revoke rejected/i)).toBeInTheDocument()
   })
 })
+
+// T-72. Measured on a two-member team: the People heading read "0 members" from
+// 750ms to 1974ms, and the audit heading "Team activity · last 0 events" from
+// 750ms to 1708ms on a trail holding six. Both are counts derived from a
+// `?? []` fallback and presented as measurements.
+describe('Team counts while their data is still in flight', () => {
+  const forever = () => new Promise<never>(() => {})
+
+  it('does not report zero members before the roster arrives', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getMembers').mockReturnValue(forever())
+    const { container } = renderWith(client, <MembersSection />)
+
+    const count = container.querySelector('.team-members-count')
+    expect(count).not.toBeNull()
+    expect(count?.querySelector('.loading-block')).not.toBeNull()
+    expect(count?.textContent).not.toMatch(/\d/)
+    expect(screen.queryByText('0 members')).toBeNull()
+  })
+
+  it('holds the roster open with placeholder rows, not a bare Loading line', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getMembers').mockReturnValue(forever())
+    renderWith(client, <MembersSection />)
+
+    expect(await screen.findByTestId('members-loading')).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('does not report an event count before the audit trail arrives', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getAudit').mockReturnValue(forever())
+    renderWith(client, <MembersSection />)
+
+    // The clause is dropped, not zeroed: the shorter sentence is still true.
+    expect(await screen.findByText('Team activity')).toBeInTheDocument()
+    expect(screen.queryByText(/last 0 events/)).toBeNull()
+  })
+
+  it('reports the real member count once the roster arrives', async () => {
+    renderWith(new FakeDataClient(), <MembersSection />)
+    expect(await screen.findByText(/\d+ members?$/)).toBeInTheDocument()
+  })
+})

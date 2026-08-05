@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
+import { LoadingBlock, LoadingRows } from '../../components/LoadingBlock'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
   useAccessMatrix, useInvites, useMembers, useRemoveMember, useRevokeInvite, useSetMemberRole,
@@ -201,7 +202,14 @@ export function MembersSection() {
     <section className="team-card team-members" aria-labelledby="team-members-heading">
       <div className="team-members-head">
         <h2 className="team-card-title" id="team-members-heading">People</h2>
-        <span className="mono team-members-count">{members.length} {members.length === 1 ? 'member' : 'members'}</span>
+        {/* `members` is `membersQuery.data ?? []`, so this read "0 members" on
+            a two-person team for 1,224ms (measured). The heading keeps its slot;
+            it just does not put a number in it until one has been counted. */}
+        <span className="mono team-members-count">
+          {ready
+            ? `${members.length} ${members.length === 1 ? 'member' : 'members'}`
+            : <><LoadingBlock variant="short" /><span className="sr-only">Loading member count</span></>}
+        </span>
       </div>
 
       {canManage && <InvitesSection />}
@@ -210,7 +218,7 @@ export function MembersSection() {
         <p className="members-error" role="alert">Couldn't change role. {errorMessage(setRoleFromSelect.error)}</p>
       )}
 
-      {!ready && <p className="members-empty-note">Loading…</p>}
+      {!ready && <LoadingRows rows={2} label="Loading the people on this team" testId="members-loading" />}
       {ready && members.map(member => (
         <MemberRow
           key={member.id}

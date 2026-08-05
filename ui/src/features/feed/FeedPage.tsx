@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { FEED_SESSION_PARAM, ROUTES, feedSessionHref, useRawSearch } from '../../app/routes'
 import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
@@ -156,6 +157,15 @@ export function FeedPage() {
           {tools.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
       </div>
+
+      {/* The gate on isLoading was already right — "Nothing yet." never
+          appeared over a loading feed. What was missing is the other half:
+          nothing appeared AT ALL. The body was empty from 87ms to 1,402ms
+          (measured), so the screen read as a Feed that had finished loading and
+          found nothing, which is the same wrong conclusion by omission. */}
+      {feedQuery.isLoading && (
+        <LoadingRows rows={4} label="Loading the feed" testId="feed-loading" />
+      )}
 
       {!feedQuery.isLoading && dayGroups.length === 0 && (
         <p className="feed-empty-note">Nothing yet.</p>

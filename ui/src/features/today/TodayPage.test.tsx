@@ -416,3 +416,83 @@ describe('Happening now: the card links to that session in the feed', () => {
     expect(link!.getAttribute('href')).toBe('/feed?session=sess-newest')
   })
 })
+
+// T-61. Today rendered its NOT-YET-KNOWN state as its EMPTY state. Measured
+// on a real 10-project install, the landing screen showed all of this for
+// 1,392ms (94ms -> 1486ms, sampled per animation frame in a visible Chrome):
+//
+//   0 LIVE NOW · 0 SESSIONS · LAST 24H · 0 UPDATES SHARED
+//   Nothing happening right now.
+//   No projects yet. Sync your first project to see it here.
+//
+// to a user with ten projects, nineteen sessions that day and a live session
+// running. The last line is first-run onboarding copy: it tells an established
+// user their setup is gone and instructs them to redo it. None of it is
+// "slow" -- all of it is WRONG, confidently, for a second and a half.
+describe('Today while its data is still in flight', () => {
+  // Never resolves: pending is the state under test. Same instrument
+  // access.test.tsx already uses for getProjectAccess.
+  //
+  // Promise<never>, not Promise<unknown>: these three methods have three
+  // different return types, and a stub that never resolves resolves to
+  // nothing, so `never` is the one element type assignable to all of them
+  // without an `any` or a cast.
+  const forever = () => new Promise<never>(() => {})
+  const pendingClient = (methods: Array<'getProjects' | 'getLiveSessions' | 'getSkeletonStats'>) => {
+    const client = new FakeDataClient()
+    for (const m of methods) vi.spyOn(client, m).mockReturnValue(forever())
+    return client
+  }
+
+  it('does not claim there are no projects while the project list is loading', async () => {
+    renderWith(pendingClient(['getProjects']), <TodayPage />)
+
+    expect(await screen.findByTestId('projects-loading')).toBeInTheDocument()
+    expect(screen.queryByText('No projects yet. Sync your first project to see it here.')).toBeNull()
+    expect(screen.queryByText('No project activity in the last 7 days.')).toBeNull()
+  })
+
+  it('does not claim nothing is happening while the live read is in flight', async () => {
+    renderWith(pendingClient(['getLiveSessions']), <TodayPage />)
+
+    expect(await screen.findByTestId('live-loading')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing happening right now.')).toBeNull()
+  })
+
+  it('withholds every figure whose own request has not answered', async () => {
+    renderWith(pendingClient(['getProjects', 'getLiveSessions', 'getSkeletonStats']), <TodayPage />)
+
+    // The labels are still there -- the strip keeps its shape and its meaning.
+    // Asserted on the VALUE slot, not the whole cell: the label "sessions ·
+    // last 24h" legitimately contains a digit, and it is the figure that must
+    // not be invented.
+    const liveCell = (await screen.findByText('live now')).closest('.stat-cell')
+    expect(liveCell?.querySelector('.loading-block')).not.toBeNull()
+    expect(liveCell?.querySelector('.stat-value')?.textContent).not.toMatch(/\d/)
+
+    const sessionsCell = screen.getByText('sessions · last 24h').closest('.stat-cell')
+    expect(sessionsCell?.querySelector('.loading-block')).not.toBeNull()
+    expect(sessionsCell?.querySelector('.stat-value')?.textContent).not.toMatch(/\d/)
+  })
+
+  // Per query, not per page. status answers in ~20ms while the feed-backed
+  // reads take 1.4s, and hiding a figure we already have to keep four cells
+  // looking alike would be a second kind of dishonesty.
+  it('still shows a figure whose own request HAS answered', async () => {
+    const client = new FakeDataClient({ solo: false })
+    vi.spyOn(client, 'getProjects').mockReturnValue(new Promise(() => {}))
+    vi.spyOn(client, 'getLiveSessions').mockReturnValue(new Promise(() => {}))
+    renderWith(client, <TodayPage />)
+
+    const syncCell = (await screen.findByText('last team sync')).closest('.stat-cell')
+    expect(syncCell?.querySelector('.loading-block')).toBeNull()
+  })
+
+  // The screen must still be able to say "nothing" once it actually knows.
+  it('says nothing is happening once the live read comes back empty', async () => {
+    renderWith(new FakeDataClient({ empty: true }), <TodayPage />)
+
+    expect(await screen.findByText('Nothing happening right now.')).toBeInTheDocument()
+    expect(screen.queryByTestId('live-loading')).toBeNull()
+  })
+})

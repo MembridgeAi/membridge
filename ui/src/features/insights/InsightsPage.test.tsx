@@ -297,3 +297,95 @@ describe('InsightsPage', () => {
     expect(insightsSpy).toHaveBeenCalledWith(7)
   })
 })
+
+// T-61, and the screen Marco actually named. GET /api/team/insights?window=30
+// takes 3.6-4.0s on his install (three consecutive curl runs: 3.98s, 3.93s,
+// 3.63s), and for all of it this page rendered:
+//
+//   t=65ms    an empty <div className="insights-page" /> -- a blank window
+//   t=253ms   a bare "Loading…" paragraph, no header, no strip, no columns
+//   t=4371ms  the entire page, all at once
+//
+// Two undesigned states and a four-second layout jump. Note this is a
+// DIFFERENT endpoint from /api/insights (0.6ms), which this screen never calls
+// -- the fast one is not the one behind the wait.
+describe('Insights while its payload is still in flight', () => {
+  const pendingInsights = () => {
+    const client = new FakeDataClient()
+    // Never resolves: pending is the state under test.
+    vi.spyOn(client, 'getInsights').mockReturnValue(new Promise(() => {}))
+    return client
+  }
+
+  it('renders the page frame immediately instead of a bare Loading line', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    // The frame: title, window selector, and the four stat cells the loaded
+    // page renders -- so nothing is renamed or re-counted when data lands.
+    //
+    // Awaited on the window selector, not on the heading: the OUTER gate
+    // (status/settings, tested in its own describe below) renders a heading
+    // too, so a findBy on that would resolve one state too early and assert
+    // against the wrong frame.
+    expect(await screen.findByRole('group', { name: 'Time window' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Insights' })).toBeInTheDocument()
+    for (const label of ['sessions', 'times memory helped', 'members syncing', 'memory entries shared']) {
+      expect(screen.getByText(label)).toBeInTheDocument()
+    }
+    expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('shows bars, not zeros, in every stat cell', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    const cell = (await screen.findByText('sessions')).closest('.stat-cell')
+    expect(cell?.querySelector('.loading-block')).not.toBeNull()
+    expect(cell?.querySelector('.stat-value')?.textContent).not.toMatch(/\d/)
+  })
+
+  it('holds both columns open with placeholder rows', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    expect(await screen.findByTestId('insights-people-loading')).toBeInTheDocument()
+    expect(screen.getByTestId('insights-problems-loading')).toBeInTheDocument()
+  })
+
+  // A 30-day window that takes four seconds is exactly when a reader wants to
+  // ask for 7 instead. Disabling the control would make them wait out an
+  // answer they have already decided against.
+  it('keeps the window selector usable during the wait', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    const sevenDays = await screen.findByRole('button', { name: '7 days' })
+    expect(sevenDays).toBeEnabled()
+    await userEvent.click(sevenDays)
+    expect(sevenDays).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  // Nothing to export yet. An absent control is honest where a disabled one is
+  // a dead button, and a live one would hand back an empty CSV.
+  it('offers no Export CSV until there is something to export', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    await screen.findByRole('heading', { name: 'Insights' })
+    expect(screen.queryByRole('button', { name: 'Export CSV' })).toBeNull()
+  })
+})
+
+// The outer gate, before the role check: this returned a literally empty
+// element while getSettings() fanned out to /api/settings + /api/status +
+// /api/team (~250ms, dominated by /api/team).
+describe('Insights before status and settings have resolved', () => {
+  it('names the screen instead of painting a blank window', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getSettings').mockReturnValue(new Promise(() => {}))
+    renderWith(client, <InsightsPage />)
+
+    expect(await screen.findByRole('heading', { name: 'Insights' })).toBeInTheDocument()
+    expect(screen.getByTestId('insights-outer-loading')).toBeInTheDocument()
+    // NOT the admin page's furniture: this runs before the role check, and a
+    // member who typed the URL must not watch it assemble and then be refused.
+    expect(screen.queryByRole('group', { name: 'Time window' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Export CSV' })).toBeNull()
+  })
+})

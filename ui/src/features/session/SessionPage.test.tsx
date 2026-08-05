@@ -1,6 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { screen, cleanup, fireEvent } from '@testing-library/react'
-import { renderApp } from '../../test/renderApp'
+import { renderApp, renderWith } from '../../test/renderApp'
+import { FakeDataClient } from '../../data/FakeDataClient'
+import { SessionPage } from './SessionPage'
 import { ROUTES } from '../../app/routes'
 
 function visit(path: string) {
@@ -143,5 +145,23 @@ describe('session page redesign: order, analytics, bullets, intent', () => {
     await screen.findByRole('heading', { level: 1 })
     const titles = [...document.querySelectorAll('.session-widget-title')].map(el => el.textContent)
     expect(titles).not.toContain('Checkpoints')
+  })
+})
+
+// T-72. Was `<div className="session-page" />` — the shortest blank in the app
+// (49ms to 175ms measured; GET /api/session is a 67ms local read), fixed anyway
+// because the back link is the one control a reader may want DURING the wait and
+// it is known from the URL without waiting for anything.
+describe('SessionPage while the session is still loading', () => {
+  it('keeps the back link and shows placeholder rows instead of an empty page', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getSession').mockReturnValue(new Promise<never>(() => {}))
+    renderWith(client, <SessionPage sessionId="s1" />)
+
+    expect(await screen.findByTestId('session-loading')).toBeInTheDocument()
+    expect(screen.getByRole('link')).toBeInTheDocument()
+    // Must not have concluded the session is gone — that is a different state
+    // with a different remedy.
+    expect(screen.queryByText("This session isn't in memory anymore.")).toBeNull()
   })
 })

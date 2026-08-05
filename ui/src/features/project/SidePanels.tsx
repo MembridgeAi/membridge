@@ -1,3 +1,4 @@
+import { LoadingBlock } from '../../components/LoadingBlock'
 import { StateChip } from '../../components/StateChip'
 import { SyncStateView } from '../../components/SyncState'
 import { readEncryption, type EncryptionState } from '../../components/encryptionState'
@@ -7,6 +8,12 @@ import type { Project, StreamEntry as StreamEntryData, SyncState } from '../../d
 interface MemoryPanelProps {
   project: Project
   latestEntry: StreamEntryData | null
+  /** True while the project stream that `latestEntry` comes from is still in
+   *  flight. Required, not optional: the Status row below is a HEALTH claim
+   *  derived entirely from `latestEntry`, and a null entry means two completely
+   *  different things before and after that request answers. Making this
+   *  optional would let the next caller reintroduce the bug by omission. */
+  streamPending: boolean
   onOpenMemory: () => void
   openPending: boolean
 }
@@ -20,14 +27,25 @@ interface MemoryPanelProps {
  * a real control now (Task 18): POST /api/open {kind:'memory'} reveals the
  * file in the OS file manager -- see DataClient.openMemoryFile.
  */
-export function MemoryPanel({ project, latestEntry, onOpenMemory, openPending }: MemoryPanelProps) {
+export function MemoryPanel({ project, latestEntry, streamPending, onOpenMemory, openPending }: MemoryPanelProps) {
   return (
     <div className="panel">
       <div className="section-label">Memory · this project</div>
       <div className="kv">
         <span className="kv-key">Status</span>
+        {/* `paused` first: it is read off the project row, which has already
+            loaded, and it is true regardless of what the stream says.
+            streamPending next, BEFORE the latestEntry test -- "waiting for the
+            first session" is derived from latestEntry being null, and a
+            not-yet-answered request produces exactly the same null as a project
+            that has genuinely never captured anything. That is how a project
+            with 28 captured sessions displayed a muted "waiting for the first
+            session" chip for 846ms on every open: a status indicator asserting
+            a system state the code had not observed. */}
         {project.paused ? (
           <StateChip tone="muted" glyph="">paused</StateChip>
+        ) : streamPending ? (
+          <LoadingBlock variant="short" />
         ) : latestEntry ? (
           <StateChip tone="ok" glyph="✓">delivering</StateChip>
         ) : (

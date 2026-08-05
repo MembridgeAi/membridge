@@ -119,6 +119,39 @@ describe('StatStrip', () => {
     expect(value.className).toContain('mono')
     expect(screen.getByText('sessions')).toBeInTheDocument()
   })
+
+  // T-61. A figure that has not arrived is not a zero. Today rendered "0
+  // sessions · last 24h" for 1.4s to a user with nineteen, because every
+  // caller collapsed "no data yet" into the same `?? []` fallback the empty
+  // case uses. `null` is the third value that makes the two distinguishable.
+  it('renders a loading bar, not a zero, for a value that is not known yet', () => {
+    render(<StatStrip items={[{ value: null, label: 'sessions · last 24h' }]} />)
+
+    // The label still renders -- the cell keeps its place and its meaning.
+    const cell = screen.getByText('sessions · last 24h').closest('.stat-cell')
+    expect(cell).not.toBeNull()
+    expect(cell?.querySelector('.loading-block')).not.toBeNull()
+    expect(cell?.getAttribute('aria-busy')).toBe('true')
+    // The specific failure being locked out: no digit in the VALUE slot. The
+    // label is checked separately -- "last 24h" legitimately contains one.
+    expect(cell?.querySelector('.stat-value')?.textContent).not.toMatch(/\d/)
+  })
+
+  // The bar is aria-hidden (it carries nothing a screen reader can use), so
+  // without a word in the value's own slot the cell sounds finished and empty.
+  it('announces the wait where the number will be', () => {
+    render(<StatStrip items={[{ value: null, label: 'live now' }]} />)
+    expect(screen.getByText('Loading')).toHaveClass('sr-only')
+  })
+
+  // A real zero must survive: '0' is an answer and has to render as one.
+  it('renders a genuine zero as a zero', () => {
+    render(<StatStrip items={[{ value: '0', label: 'live now' }]} />)
+    expect(screen.getByText('0')).toBeInTheDocument()
+    const cell = screen.getByText('live now').closest('.stat-cell')
+    expect(cell?.querySelector('.loading-block')).toBeNull()
+    expect(cell?.getAttribute('aria-busy')).toBeNull()
+  })
 })
 
 describe('Sparkline', () => {

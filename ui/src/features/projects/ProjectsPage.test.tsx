@@ -174,3 +174,38 @@ describe('ProjectsPage', () => {
     expect(await screen.findByText(/not a directory/i)).toBeInTheDocument()
   })
 })
+
+// T-72. Measured per animation frame in a visible Chrome, 10 watched / 1 shared:
+// the header read "0 watched · 0 shared" from 99ms to 1389ms, and the table body
+// was a bare "Loading…" cell until 1464ms. The count is the misinforming half —
+// a zero in a header is read as a measurement, and this one said the machine was
+// watching nothing.
+describe('ProjectsPage while its data is still in flight', () => {
+  const forever = () => new Promise<never>(() => {})
+
+  it('does not report zero watched or zero shared before the projects arrive', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjects').mockReturnValue(forever())
+    const { container } = renderWith(client, <ProjectsPage />)
+
+    const count = container.querySelector('.projects-count')
+    expect(count).not.toBeNull()
+    expect(count?.querySelector('.loading-block')).not.toBeNull()
+    expect(count?.textContent).not.toMatch(/\d/)
+    expect(screen.queryByText(/watched · /)).toBeNull()
+  })
+
+  it('holds the table open with placeholder rows instead of a bare Loading line', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjects').mockReturnValue(forever())
+    const { container } = renderWith(client, <ProjectsPage />)
+
+    expect(container.querySelectorAll('.projects-table tbody .loading-block').length).toBeGreaterThan(1)
+    expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('reports the real counts once the projects arrive', async () => {
+    renderWith(new FakeDataClient(), <ProjectsPage />)
+    expect(await screen.findByText(/watched · /)).toBeInTheDocument()
+  })
+})

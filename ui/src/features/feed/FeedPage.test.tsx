@@ -462,3 +462,29 @@ describe('feed: a session targeted by ?session=', () => {
     expect(container.querySelectorAll('.entry-row-targeted')).toHaveLength(0)
   })
 })
+
+// T-72. The Feed's gate was already correct — "Nothing yet." never appeared over
+// a loading feed. The other half was missing: measured per animation frame, the
+// body was entirely empty from 87ms to 1402ms, so the screen read as a Feed that
+// HAD loaded and found nothing. Same wrong conclusion, reached by omission
+// rather than by copy.
+describe('FeedPage while the first page is still in flight', () => {
+  it('shows placeholder rows rather than an empty body', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getFeed').mockReturnValue(new Promise<never>(() => {}))
+    renderWith(client, <FeedPage />)
+
+    expect(await screen.findByTestId('feed-loading')).toBeInTheDocument()
+    // And still not the empty-state claim.
+    expect(screen.queryByText('Nothing yet.')).toBeNull()
+  })
+
+  it('says nothing yet only once the feed has actually come back empty', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getFeed').mockResolvedValue({ entries: [], nextBefore: null })
+    renderWith(client, <FeedPage />)
+
+    expect(await screen.findByText('Nothing yet.')).toBeInTheDocument()
+    expect(screen.queryByTestId('feed-loading')).toBeNull()
+  })
+})
