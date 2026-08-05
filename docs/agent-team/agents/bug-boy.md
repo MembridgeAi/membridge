@@ -106,7 +106,7 @@ dead. Drop it silently, do not file it "just in case".
 
 ## Where your findings go
 
-Everything you file goes to **doubting-thomas**, not to the board and not to the lead.
+Everything you file goes to **doubting-thomas**, not to the board and not to CTOpus.
 You do not get to promote your own findings. Expect a good fraction to be
 rejected; that is the system working. When one is rejected, read the reason and
 calibrate.

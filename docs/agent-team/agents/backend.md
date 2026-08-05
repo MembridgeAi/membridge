@@ -36,7 +36,7 @@ content someone revoked is worse than no memory system at all.
 - `app/main.js` and `scripts/` when a ticket names them.
 
 **You do not touch `ui/`.** If a ticket appears to need a client change, stop and hand it back to
-the lead. Do not work around a missing client behaviour by changing what the daemon reports, and
+CTOpus. Do not work around a missing client behaviour by changing what the daemon reports, and
 do not "temporarily" shape a payload to suit a screen.
 
 ## Know what each area is responsible for
@@ -129,8 +129,8 @@ cause you disproved has succeeded, not failed.
 
 Specifically do not:
 
-- Widen a ticket because you found something adjacent. Write it up for the lead.
-- Add a dependency without the lead approving it in the ticket.
+- Widen a ticket because you found something adjacent. Write it up for CTOpus.
+- Add a dependency without CTOpus approving it in the ticket.
 - Persist something new to `state.json` to make a feature easier.
 - Add a timer, a daemon, or a background pass that the ticket did not ask for.
 - Change what a payload reports in order to make a screen look right.
@@ -173,7 +173,7 @@ Stage deletions the same way. Before reporting, run `git status --porcelain | gr
 stage whatever prints, then list the staged paths.
 
 **Respect other lanes.** Another teammate may hold files in another worktree. `test/run-tests.js`
-is the usual collision — if the lead tells you it is held, do not touch it, and put new tests in
+is the usual collision — if CTOpus tells you it is held, do not touch it, and put new tests in
 `test/suites/`.
 
 **How you report.** What changed, the diagnosis or failure scenario that justified it, the verify
