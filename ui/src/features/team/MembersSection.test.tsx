@@ -203,6 +203,55 @@ describe('MembersSection (the People section of the Team page)', () => {
     expect(blanks).toHaveLength(0)
   })
 
+  // Second instance of the mapMember(email) shape, found by sweeping the
+  // mappers for fields assigned a literal rather than read from the raw row.
+  //
+  // mapMember set `keyAlert: false` on every member -- RawMemberRow has no such
+  // field, and /api/team/members is a bare RPC passthrough returning four
+  // columns -- while MemberRow rendered a "key changed" warning chip gated on
+  // it. So the chip could not fire for any member, ever.
+  //
+  // Worse than the blank email line: this is a SECURITY warning, and its
+  // silence read as "these keys are fine". The daemon does track it per member
+  // (state.keyAlerts is a list of { user_id }), it just never exposes the list
+  // -- statusPayload sends only a COUNT. The count is what the app can honestly
+  // show today, and it was reaching the UI's Status type and being rendered
+  // nowhere at all.
+  describe('key-substitution alerts', () => {
+    const withAlerts = async (keyAlerts: number) => {
+      const client = new FakeDataClient()
+      const status = await client.getStatus()
+      vi.spyOn(client, 'getStatus').mockResolvedValue({
+        ...status,
+        encryption: { ...status.encryption, keyAlerts },
+      })
+      return client
+    }
+
+    it('warns when the daemon is holding key alerts, naming how many', async () => {
+      renderWith(await withAlerts(2), <MembersSection />)
+      const warning = await screen.findByTestId('member-key-alerts')
+      expect(warning).toHaveTextContent(/2/)
+      // Says what to DO about it -- a warning nobody can act on is the same
+      // dead end as one that never fires.
+      expect(warning).toHaveTextContent(/verif/i)
+    })
+
+    it('says nothing when there are no alerts', async () => {
+      renderApp({}, <MembersSection />)
+      await screen.findByText('Sarah')
+      expect(screen.queryByTestId('member-key-alerts')).toBeNull()
+    })
+
+    // The counterpart: no per-member chip, because nothing can populate one.
+    // An always-absent chip is what made the whole feature invisible.
+    it('shows no per-member key chip, which could never fire', async () => {
+      renderWith(await withAlerts(2), <MembersSection />)
+      await screen.findByTestId('member-key-alerts')
+      expect(screen.queryByText(/key changed/i)).toBeNull()
+    })
+  })
+
   it('does not offer role changes on the owner row', async () => {
     renderApp({}, <MembersSection />)
     const ownerRow = await screen.findByTestId('member-row-me')

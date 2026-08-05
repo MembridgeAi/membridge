@@ -387,3 +387,18 @@
   background: var(--panel2);
   color: var(--text2);
 }
+
+/* Key-substitution alert banner (MembersSection). Amber like insights.css's
+ * truncation notice, and for the same reason: a stated limit on trust, not a
+ * failure. Text is --text, never --amber, which fails contrast on its own tint;
+ * the ⚠ carries the non-colour half of the signal. */
+.team-key-alerts {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--amber-dim);
+  border: 1px solid var(--amber);
+  border-radius: var(--r);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  max-width: 74ch;
+}

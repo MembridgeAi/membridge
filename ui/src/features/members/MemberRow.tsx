@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { Avatar } from '../../components/Avatar'
-import { StateChip } from '../../components/StateChip'
 import { absoluteTime, relativeAgo } from '../../data/relativeTime'
 import type { Member, Role } from '../../data/types'
 
@@ -116,15 +115,12 @@ export function MemberRow({ member, isSelf, canManage, onSetRole, onRequestRemov
             exact local time, so recency here is as verifiable as the audit
             trail's exact-time rows. undefined when nothing was ever shared. */}
         <span className="kvi" title={absoluteTime(member.lastSharedAt) || undefined}>{sharedLabel(member.lastSharedAt)}</span>
-        {member.keyAlert && (
-          <StateChip
-            tone="warn"
-            glyph="⚠"
-            title="Their encryption key changed since you last verified them. Re-confirm out of band that it's really them before trusting new memory from this account."
-          >
-            key changed
-          </StateChip>
-        )}
+        {/* The "key changed" chip lived here, gated on member.keyAlert -- a
+            field mapMember hardcoded to false because the members RPC never
+            sent one, so it could not fire for any member. The alert COUNT the
+            daemon does send is shown once at the top of this section instead;
+            see Member's doc in types.ts for what a daemon ticket would need to
+            expose to bring a per-member chip back. */}
 
         {showMenu && (
           <div className="member-menu" ref={menuRef}>

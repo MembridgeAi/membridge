@@ -324,7 +324,17 @@ export interface Member {
   // load-bearing.
   projectCount: number
   lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
-  keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
+  // There is no `keyAlert`. mapMember set it to false on every row -- the
+  // members RPC returns four columns and none of them is this -- while
+  // MemberRow rendered a "key changed" warning gated on it, so the warning
+  // could not fire for anyone. A security chip that is structurally always
+  // absent is worse than none: its silence reads as "verified".
+  //
+  // The daemon DOES track this per member (state.keyAlerts is a list of
+  // { user_id }), it just never sends the list -- statusPayload exposes only
+  // a count. MembersSection now shows that count. Restoring a per-member chip
+  // is a daemon ticket: expose the user_ids, add them to RawMemberRow, and the
+  // chip can come back keyed on real data.
   /**
    * #59. How much of this member's local history a person filter CANNOT reach.
    *

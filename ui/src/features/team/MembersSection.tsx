@@ -139,6 +139,8 @@ function InvitesSection() {
 export function MembersSection() {
   const client = useDataClient()
   const statusQuery = useStatus()
+  // Count only -- see the banner below for why there is no per-member chip.
+  const keyAlerts = statusQuery.data?.encryption.keyAlerts ?? 0
   const settingsQuery = useSettings()
   const membersQuery = useMembers()
 
@@ -211,6 +213,29 @@ export function MembersSection() {
             : <><LoadingBlock variant="short" /><span className="sr-only">Loading member count</span></>}
         </span>
       </div>
+
+      {/* Key-substitution alerts. The daemon pins each teammate's encryption
+          key and raises an alert when one changes underneath us -- the signal
+          that someone else's account may have been taken over, and the reason
+          to re-verify out of band before trusting new memory from them.
+          statusPayload sends a COUNT only (state.keyAlerts is a per-member list
+          the endpoint does not expose), which is why this is one banner rather
+          than a chip on the named rows.
+
+          It is here because until now this reached the UI's Status type and was
+          rendered NOWHERE, while MemberRow carried a per-member chip gated on a
+          field the mapper hardcoded to false. Between them the app could not
+          show a key alert at all, and the silence read as "everyone verified". */}
+      {keyAlerts > 0 && (
+        <p className="team-key-alerts" role="status" data-testid="member-key-alerts">
+          ⚠ {keyAlerts} {keyAlerts === 1 ? 'teammate’s encryption key has' : 'teammates’ encryption keys have'}
+          {' '}changed since this machine pinned {keyAlerts === 1 ? 'it' : 'them'}. Re-verify out of band
+          before trusting new memory from {keyAlerts === 1 ? 'that account' : 'those accounts'}.
+          {/* Deliberately does not name anyone: the count is all the daemon
+              sends, and guessing which member it refers to would be the same
+              unearned confidence this replaced. */}
+        </p>
+      )}
 
       {canManage && <InvitesSection />}
 

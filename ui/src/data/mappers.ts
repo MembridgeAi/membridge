@@ -627,8 +627,9 @@ export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
     joinedAt: row.joined_at || '',
     projectCount: activity.projectCount,
     lastSharedAt: activity.lastSharedAt,
-    // Known gap: statusPayload (server.js:197) exposes only a COUNT of state.keyAlerts; no per-member endpoint exists.
-    keyAlert: false,
+    // No `keyAlert`: statusPayload exposes only a COUNT of state.keyAlerts and
+    // this RPC returns four columns, so there was never a per-member value to
+    // map. Assigning false meant the UI's warning chip could never fire.
     // #59. This mapper builds an explicit object, so a field not named here is
     // dropped before any component sees it -- which is exactly how a new wire
     // field goes missing without a single error. Carried through deliberately.

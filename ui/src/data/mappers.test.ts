@@ -493,8 +493,13 @@ describe('mapMember', () => {
       // No `email` key at all. It used to be here as '' -- a field the members
       // RPC never returns -- and that empty string is what MemberRow painted
       // as a blank address line under every name.
+      // No `keyAlert` key either, for the same reason as `email`: the RPC
+      // returns four columns, so a per-member alert flag was never mapped from
+      // anything -- and the `false` it was given meant MemberRow's key-changed
+      // warning could not fire for any member. The alert COUNT the daemon does
+      // send is rendered once in MembersSection instead.
       id: 'andrew', name: 'Andrew', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
-      projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false,
+      projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z',
       // #59. A daemon too old to report the field degrades to an explicit
       // zero, not undefined: zero means "no gap", which keeps the UI quiet.
       // Failing the other way would put a repull hint under every empty
