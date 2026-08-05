@@ -213,6 +213,53 @@ describe('FeedPage', () => {
     )
   })
 
+  // T-81. The dropdown used to list `status.tools` -- tools the daemon has
+  // SPOTTED on disk. A first-run machine where Codex is installed but has
+  // never fired listed Codex in the filter, and selecting it emptied the
+  // feed. The fix is a monotonic set of tools that have ever produced a row
+  // this session, union with the current filter.
+  describe('the tool filter lists tools that have fired here, not tools spotted on disk', () => {
+    it('shows a tool once entries carrying it have loaded', async () => {
+      renderWith(new FakeDataClient(), <FeedPage />)
+      const select = await screen.findByLabelText('Filter by tool')
+      // The default fixture serves Codex and Claude Code rows.
+      await within(select).findByRole('option', { name: 'Codex' })
+      expect(within(select).getByRole('option', { name: 'Claude Code' })).toBeInTheDocument()
+    })
+
+    it('does NOT list a tool the daemon reports as spotted but which has never fired here', async () => {
+      // status.tools carries a tool that has no matching entry -- the old
+      // dropdown showed it and selecting it emptied the feed. The new
+      // dropdown draws from entries only, so this "spotted but silent" tool
+      // must not appear.
+      const client = new FakeDataClient()
+      const status = await client.getStatus()
+      vi.spyOn(client, 'getStatus').mockResolvedValue({
+        ...status,
+        tools: ['Claude Code', 'Codex', 'Cursor'], // Cursor is spotted, but no fixture row uses it
+      })
+      renderWith(client, <FeedPage />)
+      const select = await screen.findByLabelText('Filter by tool')
+      await within(select).findByRole('option', { name: 'Codex' })
+      expect(within(select).queryByRole('option', { name: 'Cursor' })).toBeNull()
+    })
+
+    it('lists nothing beyond "All tools" when nothing has fired yet', async () => {
+      const client = new FakeDataClient()
+      // status still claims a tool is watched, but the feed is empty --
+      // exactly the ticket's first-run case (Codex spotted, nothing synced).
+      vi.spyOn(client, 'getFeed').mockResolvedValue({ entries: [], nextBefore: null })
+      renderWith(client, <FeedPage />)
+      const select = await screen.findByLabelText('Filter by tool')
+      // "All tools" is the resting option and must stay.
+      expect(within(select).getByRole('option', { name: 'All tools' })).toBeInTheDocument()
+      // Two known daemon-reported tools from the default fixture ('Claude
+      // Code', 'Codex'); neither may appear now that no row carries them.
+      expect(within(select).queryByRole('option', { name: 'Codex' })).toBeNull()
+      expect(within(select).queryByRole('option', { name: 'Claude Code' })).toBeNull()
+    })
+  })
+
   it('"Show more" pages backwards using the previous page\'s cursor, keeping the earlier page visible', async () => {
     // Distinct days, so the two pages are two cards -- one card per person per
     // project per day would otherwise fold both pages' single entries together
