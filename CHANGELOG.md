@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-08-04
+
+- **Insights opens for whoever owns the team, full stop.** 0.2.9 restored the
+  file whose absence locked the owner out; this removes the reason that
+  absence could lock anyone out in the first place. The page was asking
+  `solo` — a flag that answers "is anyone else actually here", which the
+  daemon works out from whether a *linked project* belongs to a multi-member
+  team. That is a different question from "do you have a team", and the gap
+  between them is where an owner fell through: own a real team, have no repo
+  linked yet, and the page told you Insights was for owners and admins.
+  Authorization now turns on membership and role, which is what it always
+  meant. The navigation rail had already been corrected this way, so the link
+  and the page behind it finally agree — an owner of a one-person team can see
+  their own numbers too.
+
 ## 0.2.9 — 2026-08-04
 
 - **Fixed: a team owner could be locked out of their own Insights page.** The
