@@ -11,6 +11,25 @@ export default defineConfig({
   build: { outDir: 'dist', emptyOutDir: true },
   test: {
     environment: 'jsdom',
+    // DO NOT set pool: 'threads' here. It was tried and it broke CI on every
+    // timezone-dependent test, 26 of them, while passing on every developer
+    // machine already sitting in America/Los_Angeles.
+    //
+    // The reason is the `env: { TZ }` pin below. Node resolves the zone ONCE
+    // per process. A forks-pool worker is its own process, so assigning
+    // process.env.TZ inside it re-reads the zone and the pin works. A threads
+    // pool worker shares the parent process, the assignment lands too late to
+    // change anything, and every worker silently keeps the host's zone. CI
+    // runs on UTC, so the pin evaporated there and nowhere else. Measured:
+    // TZ=UTC with threads gives 10 failures in localTime.test.ts alone,
+    // TZ=UTC with forks gives 14 passes.
+    //
+    // The problem threads was reaching for (a forks worker failing to start
+    // on a loaded machine, reported as a test failure) is real, but it
+    // already has a correct answer that does not cost correctness:
+    // scripts/verify-finding.js, which re-runs a target alone behind a global
+    // lock once load has settled. Use that. Do not trade a real timezone
+    // guarantee for a flake workaround.
     setupFiles: ['./vitest.setup.ts'],
     globals: true,
     passWithNoTests: true,

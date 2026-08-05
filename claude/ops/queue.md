@@ -21,6 +21,16 @@ one of the moved sections, the edit belongs in the suite file now — the
 breadcrumb comment says which. New tests go in `test/suites/` (require
 `../harness` first, end with `h.finish()`), not in run-tests.js.
 
+**The feed screen is rewritten (2026-08-05).** `dayCardKey` is day+author
+only, the card is a link into a new `/days/:daySlug` route, and
+`collapseSessionCheckpoints` is gone from the feed path (ProjectPage keeps
+it). Any branch touching `ui/src/features/feed/` rebases before further work.
+Two hard-won rules from the same night: never set `pool: 'threads'` in
+`ui/vite.config.ts` (it silently disables the TZ pin, red CI on UTC, green
+everywhere else; the comment in that file has the mechanism), and a new test
+suite must use port offsets no other suite file uses (`delete-my-data` copied
+`shared-delete-outage`'s and Windows CI hit EADDRINUSE).
+
 ## In flight
 
 **`feat/alpha-readiness-backfill`**, three commits, not merged and not pushed.
@@ -43,10 +53,34 @@ seconds from install to visible memory. Merges cleanly into `master`.
    copy have drifted; fetch the live script before touching either.
 5. **Task 8**, the Windows asset.
 
+## Waiting on a human (2026-08-05)
+
+- **The PITR/backup retention window, read off the Supabase dashboard.**
+  Migration 035 (self-serve deletion) is applied live and verified, but
+  `/security` on the site cannot state how long deleted data persists in
+  backups until someone reads the retention number from Settings, Database,
+  Backups. Asked of Marco in the 08-05 handoff. One number unblocks the copy.
+- **Prompt-sharing default sign-off**, from Andrew's Aug 2 brief. Still open.
+
 ## Logged, not scheduled
 
 These are real gaps found while doing other work. Neither is a defect in
 something that was asked for, and neither is being fixed yet.
+
+- **Digest lead-ins that announce instead of report (found 2026-08-05).**
+  The filler fix stops short conversational clauses becoming day headlines,
+  but a second class survives because it is long: "Now let me look at the
+  digest/memorydb pipeline..." renders as a day-card clause today. Same rule
+  the digest already enforces on `goal` (an intent is never promoted into an
+  outcome), one field over, and it needs a different signal than a length
+  floor. Lives in `pickSessionStatement`, `lib/digest.js`.
+- **Pre-existing Supabase advisor warnings (surveyed 2026-08-05).** Nothing
+  new from 035, but the standing list is worth a pass: `team_feed`,
+  `team_feed_counts`, `peek_invite`, `can_see_project`, `is_team_member`,
+  `is_team_member_uid`, `projects_materialize_access` and
+  `set_project_access_default` are anon-callable SECURITY DEFINER functions;
+  four ops tables have RLS enabled with no policy; leaked-password
+  protection is off in Auth.
 
 - **`membridge remove` purges memory but does not untrack, and there is no CLI
   untrack command at all.** `remove` strips the injected blocks and deletes
@@ -101,11 +135,43 @@ commits. Suite is 1398/1399, the one failure being the known worktree check.
   session, and is ABSENT rather than 0 when the map cannot be read, because a
   session that genuinely produced no commits is a real 0.
 
-## Found 2026-08-04 evening by the agent team, uncommitted in three worktrees
+## Found 2026-08-04 evening by the agent team — ALL MERGED AND RELEASED 2026-08-05
 
-50 tickets. Work sits in `.claude/worktrees/{ui,hunt,search-identity}` on
-`fix/insights-solo-gate`, `agent-hunt` and `agent-search-identity`, all
-uncommitted, zero file overlap between them. `master` untouched at `549a4dd`.
+**Status correction (2026-08-05, ~00:40).** The paragraph below described this
+work as uncommitted in three worktrees. It is all on `master` and released; do
+not go looking in the worktrees for it. Landed as PRs #19 (ui, 16 tickets), #21
+(search/daemon, 9), #20 + #22 (team kit), #23 (schema/attribution, incl.
+migrations 028-034), #24 (release 0.3.1), #26 (release 0.3.2), #25/#27 (installer
+pins). `master` head after the batch: the 0.3.2 release commit.
+
+Two things went out that need stating plainly:
+
+- **0.3.1 shipped a regression and 0.3.2 fixes it.** Deriving `/api/status`'s
+  `running` from the sync loop's real last pass was wired into
+  `bin/membridge.js` only, and `app/main.js` — the tray app, the normal install —
+  never recorded a pass. Every desktop user read `running: false` / health
+  `unknown` while syncing fine. Caught by running the shipped build, not by the
+  suite. Anyone on 0.3.1 should take 0.3.2. Rule: see the standing note that
+  BOTH sync loops must be wired for any change to what a pass does or reports.
+- **The site was four releases stale.** `membridge.app/install.sh` was pinned to
+  0.2.8 and the JSON-LD said 0.2.7, so 0.2.9/0.3.0/0.3.1 never reached anyone
+  using the documented install command. Now published at 0.3.2 with a SHA
+  matching the CI asset. Nothing verifies these agree — publishing to the site
+  repo is a required release step, not an optional one.
+
+**Still open from this batch:** migrations 028-034 are committed and UNAPPLIED
+(028 then 029 in order, in the SQL editor, never `db push`; diff 031 against live
+first, it is a reconstruction). Until 033 is applied, revoking a member's access
+still does not cover what they can write. Also open: duplicate `membridge` /
+`Membridge` projects (needs a data write), `--text3` WCAG contrast, the Windows
+daemon-restart flake plus `run.js` folding a crashed suite's partial count into a
+green-looking total, `readAccess` defaulting a missing project row to open, and
+rows left behind by a pre-fix unlink never being pruned.
+
+Original entry, kept for the detail:
+
+50 tickets. Work sat in `.claude/worktrees/{ui,hunt,search-identity}` on
+`fix/insights-solo-gate`, `agent-hunt` and `agent-search-identity`.
 Slack: #handoffs 2026-08-04 evening (main message plus four thread replies).
 
 **Corrections to earlier reports, highest value first.**

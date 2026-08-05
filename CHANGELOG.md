@@ -2,6 +2,163 @@
 
 ## Unreleased
 
+## 0.3.2 — 2026-08-05
+
+- **Fixed: the desktop app said it was not running.** 0.3.1 replaced a status
+  field that always claimed the daemon was healthy with one that reports what the
+  sync loop actually did — but only the command-line daemon was changed to record
+  its passes. The desktop app, which is how nearly everyone runs MemBridge, never
+  recorded one, so it reported itself as not running and its health as unknown no
+  matter how well it was syncing: no dot in the sidebar, and a Settings page that
+  could not say the app was up. Both loops record their passes now, and a test
+  fails if either one stops.
+
+  The two loops also agree on what "healthy" means: it covers the local sync
+  pass, and a failed team pull is reported through the team status instead, so a
+  backend problem does not get described as a broken sync loop.
+
+## 0.3.1 — 2026-08-05
+
+- **Every page now fits the window it opens in.** Projects, Feed and Team each
+  set an invisible floor on how narrow they could be, taken from the longest
+  piece of user data on screen — a project name, an absolute path, an author or
+  team name. Below that floor the content column grew a horizontal scrollbar
+  instead of the text wrapping, so at the window's own minimum size rows ran off
+  the right edge and could only be reached by scrolling sideways. Measured at
+  that minimum: 402px of hidden content on Projects, 803px on Feed from one long
+  author name, 648px on Team from a long team name. All three now wrap. The
+  window itself opens at 1100x800 with a floor of 900x600 and is clamped to the
+  screen it opens on, so it can no longer open larger than the display.
+
+- **Settings has stopped reporting success it never checked.** The Status row
+  claimed a healthy daemon unconditionally, because "running" was hardcoded true.
+  It now reports what the sync loop actually did, and distinguishes a loop that
+  is wedged from one that is failing but still rescheduling itself from one
+  nobody has observed yet — three states that all used to read the same. The
+  health dot in the sidebar makes the same distinction on every screen: amber
+  and still pulsing for degraded, red and deliberately still for stalled.
+  Restart used to confirm itself the moment the request was accepted, before the
+  replacement process existed; it now waits for the daemon to answer again.
+  Check-for-updates threw away its own answer, Recheck served a cached reading
+  without saying so, and first-run consent was recorded in the interface but
+  never written to disk. All three are fixed, and every reading on the page now
+  says when it was taken.
+
+- **Switches say when a change is still in flight.** A setting that took a
+  moment to save did not move until it had, which reads as "it didn't take", so
+  people flipped it again and landed on the opposite value from the second write.
+  Switches now move immediately, show that the write is pending, refuse a second
+  flip until it settles, and roll back visibly if it fails.
+
+- **The two unsafe encryption states are no longer labelled as each other.**
+  Encryption being off — nothing encrypted, everything readable on the server —
+  was drawn in the same grey the interface uses for absent and unremarkable
+  things, and the state where a readable copy is still being stored alongside the
+  encrypted one had borrowed the wording for "plaintext shared". Both the
+  Settings row and the project side panel now warn on both, in the same words,
+  and describe the consequence rather than which switch is off.
+
+- **Search can filter by person, and "Hide mine" no longer blanks the screen.**
+  The filter could never have worked: teammate rows arrived carrying the author's
+  display name but no stable identity, because the identifier was used to filter
+  the request and never actually requested back. It is carried through now. On
+  the screen itself, having no query yet, searching, and finding nothing were all
+  drawn as the same empty panel; each says what it is, and a search in progress
+  no longer looks identical to a miss.
+
+- **`membridge team repull` re-reads one project's shared history from the
+  beginning.** The identity fix above only applies to rows arriving from now on,
+  so history already on this machine stays anonymous without a re-read. This is
+  the re-read, and it is deliberately something you ask for rather than something
+  that happens to you: it costs a pass per page and rewrites the project's
+  injected block each time.
+
+- **Withdrawing someone's access now reaches the machines that already synced.**
+  A project whose access had been revoked kept its last downloaded rows in the
+  local cache, and several parts of the daemon read that cache directly — so
+  teammates' notes carried on being injected for projects nothing would ever
+  download again, unlinked projects still served rows, and in one path the daemon
+  was still *publishing* entries for a project it had already been told it could
+  no longer see. Every reader now goes through the one supported path, which
+  respects the revocation.
+
+- **Fixed a way the shared history file could lose entries during ordinary
+  use.** The lock that protects it covered writing but not reading, so when two
+  processes touched it at once — the command line and the background sync, which
+  both do this routinely — the second could rewrite the whole file from a
+  snapshot taken before the first one's rows arrived, and those rows were gone.
+  The lock now covers the whole read-and-write.
+
+- **The shared history file no longer doubles in size when re-read.** Every
+  incoming row was appended whether or not the file already had it, so any
+  re-read left a permanent second copy of everything, and every later load paid
+  for it in time. Duplicate lines are now compacted away. Nothing is dropped by
+  age: the long tail is the entire reason the file exists.
+
+- **A delete that failed because the server was unreachable no longer looks like
+  a permissions problem.** It unlinked the local machine and then reported that
+  you were not allowed — sending people to fix a permission they already had.
+  The two are now told apart, and the recoverable one offers to try again.
+
+- **Removing someone from the team warns you what it discards.** Every
+  per-project block you had set against that person disappears with them, which
+  the confirmation never mentioned. It now names the projects affected and counts
+  the rest.
+
+- **A shared project with no recent activity no longer claims nobody can see
+  it.** The access summary read "0 of 5" because it was counting who had been
+  active lately rather than who had access.
+
+- **Work done by subagents shows up as work.** Only their token cost was
+  recorded, so a session that delegated its editing to subagents reported that
+  nothing had been touched. Their file edits are now captured too, with their own
+  budget so they cannot crowd out the session summaries.
+
+- **Edits to files outside a project are no longer filed under it.** A file
+  outside every tracked repository was attributed to whichever project the
+  session happened to be started from, which put 235 stray edits on projects they
+  had nothing to do with. Sessions that turn out to have edited nothing in a
+  project no longer appear in it at all.
+
+- **Unlinking a project now stops its teammate notes for good.** Unlinking
+  removed the link file and cleaned up the shared history, but left the notes
+  index it had built — and nothing ever rewrote an index once it existed, so
+  teammates' decisions and per-file notes carried on being fed into every agent's
+  context for a project you had explicitly unlinked. The index is now removed,
+  including on machines that unlinked before this release, and re-linking rebuilds
+  it.
+
+- **Project access is now enforced by the backend, not only asked about by the
+  app.** "New members join with access" had no effect on anything: the check
+  behind it only ever looked for explicit blocks and never read the setting. It
+  now does, members who joined before a project was linked get an access record,
+  and a project created outside the normal path gets one too. Revoking someone's
+  access also covers what they can *write*, which it did not before — a member
+  revoked from the only project they could see was still able to upload to it,
+  because the app-side check deliberately gives up when it cannot tell an empty
+  answer from a missing one, and nothing behind it said no.
+
+- **Project access lookups are indexed.** The table behind every access check had
+  one index, and it could not serve that check — so the cost was paid per row, on
+  every feed page, every count and every write. Making the access setting work in
+  the first place had quietly made this worse, by giving every member a record on
+  every project.
+
+- **Viewing a project's access list now requires being an owner or admin.** It
+  answered anyone who asked, and because a refusal from the database comes back as
+  an empty list rather than an error, it filled that emptiness in with the
+  project's default for every member. On a project that defaults to closed it
+  reported the owner as unable to see their own project. It now refuses, and the
+  refusal names nobody.
+
+- **The app can state its own version.** The repository claimed 0.3.0 while the
+  copy of the version the desktop app reads said 0.2.8, and the check meant to
+  catch exactly that could not: the test rewrote the file from the source it was
+  about to compare it against. Installed builds were always correct, because
+  packaging stamps the version, but two releases went out with the repository
+  disagreeing with itself. There are now three independent checks and a release
+  step that cannot be skipped by forgetting.
+
 ## 0.3.0 — 2026-08-04
 
 - **Insights opens for whoever owns the team, full stop.** 0.2.9 restored the

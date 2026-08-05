@@ -162,6 +162,15 @@ export interface StreamEntry {
   // rare session-less row (bare plumbing); such a row is never merged with
   // anything, including another session-less row.
   session: string | null
+  // The session's GOAL, verbatim: "the why behind the session in your own
+  // words ... never a restated prompt" (lib/digest.js's own instruction to the
+  // agent that writes it). Carried SEPARATELY from `intent`, which is already
+  // goal-or-ask (mappers.intentOf), because the two are not interchangeable
+  // copy: a goal is a written statement of purpose, an ask is whatever the
+  // person typed, and on real data that is routinely "continue", "yes" or
+  // "fill it in". A surface that wants purpose has to tell them apart.
+  // Optional, so every hand-built fixture keeps compiling.
+  goal?: string | null
   // The daemon's own two markers about WHY this row's text is what it is
   // (lib/feed.js normalizeLocal/normalizeTeam ship both on every entry).
   // Optional, so a caller that builds a StreamEntry by hand -- and every
@@ -192,6 +201,18 @@ export interface StreamEntry {
 export interface FeedEntry extends StreamEntry {
   project: string
   projectPath: string | null
+  // The backend's id for that project, carried through untouched. This is the
+  // ONE project component that survives a round trip through team sync: work
+  // done in a linked project reaches this machine twice, and the synced-back
+  // twin has projectPath nulled (lib/feed.js normalizeTeam) and a differently
+  // capitalised display name, but the SAME projectId. lib/feed.js's own
+  // dedupeKey already keys on it first for exactly this reason; the Feed's day
+  // cards do the same (features/feed/dayCards.ts projectPart), and without it
+  // one person's afternoon renders as two copies of itself.
+  //
+  // Optional, so every hand-built fixture keeps compiling; null is the honest
+  // value for an unlinked local project, which genuinely has no backend id.
+  projectId?: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -293,9 +314,91 @@ export interface FeedFilters {
 // feedPayload's own pagination cursor (lib/feed.js buildFeed): the ts of the
 // last entry on this page, to pass back as `before` for the next one, or
 // null when there is nothing older left.
+/** One source the daemon's day digest drew a clause from. `entryId` is exactly
+ *  mappers.streamEntryId (`${session||'none'}|${ts}`), so a rendered digest
+ *  sentence can be linked back at the session it describes. */
+export interface DayDigestSource {
+  entryId: string
+  session: string | null
+  ts: string
+  project: string
+  projectId: string | null
+  distilled: boolean
+  text: string
+}
+
+/** The daemon's own one-sentence statement of a person's whole day (GET
+ *  /api/feed `dayDigests`, derived on read from the page it is served with).
+ *
+ *  This is the general day header the owner asked for -- "Worked on UI fixes,
+ *  app install and dmg" -- and it exists on the daemon because it CANNOT be
+ *  built here: composing it out of the day's headline fragments produces
+ *  garbage on real rows, which features/feed/dayCards.ts has a test forbidding.
+ *
+ *  `kind` reuses the client's own DayOverviewKind vocabulary exactly, and its
+ *  'none'/'undecryptable' text matches the client's constants, so the
+ *  distinction between "nobody summarized this" and "this machine could not
+ *  read this" survives the swap unchanged.
+ *
+ *  Every field is optional at this boundary: the digest ships on a branch that
+ *  may not be deployed against a given daemon, and an older daemon simply omits
+ *  the whole array. Absence must degrade to the client's own pick, never to a
+ *  blank card. */
+export interface RawDayDigest {
+  key?: string
+  day?: string
+  tz?: string
+  author?: string
+  authorId?: string | null
+  kind?: string
+  text?: string
+  sources?: Partial<DayDigestSource>[]
+  sessions?: number
+  summarized?: number
+  omittedSessions?: number
+  entries?: number
+  complete?: boolean
+  /** The honesty valve for a capped or half-loaded day, and the one field here
+   *  that MUST be rendered whenever it is non-null: it is the difference
+   *  between a day summary that is true and one that quietly describes only
+   *  part of the day. */
+  coverageNote?: string | null
+}
+
+export interface DayDigest {
+  /** Normalized to the client's own dayCardKey form. The daemon joins the day
+   *  and the author part with a SPACE where dayCardKey uses NUL, and that
+   *  conversion happens in exactly one place (features/feed/dayCards.ts
+   *  digestKey) rather than at each join. */
+  key: string
+  kind: string
+  text: string
+  sources: DayDigestSource[]
+  /** Distinct sessions the digest SAW on its page. */
+  sessions: number
+  /** Distinct session statements it had to work with. The honest measure of
+   *  how much of a day a sentence accounts for: `entries` counts prompt rows,
+   *  and a page boundary can hand one page most of a day's rows and none of
+   *  its summarized sessions. */
+  summarized: number
+  /** Statements the daemon had but dropped to its own clause cap. Unlike
+   *  `complete`, this is page-independent: no amount of paging brings them
+   *  back, so it is the one coverage fact a client can never supersede. */
+  omittedSessions: number
+  entries: number
+  /** Whether the page this digest came from reached back past the START of
+   *  this day. A PER-PAGE fact, not a statement about the day: a client
+   *  holding several pages can have loaded the rest itself. */
+  complete: boolean
+  coverageNote: string | null
+}
+
 export interface FeedPage {
   entries: FeedEntry[]
   nextBefore: string | null
+  /** Newest day first. Empty against a daemon that does not serve them yet,
+   *  which is a supported state and not an error. */
+  dayDigests: DayDigest[]
 }
 
 /** Only what one machine can actually observe about a teammate.

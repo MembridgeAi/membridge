@@ -6,6 +6,63 @@
 const http = require('http');
 const crypto = require('crypto');
 
+// Render an instant the way PostgREST actually returns a `timestamptz`.
+//
+// THIS IS NOT COSMETIC. A mock that stores and returns pushed rows verbatim
+// out of a JS array cannot observe an entire class of defect: everything the
+// client compares as a STRING against a value it pushed appears to work,
+// because the mock hands back the exact bytes it was given and Postgres does
+// not. Verified against Postgres 17 (Supabase runs 17.6.1), which is what
+// PostgREST builds its JSON through:
+//
+//   input:   '2026-08-05T12:00:00.550Z'::timestamptz
+//   to_json: "2026-08-05T12:00:00.55+00:00"
+//
+// Two transformations: Z becomes +00:00, and trailing zeros in the fractional
+// seconds are trimmed (an all-zero fraction disappears entirely). That is how
+// lib/feed.js's self-twin dedupe came to compare two spellings of one instant
+// and conclude they were two different rows, with the whole suite green.
+//
+// Applied on the READ path only, exactly like the real thing: what is stored
+// is what the client sent, and the difference appears when it is rendered.
+function pgTimestamptz(value) {
+  if (value == null || value === '') return value;
+  const t = new Date(value);
+  if (!Number.isFinite(t.getTime())) return value; // not a timestamp; leave it alone
+  const iso = t.toISOString();                      // ...THH:MM:SS.mmmZ
+  const fraction = iso.slice(19, 23).replace(/0+$/, '').replace(/^\.$/, '');
+  return `${iso.slice(0, 19)}${fraction}+00:00`;
+}
+
+// Apply pgTimestamptz to a row's timestamp-typed columns. Named explicitly
+// rather than sniffed by regex: a column is timestamptz because the schema
+// says so, and guessing from the value would silently start reformatting a
+// text column that happens to hold a date.
+const TIMESTAMPTZ_COLUMNS = ['ts', 'created_at', 'first_ts', 'last_ts', 'updated_at', 'joined_at', 'expires_at', 'revoked_at', 'archived_at'];
+function renderRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const out = { ...row };
+  for (const col of TIMESTAMPTZ_COLUMNS) {
+    if (out[col] != null) out[col] = pgTimestamptz(out[col]);
+  }
+  return out;
+}
+
+// Compare two timestamps the way Postgres compares two timestamptz values:
+// as INSTANTS. This matters now that reads are rendered (see pgTimestamptz),
+// because every cursor the client sends back is a value it read, so a bound
+// spelled '...55+00:00' is compared against a stored '...550Z'. Postgres casts
+// both sides and compares points in time; a mock doing localeCompare would
+// invent a cursor bug that does not exist in production ('+' sorts below '0').
+// Unparseable values fall back to a string compare so junk still orders
+// deterministically rather than collapsing to equal.
+function tsCmp(a, b) {
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta === tb ? 0 : (ta < tb ? -1 : 1);
+  return String(a).localeCompare(String(b));
+}
+
 function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
@@ -290,14 +347,17 @@ function createMockSupabase() {
         .filter(e => !body.p_author || e.author_id === body.p_author)
         .filter(e => !body.p_project || e.project_id === body.p_project)
         .filter(e => !body.p_source || e.source === body.p_source)
-        .filter(e => !body.p_since || e.ts >= body.p_since)
-        .filter(e => !body.p_until || e.ts <= body.p_until)
+        .filter(e => !body.p_since || tsCmp(e.ts, body.p_since) >= 0)
+        .filter(e => !body.p_until || tsCmp(e.ts, body.p_until) <= 0)
         .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
       if (body.p_before_created_at) {
-        rows = rows.filter(e => e.created_at < body.p_before_created_at ||
-          (e.created_at === body.p_before_created_at && e.id < body.p_before_id));
+        rows = rows.filter(e => tsCmp(e.created_at, body.p_before_created_at) < 0 ||
+          (tsCmp(e.created_at, body.p_before_created_at) === 0 && e.id < body.p_before_id));
       }
-      return json(res, 200, rows.slice(0, Math.min(Math.max(body.p_limit || 50, 1), 200)));
+      // Rendered on the way out, never in storage: see pgTimestamptz. This is
+      // the path lib/feed.js consumes, and the one where a ts spelled
+      // differently from the pushed original stops a string-keyed dedupe dead.
+      return json(res, 200, rows.slice(0, Math.min(Math.max(body.p_limit || 50, 1), 200)).map(renderRow));
     }
     // 027_team_feed_counts.sql. Exact windowed totals counted in the database,
     // because paging team_feed to count rows published its 200-row-per-page
@@ -322,8 +382,8 @@ function createMockSupabase() {
         .filter(e => !body.p_author || e.author_id === body.p_author)
         .filter(e => !body.p_project || e.project_id === body.p_project)
         .filter(e => !body.p_source || e.source === body.p_source)
-        .filter(e => !body.p_since || e.ts >= body.p_since)
-        .filter(e => !body.p_until || e.ts <= body.p_until);
+        .filter(e => !body.p_since || tsCmp(e.ts, body.p_since) >= 0)
+        .filter(e => !body.p_until || tsCmp(e.ts, body.p_until) <= 0);
       // count(distinct e.session) ignores NULLs, so the session-less rows are
       // added back one unit each. lib/api-insights.js sessionKeyOf does the
       // same thing (`r.session || 'entry:' + r.id`), and the two must agree or
@@ -356,6 +416,84 @@ function createMockSupabase() {
       const p = projects.find(x => x.id === body.p_project);
       if (p) p.defaultAccess = !!body.p_default;
       return json(res, 200, null);
+    }
+    // 035_delete_own_entries.sql: self-serve deletion of the caller's OWN
+    // synced rows, plus the preview the confirmation screen counts from.
+    //
+    // Both mirror the migration exactly on the point that matters: the
+    // predicate is `author_id = auth.uid()` AND the project's team, and
+    // NOTHING else. No isMember check and no canSeeProject check, because
+    // 035 §1/§2 deliberately omit both. A member who just left the team, or
+    // whose project access was revoked, must still be able to see and erase
+    // what they wrote. A mock that "helpfully" added a membership gate here
+    // would make the exact regression this feature exists to prevent pass
+    // locally.
+    //
+    // Archived projects are included, unlike team_feed / team_feed_counts:
+    // archiving hides a project, it does not remove its rows, and the preview
+    // must count what the delete will actually take.
+    if (fn === 'my_entry_counts') {
+      const mine = entries.filter(e => projectTeam(e.project_id) === body.p_team && e.author_id === userId);
+      const byProject = new Map();
+      for (const e of mine) {
+        const acc = byProject.get(e.project_id) || { entries: 0, first: null, last: null };
+        acc.entries++;
+        if (acc.first === null || tsCmp(e.ts, acc.first) < 0) acc.first = e.ts;
+        if (acc.last === null || tsCmp(e.ts, acc.last) > 0) acc.last = e.ts;
+        byProject.set(e.project_id, acc);
+      }
+      const rows = [...byProject.entries()].map(([projectId, acc]) => ({
+        project_id: projectId,
+        project_name: (projects.find(p => p.id === projectId) || {}).name || '',
+        entries: acc.entries,
+        first_ts: acc.first,
+        last_ts: acc.last,
+      })).sort((a, b) => String(a.project_name).localeCompare(String(b.project_name)));
+      return json(res, 200, rows.map(renderRow));
+    }
+    if (fn === 'delete_my_entries') {
+      const doomed = entries.filter(e =>
+        projectTeam(e.project_id) === body.p_team &&
+        e.author_id === userId &&
+        (!body.p_project || e.project_id === body.p_project));
+      for (const e of doomed) entries.splice(entries.indexOf(e), 1);
+      // The audit row is written INSIDE the function in the real migration
+      // (035 §3), in the same transaction, because team_audit's insert policy
+      // requires is_team_manager and a plain member's own insert is refused.
+      // Mirrored here with no role check for the same reason: a mock that only
+      // logged for managers would hide the bug that motivated putting the
+      // insert in the RPC at all.
+      if (doomed.length) {
+        // unshift + the offset created_at, matching the REST insert path
+        // below, so two audit rows written in the same millisecond still sort
+        // deterministically newest-first for the GET.
+        teamAudit.unshift({
+          id: uuid(),
+          team_id: body.p_team,
+          actor_id: userId,
+          action: 'own-data-deleted',
+          object_type: 'member',
+          object_key: userId,
+          detail: {
+            memberId: userId,
+            deleted: doomed.length,
+            projectKey: body.p_project || null,
+          },
+          created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+        });
+      }
+      // One row per project actually emptied, the migration's shape (035 §3).
+      // A scalar total is what the caller cannot act on: the deletion
+      // watermark it writes on the client is per project, so a total made it
+      // mark every linked project of the team, including ones this deletion
+      // never touched. A mock that kept returning a number would let that
+      // regression back in without a single test going red.
+      const byProject = new Map();
+      for (const e of doomed) byProject.set(e.project_id, (byProject.get(e.project_id) || 0) + 1);
+      return json(res, 200, [...byProject.entries()].map(([projectId, n]) => ({
+        project_id: projectId,
+        deleted: n,
+      })));
     }
     json(res, 404, { message: `unknown rpc ${fn}` });
   }
@@ -467,7 +605,7 @@ function createMockSupabase() {
     // check — a revoked member's direct pull sees nothing for this project.
     if (!isMember(projectTeam(eq), userId) || !canSeeProject(eq, userId)) return json(res, 200, []);
     let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
-    if (isGt) rows = rows.filter(e => e.created_at > createdAtBound);
+    if (isGt) rows = rows.filter(e => tsCmp(e.created_at, createdAtBound) > 0);
     if (isIdLt) rows = rows.filter(e => Number(e.id) < idBound);
     // Order THEN limit — a descending page must return the NEWEST rows below
     // the bound (the tail closest to the cursor), not just the first `limit`
@@ -487,7 +625,8 @@ function createMockSupabase() {
     const projected = selectCols.length
       ? rows.map(r => Object.fromEntries(selectCols.filter(c => c in r).map(c => [c, r[c]])))
       : rows;
-    json(res, 200, projected);
+    // Rendered on the way out, never in storage: see pgTimestamptz.
+    json(res, 200, projected.map(renderRow));
   }
 
   const server = http.createServer((req, res) => {
@@ -859,4 +998,4 @@ function createMockSupabase() {
   return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess };
 }
 
-module.exports = { createMockSupabase };
+module.exports = { createMockSupabase, pgTimestamptz };

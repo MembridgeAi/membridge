@@ -3,7 +3,7 @@
 // LocalDaemonClient.ts so every mapping decision is unit-testable without a
 // live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
 // to keep this file focused on feed/project/member mapping.
-import type { FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, Role, Session, StreamEntry, SyncState } from './types'
+import type { DayDigest, DayDigestSource, FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, RawDayDigest, Role, Session, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -88,6 +88,10 @@ export interface RawFeedEntry {
 export interface RawFeedPayload {
   entries: RawFeedEntry[]
   nextBefore: string | null
+  // Optional: a daemon that predates the day digest simply omits it, which is
+  // a supported state. mapDayDigest below is what turns absence into an empty
+  // list rather than into undefined reaching a render path.
+  dayDigests?: RawDayDigest[]
 }
 
 // GET /api/search's payload (lib/activity.js searchMemory). Results are the
@@ -331,6 +335,7 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     intent: intentOf(e),
     files: e.files,
     session: e.session,
+    goal: normalizedIntentText(e.goal),
     // Carried, never re-derived. Dropping these two was what made an
     // undecryptable row indistinguishable from an un-summarized one downstream
     // -- both arrive with an empty `outcome`, and only these say which.
@@ -348,8 +353,59 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
 // which project it belongs to (server.js's `project` display name and its
 // `projectPath`, for the "project name (mono)" column a cross-project
 // stream needs and a single-project stream -- StreamEntry -- doesn't.
+//
+// projectId rides along for GROUPING only, never for display: it is the one
+// project component a synced-back team row still shares with the local row it
+// is a copy of (see the field's doc on FeedEntry), so dropping it here is what
+// let the Feed render one person's day with every session in it twice.
 export function mapFeedEntry(e: RawFeedEntry): FeedEntry {
-  return { ...mapStreamEntry(e), project: e.project, projectPath: e.projectPath }
+  return { ...mapStreamEntry(e), project: e.project, projectPath: e.projectPath, projectId: e.projectId }
+}
+
+// The daemon's day digest (GET /api/feed `dayDigests`). Tolerant at the
+// boundary like every other raw payload here, and deliberately so: this ships
+// on its own daemon branch, so a client can meet a daemon that sends nothing,
+// a partial row, or a `kind` this build has never heard of.
+//
+// A digest with no text is DROPPED rather than rendered, because an empty
+// headline on a card is worse than the client's own pick of a real session's
+// outcome. Everything else normalizes to a usable value.
+//
+// The KEY is left exactly as the daemon sent it. Reconciling its separator
+// with the client's own dayCardKey is features/feed/dayCards.ts's job, in one
+// place, because that module owns the key format and this one owns the wire.
+export function mapDayDigest(raw: RawDayDigest): DayDigest | null {
+  const key = String(raw.key || '')
+  const text = String(raw.text || '').trim()
+  if (!key || !text) return null
+  const sources: DayDigestSource[] = (raw.sources ?? []).map(src => ({
+    entryId: String(src.entryId ?? ''),
+    session: src.session ?? null,
+    ts: String(src.ts ?? ''),
+    project: String(src.project ?? ''),
+    projectId: src.projectId ?? null,
+    distilled: !!src.distilled,
+    text: String(src.text ?? ''),
+  }))
+  return {
+    key,
+    kind: String(raw.kind || ''),
+    text,
+    sources,
+    sessions: Number.isFinite(raw.sessions) ? Number(raw.sessions) : 0,
+    summarized: Number.isFinite(raw.summarized) ? Number(raw.summarized) : 0,
+    omittedSessions: Number.isFinite(raw.omittedSessions) ? Number(raw.omittedSessions) : 0,
+    entries: Number.isFinite(raw.entries) ? Number(raw.entries) : 0,
+    // Absent means "no claim of completeness", which must read as INCOMPLETE:
+    // the whole point of the field is to stop a partial day being presented as
+    // a whole one, so its default has to be the cautious value.
+    complete: raw.complete === true,
+    coverageNote: raw.coverageNote || null,
+  }
+}
+
+export function mapDayDigests(raw: RawDayDigest[] | null | undefined): DayDigest[] {
+  return (Array.isArray(raw) ? raw : []).map(mapDayDigest).filter((d): d is DayDigest => d !== null)
 }
 
 // ---------------------------------------------------------------------------
