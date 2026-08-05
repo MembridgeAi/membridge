@@ -39,6 +39,10 @@ function InvitesSection() {
   if (invitesQuery.isError || invites.length === 0) return null
   return (
     <div className="invites-section">
+      {/* Names the list and legends its three columns: without a label the
+          first thing an owner reads is a bare token string with no clue it's
+          the invite link's id. */}
+      <div className="section-label">Outstanding invite links · token · uses · expiry</div>
       {revokeInvite.isError && (
         <p className="invite-error" role="alert">Couldn't revoke the invite. {errorMessage(revokeInvite.error)}</p>
       )}
@@ -129,7 +133,7 @@ export function MembersSection() {
     <section className="team-card team-members" aria-labelledby="team-members-heading">
       <div className="team-members-head">
         <h2 className="team-card-title" id="team-members-heading">People</h2>
-        <span className="mono team-members-count">{members.length} active</span>
+        <span className="mono team-members-count">{members.length} {members.length === 1 ? 'member' : 'members'}</span>
       </div>
 
       {canManage && <InvitesSection />}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Avatar } from '../../components/Avatar'
 import { StateChip } from '../../components/StateChip'
-import { relativeAgo } from '../../data/relativeTime'
+import { absoluteTime, relativeAgo } from '../../data/relativeTime'
 import type { Member, Role } from '../../data/types'
 
 // The one machine running this UI cannot see a teammate's daemon, so the
@@ -105,8 +105,19 @@ export function MemberRow({ member, isSelf, canManage, onSetRole, onRequestRemov
             access count, so a member with access to eight quiet projects
             looked like a permissions bug at "0 projects". */}
         <span className="mono kvi">active in {member.projectCount} {member.projectCount === 1 ? 'project' : 'projects'}</span>
-        <span className="kvi">{sharedLabel(member.lastSharedAt)}</span>
-        {member.keyAlert && <StateChip tone="warn" glyph="⚠">key changed</StateChip>}
+        {/* The visible label is coarse ("2d ago"); the title pins it to the
+            exact local time, so recency here is as verifiable as the audit
+            trail's exact-time rows. undefined when nothing was ever shared. */}
+        <span className="kvi" title={absoluteTime(member.lastSharedAt) || undefined}>{sharedLabel(member.lastSharedAt)}</span>
+        {member.keyAlert && (
+          <StateChip
+            tone="warn"
+            glyph="⚠"
+            title="Their encryption key changed since you last verified them. Re-confirm out of band that it's really them before trusting new memory from this account."
+          >
+            key changed
+          </StateChip>
+        )}
 
         {showMenu && (
           <div className="member-menu" ref={menuRef}>

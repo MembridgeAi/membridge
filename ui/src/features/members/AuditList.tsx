@@ -46,7 +46,7 @@ export function AuditList() {
 
   return (
     <div className="audit-panel">
-      <div className="section-label">Audit · last {events.length} events</div>
+      <div className="section-label">Team activity · last {events.length} events</div>
       {auditQuery.isError && (
         <p className="audit-error" role="alert">Couldn't load the audit trail. {errorMessage(auditQuery.error)}</p>
       )}

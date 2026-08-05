@@ -21,7 +21,10 @@ import { TeamPage } from '../features/team/TeamPage'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { InsightsPage } from '../features/insights/InsightsPage'
 
-const BANNER = /can't reach the daemon, retrying/i
+// The shared inline banner now names the product, not the implementation
+// ("daemon"). The full-page error regex still matches the pages that keep the
+// old wording (Today etc.), which are out of this change's scope.
+const BANNER = /can't reach membridge, retrying/i
 const FULL_PAGE_ERROR = /couldn't reach the daemon/i
 
 /** Wraps a FakeDataClient so every read starts failing on demand -- the

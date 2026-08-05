@@ -12,8 +12,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
-function memberCountLabel(n: number | null): string {
-  if (n === null) return 'member count unknown'
+// Null count -> null, not a "count unknown" clause: the caller drops the
+// separator entirely rather than announcing the gap mid-sentence.
+function memberCountLabel(n: number | null): string | null {
+  if (n === null) return null
   return n === 1 ? '1 member' : `${n} members`
 }
 
@@ -85,7 +87,7 @@ function SignInCard({ configured }: { configured: boolean }) {
       </h2>
       {!configured && (
         <p className="team-note">
-          This build ships no team backend, so signing in cannot succeed here.
+          This copy of MemBridge has no team service to sign in to, so sign-in won't work here.
         </p>
       )}
       {notice && <p className="team-notice" role="status">{notice}</p>}
@@ -308,7 +310,8 @@ export function TeamPage() {
     return (
       <div className="team-page">
         <h1 className="team-title">Team</h1>
-        <p className="team-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
+        <p className="team-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="team-note">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }
@@ -382,7 +385,8 @@ export function TeamPage() {
             <section className="team-card" aria-labelledby="team-current-heading">
               <h2 className="team-card-title" id="team-current-heading">{team.name}</h2>
               <p className="team-note">
-                You are the {roleLabel(team.role)} · {memberCountLabel(team.memberCount)}
+                You are the {roleLabel(team.role)}
+                {memberCountLabel(team.memberCount) && ` · ${memberCountLabel(team.memberCount)}`}
               </p>
               {(canMintLink || inviteCode) && (
                 <div className="team-actions">

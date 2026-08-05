@@ -46,7 +46,7 @@ function messageOf(error: unknown): string {
 export function DaemonErrorBanner({ className, error }: { className: string; error: unknown }) {
   return (
     <p className={className} role="alert">
-      Can't reach the daemon, retrying. {messageOf(error)}
+      Can't reach MemBridge, retrying. {messageOf(error)}
     </p>
   )
 }

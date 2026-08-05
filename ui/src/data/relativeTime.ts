@@ -51,3 +51,17 @@ export function expiresIn(iso: string, now: number = Date.now()): string {
   const days = Math.ceil(ms / DAY)
   return days === 1 ? 'expires in 1 day' : `expires in ${days} days`
 }
+
+/** The full local absolute timestamp, for a hover `title` beside a coarse
+ *  relative label -- so "2d ago" or "expires in 3 days" can always be resolved
+ *  to the exact moment (the audit trail already shows exact times; the roster
+ *  and invite rows only had the relative form). Empty string for a missing or
+ *  unparseable date, so a caller can `|| undefined` it straight into a title
+ *  attribute without ever planting "Invalid Date". Local zone, matching every
+ *  other date the UI renders (see localTime.ts). */
+export function absoluteTime(iso: string | null): string {
+  if (!iso) return ''
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return ''
+  return t.toLocaleString()
+}

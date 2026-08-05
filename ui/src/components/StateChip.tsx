@@ -7,6 +7,10 @@ interface StateChipProps {
   tone: StateTone
   glyph: string
   children: ReactNode
+  /** Optional hover explanation for a chip whose short label is not
+   *  self-explaining (e.g. "key changed"). The visible glyph+words stay the
+   *  accessible name; this only adds detail on hover. */
+  title?: string
 }
 
 /**
@@ -15,9 +19,9 @@ interface StateChipProps {
  * separate elements) — the accessible name and the visible copy are always
  * the same string, e.g. "✓ up to date" or "⚠ behind · Jul 23".
  */
-export function StateChip({ tone, glyph, children }: StateChipProps) {
+export function StateChip({ tone, glyph, children, title }: StateChipProps) {
   return (
-    <span className={`chip chip-${tone}`}>
+    <span className={`chip chip-${tone}`} title={title}>
       {glyph ? `${glyph} ` : ''}
       {children}
     </span>

@@ -138,8 +138,27 @@ describe('MembersSection (the People section of the Team page)', () => {
   // more" exists.
   it('labels the audit list by event count, not a time window it never queries', async () => {
     renderApp({}, <MembersSection />)
-    expect(await screen.findByText('Audit · last 4 events')).toBeInTheDocument()
+    // Heading reads "Team activity", not the jargon "Audit"; still counts the
+    // rows actually on screen (the only number that stays true once "Show
+    // more" exists), never a time window nothing queries.
+    expect(await screen.findByText('Team activity · last 4 events')).toBeInTheDocument()
     expect(screen.queryByText(/last 30 days/i)).toBeNull()
+  })
+
+  it('labels and legends the invite list so a bare token is not the first thing read', async () => {
+    renderApp({}, <MembersSection />)
+    expect(await screen.findByText(/outstanding invite links · token · uses · expiry/i)).toBeInTheDocument()
+  })
+
+  it('counts the People by membership, not with the misleading word "active"', async () => {
+    renderApp({}, <MembersSection />)
+    await screen.findByText('Sarah')
+    const membersHeading = screen.getByRole('heading', { name: 'People' })
+    const head = membersHeading.parentElement as HTMLElement
+    // The count beside "People" is a plain member count; "active" implied an
+    // inactive set the roster never shows.
+    expect(within(head).getByText(/^\d+ members?$/)).toBeInTheDocument()
+    expect(within(head).queryByText(/active/i)).toBeNull()
   })
 
   it('revokes a pending invite via a real DataClient call', async () => {
