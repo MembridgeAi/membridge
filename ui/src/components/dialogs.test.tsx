@@ -129,6 +129,10 @@ describe('MemberRow menu focus restore (Fix 11)', () => {
   const member: Member = {
     id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin',
     joinedAt: '2026-07-20T09:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false,
+    // #59. Zero because this row is about the member MENU, not about search
+    // reach -- and zero is the value that makes this fixture assert nothing
+    // about the gap either way.
+    preFixLocal: { entries: 0, projects: 0 },
   }
 
   function renderRow(onRequestRemove: (m: Member) => void = () => {}) {

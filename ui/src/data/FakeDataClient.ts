@@ -259,15 +259,22 @@ export class FakeDataClient implements DataClient {
   // memberCount, the shared project's roster) reads THIS so a scaled fixture
   // cannot drift into different answers per surface.
   private teamMembers(): Member[] {
+    // #59: `preFixLocal` splits this roster into the two cases the person
+    // filter cannot otherwise tell apart, so a fixture that gave everyone the
+    // same value would let the UI hardcode either answer and stay green.
+    //   Andrew -- has unattributable local history (the gap case): filtering
+    //             by him can return zero over rows that exist.
+    //   Marco, Sarah, and the scaled-out members -- an explicit zero, the
+    //             case where a zero result really does mean nothing found.
     const base: Member[] = [
-      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
-      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false },
-      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
+      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false, preFixLocal: { entries: 0, projects: 0 } },
+      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false, preFixLocal: { entries: 7, projects: 2 } },
+      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false, preFixLocal: { entries: 0, projects: 0 } },
     ]
     const size = this.opts.teamSize ?? base.length
     const out = base.slice(0, Math.min(size, base.length))
     for (let i = base.length + 1; i <= size; i++) {
-      out.push({ id: `m${i}`, name: `Member ${i}`, email: `member${i}@acme.dev`, role: 'member', joinedAt: '2026-07-25T12:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false })
+      out.push({ id: `m${i}`, name: `Member ${i}`, email: `member${i}@acme.dev`, role: 'member', joinedAt: '2026-07-25T12:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false, preFixLocal: { entries: 0, projects: 0 } })
     }
     return out
   }

@@ -221,3 +221,84 @@ describe('SearchPage', () => {
     expect(screen.getAllByText('Ports fixed and pushed.')).toHaveLength(1)
   })
 })
+
+// #59. Filtering by a person returns zero for TWO different reasons, and until
+// the daemon started reporting `preFixLocal` they were byte-identical:
+//
+//   1. that person genuinely has no matching history, and
+//   2. their rows exist on this machine but carry no author_id, so a uuid
+//      person filter cannot reach them. (Live, not theoretical: 100 of the 200
+//      team rows on the author's own machine have authorId === null.)
+//
+// Case 2 shown as case 1 is a confident zero over history that exists. The
+// daemon now says which one it is; these tests pin that the page says so too
+// -- and, just as importantly, that it does NOT say so in case 1, where a
+// repull hint would be a false alarm trading a silent zero for a noisy one.
+describe('SearchPage when a person filter returns nothing', () => {
+  // Zero results for whoever is picked, so the only variable across these
+  // tests is which member was chosen -- i.e. their preFixLocal.
+  const noMatches = () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'search').mockResolvedValue({ query: 'ports', total: 0, results: [] })
+    return client
+  }
+
+  // Andrew is the fixture's member WITH unattributable local history.
+  it('says the zero may be unattributed history, and names the repull command', async () => {
+    const user = userEvent.setup()
+    renderWith(noMatches(), <SearchPage />)
+    await search(user, 'ports')
+    await user.selectOptions(await screen.findByLabelText('Filter by person', {}, SETTLED), 'andrew')
+
+    const gap = await screen.findByTestId('search-prefix-gap', {}, SETTLED)
+    // The command is the whole point: a notice that says "some history is
+    // unreachable" without saying how to fix it leaves the reader worse off
+    // than the silent zero did.
+    expect(gap).toHaveTextContent('membridge team repull')
+    // The scale, so the reader can judge whether it is worth doing. Both
+    // numbers come off the wire; neither is inferred here.
+    expect(gap).toHaveTextContent(/7 .*(entries|rows)/)
+    expect(gap).toHaveTextContent(/2 projects/)
+    // Must not be phrased as a fact about Andrew.
+    expect(gap.textContent).not.toMatch(/has (done )?nothing/i)
+  })
+
+  // THE COUNTER-CHECK. Sarah has preFixLocal.entries === 0, so her zero is a
+  // real zero and must read as one. This is the assertion that stops the fix
+  // from trading a silent wrong answer for a loud one on every empty search.
+  it('leaves a genuine zero reading as a plain "nothing found"', async () => {
+    const user = userEvent.setup()
+    renderWith(noMatches(), <SearchPage />)
+    await search(user, 'ports')
+    await user.selectOptions(await screen.findByLabelText('Filter by person', {}, SETTLED), 'sarah')
+
+    expect(await screen.findByText(/No matches for "ports"/, {}, SETTLED)).toBeInTheDocument()
+    expect(screen.queryByTestId('search-prefix-gap')).toBeNull()
+    expect(screen.queryByText(/repull/i)).toBeNull()
+    // The ordinary filter advice is what a real zero gets, and it survives.
+    expect(screen.getByRole('button', { name: /clear filters/i })).toBeInTheDocument()
+  })
+
+  // No person picked at all: `preFixLocal` describes ONE member, so there is
+  // nobody for it to be about. An "Everyone" search that happens to return
+  // zero must not inherit Andrew's gap.
+  it('says nothing about repull when no person is picked', async () => {
+    const user = userEvent.setup()
+    renderWith(noMatches(), <SearchPage />)
+    await search(user, 'ports')
+    expect(await screen.findByText(/No matches for "ports"/, {}, SETTLED)).toBeInTheDocument()
+    expect(screen.queryByTestId('search-prefix-gap')).toBeNull()
+  })
+
+  // The notice belongs to the ZERO state only. Results on screen mean the
+  // filter reached rows, and a gap warning above them would undercut an
+  // answer the page did in fact produce.
+  it('stays silent when the same person filter does return results', async () => {
+    const user = userEvent.setup()
+    renderWith(new FakeDataClient(), <SearchPage />)
+    await search(user, 'ports')
+    await user.selectOptions(await screen.findByLabelText('Filter by person', {}, SETTLED), 'andrew')
+    await screen.findByText(/Ports fixed and pushed/, {}, SETTLED)
+    expect(screen.queryByTestId('search-prefix-gap')).toBeNull()
+  })
+})

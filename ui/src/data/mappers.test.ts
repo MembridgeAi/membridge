@@ -492,7 +492,28 @@ describe('mapMember', () => {
     expect(m).toEqual({
       id: 'andrew', name: 'Andrew', email: '', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
       projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false,
+      // #59. A daemon too old to report the field degrades to an explicit
+      // zero, not undefined: zero means "no gap", which keeps the UI quiet.
+      // Failing the other way would put a repull hint under every empty
+      // search run against an older daemon.
+      preFixLocal: { entries: 0, projects: 0 },
     })
+  })
+
+  // #59, and the reason this test exists at all: mapMember builds an explicit
+  // object literal, so a wire field it does not name is dropped here -- with
+  // no error, no type complaint at the boundary, and nothing visible until a
+  // component reads undefined. That is precisely how this field would have
+  // gone missing, so the carry-through is pinned rather than assumed.
+  it('carries preFixLocal through instead of dropping it at the object literal', () => {
+    const m = mapMember(
+      {
+        user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-22T18:58:00Z',
+        preFixLocal: { entries: 7, projects: 2 },
+      },
+      { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
+    )
+    expect(m.preFixLocal).toEqual({ entries: 7, projects: 2 })
   })
   it('falls back joinedAt to an empty string when the row carries no timestamp, rather than asserting one', () => {
     const m = mapMember(

@@ -169,6 +169,14 @@ export interface RawMemberRow {
   display_name: string
   role: Role
   joined_at: string | null
+  /** #59, from server.js's annotatePreFixLocal. The daemon always sends this
+   *  -- zero included -- but it is typed optional HERE and only here, because
+   *  this interface also describes what an OLDER daemon returns, and a client
+   *  that types an absent field as present would read `undefined.entries` and
+   *  crash the members query rather than degrade. mapMember collapses the
+   *  missing case to an explicit zero, so `Member.preFixLocal` is required and
+   *  nothing downstream has to think about it again. */
+  preFixLocal?: { entries: number; projects: number }
 }
 
 // /api/team/feed row (server.js:1502, team_feed RPC -- 002_team_v2.sql:285) -- raw team stream, not RawFeedEntry's local-merged feed.
@@ -620,6 +628,18 @@ export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
     lastSharedAt: activity.lastSharedAt,
     // Known gap: statusPayload (server.js:197) exposes only a COUNT of state.keyAlerts; no per-member endpoint exists.
     keyAlert: false,
+    // #59. This mapper builds an explicit object, so a field not named here is
+    // dropped before any component sees it -- which is exactly how a new wire
+    // field goes missing without a single error. Carried through deliberately.
+    //
+    // A daemon too old to send it collapses to an explicit zero rather than
+    // undefined, because zero is the honest reading: an old daemon reports no
+    // gap, and "no gap" is what makes the UI stay quiet. Failing open here
+    // would put a repull hint on every zero-result search against an older
+    // daemon, which is the false alarm the ticket rules out.
+    preFixLocal: row.preFixLocal
+      ? { entries: row.preFixLocal.entries, projects: row.preFixLocal.projects }
+      : { entries: 0, projects: 0 },
   }
 }
 

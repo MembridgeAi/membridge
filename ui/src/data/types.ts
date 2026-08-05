@@ -318,6 +318,32 @@ export interface Member {
   projectCount: number
   lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
   keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
+  /**
+   * #59. How much of this member's local history a person filter CANNOT reach.
+   *
+   * Team rows pulled before the daemon projected `author_id` carry an author
+   * NAME and no id. The person picker's option value is the member's uuid and
+   * the daemon matches on that uuid first, so those rows are invisible to the
+   * filter -- and the empty result they produce is byte-identical to the empty
+   * result for someone who has genuinely done nothing. This field is what
+   * tells the two apart.
+   *
+   *   entries  -- local team rows with no author_id whose author name is this
+   *               member's display name.
+   *   projects -- how many DISTINCT local projects those rows sit in. A count,
+   *               never a list: it lets the UI say "across 3 projects" without
+   *               putting teammate project paths into an identity payload.
+   *
+   * BOTH COUNT THIS MACHINE ONLY -- a pre-fix row is a local storage property,
+   * so no server can answer this.
+   *
+   * ALWAYS PRESENT, carrying zero when there is nothing to report. Not
+   * optional, and deliberately so: an absent field is indistinguishable from
+   * "no problem", which is the same silent zero the ticket exists to fix. The
+   * UI condition is `m.preFixLocal.entries > 0`, and it can only be written
+   * that way because the zero is explicit.
+   */
+  preFixLocal: { entries: number; projects: number }
 }
 
 // One outstanding invite link (GET /api/team/invites, lib/api-access.js
