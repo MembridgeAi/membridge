@@ -269,12 +269,118 @@ async function main() {
   });
 
   check('digest: a mix of distilled and harvested statements is reported as a mix, not as distilled', () => {
+    // The harvested line here is deliberately a REAL statement rather than the
+    // three-word placeholder this fixture used to carry: a harvested opening
+    // has to clear digest's scavenged-statement floor to be usable at all now
+    // (see the filler checks below), and a fixture that could not clear it
+    // would be testing the floor instead of the `kind` rule it is about.
     const d = only(digest.buildDayDigests([
       entry({ session: 'a', ts: '2026-08-05T10:00:00.000Z', distilled: true, headline: 'The distilled one' }),
-      entry({ session: 'b', ts: '2026-08-05T11:00:00.000Z', distilled: false, summary: 'The harvested one.' }),
+      entry({ session: 'b', ts: '2026-08-05T11:00:00.000Z', distilled: false, summary: 'Rebased the branch and re-ran the whole suite green.' }),
     ]));
     assert.strictEqual(d.kind, 'summary',
       'kind may only claim distilled when every clause in the sentence is');
+  });
+
+  // -------------------------------------------------------------------------
+  // Filler is never a day's statement
+  //
+  // A harvested summary is the last thing an agent SAID in a chat, not a
+  // statement about the session, and its opening sentence is very often a
+  // reply to the person rather than a report: measured over the whole real
+  // corpus (589 feed entries, 2026-07-13 to 2026-08-05), 154 statements were
+  // scavenged that way and about a quarter of them opened on an
+  // acknowledgement. Andrew saw the result on a real card, whose third clause
+  // was "Completely agree." Nothing measurable separates a short real report
+  // from a short acknowledgement, so the floor is set where the two classes
+  // stop overlapping and anything under it is skipped. See
+  // SCAVENGED_STATEMENT_MIN in lib/digest.js for the measurement.
+  // -------------------------------------------------------------------------
+
+  check('digest: a conversational acknowledgement never becomes a session clause', () => {
+    // Both rows are real text off the live feed, in the real order: the
+    // session's newest harvested checkpoint opens "Completely agree." and the
+    // older one opens on an actual report. Newest-wins picked the filler.
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', ts: '2026-08-04T18:22:27.000Z', summary: 'Yes, viable. The clean version is: MemBridge can become the team\'s agent-to-agent texting layer, but it should be a new directed inbox feature.' }),
+      entry({ session: 'a', ts: '2026-08-04T18:20:00.000Z', summary: 'Compared MemBridge\'s existing memory rails with the current Claude agent-team kit, and wrote up where they overlap.' }),
+      entry({ session: 'a', ts: '2026-08-04T18:26:12.000Z', summary: 'Completely agree. The line should be: coordination signal, not remote delegation.' }),
+    ]));
+    assert.ok(!/Completely agree/.test(d.text),
+      `"Completely agree." is not a statement of a session's work; got ${JSON.stringify(d.text)}`);
+    assert.strictEqual(d.text,
+      'Compared MemBridge\'s existing memory rails with the current Claude agent-team…',
+      'the session falls through to the newest checkpoint that actually states something');
+  });
+
+  check('digest: a session with nothing but filler is OMITTED, never dressed up', () => {
+    // An honest gap beats a confident non-statement. The other session carries
+    // the day; the filler-only one contributes no clause at all.
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'real', ts: '2026-08-05T10:00:00.000Z', distilled: true, headline: 'Fixed stale teammate liveness and the summary timestamp' }),
+      entry({ session: 'chat', ts: '2026-08-05T11:00:00.000Z', summary: 'Done. And then some more detail that nobody reads as the day.' }),
+      entry({ session: 'chat', ts: '2026-08-05T12:00:00.000Z', summary: 'Completely agree. More conversation, still not a statement.' }),
+    ]));
+    assert.strictEqual(d.text, 'Fixed stale teammate liveness and the summary timestamp');
+    assert.strictEqual(d.summarized, 1, 'only one session produced a statement');
+    assert.strictEqual(d.sessions, 2, 'both sessions are still counted as sessions');
+  });
+
+  check('digest: an omitted filler-only session is COUNTED and disclosed, not swallowed', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'real', ts: '2026-08-05T10:00:00.000Z', distilled: true, headline: 'Fixed stale teammate liveness and the summary timestamp' }),
+      entry({ session: 'chat', ts: '2026-08-05T12:00:00.000Z', summary: 'Completely agree. More conversation, still not a statement.' }),
+    ]));
+    assert.strictEqual(d.unstatedSessions, 1, 'the skipped session must be counted');
+    assert.strictEqual(d.omittedSessions, 1,
+      'omittedSessions is what the UI gates its coverage note on, so a skipped session has to land in it');
+    assert.ok(/1 session left out/.test(d.coverageNote || ''),
+      `a capped view must say it is capped, and this is the same rule; got ${JSON.stringify(d.coverageNote)}`);
+  });
+
+  check('digest: a day of nothing but filler says NOTHING, not filler', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'chat', ts: '2026-08-05T12:00:00.000Z', summary: 'Completely agree. The line should be: coordination signal, not remote delegation.' }),
+    ]));
+    assert.strictEqual(d.kind, 'none');
+    assert.strictEqual(d.text, digest.NO_DAY_SUMMARY);
+    assert.strictEqual(d.sources.length, 0);
+    assert.strictEqual(d.unstatedSessions, 1);
+  });
+
+  check('digest: an AUTHORED statement is never held to the floor, however short', () => {
+    // "Shipped 0.3.2." is 14 characters and is exactly what a day card should
+    // say. The floor applies only to text scavenged out of a chat reply, which
+    // is why it can be set where it is without deleting real short statements.
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', distilled: true, headline: 'Shipped 0.3.2.' }),
+    ]));
+    assert.strictEqual(d.text, 'Shipped 0.3.2.');
+    assert.strictEqual(d.kind, 'distilled');
+    assert.strictEqual(d.unstatedSessions, 0);
+  });
+
+  check('digest: a distilled summary is authored prose and clears the floor too', () => {
+    // The distiller writes `did` for a reader; only the harvested last-chat-
+    // line path is scavenged. A short distilled opening must survive.
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', distilled: true, summary: 'Shipped 0.3.2. Then spent the afternoon on the installer.' }),
+    ]));
+    assert.strictEqual(d.text, 'Shipped 0.3.2.');
+  });
+
+  check('digest: the cap counts and the filler count are reported as ONE honest total', () => {
+    const es = [];
+    for (let i = 1; i <= 5; i++) {
+      es.push(entry({ session: `s${i}`, ts: `2026-08-05T1${i}:00:00.000Z`, distilled: true, headline: `Statement number ${i}` }));
+    }
+    es.push(entry({ session: 'chat', ts: '2026-08-05T16:00:00.000Z', summary: 'Yes. Some more chat that is not a statement of the work.' }));
+    const d = only(digest.buildDayDigests(es));
+    assert.strictEqual(d.summarized, 5, 'the filler session never became a statement');
+    assert.strictEqual(d.unstatedSessions, 1);
+    assert.strictEqual(d.omittedSessions, 3, '2 dropped to the clause cap, 1 with nothing to say');
+    assert.ok(/2 more sessions not shown/.test(d.coverageNote), d.coverageNote);
+    assert.ok(/1 session left out/.test(d.coverageNote), d.coverageNote);
   });
 
   // -------------------------------------------------------------------------
