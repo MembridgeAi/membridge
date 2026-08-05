@@ -886,6 +886,25 @@ function createMockSupabase() {
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const q = url.searchParams;
         const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        // token=eq.<token> — the single-row lookup lib/api-access.js
+        // inviteTeamId uses to answer "which team is this invite for?", so the
+        // revoke route can file its audit event against the invite's OWN team
+        // instead of teams[0]. Supported as an ALTERNATIVE to the team_id
+        // filter, never as a way around RLS: invites_select is
+        // `is_team_member(team_id)`, and RLS on select FILTERS rather than
+        // raising, so a caller who is not a member of the invite's team must
+        // see an empty result and not a 403. That is exactly what the
+        // isMember check below produces.
+        const tokenEq = (q.get('token') || '').replace(/^eq\./, '');
+        if (tokenEq) {
+          const inv = invites.get(tokenEq);
+          if (!inv || !isMember(inv.teamId, userId)) return json(res, 200, []);
+          return json(res, 200, [{
+            token: inv.token, team_id: inv.teamId, created_at: inv.createdAt,
+            expires_at: inv.expiresAt, max_uses: inv.maxUses,
+            use_count: inv.useCount, revoked_at: inv.revokedAt || null,
+          }]);
+        }
         if (!teamEq || !isMember(teamEq, userId)) return json(res, 200, []);
         // revoked_at is both a supported FILTER and a returned column:
         // readInvites selects it and derives `revoked` from it, so dropping it
