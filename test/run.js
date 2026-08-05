@@ -13,38 +13,84 @@
 // tally. A crash after the last check but before the summary would otherwise
 // read as success to anything that greps for FAIL — that exact failure shape
 // has produced silently-truncated baselines here before.
+//
+// A crashed suite's check count is UNKNOWN, and the summary says so. It used
+// to contribute 0/0 to the totals, which made the footer of a run whose
+// largest suite never finished read `TOTAL 451/451 checks passed across 26
+// suites` — a green sentence over a truncated run (observed on PR #23, and
+// again as `TOTAL 110/110` with SIX of twelve suites dead on node:sqlite).
+// Nothing here may print an all-passed tally for a run that did not pass.
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
-// Assign each child its own verified-free port block up front. The per-process
-// probe inside each suite checks that a block LOOKS free but reserves nothing,
-// and a suite may not bind its first server until minutes in — so two children
-// whose pids map to the same block can both adopt it and cross-talk later.
-// (Observed live: a redaction team-push check failing only when run next to
-// core.) Assigning from one place removes the race; the assignment still
-// skips blocks squatted by e.g. a live daemon on this machine.
+// Assign each child its own verified-free port block up front. Left to itself a
+// suite derives its block from its own pid and verifies nothing, and it may not
+// bind its first server until minutes in — so two children whose pids map to
+// the same block can both adopt it and cross-talk later. (Observed live: a
+// redaction team-push check failing only when run next to core.) Assigning from
+// one place is what removes the race, so this is the ONLY place a block is
+// checked for freeness; the assignment also skips blocks squatted by e.g. a
+// live daemon on this machine.
+//
+// This probe MUST be async. `net.Server#listening` is false synchronously when
+// listen() is given a host: `listen(port, '127.0.0.1')` routes through an async
+// DNS lookup, so the handle does not exist yet when the next statement runs.
+// The earlier synchronous version read `s.listening` immediately and therefore
+// answered "busy" for every port on every platform — the generator below
+// yielded NOTHING, every child was spawned with no assigned block, and each
+// one silently fell back to run-tests.js's `pid % 40` guess, whose own probe is
+// broken the same way and so verifies nothing either. Twenty-six children
+// drawing an unverified block out of forty is the port cross-talk this file
+// claims in its header to have removed. Prove it before believing it:
+//   node -e "const s=require('net').createServer();s.listen(17941,'127.0.0.1');console.log(s.listening)"  // false
+const PORT_BLOCKS = 40;
 function freePort(port) {
-  try {
+  return new Promise(resolve => {
     const s = net.createServer();
-    s.listen(port, '127.0.0.1');
-    const r = s.listening;
-    s.close();
-    return r;
-  } catch { return false; }
+    s.once('error', () => resolve(false));
+    // Loopback only, deliberately: binding 0.0.0.0 would make the probe
+    // synchronous but also trip the macOS incoming-connections prompt.
+    s.listen(port, '127.0.0.1', () => s.close(() => resolve(true)));
+  });
 }
-function* freeBlocks() {
-  for (let i = 0; i < 40; i++) {
+async function freeBlocks() {
+  const free = [];
+  for (let i = 0; i < PORT_BLOCKS; i++) {
     const base = 17900 + i * 100;
     // +99 is the sentinel a live run (this orchestrator's children included)
     // holds for its lifetime — checking it keeps two concurrent invocations,
     // e.g. from two sessions in different worktrees, off each other's blocks.
-    if (freePort(base + 41) && freePort(base + 96) && freePort(base + 99)) yield base;
+    // Sequential on purpose: 120 simultaneous binds on one loopback is its own
+    // source of spurious EADDRINUSE. The whole sweep costs ~10ms.
+    if (await freePort(base + 41) && await freePort(base + 96) && await freePort(base + 99)) free.push(base);
   }
+  return free;
 }
 
-const SUITE_DIR = path.join(__dirname, 'suites');
+// Hand out a DISTINCT block per child, always. Returning undefined (which is
+// what an exhausted generator did) drops the child onto an unverified guess
+// without saying so; if we genuinely run out of verified-free blocks, the
+// child still gets a block nobody else in this run holds, and the run says
+// out loud that the block is unverified.
+function blockDealer(free) {
+  let n = 0;
+  return name => {
+    const i = n++;
+    if (i < free.length) return free[i];
+    const base = 17900 + (i % PORT_BLOCKS) * 100;
+    console.log(`warning: no verified-free port block left for ${name}; using ${base} unverified`);
+    return base;
+  };
+}
+
+// Overridable so this orchestrator's own reporting can be tested against
+// fixture suites that pass, fail and crash on purpose — see
+// test/suites/runner-reporting.test.js. With an override in play the legacy
+// monolith is NOT appended: a reporting test must not drag in 25k lines.
+const SUITE_DIR = process.env.MEMBRIDGE_TEST_SUITE_DIR || path.join(__dirname, 'suites');
+const WITH_LEGACY = !process.env.MEMBRIDGE_TEST_SUITE_DIR;
 const LEGACY = { name: 'core', file: path.join(__dirname, 'run-tests.js') };
 
 function discover() {
@@ -60,7 +106,7 @@ function discover() {
       suites.push({ name: f.replace(/\.test\.js$/, ''), file, serial });
     }
   }
-  suites.push(LEGACY);
+  if (WITH_LEGACY) suites.push(LEGACY);
   return suites;
 }
 
@@ -78,8 +124,10 @@ function runSuite(suite, portBase) {
       const tally = out.match(/^(\d+)\/(\d+) checks passed$/m);
       resolve({
         suite, code, out, secs: ((Date.now() - t0) / 1000).toFixed(1),
-        passed: tally ? Number(tally[1]) : 0,
-        total: tally ? Number(tally[2]) : 0,
+        // null, not 0: a suite that never printed a tally ran an UNKNOWN
+        // number of checks. Zero is a number, and numbers get added up.
+        passed: tally ? Number(tally[1]) : null,
+        total: tally ? Number(tally[2]) : null,
         ok: code === 0 && !!tally && tally[1] === tally[2],
         noTally: !tally,
       });
@@ -109,45 +157,78 @@ async function main() {
   // anything else shares the CPU (observed live: redaction's 200-event render
   // at 2.5x its budget with six suites in flight, comfortably green alone).
   // Core runs last for the same reason, and it dominates wall-clock anyway.
-  const blocks = freeBlocks();
+  const takeBlock = blockDealer(await freeBlocks());
   const parallel = picked.filter(s => s.name !== 'core' && !s.serial);
   const serial = picked.filter(s => s.name !== 'core' && s.serial);
-  const results = await Promise.all(parallel.map(s => {
-    const { value: portBase } = blocks.next();
-    return runSuite(s, portBase);
-  }));
+  const results = await Promise.all(parallel.map(s => runSuite(s, takeBlock(s.name))));
   for (const s of serial) {
-    const { value: portBase } = blocks.next();
-    results.push(await runSuite(s, portBase));
+    results.push(await runSuite(s, takeBlock(s.name)));
   }
   if (picked.some(s => s.name === 'core')) {
-    const { value: portBase } = blocks.next();
-    results.push(await runSuite(LEGACY, portBase));
+    results.push(await runSuite(LEGACY, takeBlock(LEGACY.name)));
   }
 
-  let passed = 0, total = 0, bad = 0;
-  console.log('');
-  for (const r of results) {
-    if (r.ok) {
-      console.log(`ok    ${r.suite.name.padEnd(24)} ${String(r.passed).padStart(5)}/${r.total}  ${r.secs}s`);
-    } else {
-      bad++;
-      const why = r.noTally ? `no tally printed (crashed?), exit ${r.code}` : `exit ${r.code}`;
-      console.log(`FAIL  ${r.suite.name.padEnd(24)} ${why}`);
-      // Show the tail of a failing suite's output — enough to see the first
-      // FAIL line or the crash, without drowning the summary.
-      const lines = r.out.trimEnd().split('\n');
-      const firstFail = lines.findIndex(l => /^ {2}FAIL {2}/.test(l));
-      const slice = firstFail >= 0 ? lines.slice(firstFail, firstFail + 15) : lines.slice(-25);
-      console.log(slice.map(l => `      | ${l}`).join('\n'));
-    }
-    passed += r.passed; total += r.total;
-  }
-  console.log(`\nTOTAL ${passed}/${total} checks passed across ${results.length} suite${results.length === 1 ? '' : 's'}`);
-  if (bad) process.exit(1);
+  const { lines, exitCode } = summarize(results);
+  console.log(lines.join('\n'));
+  if (exitCode) process.exit(exitCode);
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+// The whole summary as text plus the exit code it must agree with. Pure and
+// exported so test/suites/runner-reporting.test.js can drive it directly:
+// this is the one place in the repo where a wrong success claim would hide
+// every other one.
+function summarize(results) {
+  const lines = [''];
+  let passed = 0, total = 0, tallied = 0;
+  const crashed = [], failed = [];
+  for (const r of results) {
+    if (r.ok) {
+      lines.push(`ok    ${r.suite.name.padEnd(24)} ${String(r.passed).padStart(5)}/${r.total}  ${r.secs}s`);
+    } else {
+      (r.noTally ? crashed : failed).push(r.suite.name);
+      const why = r.noTally
+        ? `CRASHED before printing a tally, exit ${r.code}; checks run: UNKNOWN`
+        : `exit ${r.code}`;
+      lines.push(`FAIL  ${r.suite.name.padEnd(24)} ${why}`);
+      // Show the tail of a failing suite's output — enough to see the first
+      // FAIL line or the crash, without drowning the summary.
+      const out = r.out.trimEnd().split('\n');
+      const firstFail = out.findIndex(l => /^ {2}FAIL {2}/.test(l));
+      const slice = firstFail >= 0 ? out.slice(firstFail, firstFail + 15) : out.slice(-25);
+      lines.push(slice.map(l => `      | ${l}`).join('\n'));
+    }
+    // Only a suite that reported a tally contributes to the counts. A crashed
+    // suite's checks are unknown, and folding its silence in as 0/0 is what
+    // produced a passing-looking footer for a truncated run.
+    if (r.total !== null) { passed += r.passed; total += r.total; tallied++; }
+  }
+
+  const suites = n => `${n} suite${n === 1 ? '' : 's'}`;
+  lines.push('');
+  if (!crashed.length && !failed.length) {
+    lines.push(`TOTAL ${passed}/${total} checks passed across ${suites(results.length)}`);
+    return { lines, exitCode: 0 };
+  }
+  // A failed run never prints the phrase "checks passed" at all, in any
+  // arrangement: the counts are stated as counts, the verdict is the last
+  // line, and the verdict agrees with the exit code. Anything quoted out of
+  // this block still reads as a failure.
+  const scope = crashed.length
+    ? `the ${suites(tallied)} that reported a tally (the rest crashed, so the real total is higher)`
+    : `${suites(tallied)}`;
+  lines.push(`counted ${passed} of ${total} checks in ${scope}`);
+  const why = [];
+  if (failed.length) why.push(`failing checks: ${failed.join(', ')}`);
+  if (crashed.length) why.push(`CRASHED with an UNKNOWN number of checks: ${crashed.join(', ')}`);
+  lines.push(`RESULT FAILED  ${failed.length + crashed.length} of ${suites(results.length)} did not pass — ${why.join('; ')}`);
+  return { lines, exitCode: 1 };
+}
+
+module.exports = { summarize };
+
+if (require.main === module) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}
