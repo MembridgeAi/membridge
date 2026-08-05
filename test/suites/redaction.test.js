@@ -7,7 +7,7 @@
 // test/harness.js; run this file directly, or via `node test/run.js redaction`.
 // --- 12. built-in secret redaction (lib/redact.js) ---
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check, ROOT, P, BIN, jsonl, read, readSource, count, notRoot, realCanon,
+const { check, skip, ROOT, P, BIN, jsonl, read, readSource, count, notRoot, realCanon,
   startJsonMock, waitForHttp, post, httpGet, httpPost } = h;
 const assert = require('assert');
 const fs = require('fs');
@@ -154,21 +154,52 @@ async function main() {
   // so the secret must travel to `security` on stdin, never as an argument.
   // Runner-injected so the assertion is about command construction, not the
   // real keychain; the darwin round-trip check below exercises the real path.
-  check('keychain: store passes the secret via stdin, never argv', () => {
-    if (process.platform !== 'darwin') return; // store() fails closed off-darwin by design
-    const calls = [];
-    const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
-    try {
-      const secret = 'U0VDUkVULXZh+bHVl/wow==';
-      assert.ok(keychain.store('membridge.test.stdin', secret), 'store failed');
-      assert.ok(calls.every(c => !c.args.join(' ').includes(secret)), 'secret leaked into argv');
-      const store = calls.find(c => c.args[0] === '-i');
-      assert.ok(store, 'store must run security in -i (stdin command) mode');
-      assert.ok(store.input.includes(secret), 'secret travels on stdin');
-      assert.ok(/add-generic-password/.test(store.input), 'stdin carries the add command');
-      assert.ok(/-U/.test(store.input), 'idempotent update flag preserved');
-    } finally { keychain._setRunner(prev); }
-  });
+  //
+  // THREE platforms, three different things to prove — because this check used
+  // to open with `if (process.platform !== 'darwin') return;`, which made it a
+  // passing check that asserted nothing on the ubuntu and windows CI legs (4
+  // of the 6 matrix legs). That is the same silent pass the win32 family forty
+  // lines below carries a comment condemning; the fix was applied there and
+  // not here.
+  if (process.platform === 'darwin') {
+    check('keychain: store passes the secret via stdin, never argv', () => {
+      const calls = [];
+      const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
+      try {
+        const secret = 'U0VDUkVULXZh+bHVl/wow==';
+        assert.ok(keychain.store('membridge.test.stdin', secret), 'store failed');
+        assert.ok(calls.every(c => !c.args.join(' ').includes(secret)), 'secret leaked into argv');
+        const store = calls.find(c => c.args[0] === '-i');
+        assert.ok(store, 'store must run security in -i (stdin command) mode');
+        assert.ok(store.input.includes(secret), 'secret travels on stdin');
+        assert.ok(/add-generic-password/.test(store.input), 'stdin carries the add command');
+        assert.ok(/-U/.test(store.input), 'idempotent update flag preserved');
+      } finally { keychain._setRunner(prev); }
+    });
+  } else if (process.platform === 'win32') {
+    // available() routes to winAvailable() here, which probes the REAL DPAPI
+    // store and can return true — so calling store() would write a live secret
+    // rather than exercise the injected runner. The win32 argv contract has
+    // its own check below, on the leg that can actually run it.
+    skip('keychain: store passes the secret via stdin, never argv',
+      'win32 uses the DPAPI backend, not `security`; its argv contract is checked by keychain(win) below');
+  } else {
+    // Linux and friends: macAvailable() is false before it ever reaches the
+    // runner, so the provable claim is the fail-closed one — the secret never
+    // reaches a subprocess at all. Weaker than the darwin claim, but it is an
+    // assertion that can fail, which is the entire difference.
+    check('keychain: off-darwin, store fails closed and the secret reaches no subprocess', () => {
+      const calls = [];
+      const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
+      try {
+        const secret = 'U0VDUkVULXZh+bHVl/wow==';
+        assert.strictEqual(keychain.store('membridge.test.stdin', secret), false,
+          'store must fail closed where there is no keychain, not report success');
+        assert.deepStrictEqual(calls, [],
+          'store reached a subprocess on a platform with no keychain');
+      } finally { keychain._setRunner(prev); }
+    });
+  }
   check('keychain: store/load/remove round trip on macOS; fails closed elsewhere', () => {
     if (!keychain.available()) {
       assert.strictEqual(keychain.load('anything'), null, 'unavailable load must be null');

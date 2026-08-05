@@ -302,6 +302,7 @@ function main() {
         { teamEntries: [TEAM_ROW], teamAccessLost: NOW },
         { teamEntries: [], teamAccessLost: NOW },
       ];
+      let refused = 0;
       for (const proj of cases) {
         // teamRowsFor answering [] does NOT imply "do not serve" — a project
         // with no rows yet is fine. But every record it refuses on ACCESS
@@ -309,10 +310,20 @@ function main() {
         // and two notions of it that can disagree is how the original guard
         // came to cover one reader of five.
         if (!util.mayServeTeammateNotes(key, proj)) {
+          refused++;
           assert.deepStrictEqual(util.teamRowsFor(proj), [],
             `teamRowsFor served rows for a record the notes gate refuses: ${JSON.stringify(proj)}`);
         }
       }
+      // The premise, asserted rather than assumed. Every assertion above lives
+      // inside the refusal branch, so a gate that stopped refusing ANYTHING
+      // would walk all five cases, assert nothing, and print `ok` — the exact
+      // regression this check exists to catch would switch it off instead of
+      // failing it. Two of the five cases carry teamAccessLost and cannot
+      // legitimately be served.
+      assert.ok(refused >= 2,
+        `the gate refused ${refused} of ${cases.length} cases; at least the two carrying `
+        + 'teamAccessLost must be refused, or the loop above asserted nothing');
     });
   }
 

@@ -9,7 +9,18 @@
 const noEgress = require('./no-egress');
 noEgress.install();
 
-const assert = require('assert');
+// SECOND, and before `require('assert')` below: a check that makes no
+// assertion cannot fail, and prints `ok` all the same. Four instances of that
+// shape landed in one week — including the six-strong Windows guard family a
+// few hundred lines down, which reported green on both Windows CI legs with
+// the bug it guards deliberately restored. check-accounting.js hands this file
+// a counting copy of assert and turns a zero-assertion check into a FAIL; its
+// header documents what it can and cannot catch. Shared with test/harness.js
+// so the gate covers both runners, not whichever one the next bug misses.
+const accounting = require('./check-accounting');
+accounting.install();
+
+const assert = require('assert'); // the counting copy, via install() above
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
@@ -183,18 +194,12 @@ const results = [];
 // Supports both sync and async fn. Sync callers (the vast majority) ignore
 // the return value, exactly as before. Async callers must `await check(...)`
 // so a rejected assertion is recorded as a FAIL instead of becoming an
-// unhandled promise rejection that crashes the whole suite.
-function check(name, fn) {
-  const onOk = () => { results.push([name, null]); console.log(`  ok    ${name}`); };
-  const onErr = err => { results.push([name, err]); console.log(`  FAIL  ${name}\n        ${err.message}`); };
-  try {
-    const ret = fn();
-    if (ret && typeof ret.then === 'function') return ret.then(onOk, onErr);
-    onOk();
-  } catch (err) {
-    onErr(err);
-  }
-}
+// unhandled promise rejection that crashes the whole suite — and, since the
+// accounting above, so it is recorded AT ALL: an unawaited async check settles
+// after the tally is printed. checkNoThrow(name, reason, fn) is how a check
+// says asserting nothing is the intent; skip(name, why) is how an unmet
+// precondition is stated out loud instead of registering a green line.
+const { check, checkNoThrow, skip, checkNothingLeftInFlight } = accounting.createCheck(results);
 const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
 // Every SOURCE-SHAPE check (assertions about the bytes of a file committed to
@@ -2922,11 +2927,19 @@ async function main() {
       assert.strictEqual(rawCfg.advisor.apiKey, GOOD_KEY, 'key not persisted');
       assert.strictEqual(rawCfg.intervalSec, 45, 'interval not persisted');
     });
-    check('settings: config file is chmod 600 once a key is present', () => {
-      if (process.platform === 'win32') return;
-      const mode = fs.statSync(util.configPath()).mode & 0o777;
-      assert.strictEqual(mode, 0o600, `mode was ${mode.toString(8)}`);
-    });
+    // POSIX mode bits do not exist on Windows, and the early-return this used
+    // to open with made it a check that printed `ok` having asserted nothing
+    // on the windows-latest leg — for the guard that keeps a file holding a
+    // live API key from being world-readable. The skip is visible now.
+    if (process.platform === 'win32') {
+      skip('settings: config file is chmod 600 once a key is present',
+        'Windows has no POSIX mode bits; fs.chmod there toggles only the read-only attribute');
+    } else {
+      check('settings: config file is chmod 600 once a key is present', () => {
+        const mode = fs.statSync(util.configPath()).mode & 0o777;
+        assert.strictEqual(mode, 0o600, `mode was ${mode.toString(8)}`);
+      });
+    }
     const stExtra = await (await post(`${base}/api/settings`, {
       extraTargets: { cursor: true, gemini: true },
     })).json();
@@ -4497,7 +4510,12 @@ async function main() {
     const goalChangesFeed = await feedPayload({ limit: 10 });
     check('feedPayload: entries expose goal + changes', () => {
       const e = (goalChangesFeed.entries || [])[0];
-      if (e) { assert.ok('goal' in e, 'goal key present'); assert.ok('changes' in e, 'changes key present'); }
+      // The premise, asserted rather than assumed. Both key assertions used to
+      // sit inside `if (e)`, so a feed that regressed to returning NO entries
+      // switched this check off instead of failing it.
+      assert.ok(e, `the feed returned no entries, so the key assertions below would prove nothing (got ${JSON.stringify(goalChangesFeed.entries)})`);
+      assert.ok('goal' in e, 'goal key present');
+      assert.ok('changes' in e, 'changes key present');
     });
 
     // --- liveness -----------------------------------------------------------
@@ -11292,8 +11310,14 @@ async function main() {
       util.saveState(st);
       await teamsync.syncTeams({ project: projRE }); // plaintext push, ask=null (unshared)
       const creds = await teamsync.getAccessToken(util.getConfig());
-      await check('teamsync: reshareSession encrypts the backfilled prompt', async () => {
-        if (!tc.available()) return; // libsodium unavailable in this env — skip as pass
+      // "skip as pass" was the literal comment on the early return this
+      // replaces. libsodium going missing is exactly when an encryption check
+      // must be heard from — a bundle that lost it has shipped here before —
+      // and a silent green is the one outcome that guarantees nobody notices.
+      if (!tc.available()) {
+        skip('teamsync: reshareSession encrypts the backfilled prompt',
+          'libsodium did not load in this environment, so there is no encryption to verify (this is itself worth investigating)');
+      } else await check('teamsync: reshareSession encrypts the backfilled prompt', async () => {
         await tc.ready();
         const teamKey = tc.genTeamKey();
         await teamsync.reshareSession(util.getConfig(), projRE, 'sB', true, { creds, crypto: { teamKey, epoch: 1, teamcrypto: tc } });
@@ -11344,9 +11368,15 @@ async function main() {
     assert.ok('headline' in without, 'headline key dropped from a headline-less row (mixed-shape batch)');
     assert.strictEqual(without.headline, null);
   });
-  await check('parity: encryptRow seals headline in the ciphertext and nulls it under plaintextOff', async () => {
-    const tc = require('../lib/teamcrypto');
-    if (!tc.available()) return; // libsodium unavailable in this env — skip as pass
+  // Same "skip as pass" early return as the reshareSession check above, and
+  // the same repair: an encryption check that goes green because the crypto
+  // library is absent is the worst available outcome.
+  const tcParity = require('../lib/teamcrypto');
+  if (!tcParity.available()) {
+    skip('parity: encryptRow seals headline in the ciphertext and nulls it under plaintextOff',
+      'libsodium did not load in this environment, so there is no encryption to verify (this is itself worth investigating)');
+  } else await check('parity: encryptRow seals headline in the ciphertext and nulls it under plaintextOff', async () => {
+    const tc = tcParity;
     await tc.ready();
     const teamKey = tc.genTeamKey();
     const row = { ts: 't1', source: 'Claude Code', ask: null, goal: null, decisions: null, gotchas: null, files: [], changes: null, summary: 'the brief', headline: 'The headline', distilled: true };
@@ -20680,20 +20710,38 @@ const repoRoot = require('../lib/repo-root');
   // Rename REPLACES the target, so the new file carries the temp file's mode,
   // not the old file's. Without care, rewriting a settings.json the user had
   // locked down to 0600 silently republishes it at the umask default.
-  check('hooks: writeSettings preserves the existing file mode', () => {
-    const f = path.join(ROOT, 'settings-mode.json');
-    fs.writeFileSync(f, JSON.stringify({ hooks: {} }));
-    fs.chmodSync(f, 0o600);
-    // win32 has no POSIX modes to preserve -- chmod above cannot narrow the
-    // reported 0666, so only assert the preservation where it actually took
-    // effect. The write itself still runs everywhere.
-    const modeApplied = (fs.statSync(f).mode & 0o777) === 0o600;
-    hooks.writeSettings(f, { hooks: { Stop: [] } });
-    if (modeApplied) {
-      assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600,
-        'an atomic rewrite must not widen the permissions the user chose');
-    }
+  //
+  // The mode claim is SEPARATE from the write claim, and registered only where
+  // POSIX modes exist. Both used to live in one check whose single assertion
+  // sat inside `if (modeApplied)` — false on win32 — so on both Windows CI legs
+  // it printed `ok` having asserted nothing at all, neither the mode nor the
+  // write. Now Windows still proves the write, and says out loud that the mode
+  // half did not run.
+  const settingsModeFile = path.join(ROOT, 'settings-mode.json');
+  // Sampled BEFORE writeSettings runs, deliberately. Gating the check on the
+  // mode AFTER the write would make the skip absorb the very failure it
+  // guards: a writeSettings that widened 0600 to 0644 would fail the
+  // condition, skip the check, and report nothing wrong.
+  let fixtureModeApplied = false;
+  check('hooks: writeSettings rewrites the target with the new contents', () => {
+    fs.writeFileSync(settingsModeFile, JSON.stringify({ hooks: {} }));
+    fs.chmodSync(settingsModeFile, 0o600);
+    fixtureModeApplied = (fs.statSync(settingsModeFile).mode & 0o777) === 0o600;
+    hooks.writeSettings(settingsModeFile, { hooks: { Stop: [] } });
+    assert.deepStrictEqual(JSON.parse(read(settingsModeFile)), { hooks: { Stop: [] } },
+      'the atomic rewrite did not land');
   });
+  // win32 has no POSIX modes to preserve: the chmod above cannot narrow the
+  // reported 0666, so there is no preservation to observe.
+  if (fixtureModeApplied) {
+    check('hooks: writeSettings preserves the existing file mode', () => {
+      assert.strictEqual(fs.statSync(settingsModeFile).mode & 0o777, 0o600,
+        'an atomic rewrite must not widen the permissions the user chose');
+    });
+  } else {
+    skip('hooks: writeSettings preserves the existing file mode',
+      'this platform did not apply the 0600 fixture mode (win32 chmod cannot narrow the reported 0666), so there is no preservation to observe');
+  }
 
   // The end-to-end pair. Atomic writes are what make this dangerous -- a
   // rename needs only the DIRECTORY writable, so nothing at the write layer
@@ -21830,10 +21878,19 @@ const repoRoot = require('../lib/repo-root');
         'switching off session summaries removed the MCP server registration');
     });
 
-    check('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it', () => {
-      // The non-negotiable: a silent skip is indistinguishable from the
-      // feature working, which is the exact bug this feature exists to fix.
-      if (probeHit) return; // a real claude on the probe list: cannot produce a miss here
+    // The non-negotiable this check states — "a silent skip is
+    // indistinguishable from the feature working, which is the exact bug this
+    // feature exists to fix" — was true of the check itself. It opened with
+    // `if (probeHit) return;`, so on any machine with claude installed at one
+    // of the fixed probe paths (/opt/homebrew/bin, /usr/local/bin — i.e. every
+    // Homebrew install) it printed `ok` having asserted nothing. CI runners and
+    // this author's machine happen to miss the probe list, which is the only
+    // reason it was ever exercised at all.
+    if (probeHit) {
+      skip('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it',
+        `a real claude binary is on the fixed probe list on this machine, so registration cannot miss here `
+        + `(the check needs a machine where claude is absent from ${claudeBinMod.CANDIDATES.slice(1).join(', ')})`);
+    } else check('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it', () => {
       const home = mkFixture(['.claude']);
       const reg = runCli(home, ['mcp', 'register'], { SHELL: deadShell });
       assert.strictEqual(reg.status, 0, reg.stderr);
@@ -25454,6 +25511,10 @@ const repoRoot = require('../lib/repo-root');
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
   // file: these are the actual regression guards, run last so they observe
   // everything the suite did, not just one code path's isolation.
+  // FIRST: a check still in flight here has not asserted yet, and never will
+  // in a way anyone sees — its ok/FAIL line lands after the tally below has
+  // printed and, on failure, exited.
+  checkNothingLeftInFlight();
   check('the suite never wrote to the real (non-MEMBRIDGE_HOME) ~/.membridge/config.json', () => {
     assert.strictEqual(snapshotRealConfig(), realConfigBeforeSuite,
       'the real user config changed during this run -- MEMBRIDGE_HOME isolation leaked');

@@ -21,7 +21,16 @@
 const noEgress = require('./no-egress');
 noEgress.install();
 
-const assert = require('assert');
+// SECOND, and before any `require('assert')` anywhere: a check that makes no
+// assertion cannot fail, and prints `ok` all the same. check-accounting.js
+// hands every test/ file a counting copy of assert and turns a zero-assertion
+// check into a FAIL. Its header documents the four live instances that made
+// this necessary, and — more importantly — the three shapes it still cannot
+// catch. Shared with run-tests.js so the gate covers both runners.
+const accounting = require('./check-accounting');
+accounting.install();
+
+const assert = require('assert'); // the counting copy, via install() above
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -106,17 +115,11 @@ const P = n => PORT_BASE + n;
 
 const results = [];
 // Supports both sync and async fn; async callers must `await check(...)`.
-function check(name, fn) {
-  const onOk = () => { results.push([name, null]); console.log(`  ok    ${name}`); };
-  const onErr = err => { results.push([name, err]); console.log(`  FAIL  ${name}\n        ${err.message}`); };
-  try {
-    const ret = fn();
-    if (ret && typeof ret.then === 'function') return ret.then(onOk, onErr);
-    onOk();
-  } catch (err) {
-    onErr(err);
-  }
-}
+// A check that makes no assertion FAILS; one still in flight at finish() is
+// named rather than silently dropped; checkNoThrow() is the documented way to
+// mean "the assertion is that this does not throw"; skip() is the way to say
+// a precondition was not met, out loud. See test/check-accounting.js.
+const { check, checkNoThrow, skip, checkNothingLeftInFlight } = accounting.createCheck(results);
 
 const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
@@ -173,6 +176,11 @@ const BIN = path.join(__dirname, '..', 'bin', 'membridge.js');
 // format ("N/M checks passed") is load-bearing — test/run.js greps for it to
 // tell "green" from "crashed before the summary printed".
 function finish() {
+  // FIRST, before anything else is tallied: a check still in flight here has
+  // not asserted yet, and never will in a way anyone sees — its own ok/FAIL
+  // line lands after this function has printed the total and, on failure,
+  // exited.
+  checkNothingLeftInFlight();
   check('the suite never wrote to the real (non-MEMBRIDGE_HOME) ~/.membridge/config.json', () => {
     assert.strictEqual(snapshotRealConfig(), realConfigBeforeSuite,
       'the real user config changed during this run -- MEMBRIDGE_HOME isolation leaked');
@@ -191,7 +199,9 @@ function finish() {
 
 module.exports = {
   ROOT, P, PORT_BASE, BIN,
-  check, results, finish,
+  check, checkNoThrow, skip, results, finish,
+  assert, // the counting copy; suites that `require('assert')` get it anyway
+  assertionsMade: accounting.assertionsMade,
   noEgress,
   jsonl, read, readSource, count, notRoot, realCanon,
   startJsonMock, waitForHttp, post, httpGet, httpPost,
