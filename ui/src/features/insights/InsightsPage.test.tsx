@@ -160,13 +160,13 @@ describe('InsightsPage', () => {
 
   it('renders no dollar figure anywhere', async () => {
     const { container } = renderApp({}, <InsightsPage />)
-    await screen.findByText(/repeat file opens/i)
+    await screen.findByText('Repeat file opens')
     expect(container.textContent).not.toMatch(/\$/)
   })
 
   it('has no heat grid', async () => {
     renderApp({}, <InsightsPage />)
-    await screen.findByText(/repeat file opens/i)
+    await screen.findByText('Repeat file opens')
     expect(screen.queryByText(/when the team works/i)).toBeNull()
   })
 
@@ -269,7 +269,7 @@ describe('InsightsPage', () => {
     const client = new FakeDataClient()
     const insightsSpy = vi.spyOn(client, 'getInsights')
     renderWith(client, <InsightsPage />)
-    await screen.findByText(/repeat file opens/i)
+    await screen.findByText('Repeat file opens')
     expect(insightsSpy).toHaveBeenCalledWith(30)
 
     await userEvent.click(screen.getByRole('button', { name: '7 days' }))
