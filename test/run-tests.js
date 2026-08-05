@@ -24194,34 +24194,60 @@ const repoRoot = require('../lib/repo-root');
         'teamRowsFor still serves the stale rows; that is a separate, wider fix');
     });
 
-    check('notes-backfill: unlinking SELF-HEALS — an index built while linked is removed on the next pass', () => {
-      // The self-heal, and the half that reaches installs which unlinked before
-      // this shipped: they already have both the stale rows and the stale index
-      // on disk, and the "never rewrite an existing index" guard means nothing
-      // would ever have gone back for them.
+    check('notes-backfill: unlinking SELF-HEALS — a full index left by a pre-fix unlink is emptied', () => {
+      // WHAT THIS BRANCH IS ACTUALLY FOR, stated narrowly on purpose.
+      // teamsync.unlinkProject erases this index at the source, so an unlink
+      // performed on a build that has that erase needs nothing from here. The
+      // gap is the install that unlinked EARLIER: it still has the stale rows
+      // and a FULL index on disk, unlinkProject will never run for it again, and
+      // the "never write over an existing index" guard means nothing else would
+      // ever go back for it. This pass is what reaches those.
+      //
+      // EMPTIED, not deleted — matching the source erase, and for the reason
+      // that erase gives: the backfill guard is "does an index exist", so
+      // removing the file would hand the next pass permission to rebuild it from
+      // the rows the unlink left behind.
       const hp = path.join(ROOT, 'projects', 'backfill-selfheal');
       fs.mkdirSync(hp, { recursive: true });
       linkTeam(hp);
       const st = { projects: { [hp]: { teamEntries: [storedRow] } } };
       assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T12:00:00Z'), [hp],
         'precondition: while linked, the index is built');
-      assert.ok(fs.existsSync(notesStore.notesPath(hp)));
       const ix = notesStore.read(hp);
       assert.ok(ix && ix.prose.length, 'precondition: it really holds teammate content');
 
-      // Now unlink it the way teamsync.unlinkProject does — drop team.json and
-      // leave teamEntries exactly where they were.
+      // Drop team.json and leave teamEntries and the full index exactly where
+      // they are — the on-disk shape of every project unlinked before the source
+      // erase shipped.
       fs.unlinkSync(path.join(hp, '.membridge', 'team.json'));
       assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T13:00:00Z'), [],
         'an unlinked project is not "rebuilt"; it is cleaned up');
-      assert.ok(!fs.existsSync(notesStore.notesPath(hp)),
-        'the stale index must be REMOVED — leaving it serves a project the user unlinked');
-      // Re-linking restores it, which is what makes the deletion safe: the file
-      // is a derived cache, so the worst case of being wrong is one rebuild.
+      const erased = notesStore.read(hp);
+      assert.ok(erased, 'the index file must survive as an empty index, not be removed');
+      assert.strictEqual((erased.prose || []).length, 0,
+        'the stale teammate prose must be gone — leaving it serves a project the user unlinked');
+      assert.deepStrictEqual(erased.byFile || {}, {},
+        'and so must the per-file notes');
+
+      // Idempotent: a second pass must not rewrite an already-empty index every
+      // time the daemon ticks.
+      const before = fs.statSync(notesStore.notesPath(hp)).mtimeMs;
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T13:30:00Z'), []);
+      assert.strictEqual(fs.statSync(notesStore.notesPath(hp)).mtimeMs, before,
+        'an already-empty index was rewritten — clearTeammateNotes must no-op');
+
+      // Re-linking refills it through the PULL path, not through this backfill:
+      // afterTeamPull's changed-project loop calls rebuildTeammateNotes
+      // unconditionally, while the backfill deliberately never writes over an
+      // index that exists. Asserted rather than assumed, because "the erase is
+      // recoverable" is the whole reason emptying is safe.
       linkTeam(hp);
-      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T14:00:00Z'), [hp],
-        're-linking must rebuild the index from teamEntries');
-      assert.ok(fs.existsSync(notesStore.notesPath(hp)));
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T14:00:00Z'), [],
+        'the backfill must not write over an existing index, even an empty one');
+      assert.ok(notesStore.rebuildTeammateNotes(hp, [storedRow], '2026-07-28T14:00:00Z'),
+        're-linking must be able to refill the index from the rows');
+      assert.ok((notesStore.read(hp).prose || []).length,
+        'and the refilled index must hold the teammate content again');
     });
 
     check('notes-backfill: a still-linked project with an index is left completely alone', () => {
