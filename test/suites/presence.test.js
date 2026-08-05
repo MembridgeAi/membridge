@@ -119,6 +119,78 @@ async function main() {
     assert.ok(authors.size >= 2, `expected several authors unfiltered, got ${[...authors]}`);
   });
 
+  // --- graded presence ---
+  // `live` alone is one flat 15-minute flag, so a row that arrived 20 seconds
+  // ago and one that arrived 14 minutes ago are indistinguishable — which is
+  // why the tool had to caveat every live flag equally and say "never report
+  // this as presence". Grading it removes the need for that blanket hedge:
+  // a row inside one sync interval really does mean someone is working.
+  //
+  // The threshold is DERIVED, not picked. A row's created_at lags the actual
+  // work by at most one push interval (config.intervalSec, default 60s), so
+  // arrival within one interval bounds the real work at ~2 intervals ago.
+  {
+    const util2 = require('../../lib/util');
+
+    check('presence: a row that arrived seconds ago is ACTIVE, not merely live', () => {
+      assert.strictEqual(util2.presenceOf(iso(20 * 1000), { intervalSec: 60 }), 'active');
+    });
+
+    check('presence: a row from several minutes ago is RECENT, not active', () => {
+      assert.strictEqual(util2.presenceOf(iso(5 * 60 * 1000), { intervalSec: 60 }), 'recent',
+        'five minutes old must not claim someone is at the keyboard');
+    });
+
+    check('presence: a row older than the live window is IDLE', () => {
+      assert.strictEqual(util2.presenceOf(iso(40 * 60 * 1000), { intervalSec: 60 }), 'idle');
+      assert.strictEqual(util2.presenceOf(iso(40 * 24 * 3600 * 1000), { intervalSec: 60 }), 'idle');
+    });
+
+    check('presence: the active window SCALES with the configured sync interval', () => {
+      // A team syncing every 5 minutes cannot know anything to 60-second
+      // precision, and one syncing every 10 seconds should not be told to wait
+      // a minute. Hardcoding 90s would be wrong for both.
+      const ts = iso(150 * 1000); // 2.5 min old
+      assert.strictEqual(util2.presenceOf(ts, { intervalSec: 300 }), 'active',
+        'a slow-syncing team never reaches active');
+      assert.strictEqual(util2.presenceOf(ts, { intervalSec: 10 }), 'recent',
+        'a fast-syncing team called a 2.5-minute-old row active');
+    });
+
+    check('presence: garbage or missing timestamps are idle, never active', () => {
+      for (const bad of [null, undefined, '', 'not-a-date']) {
+        assert.strictEqual(util2.presenceOf(bad, { intervalSec: 60 }), 'idle',
+          `presence guessed on ${JSON.stringify(bad)}`);
+      }
+    });
+
+    check('presence: a future timestamp does not read as active', () => {
+      // Exactly the shape the model-authored ts bug produced: 69 minutes ahead.
+      assert.strictEqual(util2.presenceOf(iso(-69 * 60 * 1000), { intervalSec: 60 }), 'idle',
+        'a future-dated row claimed someone was working');
+    });
+
+    check('presence: a LONG session reads as working — prompted long ago, still active', () => {
+      // The case a single timestamp cannot express. Someone asks a question,
+      // then the agent runs tools for twenty minutes. Judged on the ask, they
+      // look gone; judged on their newest activity, they are plainly working.
+      // presence is therefore computed from lastActivityAt, never from ts.
+      const promptedAt = iso(13 * 60 * 1000);
+      const stillGoing = iso(15 * 1000);
+      assert.strictEqual(util2.presenceOf(promptedAt, { intervalSec: 60 }), 'recent',
+        'fixture: a 13-minute-old prompt is not itself active');
+      assert.strictEqual(util2.presenceOf(stillGoing, { intervalSec: 60 }), 'active',
+        'the newest activity is what says someone is still working');
+    });
+
+    check('presence: entries carry the graded field, so the answer can say "now"', () => {
+      const { entries } = activity.recentActivity(50, { author: 'priya' });
+      assert.ok(entries.length, 'fixture: priya has a row');
+      assert.ok(['active', 'recent', 'idle'].includes(entries[0].presence),
+        `expected a graded presence, got ${entries[0].presence}`);
+    });
+  }
+
   check('presence: the MCP tool accepts an author and passes it through', () => {
     const mcp = require('../../lib/mcp');
     const out = mcp.getRecentActivity(50, { author: 'andrew' });

@@ -8,12 +8,24 @@
   applied before the page is cut, which is the part that actually broke it
   before: narrowing a page of fifty to one person routinely left nothing, and
   nothing reads as "they are idle" rather than "ask for more rows".
-  The answer is deliberately phrased as **"as of four minutes ago"** rather
-  than "right now". This reads memory that has already synced to your machine,
-  so there is always some lag, and a live badge means a row arrived recently —
-  good evidence of recent work, never proof someone is at the keyboard. That
-  distinction only became trustworthy now that timestamps come from a real
-  clock (below).
+- **"Working now" is a thing MemBridge can actually say.** Liveness used to be
+  one flat fifteen-minute flag, so a teammate whose work landed twenty seconds
+  ago and one who stopped fourteen minutes ago looked identical — which meant
+  the only safe thing to report about either was a hedge. Activity is now
+  graded **active / recent / idle**, and `active` is a claim worth making: a
+  teammate's work reaches the backend within one sync cycle, so a row that new
+  cannot exist unless their tooling was running. The threshold follows your
+  configured sync interval instead of being a fixed number, because a team
+  syncing every ten seconds and one syncing every five minutes cannot both be
+  described by the same window.
+  Grading is on **newest activity, not the last prompt**. Someone asks a
+  question and their agent then works for twenty minutes: judged on the ask
+  they look gone, judged on what they are actually doing they are plainly
+  still going. So "asked about the invite flow 13 minutes ago and still
+  working on it" is now expressible, and it is the honest answer.
+  Anything older still gets its real age rather than a present-tense claim,
+  and that whole distinction only became trustworthy now that timestamps come
+  from a real clock (below).
 
 - **Search runs on a real search engine now.** Memory is indexed into SQLite
   FTS5 and ranked by BM25 instead of being scored by a hand-rolled scan over
