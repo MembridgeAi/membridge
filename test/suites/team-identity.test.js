@@ -29,6 +29,7 @@ const util = require('../../lib/util');
 const teamsync = require('../../lib/teamsync');
 const activity = require('../../lib/activity');
 const feed = require('../../lib/feed');
+const { startServer } = require('../../lib/server');
 
 const TEAMMATE_ID = '11111111-2222-3333-4444-555555555555';
 
@@ -320,6 +321,131 @@ async function main() {
         const stU = util.loadState();
         delete stU.projects[proj].teamAccessLost;
         util.saveState(stU);
+      });
+    }
+
+    // --- 7. #59: the person filter's zero must say WHICH zero it is ---
+    //
+    // Sections 1-6 close the leak going FORWARD: rows pulled from here on
+    // carry author_id. They do nothing for rows already on disk. Those were
+    // pulled before author_id was projected, so they sit in state with a name
+    // and no id — 100 of the 200 team rows on the author's own machine, at the
+    // time this was written.
+    //
+    // The picker sends a uuid (`value={m.id}`, ui/src/features/search/
+    // SearchPage.tsx) and matchesAuthor keys on `entry.authorId === want`
+    // first (lib/activity.js). A uuid is not a substring of a display name, so
+    // every one of those rows is unreachable by the filter — and the empty
+    // result it produces is BYTE-IDENTICAL to the empty result for a teammate
+    // who has genuinely done nothing. The user is shown a confident zero over
+    // history that exists, with nothing to notice.
+    //
+    // GET /api/team/members therefore carries preFixLocal: { entries,
+    // projects } on every member, ALWAYS — zero included. An absent field
+    // would be indistinguishable from "no problem", which is the same silent
+    // zero one layer up.
+    {
+      // A second real member, because the whole claim is that two members must
+      // come back DISTINGUISHABLE. One with unattributable history, one with
+      // none: if a single value can be read off both, the field proves nothing.
+      const HOME_MAIN = process.env.MEMBRIDGE_HOME;
+      const HOME_MATE = path.join(ROOT, 'home-prefix-teammate');
+      fs.mkdirSync(HOME_MATE, { recursive: true });
+      process.env.MEMBRIDGE_HOME = HOME_MATE;
+      util.ensureConfig();
+      const mateCfg = util.loadUserConfig();
+      mateCfg.team = { ...(mateCfg.team || {}), encrypt: false };
+      util.saveUserConfig(mateCfg);
+      await teamsync.signup(util.getConfig(), 'prefix-mate@test.dev', 'pw-pf', 'Andrew Brown');
+      await teamsync.joinTeam(util.getConfig(), team.invite_code);
+      process.env.MEMBRIDGE_HOME = HOME_MAIN;
+
+      // Two projects' worth of pre-fix rows for Andrew, so `projects` has
+      // something to count that is not just `entries`. Plus one row that DOES
+      // carry an id: it must NOT be counted, because the filter already
+      // reaches it and reporting it as a gap would overstate the problem.
+      const projB = path.join(ROOT, 'projects', 'identity-app-b');
+      fs.mkdirSync(projB, { recursive: true });
+      const preFix = (session, over) => ({
+        author: 'Andrew Brown', ts: '2026-07-04T09:00:00.000Z', source: 'Codex',
+        session, ask: 'a', summary: 'pre-fix row', files: [], ...over,
+      });
+      const st7 = util.loadState();
+      st7.projects[proj] = {
+        events: [],
+        teamEntries: [
+          preFix('pf-1'),
+          preFix('pf-2'),
+          // Same person, id present. Reachable by the uuid filter already.
+          preFix('post-fix', { authorId: TEAMMATE_ID }),
+          // A DIFFERENT teammate's pre-fix row. Must not land on Andrew.
+          preFix('other-person', { author: 'Someone Else' }),
+        ],
+      };
+      st7.projects[projB] = { events: [], teamEntries: [preFix('pf-3')] };
+      util.saveState(st7);
+
+      const membersVia = async () => {
+        const port = P(4);
+        const srv = startServer(port, { retries: 0 });
+        try {
+          await h.waitForHttp(`http://127.0.0.1:${port}/api/status`);
+          const res = await fetch(`http://127.0.0.1:${port}/api/team/members?teamId=${encodeURIComponent(team.team_id)}`);
+          return (await res.json()).members;
+        } finally {
+          await new Promise(r => srv.close(r));
+        }
+      };
+      const byName = rows => new Map(rows.map(m => [m.display_name, m]));
+
+      // The bug itself, asserted rather than described. If this check ever
+      // goes green on its own, the filter reaches these rows and preFixLocal
+      // has no job left.
+      check('#59: the filter genuinely cannot see a pre-fix row — the zero is real', () => {
+        const hit = activity.searchMemory({ query: 'pre-fix', limit: 25, author: TEAMMATE_ID })
+          .results.filter(r => String(r.session || '').startsWith('pf-'));
+        assert.strictEqual(hit.length, 0,
+          `a uuid filter reached ${hit.length} id-less rows — it cannot, and this suite's premise is stale`);
+      });
+
+      await check('#59: a member with unattributable history is DISTINGUISHABLE from one with none', async () => {
+        const m = byName(await membersVia());
+        const mate = m.get('Andrew Brown');
+        const me = m.get('Me');
+        assert.ok(mate && me, `expected both members in the roster, got ${[...m.keys()].join(', ')}`);
+        // The whole point: same visible search result (zero), different field.
+        assert.notDeepStrictEqual(mate.preFixLocal, me.preFixLocal,
+          'both members report the same preFixLocal — the silent zero is intact, just relocated');
+        assert.strictEqual(mate.preFixLocal.entries, 3,
+          `expected Andrew's 3 pre-fix rows, got ${mate.preFixLocal.entries} `
+          + '(4 would mean the id-carrying row was counted; 5 would mean another person\'s row landed on him)');
+        assert.strictEqual(mate.preFixLocal.projects, 2,
+          'the two projects holding those rows were not counted distinctly');
+      });
+
+      await check('#59: the field is present carrying ZERO, never absent — absence would be the same bug', async () => {
+        const me = byName(await membersVia()).get('Me');
+        assert.ok(Object.prototype.hasOwnProperty.call(me, 'preFixLocal'),
+          'a member with no gap carries no field at all, so the UI cannot tell "no gap" from "old daemon"');
+        assert.deepStrictEqual(me.preFixLocal, { entries: 0, projects: 0 },
+          'the zero floor is not explicit, so `m.preFixLocal.entries > 0` cannot be written');
+      });
+
+      await check('#59: a revoked project is not counted (util.teamRowsFor, not proj.teamEntries)', async () => {
+        const stR = util.loadState();
+        stR.projects[projB].teamAccessLost = true;
+        util.saveState(stR);
+        try {
+          const mate = byName(await membersVia()).get('Andrew Brown');
+          assert.strictEqual(mate.preFixLocal.entries, 2,
+            'rows from a project this machine may no longer read were still counted');
+          assert.strictEqual(mate.preFixLocal.projects, 1,
+            'a revoked project was still counted, so the user would be told to repull a project they cannot read');
+        } finally {
+          const stU = util.loadState();
+          delete stU.projects[projB].teamAccessLost;
+          util.saveState(stU);
+        }
       });
     }
   } finally {
