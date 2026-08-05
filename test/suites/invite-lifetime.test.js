@@ -142,10 +142,10 @@ async function main() {
     // calls rotate_invite. Below: the member reads the code while still on the
     // team, the owner removes them, and they walk straight back in.
     //
-    // FIXTURE REPAIR (039, agent-removal lane — flagged to the lead, revert on
+    // FIXTURE REPAIR (041, agent-removal lane — flagged to the lead, revert on
     // request). This block read the code through the MEMBER's dashboard,
     // because that is what the daemon served every member at the time it was
-    // written. 039 §2 stops it: my_teams returns invite_code to managers only,
+    // written. 041 §2 stops it: my_teams returns invite_code to managers only,
     // and lib/server.js teamPayload nulls it for a non-manager row, so the
     // member-side read now correctly yields null and this `assert.ok` — which
     // is fixture scaffolding, not one of the eight pinned checks — aborted the
@@ -155,7 +155,7 @@ async function main() {
     // Read through the OWNER instead. Nothing about the checks below changes:
     // closing the member-side READ narrows how a member obtains the code, it
     // does not retract a copy they already hold — from the dashboard before
-    // 039, from an onboarding doc, or from the manager who pasted it into a
+    // 041, from an onboarding doc, or from the manager who pasted it into a
     // channel they can still read. `seenCode` stands in for exactly that copy,
     // which is the credential "a removed member cannot re-join with the invite
     // code they saw as a member" is about. The member-side read returning null

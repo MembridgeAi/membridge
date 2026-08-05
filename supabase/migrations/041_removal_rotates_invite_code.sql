@@ -1,5 +1,15 @@
--- 039_removal_rotates_invite_code.sql: make removing a member actually remove
+-- 041_removal_rotates_invite_code.sql: make removing a member actually remove
 -- them, and stop handing every member a permanent join credential.
+--
+-- NUMBERING: written as 039 and renumbered to 041 before merge — 039 had been
+-- allocated to two lanes at once. The security lane holds 037, 038 and 039
+-- (037_project_access_team_scope, 038_invite_redeem_atomic,
+-- 039_team_audit_created_at) and 040 is a privilege revoke on memory_entries.
+-- Every internal self-reference below (§1/§2/§3) and every mention in lib/,
+-- test/ and docs/ was renumbered with it. A comment anywhere pointing at "039"
+-- for invite-code rotation is stale and means THIS file. If an earlier cut was
+-- applied anywhere as 039, it is byte-identical apart from these comments —
+-- re-applying this file is a no-op, not a second migration.
 --
 -- THE FINDING (pinned as failing checks in test/suites/invite-lifetime.test.js
 -- on branch agent-hunt, commit fcab31a). teams.invite_code never expires, has
@@ -53,8 +63,8 @@
 -- second. The live DB has no migration history (migrations are applied by
 -- hand), so every statement here is re-runnable.
 --
--- Rollback: supabase/rollback/pre-039-removal-rotates-invite.sql restores both
--- functions to their pre-039 bodies verbatim.
+-- Rollback: supabase/rollback/pre-041-removal-rotates-invite.sql restores both
+-- functions to their pre-041 bodies verbatim.
 
 -- ---------------------------------------------------------------------------
 -- §1. remove_member rotates the team's standing invite code.
@@ -102,7 +112,7 @@ begin
     raise exception 'the team owner cannot be removed';
   end if;
   delete from public.team_members where team_id = p_team and user_id = p_user;
-  -- 039: the removed member may be holding the team's standing invite code or
+  -- 041: the removed member may be holding the team's standing invite code or
   -- an invite link. Both are now dead -- for everyone. See the CONSEQUENCE
   -- block at the top of this file: this rotation is unconditional on purpose.
   update public.teams set invite_code = gen_random_uuid() where id = p_team;
@@ -159,7 +169,7 @@ as $$
     t.id,
     t.name,
     m.role,
-    -- 039: managers only. A member row carries null here.
+    -- 041: managers only. A member row carries null here.
     case when m.role in ('owner', 'admin') then t.invite_code else null end,
     (select count(*) from public.team_members mc where mc.team_id = t.id),
     t.created_at

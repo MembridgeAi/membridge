@@ -1,5 +1,5 @@
 'use strict';
-// Removal durability — 039_removal_rotates_invite_code.sql, and the daemon
+// Removal durability — 041_removal_rotates_invite_code.sql, and the daemon
 // side of it.
 //
 // The findings themselves are pinned in test/suites/invite-lifetime.test.js
@@ -103,8 +103,8 @@ async function main() {
     // its own. A plain member can neither mint an invite (create_invite is
     // is_team_manager-gated) nor revoke one, so there is no operation they
     // have that needs it — it is a credential they can spend but not manage.
-    // 039 §2 returns null in that column for a non-manager row, and
-    // teamPayload restates the rule daemon-side so a backend without 039 does
+    // 041 §2 returns null in that column for a non-manager row, and
+    // teamPayload restates the rule daemon-side so a backend without 041 does
     // not leak through the client either.
     await check('an ordinary member is not handed the team\'s standing invite code', async () => {
       const row = await teamRowFor('member', alpha.team_id);
@@ -122,7 +122,7 @@ async function main() {
         `the flattened inviteCode is a second copy of the same credential, got ${JSON.stringify(res.body.inviteCode)}`);
     });
 
-    // COUNTER-CHECK — passes before AND after 039. The cheapest wrong fix is
+    // COUNTER-CHECK — passes before AND after 041. The cheapest wrong fix is
     // to null invite_code for everyone, which closes every leak and also
     // removes the only way to invite anybody.
     await check('a manager still reads the standing invite code', async () => {
@@ -166,7 +166,7 @@ async function main() {
       const rejoin = await apiAs('bystander', 'POST', '/api/team/join', { inviteCode: alphaCodeBefore });
       assert.notStrictEqual(rejoin.status, 200,
         'the old standing code must be dead for EVERYONE after a removal, not only for the ' +
-        'person removed — see the CONSEQUENCE block in migration 039');
+        'person removed — see the CONSEQUENCE block in migration 041');
     });
 
     await check('removing a member revokes the team\'s outstanding invite links', async () => {
@@ -178,7 +178,7 @@ async function main() {
         'an invite link minted before the removal must not still redeem afterwards');
     });
 
-    // COUNTER-CHECKS — pass before AND after 039. A rotation scoped to "every
+    // COUNTER-CHECKS — pass before AND after 041. A rotation scoped to "every
     // team the actor manages", or to the whole invites table, would satisfy
     // every check above and quietly lock a second team out.
     await check('a removal in one team does not rotate another team\'s invite code', async () => {

@@ -2,13 +2,13 @@
 
 Status: **open — Marco decides.** Nothing in this note is implemented.
 Raised by ticket REM-3 (agent-removal lane, 2026-08-05). Related work that
-IS implemented on `agent-removal`: migration 039 closes the re-join half of
+IS implemented on `agent-removal`: migration 041 closes the re-join half of
 this problem.
 
 ## What is true today
 
 `remove_member` (`supabase/migrations/002_team_v2.sql:179`, restated in
-`039_removal_rotates_invite_code.sql` §1) deletes one `team_members` row.
+`041_removal_rotates_invite_code.sql` §1) deletes one `team_members` row.
 It does not touch `public.team_keys`, and there is no path that does:
 
 * `team_keys` rows are immutable by design — 009 gives the table no UPDATE
@@ -33,8 +33,8 @@ It does not touch `public.team_keys`, and there is no path that does:
   run it after a removal.
 
 Net: a removed member keeps decrypting **everything they ever synced**, and
-until 039 they could also re-join and be sealed into the new epoch by the
-join-seal path. 039 closes the re-join half. This note is about the other
+until 041 they could also re-join and be sealed into the new epoch by the
+join-seal path. 041 closes the re-join half. This note is about the other
 half.
 
 ## The part no design can fix
@@ -51,7 +51,7 @@ reads as a revocation it is not.
 
 ## Options
 
-### A. Leave it (status quo + 039)
+### A. Leave it (status quo + 041)
 
 Rotation stays lazy; removal only kills the join credential.
 

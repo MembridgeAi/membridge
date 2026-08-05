@@ -246,7 +246,7 @@ function createMockSupabase() {
           team_id: m.teamId,
           team_name: t.name,
           role: m.role,
-          // 039 §2: the standing invite code goes to MANAGERS only. A plain
+          // 041 §2: the standing invite code goes to MANAGERS only. A plain
           // member's row keeps the column and carries null in it — the
           // RETURNS TABLE signature is fixed, so this is a null value rather
           // than an absent key, and clients that read it positionally are
@@ -306,7 +306,7 @@ function createMockSupabase() {
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === body.p_user);
       if (i !== -1) members.splice(i, 1);
       cascadeAccessRows(body.p_team, body.p_user); // 024's FK cascade (see 029 §5)
-      // 039 §1: removal rotates the team's standing invite code AND revokes
+      // 041 §1: removal rotates the team's standing invite code AND revokes
       // every outstanding invite link, unconditionally. Both halves matter: a
       // departing member may hold either credential, and create_invite
       // defaults to no expiry and no use cap, so the link they joined with
