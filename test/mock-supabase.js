@@ -116,6 +116,10 @@ function createMockSupabase() {
     // service that is down while the network is up). Sign-out must still
     // clear this machine AND must not claim the session was revoked.
     failLogout: false,
+    // "041_project_stats_carry_archived.sql has been applied": project_stats
+    // stops filtering archived projects out and carries archived_at as a
+    // column instead. Default false = the live backend as it stands today.
+    projectStatsCarriesArchived: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -801,9 +805,23 @@ function createMockSupabase() {
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const teamEq = (url.searchParams.get('team_id') || '').replace(/^eq\./, '');
+        // Two backend shapes, because both exist in the wild and the client has
+        // to be right against each:
+        //
+        //   pre-041  — `where archived_at is null and can_see_project(...)`.
+        //              An archived project and a revoked one are both simply
+        //              ABSENT, which is the conflation 041 exists to end.
+        //   post-041 — `where can_see_project(...)`, with archived_at carried
+        //              as a COLUMN. Presence now means exactly "you may see
+        //              this"; archived is read off the row.
+        //
+        // flags.projectStatsCarriesArchived selects the post-041 shape. It
+        // defaults to the shape the LIVE backend has today, so every existing
+        // caller and suite keeps seeing what it saw.
+        const carriesArchived = flags.projectStatsCarriesArchived;
         const rows = projects
-          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) && !p.archivedAt &&
-            canSeeProject(p.id, userId))
+          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) &&
+            (carriesArchived || !p.archivedAt) && canSeeProject(p.id, userId))
           .map(p => {
             const es = entries.filter(e => e.project_id === p.id);
             return {
@@ -811,6 +829,10 @@ function createMockSupabase() {
               last_activity: es.length ? es.map(e => e.ts).sort().pop() : null,
               contributors: new Set(es.map(e => e.author_id)).size,
               entries: es.length,
+              // Appended, never inserted: `create or replace view` can only add
+              // columns at the end, and a pre-041 backend has no such column at
+              // all — absent, which is not the same as null.
+              ...(carriesArchived ? { archived_at: p.archivedAt || null } : {}),
             };
           });
         return json(res, 200, rows);
