@@ -162,6 +162,15 @@ export interface StreamEntry {
   // rare session-less row (bare plumbing); such a row is never merged with
   // anything, including another session-less row.
   session: string | null
+  // The session's GOAL, verbatim: "the why behind the session in your own
+  // words ... never a restated prompt" (lib/digest.js's own instruction to the
+  // agent that writes it). Carried SEPARATELY from `intent`, which is already
+  // goal-or-ask (mappers.intentOf), because the two are not interchangeable
+  // copy: a goal is a written statement of purpose, an ask is whatever the
+  // person typed, and on real data that is routinely "continue", "yes" or
+  // "fill it in". A surface that wants purpose has to tell them apart.
+  // Optional, so every hand-built fixture keeps compiling.
+  goal?: string | null
   // The daemon's own two markers about WHY this row's text is what it is
   // (lib/feed.js normalizeLocal/normalizeTeam ship both on every entry).
   // Optional, so a caller that builds a StreamEntry by hand -- and every
@@ -345,6 +354,8 @@ export interface RawDayDigest {
   text?: string
   sources?: Partial<DayDigestSource>[]
   sessions?: number
+  summarized?: number
+  omittedSessions?: number
   entries?: number
   complete?: boolean
   /** The honesty valve for a capped or half-loaded day, and the one field here
@@ -363,7 +374,21 @@ export interface DayDigest {
   kind: string
   text: string
   sources: DayDigestSource[]
+  /** Distinct sessions the digest SAW on its page. */
+  sessions: number
+  /** Distinct session statements it had to work with. The honest measure of
+   *  how much of a day a sentence accounts for: `entries` counts prompt rows,
+   *  and a page boundary can hand one page most of a day's rows and none of
+   *  its summarized sessions. */
+  summarized: number
+  /** Statements the daemon had but dropped to its own clause cap. Unlike
+   *  `complete`, this is page-independent: no amount of paging brings them
+   *  back, so it is the one coverage fact a client can never supersede. */
+  omittedSessions: number
   entries: number
+  /** Whether the page this digest came from reached back past the START of
+   *  this day. A PER-PAGE fact, not a statement about the day: a client
+   *  holding several pages can have loaded the rest itself. */
   complete: boolean
   coverageNote: string | null
 }

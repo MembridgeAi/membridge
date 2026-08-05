@@ -123,7 +123,7 @@ describe('FeedPage', () => {
     vi.spyOn(c, 'getFeed').mockResolvedValue({
       entries: [entry({
         id: 'a', session: 's-1', outcome: 'Hook ownership now decided by durability',
-        decisions: '- Durability beats recency\n- Merged before writing settings.json',
+        goal: 'Make the summary hook fire on session boundaries instead of on edits',
       })],
       nextBefore: null, dayDigests: [],
     })
@@ -131,7 +131,10 @@ describe('FeedPage', () => {
 
     const card = (await screen.findByText('Hook ownership now decided by durability')).closest('.day-card') as HTMLElement
     expect(within(card).getByText('membridge').className).toContain('mono')
-    expect(card.querySelector('.day-card-intent')!.textContent).toBe('Durability beats recency.')
+    // What was DONE on top, what was ASKED FOR underneath. Two facts from two
+    // sources: built from the outcomes, both lines said the same thing twice.
+    expect(card.querySelector('.day-card-intent')!.textContent)
+      .toBe('Make the summary hook fire on session boundaries instead of on edits.')
     expect(container.querySelectorAll('.day-card')).toHaveLength(1)
   })
 
@@ -396,14 +399,27 @@ describe('feed: consolidated day cards', () => {
     expect(overviews).toEqual(['the day\'s distilled outcome'])
   })
 
-  it('carries a brief intent under the sentence, capped by how much was done', async () => {
-    const { container } = renderWith(marcosDay(), <FeedPage />)
+  it('carries what was ASKED under the sentence, never the sentence again', async () => {
+    // THE DEFECT this replaced: the intent was built from the day's bullets,
+    // which are the same session outcomes the digest joins to make the header,
+    // so every populated card in Andrew's feed printed its headline twice.
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [
+        entry({ id: 'm1', session: 's-m1', authorId: 'marco', author: 'Marco', at: '2026-07-29T20:00:00Z', outcome: 'a raw harvested line', goal: 'Ship the second wave of tickets' }),
+        entry({ id: 'm2', session: 's-m2', authorId: 'marco', author: 'Marco', at: '2026-07-29T19:00:00Z', distilled: true, outcome: 'the day\'s distilled outcome', intent: 'walk the app as a solo user for team-language bugs' }),
+        entry({ id: 'm3', session: 's-m3', authorId: 'marco', author: 'Marco', at: '2026-07-29T18:00:00Z', outcome: 'another harvested line', intent: 'hand off cleanly to Andrew before the pause' }),
+      ],
+      nextBefore: null, dayDigests: [],
+    })
+    const { container } = renderWith(c, <FeedPage />)
     await screen.findByText('the day\'s distilled outcome')
-    // Three sessions, so two sentences of intent, oldest work first, and never
-    // a repeat of the sentence directly above it.
+    // Three sessions, so two asks, oldest session first.
     const intent = container.querySelector('.day-card-intent')!.textContent!
-    expect(intent).toBe('another harvested line. a raw harvested line.')
+    expect(intent).toBe('hand off cleanly to Andrew before the pause. walk the app as a solo user for team-language bugs.')
+    // And not one word of the header, which is the whole defect.
     expect(intent).not.toContain('the day\'s distilled outcome')
+    expect(intent).not.toContain('harvested line')
   })
 
   it('states the session count', async () => {
@@ -513,10 +529,33 @@ describe('feed: consolidated day cards', () => {
   // The trap: EntryRow renders an empty outcome and a failed decrypt
   // identically ("No summary yet"), so a reader cannot tell them apart. A day
   // card must not inherit that ambiguity.
-  it('says an un-summarized day is un-summarized, and adds no intent to fill the gap', async () => {
+  // DEFECT 2, and the decision behind it. A card used to render "No summary
+  // yet for this day." and a paragraph under it, which read as a contradiction
+  // because BOTH lines came from the day's outcomes: the header said no outcome
+  // was recorded while the line under it printed outcomes.
+  //
+  // Now they are independent facts, and both are kept. The header is about what
+  // was DONE ("nobody has written up this work"); the intent is about what was
+  // ASKED, which is a different thing to know and, on a day with no summary, the
+  // only thing known at all. Withholding it would leave a card that says nothing
+  // whatsoever about a day that really happened. The two lines no longer
+  // contradict because they no longer describe the same thing.
+  it('still says an un-summarized day is un-summarized, and keeps the ask under it', async () => {
     const c = new FakeDataClient()
     vi.spyOn(c, 'getFeed').mockResolvedValue({
-      entries: [entry({ id: 'a', session: 'a', outcome: '', intent: 'wire the recall hook' })],
+      entries: [entry({ id: 'a', session: 'a', outcome: '', intent: 'wire the recall hook into the Stop path' })],
+      nextBefore: null, dayDigests: [],
+    })
+    const { container } = renderWith(c, <FeedPage />)
+    expect(await screen.findByText(NO_SUMMARY_OVERVIEW)).toBeInTheDocument()
+    expect(container.querySelector('.day-card-intent')!.textContent)
+      .toBe('wire the recall hook into the Stop path.')
+  })
+
+  it('adds no intent at all when the day captured no usable ask', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [entry({ id: 'a', session: 'a', outcome: '', intent: 'continue' })],
       nextBefore: null, dayDigests: [],
     })
     const { container } = renderWith(c, <FeedPage />)
@@ -598,10 +637,11 @@ describe('feed: a session targeted by ?session=', () => {
 // tests. These pin the wiring at the real component, and pin that a daemon
 // which does not serve it yet still renders a usable card.
 describe('feed: the daemon\'s day sentence', () => {
-  const withDigest = (over: Record<string, unknown> = {}) => {
+  const withDigest = (over: Record<string, unknown> = {}, extra: FeedEntry[] = []) => {
     const entries = [
-      entry({ id: 'a', session: 's-1', authorId: 'marco', author: 'Marco', at: '2026-07-29T20:00:00Z', outcome: 'one session\'s own outcome' }),
-      entry({ id: 'b', session: 's-2', authorId: 'marco', author: 'Marco', at: '2026-07-29T19:00:00Z', outcome: 'an earlier outcome' }),
+      entry({ id: 'a', session: 's-1', authorId: 'marco', author: 'Marco', at: '2026-07-29T20:00:00Z', outcome: 'one session\'s own outcome', intent: 'then package the dmg properly' }),
+      entry({ id: 'b', session: 's-2', authorId: 'marco', author: 'Marco', at: '2026-07-29T19:00:00Z', outcome: 'an earlier outcome', intent: 'get the install flow working end to end' }),
+      ...extra,
     ]
     const c = new FakeDataClient()
     vi.spyOn(c, 'getFeed').mockResolvedValue({
@@ -612,6 +652,9 @@ describe('feed: the daemon\'s day sentence', () => {
         kind: 'distilled',
         text: 'Worked on UI fixes, app install and dmg',
         sources: [{ entryId: 'a', session: 's-1', ts: '2026-07-29T20:00:00Z', project: 'membridge', projectId: null, distilled: true, text: 'x' }],
+        sessions: 2,
+        summarized: 2,
+        omittedSessions: 0,
         entries: 2,
         complete: true,
         coverageNote: null,
@@ -628,28 +671,47 @@ describe('feed: the daemon\'s day sentence', () => {
     expect(overviews).toEqual(['Worked on UI fixes, app install and dmg'])
   })
 
-  it('still carries the 1-to-3 sentence intent underneath it', async () => {
+  it('carries the ASK underneath it, which is a different sentence entirely', async () => {
     const { container } = renderWith(withDigest(), <FeedPage />)
     await screen.findByText('Worked on UI fixes, app install and dmg')
-    expect(container.querySelector('.day-card-intent')!.textContent)
-      .toBe('an earlier outcome. one session\'s own outcome.')
+    const intent = container.querySelector('.day-card-intent')!.textContent!
+    expect(intent).toBe('get the install flow working end to end. then package the dmg properly.')
+    expect(intent).not.toContain('Worked on UI fixes')
   })
 
-  it('renders a coverage note rather than swallowing it', async () => {
-    const note = 'Two sessions of this day could not be summarized.'
-    renderWith(withDigest({ coverageNote: note }), <FeedPage />)
+  // DEFECT 3. The note used to render whenever the daemon set one, and the
+  // daemon sets one per PAGE, so it fired on 3 of the 6 cards in Andrew's real
+  // feed including days that were fully loaded. At that rate it is decoration.
+  it('warns when the daemon dropped statements to its own cap', async () => {
+    const note = '2 more sessions not shown'
+    renderWith(withDigest({ omittedSessions: 2, coverageNote: note }), <FeedPage />)
     expect(await screen.findByText(note)).toBeInTheDocument()
   })
 
-  it('says so when the digest describes less of the day than is loaded', async () => {
-    renderWith(withDigest({ entries: 1, coverageNote: null }), <FeedPage />)
-    expect(await screen.findByText(/written from part of the day/i)).toBeInTheDocument()
-  })
-
-  it('shows no coverage note for a digest that covers the whole card', async () => {
+  it('shows no coverage note for a digest that saw the whole day', async () => {
     const { container } = renderWith(withDigest(), <FeedPage />)
     await screen.findByText('Worked on UI fixes, app install and dmg')
     expect(container.querySelector('.day-card-coverage')).toBeNull()
+  })
+
+  it('drops a page-truncation warning once the feed has loaded past that day', async () => {
+    // `complete: false` is a fact about the page the digest came from. The
+    // fixture's entries are all on 2026-07-29 and the feed has also loaded
+    // 2026-07-28, so the client is past the start of the day and the page's
+    // warning no longer describes anything.
+    const { container } = renderWith(withDigest(
+      { complete: false, coverageNote: 'showing only the part of this day that has loaded' },
+      [entry({ id: 'older', session: 's-old', at: '2026-07-28T20:00:00Z', outcome: 'the previous day' })],
+    ), <FeedPage />)
+    await screen.findByText('Worked on UI fixes, app install and dmg')
+    expect(container.querySelectorAll('.day-card-coverage')).toHaveLength(0)
+  })
+
+  it('keeps that warning while the feed is still mid-day', async () => {
+    // Nothing older than the day itself is loaded, so the client cannot say
+    // the rest of the day is in hand and the daemon's warning stands.
+    renderWith(withDigest({ complete: false, coverageNote: 'showing only the part of this day that has loaded' }), <FeedPage />)
+    expect(await screen.findByText('showing only the part of this day that has loaded')).toBeInTheDocument()
   })
 
   it('falls back to its own picked sentence against a daemon that sends none', async () => {

@@ -521,7 +521,7 @@ describe('DayPage: a card clicked out of a filtered feed', () => {
 // The day view renders the same day sentence the card does, from the same
 // field, and the same coverage note. Two surfaces, one source.
 describe('DayPage: the daemon\'s day sentence', () => {
-  const entries = [entry({ id: 'a', session: 's-1', outcome: 'one session\'s own outcome', intent: 'the ask' })]
+  const entries = [entry({ id: 'a', session: 's-1', outcome: 'one session\'s own outcome', intent: 'get the install flow working end to end' })]
   const render = (over: Record<string, unknown> = {}) => {
     const slug = buildDayCards(entries)[0].slug
     window.history.replaceState({}, '', dayHref(slug))
@@ -534,7 +534,7 @@ describe('DayPage: the daemon\'s day sentence', () => {
         kind: 'distilled',
         text: 'Worked on UI fixes, app install and dmg',
         sources: [{ entryId: 'a', session: 's-1', ts: '2026-07-29T20:00:00Z', project: 'membridge', projectId: null, distilled: true, text: 'x' }],
-        entries: 1, complete: true, coverageNote: null,
+        sessions: 1, summarized: 1, omittedSessions: 0, entries: 1, complete: true, coverageNote: null,
         ...over,
       }],
     })
@@ -549,8 +549,11 @@ describe('DayPage: the daemon\'s day sentence', () => {
   })
 
   it('renders a coverage note next to the sentence it qualifies', async () => {
-    const note = 'One session of this day could not be summarized.'
-    const { container } = render({ coverageNote: note })
+    // Only for a shortfall no paging can fix: the daemon HAD these statements
+    // and dropped them to its own clause cap. A page-truncation note is
+    // handled separately, and suppressed once the client has the whole day.
+    const note = '1 more session not shown'
+    const { container } = render({ omittedSessions: 1, coverageNote: note })
     await screen.findByText(note)
     expect(container.querySelector('.day-head-coverage')!.textContent).toBe(note)
   })

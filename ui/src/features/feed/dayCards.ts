@@ -1,4 +1,4 @@
-import { localDayKey } from '../../data/localTime'
+import { localDayKey, localDayRangeMs } from '../../data/localTime'
 import { clipWords } from '../../data/mappers'
 import type { DayDigest, FeedEntry } from '../../data/types'
 
@@ -364,13 +364,6 @@ export const NO_SUMMARY_OVERVIEW = 'No summary yet for this day.'
  *  without claiming to know what was in it. */
 export const OPAQUE_OVERVIEW = 'Encrypted: these sessions could not be read on this machine.'
 
-/** Said when the day view holds more of a day than the sentence above it was
- *  written from. The daemon derives a digest from the page it is served with,
- *  so a reader who has paged further back can be looking at sessions the
- *  sentence never saw. Naming that is the whole point: an out-of-date summary
- *  presented as current is the failure this product exists to avoid. */
-export const PARTIAL_DIGEST_NOTE = 'This summary was written from part of the day; more has loaded since.'
-
 export type DayOverviewKind = 'distilled' | 'summary' | 'undecryptable' | 'none'
 
 export interface DayOverview {
@@ -385,11 +378,9 @@ export interface DayOverview {
    *  the bullet list below know which line it is already showing. For a digest
    *  it is `sources[0].entryId`, which is the same streamEntryId. */
   fromEntryId: string | null
-  /** Non-null when the sentence does not cover the whole day. Rendered
-   *  wherever the sentence is, never swallowed: it is the difference between a
-   *  day summary that is true and one that quietly describes only part of the
-   *  day. Either the daemon's own `coverageNote`, or PARTIAL_DIGEST_NOTE when
-   *  this client has loaded more of the day than the digest was written from. */
+  /** Non-null when the sentence demonstrably does not cover the whole day, in
+   *  the daemon's own words. See coverageNoteFor below for when that is, and
+   *  for why the daemon's note is NOT simply rendered whenever it is set. */
   coverageNote: string | null
   /** Where the sentence came from. 'digest' is the daemon's general day
    *  header; 'pick' is this module choosing one session's outcome, which is
@@ -446,18 +437,53 @@ function digestKind(kind: string): DayOverviewKind {
   return kind === 'distilled' || kind === 'undecryptable' || kind === 'none' ? kind : 'summary'
 }
 
-export function pickDayOverview(entries: FeedEntry[], digest?: DayDigest | null): DayOverview {
+/** When the day's sentence gets a coverage warning under it, and it is a
+ *  NARROWER rule than "whenever the daemon set one". Measured against Andrew's
+ *  real feed, the naive version fired on 3 of 6 cards, which is the rate at
+ *  which a warning stops being read.
+ *
+ *  The daemon derives a digest from the ONE page it is served with, and
+ *  `complete` means only "this page reached back past the START of this day"
+ *  (lib/digest.js: `!(partialDay && partialDay === bucket.day)`). It is a fact
+ *  about a page, not about a day. A client holds several pages and may have
+ *  loaded the rest itself, at which point rendering that page's note verbatim
+ *  warns about a gap that no longer exists. That is what made it fire on cards
+ *  showing a complete day.
+ *
+ *  So, in order:
+ *
+ *   1. Nothing on a 'none' or 'undecryptable' header. There is no sentence for
+ *      the note to qualify: the header already says nothing is known, and
+ *      "this summary is partial" under "No summary yet for this day" is a
+ *      warning about the coverage of a non-existent summary.
+ *   2. `omittedSessions` always warns. The daemon HAD those statements and
+ *      dropped them to its own clause cap, so no amount of paging brings them
+ *      back. This is the one coverage fact a client cannot supersede.
+ *   3. Truncation warns only while this client has NOT loaded past the start of
+ *      the day itself. `dayFullyLoaded` is that question, answered from the
+ *      entries actually in hand.
+ *
+ *  The daemon's own wording is used throughout rather than a second string
+ *  invented here: two sources of copy for one condition is how they drift. */
+function coverageNoteFor(digest: DayDigest, kind: DayOverviewKind, dayFullyLoaded: boolean): string | null {
+  if (kind === 'none' || kind === 'undecryptable') return null
+  if (digest.omittedSessions > 0) return digest.coverageNote
+  if (!digest.complete && !dayFullyLoaded) return digest.coverageNote
+  return null
+}
+
+export function pickDayOverview(
+  entries: FeedEntry[],
+  digest?: DayDigest | null,
+  opts: { dayFullyLoaded?: boolean } = {},
+): DayOverview {
   if (digest) {
+    const kind = digestKind(digest.kind)
     return {
-      kind: digestKind(digest.kind),
+      kind,
       text: digest.text,
       fromEntryId: digest.sources[0]?.entryId ?? null,
-      // The daemon's own note wins; otherwise this client says so itself when
-      // it demonstrably holds more of the day than the digest was written
-      // from. `entries` is what the digest saw, and it is only ever fewer,
-      // never more -- the digest is derived from a page this client has.
-      coverageNote: digest.coverageNote
-        ?? (digest.entries > 0 && digest.entries < entries.length ? PARTIAL_DIGEST_NOTE : null),
+      coverageNote: coverageNoteFor(digest, kind, opts.dayFullyLoaded !== false),
       source: 'digest',
     }
   }
@@ -773,21 +799,149 @@ export function dayIntentSentences(sessionCount: number): number {
   return 1
 }
 
-/** The card's second line: the day's own bullets, as far as the rule above
- *  allows, joined into sentences.
+/** Longest ask the card face will quote, and it is a FILTER rather than a
+ *  clip. Past this the candidate is skipped and the next one is tried; it is
+ *  never truncated into the line.
  *
- *  Every sentence is text the distiller wrote about work that happened, taken
- *  whole. Nothing here composes a claim out of fragments, and nothing is said
- *  at all when the day landed nothing -- an empty string, which the renderer
+ *  This is listPoints' rule, applied to the same problem one field over. A
+ *  captured prompt reaches this client with its newlines already gone --
+ *  digest.clip and digest.plainText run replace(/\s+/g, ' ') on every path out
+ *  of storage -- so a prompt that was a request followed by a pasted terminal
+ *  transcript arrives as one long line with no boundary left to cut on. Clipped
+ *  to fit, Andrew's feed rendered a card whose stated intent was
+ *  "fix this efficiently and effectively as recommended. andrewbrown@Andrews-MacBook-Pro
+ *  Downloads % defaults read /Applications/MemBridge.app/Contents/..." -- a
+ *  shell session presented as what someone set out to do.
+ *
+ *  Dropping it costs nothing: the day view renders every prompt in full, so the
+ *  text is one click away, and a card with one fewer line is better than a card
+ *  with a fragment of a transcript on it.
+ *
+ *  180 sits above every legitimate ask measured on the live feed (the longest
+ *  is 157, "those hchanges make no sense. there should be a way to see if its
+ *  green without...") and above every written goal (the longest is 133, and
+ *  lib/hooks GOAL_MAX bounds them anyway). Goals skip this check entirely:
+ *  a goal is authored prose by construction, never a restated prompt. */
+const DAY_ASK_MAX = 180
+
+/** Total characters the intent line will spend. Reached before
+ *  dayIntentSentences runs out, the line simply carries fewer asks. Whole asks
+ *  or none: the budget decides HOW MANY are shown, never trims one into a
+ *  fragment, so nothing on the card is ever half a sentence someone wrote. */
+const DAY_INTENT_BUDGET = 280
+
+/** Shortest ask that can stand as a statement of intent, set inside a gap
+ *  measured on Andrew's real feed rather than guessed. Every short ask in the
+ *  live data is a continuation that tells a reader nothing -- "ok" (2), "yes"
+ *  (3), "continue" (8), "fill it in" (11) -- and the shortest one that is a
+ *  real request is "letes build the bm25 fts5" (25). Nothing at all falls
+ *  between 11 and 25, so the threshold sits in the middle of that gap where a
+ *  few characters either way changes no decision, rather than hard against
+ *  either edge.
+ *
+ *  This is a FILTER over candidates, not a rewrite: whatever survives is
+ *  rendered exactly as it was typed. */
+const DAY_ASK_MIN = 16
+
+export interface DayAsk {
+  key: string
+  text: string
+  /** True when this came from the session's written `goal` rather than from a
+   *  raw prompt. Only used to explain the pick in tests and to keep the two
+   *  sources visibly distinct in this module. */
+  fromGoal: boolean
+}
+
+/** What this person set out to do, one line per session, oldest session first.
+ *
+ *  THE CARD'S TWO LINES ARE TWO DIFFERENT FACTS. The header states what was
+ *  DONE; this states what was ASKED FOR. Built from the day's bullets instead,
+ *  the two lines had ONE source -- the daemon's digest joins the same session
+ *  outcomes with "; " that dayBullets lists -- so every populated card printed
+ *  its own headline twice, differing only in punctuation. Andrew saw it on
+ *  every card in the feed.
+ *
+ *  GOAL FIRST, ASK AS FALLBACK, and the distinction is the whole quality of
+ *  this line. A goal is written for a reader: lib/digest.js asks the agent for
+ *  "the why behind the session in your own words ... never a restated prompt",
+ *  and the live values are exactly that ("Redesign the hero terminal panel on
+ *  membridge.app so it demonstrates the product instead of asserting it"). An
+ *  ask is whatever the person typed. mappers.intentOf already collapses the two
+ *  into one field, which is why FeedEntry now carries `goal` separately: on the
+ *  real feed only 4 of 89 entries have a goal, so a card that used goals alone
+ *  would be blank on most days, and one that could not tell them apart would
+ *  put "continue" on the feed as a statement of intent.
+ *
+ *  ONE line per session, its FIRST: a session's opening ask is what it was sent
+ *  to do, where the prompts after it are course corrections. Taken WHOLE, never
+ *  composed from fragments, deduped across the day by the same rule the bullets
+ *  use. */
+export function dayAsks(sessions: DaySession[]): DayAsk[] {
+  const out: DayAsk[] = []
+  const seen = new Set<string>()
+  // Oldest session first, so the line reads in the order the day happened --
+  // the same direction dayBullets reads, and `sessions` arrives newest-first.
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    const session = sessions[i]
+    let text: string | null = null
+    let fromGoal = false
+    for (const e of session.entries) {
+      const goal = oneLine(e.goal)
+      if (goal) { text = goal; fromGoal = true; break }
+    }
+    if (!text) {
+      for (const e of session.entries) {
+        // `intent` is goal-or-ask, so an entry carrying a goal would re-offer
+        // it here; skipping those keeps this branch strictly the ask branch.
+        if (oneLine(e.goal)) continue
+        const ask = oneLine(e.intent)
+        // Too short is a continuation, too long is a paste. Both keep looking
+        // through the session rather than settling for an unreadable line.
+        if (ask && ask.length >= DAY_ASK_MIN && ask.length <= DAY_ASK_MAX) { text = ask; break }
+      }
+    }
+    if (!text) continue
+    const key = sameLineKey(text)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    // A goal is taken whole; the clip is defensive only, since lib/hooks
+    // GOAL_MAX already bounds one and the longest measured is 133.
+    out.push({
+      key: `${session.key}:${out.length}`,
+      text: text.length > DAY_ASK_MAX ? clipWords(text, DAY_ASK_MAX) : text,
+      fromGoal,
+    })
+  }
+  return out
+}
+
+/** The card's second line: what the day was asked to do, in 1 to 3 sentences.
+ *
+ *  Every sentence is a goal or a prompt someone actually wrote, taken whole.
+ *  Nothing here composes a claim out of fragments, and nothing is said at all
+ *  when the day captured no usable ask -- an empty string, which the renderer
  *  drops rather than filling with a placeholder.
  *
- *  Terminal punctuation is added only where the source line lacks it. A
- *  clipped line already ends in an ellipsis, and "…." is a rendering bug. */
-export function dayIntent(bullets: DayBullet[], sessionCount: number): string {
-  return bullets
-    .slice(0, dayIntentSentences(sessionCount))
-    .map(b => (/[.!?…]$/.test(b.text) ? b.text : `${b.text}.`))
-    .join(' ')
+ *  `skip` is the header's own text: on a day whose goal happens to match the
+ *  sentence above, repeating it is the very duplication this rewrite exists to
+ *  remove.
+ *
+ *  Terminal punctuation is added only where the source line lacks it. A clipped
+ *  line already ends in an ellipsis, and "…." is a rendering bug. */
+export function dayIntent(asks: DayAsk[], sessionCount: number, skip?: string | null): string {
+  const skipKey = skip ? sameLineKey(skip) : null
+  const parts: string[] = []
+  let spent = 0
+  for (const ask of asks) {
+    if (parts.length >= dayIntentSentences(sessionCount)) break
+    if (skipKey && sameLineKey(ask.text) === skipKey) continue
+    // Always take the first one, whatever it costs: a card with a budget too
+    // small for its own opening ask would render nothing at all.
+    if (parts.length > 0 && spent + ask.text.length > DAY_INTENT_BUDGET) break
+    parts.push(/[.!?…]$/.test(ask.text) ? ask.text : `${ask.text}.`)
+    spent += ask.text.length
+  }
+  return parts.join(' ')
 }
 
 // ---------------------------------------------------------------------------
@@ -820,8 +974,10 @@ export interface DayCard {
   sessionCount: number
   overview: DayOverview
   /** The card's face, under the overview sentence: 1 to 3 sentences of what
-   *  was actually done, one step more specific than the sentence above it.
-   *  Empty when the day landed nothing to say. */
+   *  this person set out to DO, where the sentence above says what was done.
+   *  Two different facts from two different sources, which is the whole point
+   *  -- built from the outcomes, as it first was, both lines said the same
+   *  thing twice. Empty when the day captured no usable ask. */
   intent: string
   files: DayFile[]
   bullets: DayBullet[]
@@ -835,17 +991,40 @@ export interface DayCard {
  *
  *  A digest is derived from the ONE page it was served with, so a reader three
  *  pages deep holds several for the same day, each describing its own slice.
- *  This is a PICK of the one that saw the most of the day -- the same rule
- *  pickDayOverview follows, for the same reason: merging two of them would be
- *  composing a sentence nobody wrote. What it does NOT do is hide the
- *  shortfall; pickDayOverview turns "saw fewer entries than the card holds"
- *  into a coverage note. */
+ *  This is a PICK of the best of them, never a merge: joining two would be
+ *  composing a sentence nobody wrote.
+ *
+ *  RANKED ON `summarized`, NOT ON `entries`, and the difference is a defect
+ *  measured on Andrew's real feed. `entries` counts prompt ROWS; `summarized`
+ *  counts the distinct session statements the sentence could be built from. A
+ *  page boundary routinely hands one page most of a day's rows and none of its
+ *  summarized sessions: for marco on 2026-08-04, page one held 18 rows and 0
+ *  statements while page two held 13 rows and 3. Ranking on rows picked page
+ *  one, so a day with three perfectly good statements in hand rendered the
+ *  placeholder "No summary yet for this day." and, because that page was also
+ *  the truncated one, an amber coverage warning under it. Ranking on
+ *  statements picks the page that can actually say something.
+ *
+ *  Ties break toward the digest whose page reached the day's start, then on
+ *  rows, so the pick is total and stable rather than dependent on page order. */
+function digestRank(d: DayDigest): [number, number, number] {
+  return [d.summarized, d.complete ? 1 : 0, d.entries]
+}
+
+function outranks(a: DayDigest, b: DayDigest): boolean {
+  const [x, y] = [digestRank(a), digestRank(b)]
+  for (let i = 0; i < x.length; i++) {
+    if (x[i] !== y[i]) return x[i] > y[i]
+  }
+  return false
+}
+
 function digestsByKey(digests: DayDigest[]): Map<string, DayDigest> {
   const byKey = new Map<string, DayDigest>()
   for (const d of digests) {
     const key = digestKey(d.key)
     const seen = byKey.get(key)
-    if (!seen || d.entries > seen.entries) byKey.set(key, d)
+    if (!seen || outranks(d, seen)) byKey.set(key, d)
   }
   return byKey
 }
@@ -863,6 +1042,18 @@ function digestsByKey(digests: DayDigest[]): Map<string, DayDigest> {
 export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []): DayCard[] {
   const entries = dedupeSyncedTwins(rawEntries)
   const byDigestKey = digestsByKey(digests)
+  // The oldest instant anywhere in what the caller loaded. This is what lets a
+  // card tell a day it has loaded WHOLE from one it is still in the middle of,
+  // which is the difference between a truthful coverage warning and a stale
+  // one -- see coverageNoteFor. Computed here rather than taken as an argument
+  // because it is derivable from the same input and a caller that forgot to
+  // pass it would silently suppress every warning.
+  let oldestLoadedMs: number | null = null
+  for (const e of entries) {
+    const ms = Date.parse(e.at)
+    if (Number.isNaN(ms)) continue
+    if (oldestLoadedMs === null || ms < oldestLoadedMs) oldestLoadedMs = ms
+  }
   const byKey = new Map<string, FeedEntry[]>()
   for (const e of entries) {
     const key = dayCardKey(e)
@@ -878,7 +1069,13 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
     const sorted = [...bucket].sort((a, b) => b.at.localeCompare(a.at))
     const newest = sorted[0]
     const sessions = daySessions(sorted)
-    const overview = pickDayOverview(sorted, byDigestKey.get(key) ?? null)
+    // Has this client loaded past the START of this local day? The same
+    // question DayPage's pager asks, through the same shared conversion, so a
+    // day the feed considers whole and a day the pager stops walking for can
+    // never disagree.
+    const dayStart = localDayRangeMs(entryDayKey(newest) ?? '')?.start ?? null
+    const dayFullyLoaded = dayStart !== null && oldestLoadedMs !== null && oldestLoadedMs < dayStart
+    const overview = pickDayOverview(sorted, byDigestKey.get(key) ?? null, { dayFullyLoaded })
     const bullets = dayBullets(sessions, overview)
     cards.push({
       key,
@@ -894,7 +1091,7 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
       // reason the count survives the feed no longer collapsing checkpoints.
       sessionCount: sessions.length,
       overview,
-      intent: dayIntent(bullets, sessions.length),
+      intent: dayIntent(dayAsks(sessions), sessions.length, overview.text),
       files: dayFiles(sorted),
       bullets,
       sessions,

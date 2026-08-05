@@ -335,6 +335,7 @@ export function mapStreamEntry(e: RawFeedEntry): StreamEntry {
     intent: intentOf(e),
     files: e.files,
     session: e.session,
+    goal: normalizedIntentText(e.goal),
     // Carried, never re-derived. Dropping these two was what made an
     // undecryptable row indistinguishable from an un-summarized one downstream
     // -- both arrive with an empty `outcome`, and only these say which.
@@ -391,6 +392,9 @@ export function mapDayDigest(raw: RawDayDigest): DayDigest | null {
     kind: String(raw.kind || ''),
     text,
     sources,
+    sessions: Number.isFinite(raw.sessions) ? Number(raw.sessions) : 0,
+    summarized: Number.isFinite(raw.summarized) ? Number(raw.summarized) : 0,
+    omittedSessions: Number.isFinite(raw.omittedSessions) ? Number(raw.omittedSessions) : 0,
     entries: Number.isFinite(raw.entries) ? Number(raw.entries) : 0,
     // Absent means "no claim of completeness", which must read as INCOMPLETE:
     // the whole point of the field is to stop a partial day being presented as

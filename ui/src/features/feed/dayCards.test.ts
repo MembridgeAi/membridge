@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import type { DayDigest, FeedEntry } from '../../data/types'
 import {
-  NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, PARTIAL_DIGEST_NOTE, UNDATED_DAY,
+  NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, UNDATED_DAY,
   buildDayCards, dayBullets, dayCardKey, dayFiles, dayIntent, dayIntentSentences,
-  dayProjects, daySessions, daySlug, daySlugDay, dedupeSyncedTwins, digestKey, pickDayOverview, projectPart,
+  dayAsks, dayProjects, daySessions, daySlug, daySlugDay, dedupeSyncedTwins, digestKey, pickDayOverview, projectPart,
 } from './dayCards'
 
 // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ), so
@@ -433,24 +433,134 @@ describe('dayBullets', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// The card's SECOND line: what the day was asked to do.
+//
+// It used to be built from the day's bullets, which are the same session
+// outcomes the daemon digest joins with "; " to make the FIRST line. Two lines,
+// one source: every populated card in Andrew's real feed printed its own
+// headline twice, differing only in punctuation.
+// ---------------------------------------------------------------------------
+describe('dayAsks', () => {
+  const withAsks = (rows: Partial<FeedEntry>[]) => daySessions(rows.map((r, i) => entry({ id: `e${i}`, ...r })))
+
+  it('prefers the session GOAL, which is written for a reader', () => {
+    const asks = dayAsks(withAsks([{
+      session: 's1', goal: 'Redesign the hero terminal panel so it demonstrates the product',
+      intent: 'Redesign the hero terminal panel so it demonstrates the product',
+    }]))
+    expect(asks.map(a => a.text)).toEqual(['Redesign the hero terminal panel so it demonstrates the product'])
+    expect(asks[0].fromGoal).toBe(true)
+  })
+
+  it('falls back to the captured ask when a session wrote no goal', () => {
+    const asks = dayAsks(withAsks([{ session: 's1', goal: null, intent: 'reconcile the UI changes with marcos most recent merges' }]))
+    expect(asks.map(a => a.text)).toEqual(['reconcile the UI changes with marcos most recent merges'])
+    expect(asks[0].fromGoal).toBe(false)
+  })
+
+  // The real short asks in Andrew's feed. Rendered as a statement of intent
+  // these tell a reader nothing at all.
+  it('drops a continuation prompt rather than printing it as the day\'s intent', () => {
+    for (const noise of ['yes', 'continue', 'fill it in', 'ok']) {
+      expect(dayAsks(withAsks([{ session: 's1', goal: null, intent: noise }]))).toEqual([])
+    }
+  })
+
+  it('keeps the shortest ask that is still a real request', () => {
+    // "letes build the bm25 fts5" is 25 characters, live, and is genuinely
+    // what that session was asked to do.
+    expect(dayAsks(withAsks([{ session: 's1', goal: null, intent: 'letes build the bm25 fts5' }])).map(a => a.text))
+      .toEqual(['letes build the bm25 fts5'])
+  })
+
+  it('takes one line per session, its FIRST, oldest session first', () => {
+    const asks = dayAsks(withAsks([
+      { session: 's1', at: '2026-07-29T18:00:00Z', goal: null, intent: 'push all this over to the site reworks' },
+      { session: 's1', at: '2026-07-29T18:30:00Z', goal: null, intent: 'now do the same for the other branch' },
+      { session: 's2', at: '2026-07-29T21:00:00Z', goal: null, intent: 'reconcile the UI changes with marcos merges' },
+    ]))
+    expect(asks.map(a => a.text)).toEqual(['push all this over to the site reworks', 'reconcile the UI changes with marcos merges'])
+  })
+
+  it('never lists the same ask twice across sessions', () => {
+    const asks = dayAsks(withAsks([
+      { session: 's1', at: '2026-07-29T18:00:00Z', goal: null, intent: 'ok im ready to fully review, what needs doing' },
+      { session: 's2', at: '2026-07-29T19:00:00Z', goal: null, intent: 'Ok im ready to fully review, what needs doing.' },
+    ]))
+    expect(asks).toHaveLength(1)
+  })
+
+  it('says nothing for a day whose rows carried no readable ask', () => {
+    expect(dayAsks(withAsks([{ session: 's1', goal: null, intent: null }]))).toEqual([])
+  })
+
+  // The prompt reaches this client with its newlines already stripped
+  // (digest.clip flattens on the way out of storage), so a request followed by
+  // a pasted terminal transcript is one long line with no boundary to cut on.
+  // Clipped to fit, it rendered a shell session as the day's stated intent.
+  it('skips a pasted transcript rather than clipping it into the line', () => {
+    const paste = 'fix this efficiently and effectively as recommended. andrewbrown@Andrews-MacBook-Pro Downloads % defaults read /Applications/MemBridge.app/Contents/Info.plist CFBundleShortVersionString 0.2.8 andrewbrown@Andrews-MacBook-Pro Downloads % cd ~/membridge'
+    const asks = dayAsks(withAsks([
+      { session: 's1', at: '2026-07-29T18:00:00Z', goal: null, intent: paste },
+      { session: 's1', at: '2026-07-29T18:30:00Z', goal: null, intent: 'now push it to the site branch' },
+    ]))
+    // It kept looking through the session rather than settling for a fragment.
+    expect(asks.map(a => a.text)).toEqual(['now push it to the site branch'])
+    expect(asks[0].text).not.toContain('…')
+  })
+
+  it('leaves a session out entirely when everything it asked is unreadable', () => {
+    const paste = `paste ${'x'.repeat(300)}`
+    expect(dayAsks(withAsks([{ session: 's1', goal: null, intent: paste }]))).toEqual([])
+  })
+
+  it('never applies that ceiling to a written goal', () => {
+    // A goal is authored prose by construction, and lib/hooks GOAL_MAX already
+    // bounds it. The ceiling exists for pasted prompts, not for authored text.
+    const longGoal = `Decide whether directed agent-to-agent teammate messages are worth building ${'and '.repeat(30)}shipping`
+    const asks = dayAsks(withAsks([{ session: 's1', goal: longGoal, intent: longGoal }]))
+    expect(asks).toHaveLength(1)
+    expect(asks[0].fromGoal).toBe(true)
+  })
+})
+
 describe('dayIntent', () => {
+  const ask = (text: string, key = text.slice(0, 4)) => ({ key, text, fromGoal: false })
+
   it('scales 1 to 3 sentences by how much was done that day', () => {
     expect(dayIntentSentences(1)).toBe(1)
     expect(dayIntentSentences(3)).toBe(2)
     expect(dayIntentSentences(9)).toBe(3)
   })
 
-  it('joins the day\'s own bullets whole, never re-worded', () => {
-    const bullets = [{ key: 'a', text: 'first thing' }, { key: 'b', text: 'second thing' }]
-    expect(dayIntent(bullets, 2)).toBe('first thing. second thing.')
+  it('joins the day\'s own asks whole, never re-worded', () => {
+    expect(dayIntent([ask('first thing'), ask('second thing')], 2)).toBe('first thing. second thing.')
   })
 
   it('adds no second full stop to a line that already ends in one', () => {
-    expect(dayIntent([{ key: 'a', text: 'already punctuated.' }], 1)).toBe('already punctuated.')
-    expect(dayIntent([{ key: 'a', text: 'clipped mid sen…' }], 1)).toBe('clipped mid sen…')
+    expect(dayIntent([ask('already punctuated.')], 1)).toBe('already punctuated.')
+    expect(dayIntent([ask('clipped mid sen…')], 1)).toBe('clipped mid sen…')
   })
 
-  it('says nothing at all for a day that landed nothing', () => {
+  it('never repeats the sentence already on the line above it', () => {
+    expect(dayIntent([ask('Ship the second wave of tickets')], 1, 'Ship the second wave of tickets.')).toBe('')
+  })
+
+  it('shows fewer whole asks rather than half of one when the line runs long', () => {
+    const long = 'x'.repeat(200)
+    const out = dayIntent([ask(long, 'a'), ask(long, 'b'), ask(long, 'c')], 9)
+    // One whole ask, not three clipped ones: the budget decides HOW MANY are
+    // shown and never trims one into a fragment.
+    expect(out).toBe(`${long}.`)
+  })
+
+  it('always shows the first ask, however long, rather than an empty line', () => {
+    const huge = 'y'.repeat(500)
+    expect(dayIntent([ask(huge)], 1)).toBe(`${huge}.`)
+  })
+
+  it('says nothing at all for a day that captured no ask', () => {
     expect(dayIntent([], 1)).toBe('')
   })
 })
@@ -589,6 +699,9 @@ const digest = (overrides: Partial<DayDigest> = {}): DayDigest => ({
   kind: 'distilled',
   text: 'Worked on UI fixes, app install and dmg',
   sources: [{ entryId: 's1|2026-07-29T20:00:00Z', session: 's1', ts: '2026-07-29T20:00:00Z', project: 'membridge', projectId: null, distilled: true, text: 'x' }],
+  sessions: 1,
+  summarized: 1,
+  omittedSessions: 0,
   entries: 1,
   complete: true,
   coverageNote: null,
@@ -643,20 +756,41 @@ describe('pickDayOverview with a digest', () => {
     expect(pick.coverageNote).toBeNull()
   })
 
-  it('renders the daemon\'s coverage note rather than swallowing it', () => {
-    const note = 'Two sessions of this day could not be summarized.'
-    expect(pickDayOverview([entry()], digest({ coverageNote: note })).coverageNote).toBe(note)
+  // The coverage note used to render whenever the daemon set one, which put an
+  // amber warning on 3 of the 6 cards in Andrew's real feed -- the rate at
+  // which a warning stops being read. The rule below is what narrowed it.
+  it('warns about statements the daemon dropped to its own cap, which no paging recovers', () => {
+    const note = '2 more sessions not shown'
+    expect(pickDayOverview([entry()], digest({ omittedSessions: 2, coverageNote: note })).coverageNote).toBe(note)
   })
 
-  it('says so itself when this client has loaded more of the day than the digest saw', () => {
-    // The digest is derived from the page it was served with, so a reader who
-    // paged further back is looking at sessions the sentence never saw.
-    const entries = [entry({ id: 'a' }), entry({ id: 'b' }), entry({ id: 'c' })]
-    expect(pickDayOverview(entries, digest({ entries: 1 })).coverageNote).toBe(PARTIAL_DIGEST_NOTE)
+  it('warns about a truncated day while this client is still mid-day', () => {
+    const note = 'showing only the part of this day that has loaded'
+    expect(pickDayOverview([entry()], digest({ complete: false, coverageNote: note }), { dayFullyLoaded: false }).coverageNote)
+      .toBe(note)
   })
 
-  it('claims no shortfall when the digest saw the whole card', () => {
-    expect(pickDayOverview([entry()], digest({ entries: 1 })).coverageNote).toBeNull()
+  it('drops that warning once the client has loaded past the start of the day', () => {
+    // `complete` is a fact about ONE PAGE (lib/digest.js), not about the day.
+    // A client holding several pages can have loaded the rest itself, and
+    // repeating the page's warning then describes a gap that is not there.
+    const note = 'showing only the part of this day that has loaded'
+    expect(pickDayOverview([entry()], digest({ complete: false, coverageNote: note }), { dayFullyLoaded: true }).coverageNote)
+      .toBeNull()
+  })
+
+  it('never warns under a header that already says nothing is known', () => {
+    // "This summary is partial" under "No summary yet for this day." warns
+    // about the coverage of a summary that does not exist.
+    const note = 'showing only the part of this day that has loaded'
+    for (const kind of ['none', 'undecryptable']) {
+      expect(pickDayOverview([entry()], digest({ kind, complete: false, coverageNote: note }), { dayFullyLoaded: false }).coverageNote)
+        .toBeNull()
+    }
+  })
+
+  it('claims no shortfall for a whole day the daemon saw whole', () => {
+    expect(pickDayOverview([entry()], digest()).coverageNote).toBeNull()
   })
 })
 
@@ -675,13 +809,43 @@ describe('buildDayCards with digests', () => {
     expect(cards[0].overview.text).toBe('sarah\'s only outcome')
   })
 
-  it('picks the digest that saw the most of the day, never merging two', () => {
+  it('picks the digest that accounts for the most of the day, never merging two', () => {
     // A reader three pages deep holds one digest per page for the same day.
     const cards = buildDayCards([entry()], [
-      digest({ text: 'the page-two slice', entries: 1 }),
-      digest({ text: 'the fuller statement', entries: 9 }),
+      digest({ text: 'the page-two slice', summarized: 1, entries: 1 }),
+      digest({ text: 'the fuller statement', summarized: 4, entries: 9 }),
     ])
     expect(cards[0].overview.text).toBe('the fuller statement')
+  })
+
+  // THE DEFECT, with marco's real 2026-08-04 numbers. Page one held 18 of the
+  // day's rows and not one summarized session; page two held 13 rows and three.
+  // Ranked on rows the card picked page one, so a day with three perfectly good
+  // statements in hand rendered "No summary yet for this day." -- and, because
+  // that page was also the truncated one, an amber coverage warning under it.
+  it('prefers the page that can say something over the page with more rows', () => {
+    const cards = buildDayCards([entry()], [
+      digest({
+        text: NO_SUMMARY_OVERVIEW, kind: 'none', sources: [],
+        sessions: 2, summarized: 0, entries: 18,
+        complete: false, coverageNote: 'showing only the part of this day that has loaded',
+      }),
+      digest({
+        text: 'Done and the memory that worried me turned out to be stale', kind: 'summary',
+        sessions: 4, summarized: 3, entries: 13, complete: true, coverageNote: null,
+      }),
+    ])
+    expect(cards[0].overview.text).toBe('Done and the memory that worried me turned out to be stale')
+    expect(cards[0].overview.kind).toBe('summary')
+    expect(cards[0].overview.coverageNote).toBeNull()
+  })
+
+  it('breaks a tie on statements toward the page that reached the day\'s start', () => {
+    const cards = buildDayCards([entry()], [
+      digest({ text: 'the truncated page', summarized: 2, entries: 40, complete: false }),
+      digest({ text: 'the page that reached the start', summarized: 2, entries: 5, complete: true }),
+    ])
+    expect(cards[0].overview.text).toBe('the page that reached the start')
   })
 
   it('is unchanged by an empty digest list, which is what an older daemon sends', () => {
