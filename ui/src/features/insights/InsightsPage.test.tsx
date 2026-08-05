@@ -186,6 +186,26 @@ describe('InsightsPage', () => {
     expect(insightsSpy).not.toHaveBeenCalled()
   })
 
+  // The owner-locked-out bug. `status.solo` does not mean "has no team": the
+  // daemon derives it from whether a LINKED PROJECT belongs to a multi-member
+  // team, so an owner whose repo link is missing -- or whose team is still
+  // just them -- reports solo while genuinely owning a team. Gating the page
+  // on !solo showed that owner "Insights is available to team owners and
+  // admins", which is exactly what happened in 0.2.8 when .membridge/team.json
+  // was deleted from the repo. The fake ties its own `solo` option to "no
+  // team", so the two have to be pulled apart by hand here.
+  it('renders for an owner whose machine reports solo but who is on a team', async () => {
+    const client = new FakeDataClient()
+    const status = await client.getStatus()
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, solo: true })
+    const settings = await client.getSettings()
+    expect(settings.team?.role).toBe('owner')
+
+    renderWith(client, <InsightsPage />)
+    expect(await screen.findByText('Repeat file opens')).toBeInTheDocument()
+    expect(screen.queryByText(/owners and admins/i)).toBeNull()
+  })
+
   // Assists breakdown (owner's ask: "answered by our memory first should be
   // a better stat -- it should be any instance where the memory helped").
   // The default FakeDataClient fixture is total: 864, byKind: { recallServed:

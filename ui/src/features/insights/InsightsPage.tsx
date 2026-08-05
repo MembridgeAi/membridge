@@ -356,7 +356,7 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
  * the nav entry, but a member could still type the URL, so this page holds
  * its own gate too and never mounts InsightsContent (and therefore never
  * calls getInsights()) for anyone else. Unknown (still loading, or failed)
- * defaults to solo/no-role, same as Shell.tsx and MembersPage.tsx -- this
+ * defaults to no-team/no-role, same as Shell.tsx and MembersPage.tsx -- this
  * screen never flashes on before its data confirms the viewer actually
  * holds an admin role on an actual team.
  */
@@ -385,10 +385,17 @@ export function InsightsPage() {
     return <div className="insights-page" />
   }
 
-  const solo = statusQuery.data?.solo ?? true
   const role = settingsQuery.data?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
-  const authorized = !solo && client.capabilities.teamAdminSupported && isTeamAdmin
+  // Membership, not `solo` -- the same correction Shell.tsx already carries.
+  // `solo` answers "is anyone else actually here", which it derives from
+  // whether a LINKED PROJECT belongs to a multi-member team. That is a
+  // different question from "do you have a team", and gating on it locked the
+  // owner of a real team out of their own Insights whenever no project
+  // happened to be linked. Membership is what authorization actually turns on;
+  // an owner with a team of one still owns the team.
+  const onTeam = !!settingsQuery.data?.team
+  const authorized = onTeam && client.capabilities.teamAdminSupported && isTeamAdmin
 
   if (!authorized) {
     return (
