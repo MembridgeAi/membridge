@@ -96,6 +96,11 @@ function createMockSupabase() {
     // memory_entries write check, restoring the pre-033 backend where a revoked
     // member could still push into a project they cannot read.
     noWriteAccessCheck: false,
+    // Faults the base-projects list read that lib/teamsync.js teamHasLiveProject
+    // uses to corroborate an EMPTY project_stats. Exists so a suite can prove
+    // that a corroboration which cannot answer refuses to authorize destroying
+    // local data, rather than falling through to "revoked".
+    failProjectsList: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -758,6 +763,31 @@ function createMockSupabase() {
             .filter(x => wanted.includes(x.id) && isMember(x.teamId, userId))
             .map(p => {
               const full = { id: p.id, team_id: p.teamId, name: p.name, repo_url: p.repoUrl, default_access: p.defaultAccess !== false };
+              return Object.fromEntries(cols.filter(c => c in full).map(c => [c, full[c]]));
+            });
+          return json(res, 200, rows);
+        }
+        // `team_id=eq.<uuid>` — lib/teamsync.js teamHasLiveProject, the
+        // corroborating probe for an empty project_stats.
+        //
+        // NOTE, and it is the whole point of that probe: this filters on
+        // is_team_member ONLY. It does NOT call canSeeProject, and it does NOT
+        // drop archived rows — because the live projects_select policy does
+        // neither (supabase/schema.sql; verified against the live catalog, and
+        // pinned by test/suites/revocation-empty-visibility.test.js). That is
+        // precisely how it differs from project_stats above, and mirroring it
+        // wrongly here would make the probe's test a fiction.
+        const teamEq = (url.searchParams.get('team_id') || '').replace(/^eq\./, '');
+        if (teamEq) {
+          if (flags.failProjectsList) return json(res, 500, { message: 'projects list failed' });
+          const cols = (url.searchParams.get('select') || 'id').split(',').map(s => s.trim());
+          const rows = projects
+            .filter(p => p.teamId === teamEq && isMember(p.teamId, userId))
+            .map(p => {
+              const full = {
+                id: p.id, team_id: p.teamId, name: p.name, repo_url: p.repoUrl,
+                archived_at: p.archivedAt || null,
+              };
               return Object.fromEntries(cols.filter(c => c in full).map(c => [c, full[c]]));
             });
           return json(res, 200, rows);
