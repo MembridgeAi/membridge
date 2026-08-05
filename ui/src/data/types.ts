@@ -409,10 +409,30 @@ export interface Insights {
   // rather than from measuring fetched rows, so they are true totals at any
   // window size. False only on a backend predating that migration.
   exact: boolean
-  // Only reachable when `exact` is false: the paged fallback ran out of pages,
-  // so the counts are floors and their deltas are null. Against a current
-  // backend this is always false.
+  // Un-masked as of #79: the feed fetch really did stop at the 10-page cap,
+  // regardless of whether the two headline COUNTS are exact. Under the old
+  // masked wire (`feedTruncated && !exact`) this was always false against a
+  // 027+ backend; T-76 shipped against that mask and was dormant on production.
+  // Now this fires whenever the fetch saturated, and the T-76 UI (truncation
+  // notice, silent-teammate demotion, floor-mark on members-syncing) is what
+  // that boolean is for. `exact` still covers the two headline counts
+  // (sessions, entries) independently -- both flags carry their own meaning.
   truncated: boolean
+  // How far back the paged fetch actually reached, in days. Untruncated, this
+  // equals `window * 2` (the daemon requests the two-window span for the
+  // current-vs-prior comparison). Truncated, it shrinks to the floor the fetch
+  // hit -- and this is the ONE number that lets the UI say "30 days requested,
+  // N days reached" rather than "some part of it was cut".
+  //
+  // WHY TWO FIELDS FOR THE SAME NUMBER. The daemon's own silent-teammate and
+  // concentration sentences quote `lookbackDays` ("in the last Nd") and always
+  // will; `coveredDays` is the same integer under a UI-facing name for "days
+  // reached" in the truncation notice. They hold the same value today (see the
+  // #79 commit body). Deliberately no helper abstracting across them: a helper
+  // is how the two drift when the daemon later diverges them, so each site
+  // reads the name it means and cites the other in a comment.
+  lookbackDays: number
+  coveredDays: number
   sessions: { count: number; deltaPct: number | null }
   membersSyncing: { ok: number; total: number }
   entriesShared: { count: number; delta: number | null }

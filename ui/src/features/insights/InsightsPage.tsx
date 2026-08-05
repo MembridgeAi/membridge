@@ -63,6 +63,12 @@ function deltaNote(delta: number | null): string | undefined {
 // seen against a current backend.
 const CAP_NOTE = 'approximate — this MemBridge server is out of date'
 
+// For a figure that is a floor because the feed fetch stopped short, rather
+// than because the server is old. Separate from CAP_NOTE on purpose: the fix
+// for CAP_NOTE is upgrading the backend, and upgrading does NOT extend the
+// feed fetch -- it only makes the two headline counts exact.
+const COVERAGE_NOTE = 'a floor — part of the window was unread'
+
 // Shown wherever a figure reads "pending" (a fresh install whose ledger has
 // nothing yet): names what it's waiting on so it doesn't read as stuck.
 const PENDING_NOTE = 'No data yet — fills in as your tools run'
@@ -99,6 +105,15 @@ export function buildCsv(insights: Insights): string {
     // silently stops summing. When this is true every count below is a
     // lower bound, because the feed fetch stopped at its page cap.
     toCsvRow(['feed_truncated', insights.truncated ? 'true' : 'false']),
+    // T-71: the actual reach of the paged fetch, in days. On an untruncated
+    // fetch this equals window * 2; on a truncated fetch it shrinks to the
+    // floor the fetch hit. Carried as its own numeric row (not folded into a
+    // decoration on window_days) so a spreadsheet can compare requested vs
+    // reached without parsing a string. Named `feed_covered_days` to match
+    // `feed_truncated` above rather than the daemon's internal `lookbackDays`,
+    // which is the SAME NUMBER (#79 commit body) -- one name here, one name
+    // there, no helper across them.
+    toCsvRow(['feed_covered_days', insights.coveredDays]),
     toCsvRow(['sessions', insights.sessions.count]),
     toCsvRow(['members_syncing_ok', insights.membersSyncing.ok]),
     toCsvRow(['members_syncing_total', insights.membersSyncing.total]),
@@ -120,7 +135,14 @@ export function buildCsv(insights: Insights): string {
     ...insights.topProjects.map(p => toCsvRow([p.name, p.sessions, p.people])),
     '',
     toCsvRow(['problem_severity', 'headline', 'scale']),
-    ...insights.problems.map(p => toCsvRow([p.severity, p.headline, p.scale])),
+    // The severity column follows the SCREEN, not the wire. Every problem is
+    // an absence claim about a named person built from the paged feed, so when
+    // that feed stopped short the page shows them as unconfirmed -- and this
+    // file is the copy that gets forwarded to the person it names. Exporting
+    // `broken` here while the screen says "can't tell" would let the export
+    // out-claim the app it came from. `feed_truncated` above is the same fact
+    // stated once; this states it per row, where the accusation is.
+    ...insights.problems.map(p => toCsvRow([insights.truncated ? 'unconfirmed' : p.severity, p.headline, p.scale])),
   ]
   return lines.join('\n')
 }
@@ -170,6 +192,66 @@ function LRow({ name, sub, value, reason, href }: { name: string; sub?: string; 
         {reason && <div className="lrow-reason">{reason}</div>}
       </div>
       {value && <span className="mono lrow-value">{value}</span>}
+    </div>
+  )
+}
+
+/**
+ * Shown only when the payload admits the team-feed fetch stopped at its page
+ * cap. Until this existed, a window that was cut short looked exactly like one
+ * that was honoured: picking 90 days on a team with real history produced the
+ * same page as picking 30, because both saturate the same cap, and nothing on
+ * screen said the extra 60 days were never read.
+ *
+ * TWO CASES, chosen by whether the current window itself is short.
+ *
+ *   * `coveredDays < windowDays` -- the current window is CUT. The reader is
+ *     looking at rows from the last `coveredDays` days when they asked for
+ *     the last `windowDays`. Everything on the page is a floor of a genuinely
+ *     truncated view. This is the ticket's headline case ("30 days requested,
+ *     12 days reached") and the sentence names both numbers.
+ *
+ *   * `coveredDays >= windowDays` (but still truncated) -- the current window
+ *     is whole and the PRIOR one is short, so the year-over-year figure
+ *     (delta) is what got capped. The daemon nulls those deltas already, but
+ *     the reader should still know why the trend cell is empty.
+ *
+ * `coveredDays` is what the notice quotes; `lookbackDays` is the same integer
+ * under the daemon's own name and reads as "in the last Nd" inside a problem's
+ * scale line. Kept separate on purpose: a helper that abstracts across them
+ * is how the two names drift when the daemon later diverges them, and picking
+ * one per site + citing the other in a comment is the discipline (see #79
+ * commit body).
+ */
+function TruncationNotice({ windowDays, coveredDays }: { windowDays: number; coveredDays: number }) {
+  const currentWindowCut = coveredDays < windowDays
+  return (
+    <div className="insights-truncated" role="status" data-testid="insights-truncated">
+      {/* Glyph and words in one run, same rule StateChip follows: the amber
+          tint must not be the only thing carrying "attention" here. */}
+      {currentWindowCut ? (
+        <>
+          <p className="insights-truncated-head">
+            ⚠ {windowDays} days requested, {coveredDays} days reached
+          </p>
+          <p className="insights-truncated-body">
+            The team feed stopped at its page limit, and it reads newest first — so the oldest {windowDays - coveredDays}
+            {' '}days of what you asked for were never read. Every figure here, including who looks quiet, is a floor
+            over the {coveredDays} days that were.
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="insights-truncated-head">
+            ⚠ The comparison against the previous {windowDays} days is capped
+          </p>
+          <p className="insights-truncated-body">
+            The last {windowDays} days are complete, but the fetch stopped {coveredDays} days back — so the
+            trend against the previous {windowDays} days is unavailable, and any teammate who last shared
+            more than {coveredDays} days ago is not visible here.
+          </p>
+        </>
+      )}
     </div>
   )
 }
@@ -309,14 +391,22 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
       note: insights.assists.available ? 'all time' : PENDING_NOTE,
     },
     {
-      value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
+      // `ok` counts members with a row in the fetched window, so a fetch that
+      // stopped short can only ever UNDERCOUNT it -- which makes the plain
+      // fraction read as a diagnosis of the people it left out. Marked as a
+      // floor for the same reason the two counts either side of it are.
+      value: `${countValue(insights.membersSyncing.ok, insights.truncated)}/${insights.membersSyncing.total}`,
       label: STAT_SYNCING,
       // "ok" = members who have shared into the window; the rest we can only
       // observe as quiet, never diagnose as broken (their machine is not
-      // visible from here), so the unequal note states what we can see.
-      note: insights.membersSyncing.ok === insights.membersSyncing.total
-        ? 'all healthy'
-        : `${insights.membersSyncing.total - insights.membersSyncing.ok} haven't shared recently`,
+      // visible from here), so the unequal note states what we can see. Under
+      // truncation we cannot even say that much: "1 hasn't shared recently" is
+      // a claim about a person built from a window that was never fully read.
+      note: insights.truncated
+        ? COVERAGE_NOTE
+        : insights.membersSyncing.ok === insights.membersSyncing.total
+          ? 'all healthy'
+          : `${insights.membersSyncing.total - insights.membersSyncing.ok} haven't shared recently`,
     },
     {
       value: countValue(insights.entriesShared.count, insights.truncated),
@@ -334,6 +424,13 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
         onWindowChange={onWindowChange}
         onExport={() => exportCsv(insights)}
       />
+
+      {/* Above the figures, not below them: it changes how every number on the
+          page should be read, so it cannot be a footnote they scroll past.
+          Sized from `insights.window` rather than the selector's state -- the
+          notice is a statement about THIS payload, and the two can only ever
+          drift apart in the direction of naming a window the data is not for. */}
+      {insights.truncated && <TruncationNotice windowDays={insights.window} coveredDays={insights.coveredDays} />}
 
       <StatStrip items={stats} />
 
@@ -380,8 +477,41 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
         </div>
 
         <div className="insights-colR">
-          <ProblemGroup testId="problems-broken" severity="broken" title="Broken" hint="nothing is reaching the team" problems={broken} emptyNote="Nothing is broken right now." />
-          <ProblemGroup testId="problems-minor" severity="minor" title="Minor" hint="isolated, no action needed" problems={minor} emptyNote="No minor issues." />
+          {/* THE ONE CLAIM ON THIS PAGE THAT NAMES A PERSON, and it is drawn
+              from the same fetch the cap truncates. lib/api-insights.js builds
+              `problems` from silentTeammateProblems and nothing else, so every
+              problem here is "nothing has arrived from <name>", derived from
+              rows the fetch may simply never have reached. A teammate who
+              shared 40 days into a 90-day window that only reached back 12
+              days produces a byte-identical payload to one who has genuinely
+              gone quiet -- so under truncation this section cannot be Broken
+              ("nothing is reaching the team" is exactly what is unestablished)
+              and it cannot be empty-noted "Nothing is broken right now"
+              either. Both are the same defect the rest of this page was just
+              fixed for: an unknown rendered as an answer.
+
+              Deliberately ALL problems rather than only the ones whose id
+              starts with `silent:`. Matching on the id shape would silently
+              restore full confidence to any future problem the daemon adds,
+              and a new problem is far likelier to be another read of the same
+              capped feed than a local certainty. Over-qualifying is visible
+              and recoverable; a false accusation about a named colleague is
+              neither. */}
+          {insights.truncated ? (
+            <ProblemGroup
+              testId="problems-unconfirmed"
+              tone="unconfirmed"
+              title="Can't tell"
+              hint="the window was cut short, so silence here may be unread data"
+              problems={insights.problems}
+              emptyNote="Nobody looked quiet in the part that was read."
+            />
+          ) : (
+            <>
+              <ProblemGroup testId="problems-broken" tone="broken" title="Broken" hint="nothing is reaching the team" problems={broken} emptyNote="Nothing is broken right now." />
+              <ProblemGroup testId="problems-minor" tone="minor" title="Minor" hint="isolated, no action needed" problems={minor} emptyNote="No minor issues." />
+            </>
+          )}
 
           <div className="insights-sect">
             Knowledge concentration <span className="insights-hint">who is the only one who has touched a project</span>

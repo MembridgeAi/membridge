@@ -579,6 +579,12 @@ export class FakeDataClient implements DataClient {
       window,
       exact: true,
       truncated: false,
+      // T-71: the daemon fetches priorStart..now (2 * window). On an
+      // untruncated fetch both fields hold `window * 2` -- the "reached"
+      // number equals the daemon's requested span. Truncated tests override
+      // both, exactly like the sessions/entries counts above.
+      lookbackDays: window * 2,
+      coveredDays: window * 2,
       sessions: { count: 412, deltaPct: 18 },
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },

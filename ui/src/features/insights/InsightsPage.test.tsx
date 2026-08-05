@@ -81,6 +81,12 @@ describe('InsightsPage against a backend predating migration 027', () => {
     ...(await new FakeDataClient().getInsights(30)),
     exact: false,
     truncated: true,
+    // Same coveredDays shape backend #79 ships even on an ancient wire; the
+    // TWO fields describe DIFFERENT facts (`exact` covers the headline counts,
+    // `truncated` covers the paged breakdowns), so the counts-are-floors path
+    // still needs the reached span to phrase the notice.
+    lookbackDays: 12,
+    coveredDays: 12,
     sessions: { count: 267, deltaPct: null },
     entriesShared: { count: 2000, delta: null },
   })
@@ -110,6 +116,167 @@ describe('InsightsPage against a backend predating migration 027', () => {
     renderApp({}, <InsightsPage />)
     expect(await screen.findByText('187')).toBeInTheDocument()
     expect(screen.queryByText(/approximate/)).toBeNull()
+  })
+})
+
+// T-76 + T-71. A 30-day and a 90-day window are indistinguishable on a team
+// with real history -- both saturate the same MAX_PAGES x TEAM_FEED_PAGE cap.
+// Under T-76 (before backend #79) the truncation was invisible to the client
+// because the wire masked it through `exact`; the fix landed as absence copy
+// ("the reached depth is not reported") because that was the strongest
+// sentence the payload permitted.
+//
+// With #79 the wire now carries `coveredDays` (== lookbackDays), the actual
+// reach of the fetch, so the notice moves from "something was cut" to "30
+// days requested, N days reached." The two truncation shapes have to be told
+// apart:
+//   - `coveredDays < windowDays` -- the current window itself is short. The
+//     ticket's headline case.
+//   - `coveredDays >= windowDays` (but still truncated) -- the current window
+//     is whole, the PRIOR one is short, the delta is what got capped.
+describe('Insights when the current window itself was cut short', () => {
+  const cut = async (over: Partial<Insights> = {}) => ({
+    ...(await new FakeDataClient().getInsights(30)),
+    // Post-#79: exact stays true on a current backend even when truncated,
+    // because the two headline counts come from the database and only the
+    // paged breakdowns are floors. The old masked flag would have hidden this
+    // whole path -- see the type doc for `truncated`.
+    exact: true,
+    truncated: true,
+    lookbackDays: 12,
+    coveredDays: 12,
+    sessions: { count: 267, deltaPct: null },
+    entriesShared: { count: 2000, delta: null },
+    ...over,
+  })
+
+  it('names both the requested and reached ranges, in days', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    // The actionable sentence: what you asked for, and what you got. Both
+    // numbers, both units, no "some part of it was cut" hedge.
+    expect(notice).toHaveTextContent(/30 days requested, 12 days reached/)
+    // The missing span is stated as the arithmetic difference so a scanner
+    // can see how big the gap is without doing the subtraction themselves.
+    expect(notice).toHaveTextContent(/oldest 18 days/)
+    expect(notice).toHaveTextContent(/floor over the 12 days that were/)
+  })
+
+  it('names the window the reader actually chose', async () => {
+    renderWith(await clientServing(await cut({ window: 90, lookbackDays: 12, coveredDays: 12 })), <InsightsPage />)
+    await screen.findByTestId('insights-truncated')
+    await userEvent.click(screen.getByRole('button', { name: '90 days' }))
+    expect(await screen.findByTestId('insights-truncated'))
+      .toHaveTextContent(/90 days requested, 12 days reached/)
+  })
+
+  // The part that matters. "Nothing has arrived from Sarah" is drawn from the
+  // truncated rows, so under a cut window it may be an artefact of the cap
+  // rather than a fact about Sarah.
+  it('never files a silent teammate under Broken when the data was cut', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    const unconfirmed = await screen.findByTestId('problems-unconfirmed')
+    expect(within(unconfirmed).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
+    expect(unconfirmed).toHaveTextContent(/Unconfirmed/)
+    expect(unconfirmed).toHaveTextContent(/silence here may be unread data/)
+
+    // The accusing frame is gone entirely -- both the "nothing is reaching the
+    // team" heading and its inverse claim that nothing is wrong.
+    expect(screen.queryByTestId('problems-broken')).toBeNull()
+    expect(screen.queryByText(/nothing is reaching the team/i)).toBeNull()
+    expect(screen.queryByText(/Nothing is broken right now/i)).toBeNull()
+  })
+
+  // Every action on this page asks the reader to go and chase a named
+  // teammate. You may not send someone after a problem the page cannot
+  // establish. (The real daemon sets action: null for absence problems; the
+  // fixture supplies one, which is exactly the case worth pinning.)
+  it('offers no chase-this-person action on an unconfirmed problem', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+    await screen.findByTestId('problems-unconfirmed')
+    expect(screen.queryByRole('button', { name: /send setup steps/i })).toBeNull()
+  })
+
+  it('marks members-syncing as a floor instead of counting people out', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    // Anchored on loaded content: the loading frame renders the same four stat
+    // LABELS with bars in place of figures, so a findByText on the label alone
+    // resolves one state too early.
+    await screen.findByTestId('insights-truncated')
+    const cell = screen.getByText('members syncing').closest('.stat-cell')
+    expect(cell).toHaveTextContent('≥2/3')
+    expect(cell).toHaveTextContent(/a floor/)
+    // `ok` can only be undercounted by a short fetch, so the missing member
+    // must not be reported as a person who has gone quiet.
+    expect(cell).not.toHaveTextContent(/haven't shared recently/)
+  })
+
+  // The CSV is the copy that gets forwarded to the person it names, so it must
+  // not out-claim the screen it came from.
+  it('exports the problem as unconfirmed rather than broken, and carries the reached span', async () => {
+    const csv = buildCsv(await cut())
+    expect(csv).toContain('feed_truncated,true')
+    expect(csv).toContain('feed_covered_days,12')
+    expect(csv).toContain('unconfirmed,Nothing has arrived from Sarah')
+    expect(csv).not.toContain('broken,Nothing has arrived from Sarah')
+  })
+
+  it('keeps Broken, Minor and the plain fraction when the fetch completed', async () => {
+    renderApp({}, <InsightsPage />)
+
+    const broken = await screen.findByTestId('problems-broken')
+    expect(within(broken).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
+    expect(screen.getByTestId('problems-minor')).toBeInTheDocument()
+    expect(screen.queryByTestId('problems-unconfirmed')).toBeNull()
+    expect(screen.queryByTestId('insights-truncated')).toBeNull()
+    expect(screen.getByRole('button', { name: /send setup steps/i })).toBeInTheDocument()
+    expect((screen.getByText('members syncing').closest('.stat-cell'))).toHaveTextContent('2/3')
+  })
+})
+
+// T-71 second shape: the CURRENT window is whole but the PRIOR one is not, so
+// the trend against the previous window is what got capped. Different sentence
+// entirely -- "30 days requested, 42 days reached" would read as growth, when
+// the point is that the reader can trust everything in the current window and
+// only the year-over-year comparison is unavailable.
+describe('Insights when only the prior window was cut short', () => {
+  const capped = async () => ({
+    ...(await new FakeDataClient().getInsights(30)),
+    exact: true,
+    truncated: true,
+    // The daemon requests window * 2 = 60 days; reaching 42 means the LAST
+    // 30 days are complete and the previous 30 days are short.
+    lookbackDays: 42,
+    coveredDays: 42,
+    sessions: { count: 812, deltaPct: null },
+    entriesShared: { count: 3400, delta: null },
+  })
+
+  it('names the trend as capped, not the window as truncated', async () => {
+    renderWith(await clientServing(await capped()), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    // Not the "requested / reached" phrasing -- that would read as growth
+    // ("30 requested, 42 reached") when the actual fact is a capped delta.
+    expect(notice.textContent).not.toMatch(/30 days requested/)
+    expect(notice).toHaveTextContent(/comparison against the previous 30 days is capped/)
+    // Reassures on the current window itself, which is the fact the reader
+    // most needs to know before deciding whether to trust the figures below.
+    expect(notice).toHaveTextContent(/last 30 days are complete/)
+    expect(notice).toHaveTextContent(/stopped 42 days back/)
+  })
+
+  it('still demotes the silent-teammate sentence, because the sentence reads over the same rows', async () => {
+    // Coordinator's rule: silent-teammate demotion fires whenever truncated
+    // is true, not only when the current window is short. The delta-only
+    // case still means the problems list was built from a capped view --
+    // any teammate whose last row is older than 42 days is invisible.
+    renderWith(await clientServing(await capped()), <InsightsPage />)
+    await screen.findByTestId('problems-unconfirmed')
+    expect(screen.queryByTestId('problems-broken')).toBeNull()
   })
 })
 
