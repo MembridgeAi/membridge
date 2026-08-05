@@ -109,7 +109,8 @@ export function TodayPage() {
   if (daemonError?.blocking) {
     return (
       <div className="today-page">
-        <p className="today-error" role="alert">Couldn't reach the daemon. {errorMessage(daemonError.error)}</p>
+        <p className="today-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="today-empty-note">{errorMessage(daemonError.error)}</p>
       </div>
     )
   }

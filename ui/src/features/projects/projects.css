@@ -71,9 +71,32 @@
   font-size: 12px;
 }
 
-/* No scroll boundary anymore: the column set is fixed (one Access cell per
- * row instead of one column per member), so the table's width is independent
- * of team size and nothing here ever scrolls sideways. */
+/* The COLUMN SET is fixed (one Access cell per row instead of one column per
+ * member), so the table's width is independent of team size. That is all it
+ * means -- it does NOT mean the table cannot outgrow the window, and for a
+ * long time it did. `width: 100%` is only a *preferred* width: under
+ * `table-layout: auto` a table can never render narrower than the sum of its
+ * columns' min-content widths, and a project path is arbitrary-length user
+ * data. Measured in this app at the 900px window floor (170px rail, 730px of
+ * content): with one 90-character path the table's min-content reached
+ * 1132px, i.e. 402px off the right edge, and 202px off it even at the 1100px
+ * default. What bounds it now is `overflow-wrap: anywhere` on .proj-name and
+ * .archived-row below (1132px -> 646px, and 496px in select mode).
+ *
+ * Two things that look like the fix and measure as no fix at all -- both
+ * verified here, one variable at a time, before the rule above was chosen:
+ *   - `overflow-wrap: break-word` instead of `anywhere`: min-content stayed
+ *     at 1132px. Only `anywhere` participates in intrinsic (min-content)
+ *     sizing; `break-word` is ignored for it. The two are not interchangeable.
+ *   - The ellipsis pattern from app.css's .rail-identity (`overflow: hidden`
+ *     + `text-overflow: ellipsis` + `white-space: nowrap`) applied to the
+ *     name and path: the cells visibly collapsed to one line each and
+ *     min-content STILL stayed at 1132px. That pattern works in the rail
+ *     because the rail is a flex item with `min-width: 0`; a table cell's
+ *     min-content is computed from its content and ignores a child's overflow
+ *     clipping. Do not reach for it here.
+ * Neither cell padding nor any `white-space: nowrap` in this file was ever
+ * the cause: disabling every nowrap in the table moved min-content not at all. */
 .projects-table {
   width: 100%;
   border-collapse: collapse;
@@ -90,10 +113,6 @@
   white-space: nowrap;
   border-bottom: 1px solid var(--line);
 }
-.projects-table thead th.who {
-  text-align: center;
-  width: 46px;
-}
 .projects-table tbody td {
   padding: 8px 12px;
   vertical-align: middle;
@@ -108,17 +127,26 @@
 @media (prefers-reduced-motion: no-preference) {
   .projects-table tbody tr { transition: background-color var(--dur-fast) var(--ease-out); }
 }
-.projects-table td.who {
-  text-align: center;
-}
 .projects-empty-note {
   padding: var(--sp-6) var(--sp-4);
   color: var(--text3);
   text-align: center;
+  /* This note interpolates the user's raw filter string ("No projects match
+   * X"), which is unbounded input with no spaces to break at. Same bound as
+   * the cells above, for the same reason. */
+  overflow-wrap: anywhere;
 }
 
+/* This cell holds the row's only two pieces of arbitrary-length user data --
+ * the project name and its absolute path -- so it is where the table's width
+ * is won or lost. `anywhere` is what keeps the cell's min-content small
+ * enough for the table to fit its container at the 900px window floor; see
+ * the .projects-table note above for what it is bounding and for the two
+ * mechanisms that do not work. Inherited, so it covers the name link and the
+ * path together. */
 .proj-name {
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 /* The name is a link now. It must not READ as one at rest: a table whose
  * every first cell is blue and underlined is a table nobody can scan. The
@@ -133,8 +161,22 @@
 .proj-name-link:focus-visible {
   text-decoration: underline;
 }
+/* The 2-line clamp is not cosmetic: it is what stops the horizontal fix from
+ * becoming a vertical one. `overflow-wrap: anywhere` bounds the row's WIDTH by
+ * letting the path wrap mid-token, and left alone it would trade a page that
+ * scrolls sideways for rows tall enough to push the grid off the bottom
+ * instead -- measured at 312px for a single cell at the table's min-content
+ * width. Clamping caps that at two lines, and because a clamp can hide the
+ * tail of the path (the part that tells two worktrees of the same repo apart)
+ * every .proj-path carries the full value in `title` -- see ProjectsPage.
+ * -webkit-box is the only widely supported line clamp; this app ships in
+ * Electron/Chromium, so the prefix is safe here. */
 .proj-path {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
   margin-top: 1px;
   color: var(--text3);
   font-size: 10px;
@@ -393,6 +435,11 @@
   margin: 4px 0 0;
   padding: 0;
 }
+/* Same defect as the table row and the same bound: this row also carries a
+ * project name and an absolute path. It is flex rather than a table, so the
+ * mechanism differs -- a flex item's default `min-width: auto` is "at least my
+ * min-content" -- but `anywhere` shrinks that min-content the same way, and it
+ * inherits to .archived-name and .proj-path together. */
 .archived-row {
   display: flex;
   align-items: center;
@@ -400,6 +447,7 @@
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .archived-row:last-child {
   border-bottom: none;
@@ -408,10 +456,14 @@
   font-weight: 600;
   color: var(--text2);
 }
+/* Keeps -webkit-box rather than restoring `display: inline`: as a flex item
+ * `inline` would blockify anyway, and blockifying discards the 2-line clamp
+ * this needs as much as the table row does. `min-width: 0` lets the item
+ * actually shrink instead of holding the row open at its min-content. */
 .archived-row .proj-path {
-  display: inline;
   margin: 0;
   flex: 1;
+  min-width: 0;
 }
 .archived-missing {
   color: var(--text3);

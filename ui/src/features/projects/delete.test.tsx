@@ -7,6 +7,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
+import type { DeleteProjectResult } from '../../data/types'
 import { ProjectsPage } from './ProjectsPage'
 
 async function openDeleteDialog(projectName: string) {
@@ -122,5 +123,114 @@ describe('a shared project’s delete is manager-only', () => {
     await userEvent.type(within(dialog).getByRole('textbox', { name: /type the project name/i }), 'sublease')
     await userEvent.click(within(dialog).getByRole('button', { name: /delete project/i }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+})
+
+// U-3: two very different refusals arrive as the same 200 with the same field
+// shapes. "You are not a manager" is FINAL -- retrying changes nothing. "We
+// could not establish whether you are a manager" is INDETERMINATE: no
+// connection or an expired sign-in, nothing on this machine was touched, and
+// the identical delete may well succeed on the next attempt. Rendered
+// identically, the outage sent the user off to argue about a role they already
+// hold while the real cause was their connection.
+//
+// The discriminator is the daemon's `retryable` (lib/server.js
+// RETRYABLE_REFUSALS). This screen must branch on THAT and never on the
+// `refusal` code list, so a determinate refusal the daemon adds later reads as
+// final here without this screen being taught its name.
+describe('an outage refusal reads as retryable, a role refusal reads as final', () => {
+  async function attemptDelete(result: DeleteProjectResult) {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'deleteProject').mockResolvedValue(result)
+    renderWith(client, <ProjectsPage />)
+    const dialog = await openDeleteDialog('membridge')
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /type the project name/i }), 'membridge')
+    await userEvent.click(within(dialog).getByRole('button', { name: /delete project|try again/i }))
+    return dialog
+  }
+
+  const ROLE_UNKNOWN = {
+    path: '/Users/x/membridge', scope: 'local' as const, archived: false, unlinked: false,
+    refusal: 'role-unknown' as const, retryable: true,
+    message: 'could not confirm whether you manage this team — MemBridge could not be reached. '
+      + 'Try the delete again in a moment. Nothing on this machine was changed.',
+  }
+  const NOT_MANAGER = {
+    path: '/Users/x/membridge', scope: 'local' as const, archived: false, unlinked: true,
+    refusal: 'not-manager' as const, retryable: false,
+    message: 'only owners or managers can delete a shared project for the team',
+  }
+
+  it('offers the retry as the button itself, and tones the message down from red', async () => {
+    const dialog = await attemptDelete(ROLE_UNKNOWN)
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent(/nothing on this machine was changed/i)
+    // Amber, not red: this did not fail, it did not happen.
+    expect(alert).toHaveAttribute('data-tone', 'retryable')
+    // The confirm button IS the retry, and it says so. The typed name survives
+    // the refusal, so it is enabled and one click away.
+    const retry = within(dialog).getByRole('button', { name: /^try again$/i })
+    expect(retry).toBeEnabled()
+    expect(within(dialog).queryByRole('button', { name: /^delete project$/i })).toBeNull()
+    // The dialog must still be open -- a refusal is never reported as a done
+    // destruction.
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('leaves a genuine role refusal final: still red, still "Delete project"', async () => {
+    const dialog = await attemptDelete(NOT_MANAGER)
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent(/only owners or managers/i)
+    expect(alert).toHaveAttribute('data-tone', 'error')
+    expect(within(dialog).getByRole('button', { name: /^delete project$/i })).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /^try again$/i })).toBeNull()
+  })
+
+  // The gate is `retryable`, NOT the refusal code. A refusal code this client
+  // has never heard of, without retryable, must read as final -- which is what
+  // makes a fourth determinate refusal safe to add daemon-side.
+  it('treats an unrecognized refusal code as final rather than guessing', async () => {
+    // Cast on purpose: 'quota-exceeded' is deliberately NOT in the declared
+    // union, which is the whole point -- this models a daemon newer than this
+    // client, and the type must not be able to pretend that cannot happen.
+    const dialog = await attemptDelete({
+      path: '/Users/x/membridge', scope: 'local', archived: false, unlinked: false,
+      refusal: 'quota-exceeded', retryable: false,
+      message: 'this team is over its project limit',
+    } as unknown as DeleteProjectResult)
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveAttribute('data-tone', 'error')
+    expect(within(dialog).queryByRole('button', { name: /^try again$/i })).toBeNull()
+  })
+
+  // An older daemon sends neither field. Absent must mean final, which is
+  // exactly the behaviour this screen had before the discriminator existed --
+  // the alternative (absent means retryable) would invite a retry after a
+  // refusal that already unlinked the machine.
+  it('reads a pre-discriminator daemon\'s refusal as final', async () => {
+    const dialog = await attemptDelete({
+      path: '/Users/x/membridge', scope: 'local', archived: false, unlinked: true,
+      message: 'only owners or managers can delete a shared project for the team',
+    })
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveAttribute('data-tone', 'error')
+    expect(within(dialog).getByRole('button', { name: /^delete project$/i })).toBeInTheDocument()
+  })
+
+  // A transport failure is a different thing again: the request itself threw,
+  // so nothing is known about what the daemon did. It must not borrow the
+  // retryable treatment -- "nothing on this machine was changed" is a promise
+  // only a refusal body can make.
+  it('does not dress a thrown request up as a retryable refusal', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'deleteProject').mockRejectedValue(new Error('fetch failed'))
+    renderWith(client, <ProjectsPage />)
+    const dialog = await openDeleteDialog('membridge')
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /type the project name/i }), 'membridge')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^delete project$/i }))
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent(/fetch failed/i)
+    expect(alert).toHaveAttribute('data-tone', 'error')
+    expect(within(dialog).queryByRole('button', { name: /^try again$/i })).toBeNull()
   })
 })

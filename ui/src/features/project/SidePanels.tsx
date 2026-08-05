@@ -1,5 +1,6 @@
 import { StateChip } from '../../components/StateChip'
 import { SyncStateView } from '../../components/SyncState'
+import { readEncryption, type EncryptionState } from '../../components/encryptionState'
 import { relativeAgo } from '../../data/relativeTime'
 import type { Project, StreamEntry as StreamEntryData, SyncState } from '../../data/types'
 
@@ -60,12 +61,36 @@ interface SyncPanelProps {
   encryptionEnabled: boolean
   plaintextOff: boolean
   sessionsThisWeek: number
-  peopleCount: number
+}
+
+// Short by necessity: this chip lives in a fixed 300px column with ~174px left
+// after the key and padding, and `.chip` is `white-space: nowrap`, so an
+// over-long label forces the whole side column wider and squeezes the activity
+// stream beside it. Settings' Privacy row states the same three states at
+// length, with an explanatory note under each warning -- see
+// components/encryptionState.ts for why the wording is per-context and only the
+// state and tone are shared.
+const ENCRYPTION_LABEL: Record<EncryptionState, string> = {
+  // Same words as Settings for this state: it is the one a reader is most
+  // likely to see in both places and go looking for an explanation of.
+  off: 'plaintext shared',
+  'dual-write': 'readable copy stored',
+  'ciphertext-only': 'end-to-end',
 }
 
 /** "Sync" — team sync reuses the same SyncStateView contract as the header
- *  (never re-implemented); encryption reads status.encryption directly. */
-export function SyncPanel({ sync, onSync, encryptionEnabled, plaintextOff, sessionsThisWeek, peopleCount }: SyncPanelProps) {
+ *  (never re-implemented); encryption reads status.encryption directly.
+ *
+ *  The encryption chip used to tone the ENCRYPTION-OFF state `muted` and label
+ *  it "off". Muted is this system's neutral/absence tone, so the worst state
+ *  available -- nothing encrypted, everything readable on the server -- was the
+ *  only one rendered as unremarkable, and "off" described a switch rather than
+ *  the consequence. It now warns, in the same words Settings uses. The
+ *  encrypted-but-dual-write state was already distinguished here, but borrowed
+ *  the encryption-off vocabulary ("plaintext shared") for itself, which left the
+ *  two unsafe states labelled as each other. */
+export function SyncPanel({ sync, onSync, encryptionEnabled, plaintextOff, sessionsThisWeek }: SyncPanelProps) {
+  const encryption = readEncryption(encryptionEnabled, plaintextOff)
   return (
     <div className="panel panel-last">
       <div className="section-label">Sync</div>
@@ -75,17 +100,30 @@ export function SyncPanel({ sync, onSync, encryptionEnabled, plaintextOff, sessi
       </div>
       <div className="kv">
         <span className="kv-key">Encryption</span>
-        {encryptionEnabled && plaintextOff ? (
-          <StateChip tone="ok" glyph="✓">end-to-end</StateChip>
-        ) : encryptionEnabled ? (
-          <StateChip tone="warn" glyph="⚠">plaintext shared</StateChip>
-        ) : (
-          <StateChip tone="muted" glyph="">off</StateChip>
-        )}
+        <StateChip tone={encryption.tone} glyph={encryption.glyph}>
+          {ENCRYPTION_LABEL[encryption.state]}
+        </StateChip>
       </div>
+      {/* Sessions only. This read "N sessions · M people", where M was the
+          length of Project.recentAuthorIds -- the author set of this project's
+          slice of one capped, cross-project feed page. Two things were wrong
+          with it at once, and they compounded: the set is empty for a project
+          quiet enough to miss that page, so a genuinely busy week rendered as
+          "31 sessions · 0 people", a line that contradicts itself; and the set
+          has no time window, so even when non-empty it was not a "this week"
+          figure and could not honestly sit under this key.
+          No number replaces it, because none of this page's payloads counts
+          distinct people over a window. Two candidates were rejected: the
+          project-scoped stream this page already loads is capped at 100 entries,
+          so a count off it is a FLOOR that under-reports exactly for the busy
+          projects where the figure would matter -- the same capped-page trap
+          this codebase has now fixed four times; and an inline "people unknown"
+          does not fit, per the width budget documented above. The faces in the
+          page header carry who has been active, where being approximate is
+          honest. */}
       <div className="kv">
         <span className="kv-key">This week</span>
-        <span className="mono kv-value">{sessionsThisWeek} sessions · {peopleCount} people</span>
+        <span className="mono kv-value">{sessionsThisWeek} sessions</span>
       </div>
     </div>
   )

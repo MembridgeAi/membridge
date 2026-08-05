@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
-  collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf,
+  collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf, mapDayDigests,
   latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
-  memberActivity, memberIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
+  memberActivity, recentAuthorIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
 import type { LiveSession, StreamEntry } from './types'
@@ -358,7 +358,7 @@ describe('groupLiveSessions', () => {
   })
 })
 
-describe('latestSummaryFor and memberIdsFor', () => {
+describe('latestSummaryFor and recentAuthorIdsFor', () => {
   it('picks the first entry (newest-first) that carries a headline or summary', () => {
     const stale = entry({ headline: 'old work', ts: '2026-07-28T00:00:00Z', author: 'You', authorId: 'me' })
     const fresh = entry({ headline: 'fresh work', ts: '2026-07-29T00:00:00Z', author: 'Andrew', authorId: 'andrew' })
@@ -368,7 +368,7 @@ describe('latestSummaryFor and memberIdsFor', () => {
     expect(latestSummaryFor([entry()])).toBeNull()
   })
   it('collects distinct non-null authorIds', () => {
-    const ids = memberIdsFor([entry({ authorId: 'andrew' }), entry({ authorId: 'andrew' }), entry({ authorId: 'sarah' }), entry({ authorId: null })])
+    const ids = recentAuthorIdsFor([entry({ authorId: 'andrew' }), entry({ authorId: 'andrew' }), entry({ authorId: 'sarah' }), entry({ authorId: null })])
     expect(ids.sort()).toEqual(['andrew', 'sarah'])
   })
 })
@@ -395,7 +395,7 @@ describe('mapProjectRow', () => {
     const team = entry({ projectPath: null, projectId: 'proj-1', authorId: 'sarah' })
     const other = entry({ projectPath: '/Users/x/other', projectId: 'proj-9', authorId: 'ghost' })
     const p = mapProjectRow(row, [local, team, other])
-    expect(p.memberIds.sort()).toEqual(['me', 'sarah'])
+    expect(p.recentAuthorIds.sort()).toEqual(['me', 'sarah'])
   })
   it('carries the daemon archived and missing flags, defaulting absence to false', () => {
     const p = mapProjectRow({ ...row, archived: true, missing: true }, [])
@@ -533,5 +533,58 @@ describe('groupLiveSessions session target', () => {
 
   it('gives a single-session group that session id', () => {
     expect(groupLiveSessions([live({ id: 'only-one' })])[0].sessionId).toBe('only-one')
+  })
+})
+
+// The daemon's day digest arrives from a branch that may not be deployed
+// against a given daemon, so every field is treated as absent-until-proven.
+describe('mapDayDigests', () => {
+  const raw = {
+    key: '2026-08-05 id:8f2c',
+    day: '2026-08-05',
+    kind: 'distilled',
+    text: 'Worked on UI fixes, app install and dmg',
+    sources: [{ entryId: 'a|2026-08-05T18:00:00.000Z', session: 'a', ts: '2026-08-05T18:00:00.000Z', project: 'membridge', projectId: 'p1', distilled: true, text: 'x' }],
+    sessions: 2, entries: 2, complete: true, coverageNote: null,
+  }
+
+  it('carries the sentence, its sources and its coverage through untouched', () => {
+    const [d] = mapDayDigests([raw])
+    expect(d.text).toBe('Worked on UI fixes, app install and dmg')
+    expect(d.key).toBe('2026-08-05 id:8f2c')
+    expect(d.sources[0].entryId).toBe('a|2026-08-05T18:00:00.000Z')
+    expect(d.entries).toBe(2)
+    expect(d.complete).toBe(true)
+  })
+
+  it('reads an absent array as no digests, not as undefined', () => {
+    expect(mapDayDigests(undefined)).toEqual([])
+    expect(mapDayDigests(null)).toEqual([])
+    expect(mapDayDigests([])).toEqual([])
+  })
+
+  it('drops a digest with no text rather than rendering a blank headline', () => {
+    expect(mapDayDigests([{ ...raw, text: '' }])).toEqual([])
+    expect(mapDayDigests([{ ...raw, text: '   ' }])).toEqual([])
+    expect(mapDayDigests([{ ...raw, key: '' }])).toEqual([])
+  })
+
+  it('treats an absent `complete` as INCOMPLETE, which is the cautious read', () => {
+    // The field exists to stop a partial day being presented as a whole one,
+    // so its default cannot be the confident value.
+    const [d] = mapDayDigests([{ key: 'k', text: 't' }])
+    expect(d.complete).toBe(false)
+    expect(d.entries).toBe(0)
+    expect(d.sources).toEqual([])
+  })
+
+  it('keeps a coverage note, which is the one field that must never be lost', () => {
+    const [d] = mapDayDigests([{ ...raw, coverageNote: 'Two sessions could not be summarized.' }])
+    expect(d.coverageNote).toBe('Two sessions could not be summarized.')
+  })
+
+  it('normalizes a sparse source row instead of letting undefined through', () => {
+    const [d] = mapDayDigests([{ ...raw, sources: [{ entryId: 'a|t' }] }])
+    expect(d.sources[0]).toEqual({ entryId: 'a|t', session: null, ts: '', project: '', projectId: null, distilled: false, text: '' })
   })
 })

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
-import { FakeDataClient } from '../../data/FakeDataClient'
+import { FakeDataClient, type FakeOptions } from '../../data/FakeDataClient'
 import { SettingsPage } from './SettingsPage'
 
 describe('SettingsPage', () => {
@@ -10,7 +10,7 @@ describe('SettingsPage', () => {
     renderApp({}, <SettingsPage />)
     await screen.findByText('Memory delivery')
     expect(screen.getByText('Privacy')).toBeInTheDocument()
-    expect(screen.getByText('Daemon')).toBeInTheDocument()
+    expect(screen.getByText('Background service')).toBeInTheDocument()
     expect(screen.getByText('Team')).toBeInTheDocument()
     expect(screen.queryByText(/roadmap/i)).toBeNull()
     expect(screen.queryByLabelText(/api key/i)).toBeNull()
@@ -80,9 +80,42 @@ describe('SettingsPage', () => {
 
     // The exact cause and the exact config key, per tool -- the same two
     // things the CLI prints, and no click needed to reach them.
-    expect(await within(row).findByText(/claude code: skipped, could not find the `claude` binary; set config\.mcp\.claudeBin/i)).toBeInTheDocument()
-    expect(within(row).getByText(/codex: skipped, .*set config\.mcp\.codex\.configPath/i)).toBeInTheDocument()
+    expect(await within(row).findByText(/claude code: nothing changed · could not find the `claude` binary; set config\.mcp\.claudeBin/i)).toBeInTheDocument()
+    expect(within(row).getByText(/codex: nothing changed · .*set config\.mcp\.codex\.configPath/i)).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: /re-register/i })).toBeInTheDocument()
+  })
+
+  // Finding 7: these chips interpolated lib/mcp-register.js's raw status token,
+  // so they read "Codex: skipped" / "Cursor: removed" -- the daemon's internal
+  // control-flow vocabulary. Worse, 'skipped' was toned MUTED alongside
+  // 'removed', so the colour said "fine" while the word said something had not
+  // happened, for the one status that always carries a fix.
+  it('describes each tool in terms of this machine, never the daemon status token', async () => {
+    const client = new FakeDataClient()
+    const base = await client.getSettings()
+    vi.spyOn(client, 'getSettings').mockResolvedValue({
+      ...base,
+      delivery: base.delivery.map(c => c.id === 'mcp'
+        ? {
+            ...c,
+            installed: false,
+            mcpRows: [
+              { agent: 'codex', status: 'skipped' as const, detail: 'config.mcp.autoRegister is false' },
+              { agent: 'cursor', status: 'unchanged' as const, detail: null },
+            ],
+          }
+        : c),
+    })
+    renderWith(client, <SettingsPage />)
+    const row = await screen.findByTestId('setting-mcp')
+
+    const skipped = await within(row).findByText(/codex: nothing changed/i)
+    expect(skipped.className).toMatch(/chip-warn/)
+    expect(within(row).queryByText(/codex: skipped/i)).toBeNull()
+
+    const unchanged = within(row).getByText(/cursor: already registered/i)
+    expect(unchanged.className).toMatch(/chip-ok/)
+    expect(within(row).queryByText(/cursor: unchanged/i)).toBeNull()
   })
 
   // The "unknown" render state (installed:null -- an older daemon that has
@@ -143,8 +176,8 @@ describe('SettingsPage', () => {
     renderWith(client, <SettingsPage />)
     const row = await screen.findByTestId('setting-mcp')
     await user.click(within(row).getByRole('button', { name: /re-register/i }))
-    expect(await within(row).findByText(/claude code: registered/i)).toBeInTheDocument()
-    expect(within(row).getByText(/codex: unchanged, already registered/i)).toBeInTheDocument()
+    expect(await within(row).findByText(/claude code: registered now/i)).toBeInTheDocument()
+    expect(within(row).getByText(/codex: already registered/i)).toBeInTheDocument()
   })
 
   // A failed row must surface visibly, never read as a silent success.
@@ -157,7 +190,7 @@ describe('SettingsPage', () => {
     renderWith(client, <SettingsPage />)
     const row = await screen.findByTestId('setting-mcp')
     await user.click(within(row).getByRole('button', { name: /re-register/i }))
-    const resultChip = await within(row).findByText(/cursor: failed, config file is not writable/i)
+    const resultChip = await within(row).findByText(/cursor: couldn't register · config file is not writable/i)
     expect(resultChip).toBeInTheDocument()
     expect(resultChip.className).toMatch(/chip-bad/)
   })
@@ -378,6 +411,385 @@ describe('SettingsPage', () => {
     const row = await screen.findByTestId('setting-updates')
     await userEvent.click(within(row).getByRole('button', { name: /check now/i }))
     expect(spy).toHaveBeenCalled()
+  })
+
+  // Settings honesty: no control on this page may end in a state the code did
+  // not verify. "Check now" resolved with { current, latest, updateAvailable }
+  // and the UI kept none of it, drawing a chip ONLY when an update existed --
+  // so "up to date", "the check couldn't reach GitHub" and "the button did
+  // nothing" were one indistinguishable blank. On this project the no-update
+  // answer is the NORMAL one (its GitHub releases sit behind npm), so the
+  // blank was what users saw essentially every time.
+  describe('Check for updates', () => {
+    it('reports "up to date" with a checked stamp instead of no visible outcome', async () => {
+      const client = new FakeDataClient()
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-updates')
+      await userEvent.click(within(row).getByRole('button', { name: /check now/i }))
+      expect(await within(row).findByText(/up to date/i)).toBeInTheDocument()
+      expect(within(row).getByText(/checked just now/i)).toBeInTheDocument()
+    })
+
+    it('names the new version when the check finds an update', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'checkForUpdates').mockResolvedValue({ current: '0.1.7', latest: '0.2.9', updateAvailable: '0.2.9' })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-updates')
+      await userEvent.click(within(row).getByRole('button', { name: /check now/i }))
+      expect(await within(row).findByText(/update available · v0\.2\.9/i)).toBeInTheDocument()
+    })
+
+    // latest === null is the daemon saying its network probe failed -- 200,
+    // but nothing learned. It must never fold into "no update available",
+    // which is a claim about the newest version that nobody established.
+    it('says the check could not run when the daemon reports no latest version, never "up to date"', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'checkForUpdates').mockResolvedValue({ current: '0.1.7', latest: null, updateAvailable: null })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-updates')
+      await userEvent.click(within(row).getByRole('button', { name: /check now/i }))
+      expect(await within(row).findByText(/couldn't check/i)).toBeInTheDocument()
+      expect(within(row).getByText(/couldn't reach github/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/up to date/i)).toBeNull()
+    })
+  })
+
+  describe('Restart', () => {
+    // Finding 2, UI half: pressing Restart changed nothing on screen, ever --
+    // no confirmation, no error, and the Status chip went on serving its
+    // cached "running" for a process the user had just asked to be replaced.
+    //
+    // The confirmation has to resolve on the daemon ANSWERING again, never on
+    // the POST resolving: lib/server.js writes { ok, restarting } to the
+    // socket before it even attempts the spawn, so a POST-resolved
+    // confirmation would be a lie the UI renders.
+    it('withholds the cached "running" chip until MemBridge answers again, then confirms', async () => {
+      const client = new FakeDataClient()
+      const realGetStatus = client.getStatus.bind(client)
+      let release: (() => void) | null = null
+      let calls = 0
+      vi.spyOn(client, 'getStatus').mockImplementation(async () => {
+        calls += 1
+        if (calls === 1) return realGetStatus()
+        // Every read after the first hangs until the test lets it through --
+        // standing in for the window where the daemon is genuinely down.
+        await new Promise<void>(resolve => { release = resolve })
+        return realGetStatus()
+      })
+
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-status')
+      expect(within(row).getByText(/running/i)).toBeInTheDocument()
+
+      await userEvent.click(within(row).getByRole('button', { name: /restart/i }))
+
+      expect(await within(row).findByText(/restarting/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/✓ running/)).toBeNull()
+      expect(within(row).getByRole('button', { name: /restart/i })).toBeDisabled()
+
+      await waitFor(() => expect(release).not.toBeNull())
+      release!()
+
+      expect(await within(row).findByText(/answering again after restart/i)).toBeInTheDocument()
+      expect(within(row).getByText(/✓ running/)).toBeInTheDocument()
+    })
+
+    it('surfaces a rejected restart request and never enters the restarting state', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'restartDaemon').mockRejectedValue(new Error('restart refused'))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-status')
+      await userEvent.click(within(row).getByRole('button', { name: /restart/i }))
+      expect(await screen.findByText(/restart refused/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/restarting/i)).toBeNull()
+      expect(within(row).getByRole('button', { name: /restart/i })).toBeEnabled()
+    })
+  })
+
+  // Finding 5: useSetSetting had onSuccess only and no optimistic update, and
+  // Toggle could not express in-flight at all -- so flipping a switch left it
+  // sitting on the old value for a full round trip. The natural read is "it
+  // didn't take", so users flip again, queue a second write, and land on the
+  // opposite value from the one they wanted.
+  describe('toggle feedback', () => {
+    it('moves the switch on click rather than after the round trip', async () => {
+      const client = new FakeDataClient()
+      // Never resolves: the in-flight window is what is under test, so the
+      // write must not be allowed to finish and end it.
+      vi.spyOn(client, 'setSetting').mockReturnValue(new Promise<void>(() => {}))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-start-at-login')
+      const toggle = within(row).getByRole('switch')
+      expect(toggle).toHaveAttribute('aria-checked', 'true')
+
+      await userEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-checked', 'false')
+      expect(toggle).toHaveAttribute('aria-busy', 'true')
+    })
+
+    it('refuses a second flip while the first write is in flight, so no opposite value is queued', async () => {
+      const client = new FakeDataClient()
+      const spy = vi.spyOn(client, 'setSetting').mockReturnValue(new Promise<void>(() => {}))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-start-at-login')
+      const toggle = within(row).getByRole('switch')
+      await userEvent.click(toggle)
+      await userEvent.click(toggle)
+      expect(spy).toHaveBeenCalledTimes(1)
+    })
+
+    // A silent revert is the exact failure this page exists to prevent, so the
+    // rollback has to be explained as well as performed.
+    it('rolls the switch back AND says which action failed', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('launchd refused'))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-start-at-login')
+      const toggle = within(row).getByRole('switch')
+      await userEvent.click(toggle)
+      expect(await within(row).findByText(/couldn't change start at login/i)).toBeInTheDocument()
+      expect(toggle).toHaveAttribute('aria-checked', 'true')
+    })
+  })
+
+  // Finding 6: Restart, Start at login, Sync interval and Check now shared one
+  // line reading "Couldn't save the change." -- so pressing Restart told you a
+  // save had failed, and nothing said which of the four controls was broken.
+  describe('per-action failures', () => {
+    it('names Restart on the Status row, not a generic save failure', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'restartDaemon').mockRejectedValue(new Error('spawn refused'))
+      renderWith(client, <SettingsPage />)
+      const statusRow = await screen.findByTestId('setting-status')
+      await userEvent.click(within(statusRow).getByRole('button', { name: /restart/i }))
+      expect(await within(statusRow).findByText(/couldn't restart membridge/i)).toBeInTheDocument()
+      expect(screen.queryByText(/couldn't save the change/i)).toBeNull()
+    })
+
+    it('keeps a failed sync-interval write off the unrelated rows', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('write rejected'))
+      renderWith(client, <SettingsPage />)
+      await userEvent.selectOptions(await screen.findByLabelText('Sync interval'), '900')
+      const intervalRow = screen.getByTestId('setting-sync-interval')
+      expect(await within(intervalRow).findByText(/couldn't change the sync interval/i)).toBeInTheDocument()
+      expect(within(screen.getByTestId('setting-start-at-login')).queryByRole('alert')).toBeNull()
+      expect(within(screen.getByTestId('setting-status')).queryByRole('alert')).toBeNull()
+    })
+
+    it('names the update check when it is the request that was rejected', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'checkForUpdates').mockRejectedValue(new Error('endpoint gone'))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-updates')
+      await userEvent.click(within(row).getByRole('button', { name: /check now/i }))
+      expect(await within(row).findByText(/couldn't check for updates/i)).toBeInTheDocument()
+    })
+
+    it('names the summaries switch when its write is refused', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('hook write failed'))
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-summaries')
+      await userEvent.click(within(row).getByRole('switch'))
+      expect(await within(row).findByText(/couldn't change session summaries/i)).toBeInTheDocument()
+    })
+  })
+
+  // Finding 4, decided read-only by Marco: an accidental `encrypt: false` in
+  // his config already shipped a full plaintext history to the server once, and
+  // a privacy downgrade one click away on a page with no confirm step is how
+  // that recurs. The row's job is to let him SEE the state. It used to LOOK
+  // like a switch -- "Share plaintext with team", described as "Off means..."
+  // -- while ignoring every click.
+  it('presents team encryption as a status row, never as a control that ignores clicks', async () => {
+    renderApp({}, <SettingsPage />)
+    const row = await screen.findByTestId('setting-plaintext')
+    expect(within(row).queryByRole('switch')).toBeNull()
+    expect(within(row).queryByRole('button')).toBeNull()
+    expect(within(row).getByText(/change it in your config file \(team\.encrypt, team\.plaintextOff\)/i)).toBeInTheDocument()
+    expect(screen.queryByText(/share plaintext with team/i)).toBeNull()
+  })
+
+  // The row keyed off `endToEnd` alone, so "encrypted, ciphertext only" and
+  // "encrypted but a readable copy is also stored" rendered as one identical
+  // green chip. That second state is the dual-write middle ground, and it is
+  // the exact fact behind the plaintext history that made this row read-only in
+  // the first place -- so showing half of it defeated the row's whole job.
+  describe('encryption state', () => {
+    async function withPrivacy(overrides: Partial<Awaited<ReturnType<FakeDataClient['getSettings']>>['privacy']>) {
+      const client = new FakeDataClient()
+      const base = await client.getSettings()
+      vi.spyOn(client, 'getSettings').mockResolvedValue({
+        ...base,
+        privacy: { ...base.privacy, ...overrides },
+      })
+      renderWith(client, <SettingsPage />)
+      return screen.findByTestId('setting-plaintext')
+    }
+
+    it('says ciphertext only when nothing readable is stored', async () => {
+      const row = await withPrivacy({ endToEnd: true, plaintextShared: false })
+      expect(within(row).getByText(/end-to-end, ciphertext only/i)).toBeInTheDocument()
+    })
+
+    it('warns when rows are encrypted but a readable copy is stored too', async () => {
+      const row = await withPrivacy({ endToEnd: true, plaintextShared: true })
+      const chip = within(row).getByText(/end-to-end, readable copy also stored/i)
+      expect(chip.className).toMatch(/chip-warn/)
+      expect(within(row).getByText(/the server can read your memory/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+    })
+
+    // With no key the daemon's plaintext-nulling never runs (it lives inside
+    // encryptRow, which is skipped), so ciphertext-only is INERT when
+    // encryption is off. Reporting it here would let a ciphertext-only reading
+    // imply a protection that is not in force.
+    it('does not credit ciphertext-only while encryption is off, where it has no effect', async () => {
+      const row = await withPrivacy({ endToEnd: false, plaintextShared: false })
+      const chip = within(row).getByText(/plaintext shared/i)
+      expect(chip.className).toMatch(/chip-warn/)
+      expect(within(row).getByText(/ciphertext-only has no effect until encryption is on/i)).toBeInTheDocument()
+      // No reassuring chip of any kind -- the row's description explains what
+      // end-to-end MEANS, which is not the same as claiming it is in force.
+      expect(row.querySelector('.chip-ok')).toBeNull()
+      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+    })
+  })
+
+  // The daemon now reports its sync loop's own health, and `running: false`
+  // covers two very different things: a WEDGED loop and a daemon nobody has
+  // observed yet. Rendering either as "not running" is a stronger claim than the
+  // daemon supports -- and telling someone their daemon is not running when the
+  // process is up sends them to start something already started.
+  describe('sync-loop health', () => {
+    async function statusRow(health: FakeOptions['health']) {
+      renderWith(new FakeDataClient({ health }), <SettingsPage />)
+      return screen.findByTestId('setting-status')
+    }
+
+    it('reads plainly as running when a pass completed inside the window', async () => {
+      const row = await statusRow({ state: 'ok', lastTickAt: '2026-07-29T21:00:00Z', lastTickError: null, staleForSec: 5 })
+      const chip = within(row).getByText(/✓ running/)
+      expect(chip.className).toMatch(/chip-ok/)
+    })
+
+    // Alive and rescheduling, work failing. Neither an ok chip nor a bad one,
+    // and the error is the whole reason the state is distinguishable, so it has
+    // to be on screen rather than summarised away.
+    it('reads as neither healthy nor dead while erroring, and shows the error', async () => {
+      const row = await statusRow({ state: 'erroring', lastTickAt: '2026-07-29T21:00:00Z', lastTickError: 'ENOSPC writing memory.md', staleForSec: 12 })
+      const chip = within(row).getByText(/running, last sync failed/i)
+      expect(chip.className).toMatch(/chip-warn/)
+      expect(within(row).getByText(/ENOSPC writing memory\.md/)).toBeInTheDocument()
+      expect(row.querySelector('.chip-ok')).toBeNull()
+      expect(within(row).queryByText(/not running/i)).toBeNull()
+    })
+
+    // The headline: a wedged loop must not be described as a stopped process.
+    it('never calls a stalled loop "not running", and keeps Restart reachable', async () => {
+      const row = await statusRow({ state: 'stalled', lastTickAt: '2026-07-29T18:00:00Z', lastTickError: null, staleForSec: 900 })
+      const chip = within(row).getByText(/sync stalled/i)
+      expect(chip.className).toMatch(/chip-bad/)
+      expect(within(row).queryByText(/not running/i)).toBeNull()
+      // Says the process IS up, so the user reaches for Restart rather than Start.
+      expect(within(row).getByText(/MemBridge is running, but no sync has finished/i)).toBeInTheDocument()
+      expect(within(row).getByText(/15 min/)).toBeInTheDocument()
+      expect(within(row).getByRole('button', { name: /restart/i })).toBeEnabled()
+    })
+
+    // Same precedent as DeliveryControl's installed === null: an unobserved
+    // state reads as unobserved, never as healthy and never as broken.
+    it('claims nothing at all when health was never observed', async () => {
+      const row = await statusRow({ state: 'unknown', lastTickAt: null, lastTickError: null, staleForSec: null })
+      expect(within(row).getByText(/not checked yet/i)).toBeInTheDocument()
+      expect(row.querySelector('.chip-ok')).toBeNull()
+      expect(row.querySelector('.chip-bad')).toBeNull()
+      expect(within(row).queryByText(/not running/i)).toBeNull()
+      expect(within(row).getByRole('button', { name: /restart/i })).toBeEnabled()
+    })
+
+    // A daemon older than the health field sends `running` alone. Rendering
+    // "not checked yet" at that user would be reporting OUR blindness as THEIR
+    // daemon's, so the page must fall back to exactly what it rendered before.
+    it('falls back to the running/not-running chip when the daemon sends no health at all', async () => {
+      const row = await statusRow(null)
+      expect(within(row).getByText(/✓ running/)).toBeInTheDocument()
+      expect(within(row).queryByText(/not checked yet/i)).toBeNull()
+      expect(within(row).queryByText(/sync stalled/i)).toBeNull()
+    })
+  })
+
+  describe('page freshness', () => {
+    // Finding 10: useSettings has a staleTime and no refetchInterval, so hook
+    // vintages, MCP registration, update availability and stale excluded paths
+    // were all one snapshot taken when the page mounted, with nothing on
+    // screen admitting it. The fix is an explicit control plus a stamp rather
+    // than a poll -- getSettings() fans out to three endpoints.
+    it('stamps how old the reading is and rechecks on demand', async () => {
+      const client = new FakeDataClient()
+      const settingsSpy = vi.spyOn(client, 'getSettings')
+      const statusSpy = vi.spyOn(client, 'getStatus')
+      renderWith(client, <SettingsPage />)
+      expect(await screen.findByText(/checked just now/i)).toBeInTheDocument()
+
+      const settingsCalls = settingsSpy.mock.calls.length
+      const statusCalls = statusSpy.mock.calls.length
+      await userEvent.click(screen.getByRole('button', { name: /^recheck$/i }))
+      await waitFor(() => expect(settingsSpy.mock.calls.length).toBeGreaterThan(settingsCalls))
+      expect(statusSpy.mock.calls.length).toBeGreaterThan(statusCalls)
+    })
+
+    // Recheck was itself a false confirmation of the kind this page exists to
+    // remove: LocalDaemonClient coalesces reads of /api/status and /api/team
+    // through a 5s cache, and getSettings() plus the Status chip BOTH read
+    // through it -- so a Recheck inside that window re-stamped "checked just
+    // now" over answers up to five seconds old. Refetching react-query cannot
+    // reach that layer, so the button has to stand the transport cache down
+    // first. Asserted on ordering, because clearing after the refetch would
+    // type-check, run green on the fake, and still lie on the real client.
+    it('stands the transport read cache down before refetching, so the stamp is earned', async () => {
+      const client = new FakeDataClient()
+      const order: string[] = []
+      vi.spyOn(client, 'forgetCachedReads').mockImplementation(() => { order.push('forget') })
+      const settingsSpy = vi.spyOn(client, 'getSettings')
+      renderWith(client, <SettingsPage />)
+      await screen.findByText(/checked just now/i)
+      settingsSpy.mockImplementation(async () => {
+        order.push('getSettings')
+        return new FakeDataClient().getSettings()
+      })
+
+      await userEvent.click(screen.getByRole('button', { name: /^recheck$/i }))
+      await waitFor(() => expect(order).toContain('getSettings'))
+      expect(order[0]).toBe('forget')
+    })
+
+    // The specific trap: Settings.daemon.running comes from getSettings()'s
+    // INTERNAL /api/status read, so it rides the non-polling ['settings']
+    // query. The chip therefore looked live while being frozen at page load,
+    // and the 10s ['status'] poll never reached it.
+    it('reads the Status chip from the polled status query, not the settings snapshot', async () => {
+      const client = new FakeDataClient()
+      const base = await client.getSettings()
+      const status = await client.getStatus()
+      // Settings still insists the daemon is up; the polled status says it is
+      // not. The chip must follow status.
+      //
+      // `health` is deliberately STRIPPED here rather than left at the fixture's
+      // 'ok': the chip now prefers health over running, so keeping both would
+      // present a running:false / health:ok payload the daemon cannot produce,
+      // and the test would be asserting against an impossible state. Without
+      // health this is the older-daemon shape, where running IS the only signal
+      // -- which is exactly the contrast this test needs.
+      const { health: _dropped, ...statusWithoutHealth } = status
+      vi.spyOn(client, 'getSettings').mockResolvedValue({ ...base, daemon: { ...base.daemon, running: true } })
+      vi.spyOn(client, 'getStatus').mockResolvedValue({ ...statusWithoutHealth, running: false })
+      renderWith(client, <SettingsPage />)
+      const row = await screen.findByTestId('setting-status')
+      expect(await within(row).findByText(/not running/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/✓ running/)).toBeNull()
+    })
   })
 
   // Appearance (light/dark/system, Task 1). This is a per-machine display

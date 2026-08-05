@@ -1,6 +1,6 @@
 {
   "name": "@membridgeai/membridge",
-  "version": "0.2.8",
+  "version": "0.3.2",
   "description": "Shared memory across your AI coding tools. A tiny background daemon that watches Claude Code, Codex and any other agent's session logs, distills a brief per-project memory, and syncs it into the context files every tool reads (CLAUDE.md, AGENTS.md, ...).",
   "keywords": [
     "ai",
@@ -32,6 +32,7 @@
   ],
   "scripts": {
     "test": "node test/run.js",
+    "version": "node scripts/stamp-version.js && git add app/package.json",
     "build:ui": "node scripts/build-ui.js",
     "prepack": "npm run build:ui",
     "prepublishOnly": "npm test",
@@ -79,7 +80,7 @@
     }
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",

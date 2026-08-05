@@ -6,6 +6,63 @@
 const http = require('http');
 const crypto = require('crypto');
 
+// Render an instant the way PostgREST actually returns a `timestamptz`.
+//
+// THIS IS NOT COSMETIC. A mock that stores and returns pushed rows verbatim
+// out of a JS array cannot observe an entire class of defect: everything the
+// client compares as a STRING against a value it pushed appears to work,
+// because the mock hands back the exact bytes it was given and Postgres does
+// not. Verified against Postgres 17 (Supabase runs 17.6.1), which is what
+// PostgREST builds its JSON through:
+//
+//   input:   '2026-08-05T12:00:00.550Z'::timestamptz
+//   to_json: "2026-08-05T12:00:00.55+00:00"
+//
+// Two transformations: Z becomes +00:00, and trailing zeros in the fractional
+// seconds are trimmed (an all-zero fraction disappears entirely). That is how
+// lib/feed.js's self-twin dedupe came to compare two spellings of one instant
+// and conclude they were two different rows, with the whole suite green.
+//
+// Applied on the READ path only, exactly like the real thing: what is stored
+// is what the client sent, and the difference appears when it is rendered.
+function pgTimestamptz(value) {
+  if (value == null || value === '') return value;
+  const t = new Date(value);
+  if (!Number.isFinite(t.getTime())) return value; // not a timestamp; leave it alone
+  const iso = t.toISOString();                      // ...THH:MM:SS.mmmZ
+  const fraction = iso.slice(19, 23).replace(/0+$/, '').replace(/^\.$/, '');
+  return `${iso.slice(0, 19)}${fraction}+00:00`;
+}
+
+// Apply pgTimestamptz to a row's timestamp-typed columns. Named explicitly
+// rather than sniffed by regex: a column is timestamptz because the schema
+// says so, and guessing from the value would silently start reformatting a
+// text column that happens to hold a date.
+const TIMESTAMPTZ_COLUMNS = ['ts', 'created_at', 'first_ts', 'last_ts', 'updated_at', 'joined_at', 'expires_at', 'revoked_at', 'archived_at'];
+function renderRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const out = { ...row };
+  for (const col of TIMESTAMPTZ_COLUMNS) {
+    if (out[col] != null) out[col] = pgTimestamptz(out[col]);
+  }
+  return out;
+}
+
+// Compare two timestamps the way Postgres compares two timestamptz values:
+// as INSTANTS. This matters now that reads are rendered (see pgTimestamptz),
+// because every cursor the client sends back is a value it read, so a bound
+// spelled '...55+00:00' is compared against a stored '...550Z'. Postgres casts
+// both sides and compares points in time; a mock doing localeCompare would
+// invent a cursor bug that does not exist in production ('+' sorts below '0').
+// Unparseable values fall back to a string compare so junk still orders
+// deterministically rather than collapsing to equal.
+function tsCmp(a, b) {
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta === tb ? 0 : (ta < tb ? -1 : 1);
+  return String(a).localeCompare(String(b));
+}
+
 function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
@@ -29,7 +86,17 @@ function createMockSupabase() {
   // rejectColumns is the general form — any column name added here provokes the
   // PostgREST "schema cache" error until the POST body no longer carries it, so
   // the client's drop-and-retry loop can be exercised across multiple columns.
-  const flags = { rejectSummary: false, rejectColumns: new Set(), failEntryInserts: false };
+  const flags = {
+    rejectSummary: false, rejectColumns: new Set(), failEntryInserts: false,
+    // Stands in for "032 not applied": suppresses the AFTER INSERT trigger on
+    // public.projects so a direct POST lands a row-less project, which is the
+    // pre-032 backend.
+    noProjectInsertTrigger: false,
+    // Stands in for "033 not applied": drops can_see_project from the
+    // memory_entries write check, restoring the pre-033 backend where a revoked
+    // member could still push into a project they cannot read.
+    noWriteAccessCheck: false,
+  };
 
   const uuid = () => crypto.randomUUID();
   const shortToken = () => crypto.randomBytes(8).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x').slice(0, 10);
@@ -37,14 +104,75 @@ function createMockSupabase() {
   const memberRole = (teamId, userId) => (members.find(m => m.teamId === teamId && m.userId === userId) || {}).role || null;
   const isManager = (teamId, userId) => ['owner', 'admin'].includes(memberRole(teamId, userId));
   const projectTeam = projectId => (projects.find(p => p.id === projectId) || {}).teamId;
-  // 025_enforce_project_access.sql §1 (can_see_project): default-allow — a
-  // project with no project_access row for this member is visible; an
-  // explicit can_see=false row for THIS user is a revoke and wins. Mirrors
-  // the predicate exactly, not a permissive stand-in.
+  // 028_enforce_project_access_default.sql (can_see_project): three tiers, in
+  // order — an explicit project_access row for THIS member wins, otherwise the
+  // project's own default_access decides, otherwise (no project row at all)
+  // allow. 025 shipped only the first and third tiers, hardcoding default-allow
+  // in between, which is what left the "new members join with access" toggle
+  // stored-but-unenforced. Mirrors the predicate exactly, not a permissive
+  // stand-in: a mock that keeps 025's rule passes over the bug, since these
+  // four call sites (memory_entries, project_stats, team_feed,
+  // team_feed_counts) are the only places the suite can observe enforcement.
   const canSeeProject = (projectId, userId) => {
     const row = projectAccess.find(r =>
       r.team_id === projectTeam(projectId) && r.project_key === projectId && r.member_id === userId);
-    return !row || row.can_see !== false;
+    if (row) return row.can_see !== false;
+    const p = projects.find(x => x.id === projectId);
+    if (!p) return true;
+    return p.defaultAccess !== false;
+  };
+
+  // 029_materialize_project_access.sql. `on conflict do nothing` on the
+  // (team_id, project_key, member_id) primary key: an existing row is NEVER
+  // rewritten, so a deliberate can_see = false survives every path below and
+  // every re-run. can_see is read from the project's default AT THIS MOMENT,
+  // which is what makes the flag govern arrivals rather than history.
+  const grantAccessRow = (project, memberId) => {
+    const exists = projectAccess.some(r =>
+      r.team_id === project.teamId && r.project_key === project.id && r.member_id === memberId);
+    if (exists) return false;
+    projectAccess.push({
+      team_id: project.teamId,
+      project_key: project.id,
+      member_id: memberId,
+      can_see: project.defaultAccess !== false,
+      updated_at: new Date().toISOString(),
+      // NULL in the migration too: no human made this choice.
+      updated_by: null,
+    });
+    return true;
+  };
+  // 029 §2: one member x every project the team already shares (join paths).
+  const materializeForMember = (teamId, memberId) => {
+    for (const p of projects.filter(x => x.teamId === teamId)) grantAccessRow(p, memberId);
+  };
+  // 029 §3: one project x every current member (link_project).
+  const materializeForProject = project => {
+    for (const m of members.filter(x => x.teamId === project.teamId)) grantAccessRow(project, m.userId);
+  };
+  // 032_materialize_project_access_on_insert.sql: the AFTER INSERT trigger on
+  // public.projects. Same materialization as 029 §3, but reached from the INSERT
+  // itself rather than from the RPC, so it also covers the direct
+  // POST /rest/v1/projects that `projects_insert` permits and no client uses.
+  //
+  // A SEPARATE FUNCTION, not a call to materializeForProject inlined at the
+  // route, so the trigger can be disabled on its own to prove the checks that
+  // depend on it actually fail without it. flags.noProjectInsertTrigger stands
+  // in for "032 not applied".
+  const projectsInsertTrigger = project => {
+    if (flags.noProjectInsertTrigger) return;
+    materializeForProject(project);
+  };
+  // 029 §5: project_access carries `foreign key (team_id, member_id)
+  // references team_members (team_id, user_id) on delete cascade` (024:38-39),
+  // so deleting a membership deletes its access rows in the real backend with
+  // no RPC change. The mock has to model the cascade or remove_member/
+  // leave_team would look like they leave grants behind.
+  const cascadeAccessRows = (teamId, memberId) => {
+    for (let i = projectAccess.length - 1; i >= 0; i--) {
+      const r = projectAccess[i];
+      if (r.team_id === teamId && r.member_id === memberId) projectAccess.splice(i, 1);
+    }
   };
 
   function newSession(user) {
@@ -84,6 +212,9 @@ function createMockSupabase() {
       if (!isMember(team.id, userId)) {
         members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() });
       }
+      // 029 §2: record this member's access to every project the team already
+      // shares. Runs on a repeat join too, where it is a no-op.
+      materializeForMember(team.id, userId);
       return json(res, 200, [{ team_id: team.id, team_name: team.name }]);
     }
     if (fn === 'link_project') {
@@ -96,6 +227,10 @@ function createMockSupabase() {
         row = { id: uuid(), teamId: body.p_team, name: body.p_name, repoUrl: body.p_repo_url || null };
         projects.push(row);
       }
+      // 029 §3: unconditional, on the adopt-existing branch as well as the
+      // create branch — a project created before 029 and re-linked after it
+      // must pick up rows for the current membership too.
+      materializeForProject(row);
       return json(res, 200, row.id);
     }
     if (fn === 'my_teams') {
@@ -145,6 +280,11 @@ function createMockSupabase() {
         members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() });
         inv.useCount++;
       }
+      // 029 §2. In the real function this insert comes AFTER the membership
+      // result is captured into v_joined, because FOUND would otherwise be
+      // clobbered before the use_count update reads it; here useCount is
+      // already incremented above, so ordering carries no such trap.
+      materializeForMember(team.id, userId);
       return json(res, 200, [{ team_id: team.id, team_name: team.name }]);
     }
     if (fn === 'remove_member') {
@@ -152,6 +292,7 @@ function createMockSupabase() {
       if (memberRole(body.p_team, body.p_user) === 'owner') return json(res, 400, { message: 'the team owner cannot be removed' });
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === body.p_user);
       if (i !== -1) members.splice(i, 1);
+      cascadeAccessRows(body.p_team, body.p_user); // 024's FK cascade (see 029 §5)
       return json(res, 200, null);
     }
     if (fn === 'set_role') {
@@ -177,6 +318,7 @@ function createMockSupabase() {
       if (memberRole(body.p_team, userId) === 'owner') return json(res, 400, { message: 'the owner cannot leave their own team' });
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === userId);
       if (i !== -1) members.splice(i, 1);
+      cascadeAccessRows(body.p_team, userId); // 024's FK cascade (see 029 §5)
       return json(res, 200, null);
     }
     if (fn === 'team_members_list') {
@@ -199,14 +341,17 @@ function createMockSupabase() {
         .filter(e => !body.p_author || e.author_id === body.p_author)
         .filter(e => !body.p_project || e.project_id === body.p_project)
         .filter(e => !body.p_source || e.source === body.p_source)
-        .filter(e => !body.p_since || e.ts >= body.p_since)
-        .filter(e => !body.p_until || e.ts <= body.p_until)
+        .filter(e => !body.p_since || tsCmp(e.ts, body.p_since) >= 0)
+        .filter(e => !body.p_until || tsCmp(e.ts, body.p_until) <= 0)
         .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
       if (body.p_before_created_at) {
-        rows = rows.filter(e => e.created_at < body.p_before_created_at ||
-          (e.created_at === body.p_before_created_at && e.id < body.p_before_id));
+        rows = rows.filter(e => tsCmp(e.created_at, body.p_before_created_at) < 0 ||
+          (tsCmp(e.created_at, body.p_before_created_at) === 0 && e.id < body.p_before_id));
       }
-      return json(res, 200, rows.slice(0, Math.min(Math.max(body.p_limit || 50, 1), 200)));
+      // Rendered on the way out, never in storage: see pgTimestamptz. This is
+      // the path lib/feed.js consumes, and the one where a ts spelled
+      // differently from the pushed original stops a string-keyed dedupe dead.
+      return json(res, 200, rows.slice(0, Math.min(Math.max(body.p_limit || 50, 1), 200)).map(renderRow));
     }
     // 027_team_feed_counts.sql. Exact windowed totals counted in the database,
     // because paging team_feed to count rows published its 200-row-per-page
@@ -231,8 +376,8 @@ function createMockSupabase() {
         .filter(e => !body.p_author || e.author_id === body.p_author)
         .filter(e => !body.p_project || e.project_id === body.p_project)
         .filter(e => !body.p_source || e.source === body.p_source)
-        .filter(e => !body.p_since || e.ts >= body.p_since)
-        .filter(e => !body.p_until || e.ts <= body.p_until);
+        .filter(e => !body.p_since || tsCmp(e.ts, body.p_since) >= 0)
+        .filter(e => !body.p_until || tsCmp(e.ts, body.p_until) <= 0);
       // count(distinct e.session) ignores NULLs, so the session-less rows are
       // added back one unit each. lib/api-insights.js sessionKeyOf does the
       // same thing (`r.session || 'entry:' + r.id`), and the two must agree or
@@ -265,6 +410,84 @@ function createMockSupabase() {
       const p = projects.find(x => x.id === body.p_project);
       if (p) p.defaultAccess = !!body.p_default;
       return json(res, 200, null);
+    }
+    // 035_delete_own_entries.sql: self-serve deletion of the caller's OWN
+    // synced rows, plus the preview the confirmation screen counts from.
+    //
+    // Both mirror the migration exactly on the point that matters: the
+    // predicate is `author_id = auth.uid()` AND the project's team, and
+    // NOTHING else. No isMember check and no canSeeProject check, because
+    // 035 §1/§2 deliberately omit both. A member who just left the team, or
+    // whose project access was revoked, must still be able to see and erase
+    // what they wrote. A mock that "helpfully" added a membership gate here
+    // would make the exact regression this feature exists to prevent pass
+    // locally.
+    //
+    // Archived projects are included, unlike team_feed / team_feed_counts:
+    // archiving hides a project, it does not remove its rows, and the preview
+    // must count what the delete will actually take.
+    if (fn === 'my_entry_counts') {
+      const mine = entries.filter(e => projectTeam(e.project_id) === body.p_team && e.author_id === userId);
+      const byProject = new Map();
+      for (const e of mine) {
+        const acc = byProject.get(e.project_id) || { entries: 0, first: null, last: null };
+        acc.entries++;
+        if (acc.first === null || tsCmp(e.ts, acc.first) < 0) acc.first = e.ts;
+        if (acc.last === null || tsCmp(e.ts, acc.last) > 0) acc.last = e.ts;
+        byProject.set(e.project_id, acc);
+      }
+      const rows = [...byProject.entries()].map(([projectId, acc]) => ({
+        project_id: projectId,
+        project_name: (projects.find(p => p.id === projectId) || {}).name || '',
+        entries: acc.entries,
+        first_ts: acc.first,
+        last_ts: acc.last,
+      })).sort((a, b) => String(a.project_name).localeCompare(String(b.project_name)));
+      return json(res, 200, rows.map(renderRow));
+    }
+    if (fn === 'delete_my_entries') {
+      const doomed = entries.filter(e =>
+        projectTeam(e.project_id) === body.p_team &&
+        e.author_id === userId &&
+        (!body.p_project || e.project_id === body.p_project));
+      for (const e of doomed) entries.splice(entries.indexOf(e), 1);
+      // The audit row is written INSIDE the function in the real migration
+      // (035 §3), in the same transaction, because team_audit's insert policy
+      // requires is_team_manager and a plain member's own insert is refused.
+      // Mirrored here with no role check for the same reason: a mock that only
+      // logged for managers would hide the bug that motivated putting the
+      // insert in the RPC at all.
+      if (doomed.length) {
+        // unshift + the offset created_at, matching the REST insert path
+        // below, so two audit rows written in the same millisecond still sort
+        // deterministically newest-first for the GET.
+        teamAudit.unshift({
+          id: uuid(),
+          team_id: body.p_team,
+          actor_id: userId,
+          action: 'own-data-deleted',
+          object_type: 'member',
+          object_key: userId,
+          detail: {
+            memberId: userId,
+            deleted: doomed.length,
+            projectKey: body.p_project || null,
+          },
+          created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+        });
+      }
+      // One row per project actually emptied, the migration's shape (035 §3).
+      // A scalar total is what the caller cannot act on: the deletion
+      // watermark it writes on the client is per project, so a total made it
+      // mark every linked project of the team, including ones this deletion
+      // never touched. A mock that kept returning a number would let that
+      // regression back in without a single test going red.
+      const byProject = new Map();
+      for (const e of doomed) byProject.set(e.project_id, (byProject.get(e.project_id) || 0) + 1);
+      return json(res, 200, [...byProject.entries()].map(([projectId, n]) => ({
+        project_id: projectId,
+        deleted: n,
+      })));
     }
     json(res, 404, { message: `unknown rpc ${fn}` });
   }
@@ -310,9 +533,25 @@ function createMockSupabase() {
       if (flags.failEntryInserts) return json(res, 500, { message: 'insert failed' });
       const merge = /merge-duplicates/.test(prefer || '');
       for (const r of rows) {
-        if (r.author_id !== userId || !isMember(projectTeam(r.project_id), userId)) {
+        // 033_enforce_project_access_on_write.sql: can_see_project now gates
+        // memory_entries_insert AND memory_entries_update, not just _select.
+        // Before it, a member revoked from a project could still push into it —
+        // write-only access to a project they cannot read back.
+        //
+        // ONE CHECK COVERS BOTH POLICIES because 033 gives them the same
+        // predicate, and covers the UPDATE policy's USING and WITH CHECK
+        // together for the same reason: the loop below reaches the update path
+        // via `merge`, and both clauses would refuse it identically.
+        //
+        // Message matches real PostgREST's wording rather than the mock's older
+        // 'row-level security violation', because lib/teamsync.js rlsHint()
+        // greps the message text and a test below depends on what it says.
+        if (r.author_id !== userId || !isMember(projectTeam(r.project_id), userId)
+            || (!flags.noWriteAccessCheck && !canSeeProject(r.project_id, userId))) {
           stats.deniedInserts++;
-          return json(res, 403, { message: 'row-level security violation' });
+          return json(res, 403, {
+            message: 'new row violates row-level security policy for table "memory_entries"',
+          });
         }
         const idx = entries.findIndex(e => e.project_id === r.project_id &&
           e.author_id === r.author_id && e.ts === r.ts && e.source === r.source);
@@ -360,7 +599,7 @@ function createMockSupabase() {
     // check — a revoked member's direct pull sees nothing for this project.
     if (!isMember(projectTeam(eq), userId) || !canSeeProject(eq, userId)) return json(res, 200, []);
     let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
-    if (isGt) rows = rows.filter(e => e.created_at > createdAtBound);
+    if (isGt) rows = rows.filter(e => tsCmp(e.created_at, createdAtBound) > 0);
     if (isIdLt) rows = rows.filter(e => Number(e.id) < idBound);
     // Order THEN limit — a descending page must return the NEWEST rows below
     // the bound (the tail closest to the cursor), not just the first `limit`
@@ -380,7 +619,8 @@ function createMockSupabase() {
     const projected = selectCols.length
       ? rows.map(r => Object.fromEntries(selectCols.filter(c => c in r).map(c => [c, r[c]])))
       : rows;
-    json(res, 200, projected);
+    // Rendered on the way out, never in storage: see pgTimestamptz.
+    json(res, 200, projected.map(renderRow));
   }
 
   const server = http.createServer((req, res) => {
@@ -462,17 +702,65 @@ function createMockSupabase() {
           });
         return json(res, 200, rows);
       }
+      // POST /rest/v1/projects — the capability schema.sql:118's `projects_insert`
+      // policy grants and NO CLIENT USES. It is routed here purely so the suite
+      // can exercise the path a member could take with the anon key and a bearer
+      // token, which is what 029 §3 flagged and 032 closes. Do not reach for this
+      // from lib/ — the only supported way to create a project is link_project.
+      if (url.pathname === '/rest/v1/projects' && req.method === 'POST') {
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        const rows = Array.isArray(body) ? body : [body];
+        const created = [];
+        for (const r of rows) {
+          // projects_insert: `is_team_member(team_id) and created_by = auth.uid()`.
+          // Both halves, or the mock would be more permissive than the policy.
+          if (!isMember(r.team_id, userId)) return json(res, 403, { message: 'not a member of this team' });
+          if (r.created_by && r.created_by !== userId) {
+            return json(res, 403, { message: 'new row violates row-level security policy for table "projects"' });
+          }
+          // `unique (team_id, name)` (schema.sql:33) is a table constraint, so it
+          // binds this path too — unlike link_project's repo_url dedup, which is
+          // RPC logic and is genuinely bypassed here.
+          if (projects.some(p => p.teamId === r.team_id && p.name === r.name)) {
+            return json(res, 409, { message: 'duplicate key value violates unique constraint "projects_team_id_name_key"' });
+          }
+          const project = {
+            id: uuid(), teamId: r.team_id, name: r.name, repoUrl: r.repo_url || null,
+            defaultAccess: r.default_access !== false,
+          };
+          projects.push(project);
+          projectsInsertTrigger(project);
+          created.push({ id: project.id, team_id: project.teamId, name: project.name, repo_url: project.repoUrl });
+        }
+        return json(res, 201, created);
+      }
       if (url.pathname === '/rest/v1/projects' && req.method === 'GET') {
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
-        const idEq = (url.searchParams.get('id') || '').replace(/^eq\./, '');
-        if (idEq) {
-          // 026_project_access_default.sql: single-project default_access
-          // lookup (lib/api-access.js readAccess). Same projects_select
-          // policy as the auto-link fetch below (is_team_member(team_id)).
-          const p = projects.find(x => x.id === idEq && isMember(x.teamId, userId));
-          if (!p) return json(res, 200, []);
-          return json(res, 200, [{ default_access: p.defaultAccess !== false }]);
+        const idRaw = url.searchParams.get('id') || '';
+        const idEq = /^eq\./.test(idRaw) ? idRaw.replace(/^eq\./, '') : '';
+        // `id=in.(a,b,c)` — lib/api-access.js accessMatrix reads every shared
+        // project's default_access in ONE request (no N+1), so the mock has to
+        // understand the list form too, not just the single-id form readAccess
+        // uses. Real PostgREST projects to `select`; both callers ask for a
+        // subset, so honour it rather than returning the whole row.
+        const idIn = /^in\.\(/.test(idRaw)
+          ? idRaw.replace(/^in\.\(/, '').replace(/\)$/, '').split(',').map(s => decodeURIComponent(s.trim())).filter(Boolean)
+          : null;
+        if (idEq || idIn) {
+          // 026_project_access_default.sql: default_access lookup. Same
+          // projects_select policy as the auto-link fetch below
+          // (is_team_member(team_id)).
+          const wanted = idIn || [idEq];
+          const cols = (url.searchParams.get('select') || 'default_access').split(',').map(s => s.trim());
+          const rows = projects
+            .filter(x => wanted.includes(x.id) && isMember(x.teamId, userId))
+            .map(p => {
+              const full = { id: p.id, team_id: p.teamId, name: p.name, repo_url: p.repoUrl, default_access: p.defaultAccess !== false };
+              return Object.fromEntries(cols.filter(c => c in full).map(c => [c, full[c]]));
+            });
+          return json(res, 200, rows);
         }
         // Auto-link fetch: RLS means only projects in the caller's teams.
         const rows = projects
@@ -669,7 +957,23 @@ function createMockSupabase() {
     });
   });
 
-  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags };
+  // 029 §4's backfill, mirrored so the suite can assert its two guarantees
+  // (idempotent, never overturns an explicit can_see = false). It is a
+  // migration statement, not an endpoint, so it is exposed as a function on the
+  // mock rather than a route — nothing over HTTP can reach it, same as the real
+  // thing. Returns how many rows it inserted, which is what makes "running it
+  // twice inserts nothing the second time" directly assertable.
+  const backfillProjectAccess = () => {
+    let inserted = 0;
+    for (const p of projects) {
+      for (const m of members.filter(x => x.teamId === p.teamId)) {
+        if (grantAccessRow(p, m.userId)) inserted++;
+      }
+    }
+    return inserted;
+  };
+
+  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess };
 }
 
-module.exports = { createMockSupabase };
+module.exports = { createMockSupabase, pgTimestamptz };

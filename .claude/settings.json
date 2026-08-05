@@ -1,11 +1,40 @@
 {
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-test-commands.sh"
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(node test/run-tests.js)",
       "Bash(node test/run.js)",
       "Bash(node test/run.js *)",
       "Bash(npm test)",
-      "mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot"
+      "mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot",
+      "Bash(npx tsc --noEmit)",
+      "Bash(cd ui && npx tsc --noEmit)",
+      "Bash(npx vitest run:*)",
+      "Bash(node test/run.js:*)",
+      "Bash(node scripts/verify-finding.js:*)",
+      "Bash(node -c:*)",
+      "Bash(npm ci)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
     ]
+  },
+  "worktree": {
+    "baseRef": "head"
   }
 }

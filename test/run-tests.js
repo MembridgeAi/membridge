@@ -489,7 +489,13 @@ async function main() {
     assert.strictEqual(usage[0].usage.cache_read_input_tokens, 900);
   });
 
-  check('adapter: sidechain assistant record emits usage with sidechain:true, no read/edit', () => {
+  // Subagents write the code now, so their EDITS are real project activity and
+  // are kept, attributed to the parent session. Their usage is unchanged (the
+  // ledger still needs it as a separate request stream) and their reads,
+  // prompts, summaries and todos are still dropped on purpose -- see the
+  // per-kind rationale in lib/adapters/claude-code.js. This assertion used to
+  // claim "no read/edit"; only the read half of that still holds.
+  check('adapter: sidechain assistant record emits usage with sidechain:true AND its edits, never reads', () => {
     const entries = [
       { type: 'assistant', timestamp: '2026-07-28T10:00:00Z', cwd: '/repo', sessionId: 's1', isSidechain: true,
         message: { id: 'msg_sc', model: 'claude-opus-4-6',
@@ -506,7 +512,13 @@ async function main() {
     assert.strictEqual(usage[0].messageId, 'msg_sc');
     assert.strictEqual(usage[0].session, 's1');
     assert.strictEqual(events.some(e => e.kind === 'read'), false, 'sidechain tool_use must not emit a read event');
-    assert.strictEqual(events.some(e => e.kind === 'edit'), false, 'sidechain tool_use must not emit an edit event');
+    const edits = events.filter(e => e.kind === 'edit');
+    assert.strictEqual(edits.length, 1, 'a subagent edit is real project activity and must be emitted');
+    assert.strictEqual(edits[0].file, '/repo/sub2.js');
+    assert.strictEqual(edits[0].session, 's1',
+      'a sidechain edit carries the PARENT session id, so the human session shows what its subagents changed');
+    assert.strictEqual(edits[0].sidechain, undefined,
+      'only usage carries the sidechain flag; an edit is an edit whoever made it');
   });
 
   check('codex adapter: emits usage from last_token_usage, not the cumulative total', () => {
@@ -756,7 +768,13 @@ async function main() {
   });
   check('install.sh template carries the safety-critical steps', () => {
     const tmpl = readSource(path.join(__dirname, '..', 'scripts', 'install', 'install.sh.tmpl'));
-    assert.ok(tmpl.includes('com.apple.quarantine'), 'quarantine strip missing');
+    // The installer used to strip com.apple.quarantine. Now that the app is
+    // signed and notarized under the hardened runtime, Gatekeeper clears it on
+    // its own, and stripping the attribute would only suppress the check that
+    // proves the bundle is the one we signed. Asserted as an absence so the
+    // strip cannot quietly come back as "belt-and-suspenders".
+    assert.ok(!tmpl.includes('com.apple.quarantine'),
+      'installer must not strip quarantine — notarization is what clears Gatekeeper');
     assert.ok(tmpl.includes('ELECTRON_RUN_AS_NODE=1'), 'CLI wrapper runtime missing');
     assert.ok(tmpl.includes('shasum -a 256'), 'sha256 verification missing');
     assert.ok(tmpl.includes('__MEMBRIDGE_VERSION__') && tmpl.includes('__MEMBRIDGE_SHA256__'),
@@ -803,20 +821,91 @@ async function main() {
     assert.notStrictEqual(pkg.build.mac.notarize, false,
       'notarize:false disables notarization outright; leave it unset so credentials decide');
   });
-  check('build config keeps app/package.json version in lockstep with the root version', () => {
-    // Regression: the 0.2.1 and 0.2.2 releases shipped dmgs that self-report
-    // 0.2.0 — electron-builder stamps the app from app/package.json, which
-    // had drifted from the root version npm publishes track. prepare-app.js
-    // now stamps app/package.json from the root on every build (the spawn
-    // above has already run it when the dependency closure resolves), and the
-    // committed file must agree too, so the drift can neither ship nor sit
-    // latent in the tree.
-    const rootPkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
-    const appPkg = JSON.parse(read(path.join(__dirname, '..', 'app', 'package.json')));
-    assert.strictEqual(appPkg.version, rootPkg.version,
-      `app/package.json version ${appPkg.version} drifted from root ${rootPkg.version}; `
-      + 'prepare-app.js should have stamped it — a build from this tree would '
-      + 'self-report the wrong release');
+  // app/package.json version lockstep is TWO different contracts, and they had
+  // been conflated into one check that could only ever verify the weaker one.
+  //
+  // The conflated version read app/package.json off DISK. But the
+  // prepare-app.js spawn near the top of this file has ALREADY rewritten that
+  // exact file from the root manifest by the time this runs — so on any tree
+  // where that spawn succeeds (CI, and every machine with root node_modules)
+  // the check compared the root version against a copy of itself taken seconds
+  // earlier. It could not fail. Proven live: with the root at 0.9.9 and the
+  // committed app manifest at 0.2.8, `node test/run.js core` passed 1300/1300.
+  // It failed only on a checkout with NO root node_modules, where the closure
+  // walk aborts prepare-app.js before it reaches the stamp — loudest on a tree
+  // nobody builds from, silent on the tree that ships.
+  //
+  // That is how master reached 0.3.0 with app/package.json committed at 0.2.8:
+  // green through CI on every push and through `npm publish`'s prepublishOnly
+  // gate, across two releases.
+  const gitShowHead = relPath => {
+    const out = spawnSync('git', ['show', `HEAD:${relPath}`], {
+      cwd: path.join(__dirname, '..'), encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
+    });
+    return out.status === 0 ? out.stdout : null;
+  };
+  const committedRootSrc = gitShowHead('package.json');
+  const committedAppSrc = gitShowHead('app/package.json');
+
+  if (!committedRootSrc || !committedAppSrc) {
+    console.log('  skip  the committed app/package.json tracks the committed root version — '
+      + 'HEAD is unreadable (not a git work tree, or no commit yet)');
+  } else {
+    check('the committed app/package.json version tracks the committed root version', () => {
+      // Read BOTH sides out of HEAD, never off disk: that is what makes this
+      // immune to the suite's own prepare-app write, and it also means a
+      // releaser mid-bump (root edited, nothing committed) is not failed for
+      // work in progress. The contract is about what is committed, because
+      // that is what ships and what a source checkout reports.
+      const committedApp = JSON.parse(committedAppSrc).version;
+      const committedRoot = JSON.parse(committedRootSrc).version;
+      assert.strictEqual(committedApp, committedRoot,
+        `app/package.json is committed at ${committedApp} but the root is committed at `
+        + `${committedRoot}. app.getVersion() reads the committed file, so an Electron run `
+        + `from source reports ${committedApp} and the repo cannot state its own version.\n`
+        + '  Fix:  node scripts/stamp-version.js   (then commit app/package.json)\n'
+        + '  Bumping with `npm version <v>` does it automatically.');
+    });
+  }
+
+  if (prepareAppMissingDeps) {
+    console.log('  skip  prepare-app stamps app/package.json at build time — '
+      + "the spawn above couldn't resolve the dependency closure (see the skip above)");
+  } else {
+    check('prepare-app stamps app/package.json from the root version at build time', () => {
+      // The other half of the contract, and the original regression: the 0.2.1
+      // and 0.2.2 dmgs self-reported 0.2.0 because electron-builder stamps the
+      // bundle from app/package.json. Whatever is committed, a PACKAGED build
+      // must carry the root version.
+      //
+      // This deliberately reads the file the spawn above just rewrote, so it is
+      // only meaningful as a check on the stamper: drop syncAppManifest's write
+      // and it fails. It is NOT evidence about the committed tree — that is the
+      // check above, and conflating the two is what hid the drift.
+      assert.strictEqual(prepareAppResult.status, 0, `prepare-app failed: ${prepareAppResult.stderr}`);
+      const rootPkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
+      const appPkg = JSON.parse(read(path.join(__dirname, '..', 'app', 'package.json')));
+      assert.strictEqual(appPkg.version, rootPkg.version,
+        `prepare-app.js ran but left app/package.json at ${appPkg.version} with the root at `
+        + `${rootPkg.version} — a packaged build would self-report the wrong release`);
+    });
+  }
+
+  check('an `npm version` bump stamps app/package.json into the release commit', () => {
+    // npm runs the `version` lifecycle script AFTER writing the new version to
+    // package.json and BEFORE creating the release commit, and includes
+    // whatever that script stages. Without this hook the only thing that ever
+    // wrote the app manifest was a full packaging run, which is exactly how
+    // 0.2.9 and 0.3.0 were both cut as root-only bumps.
+    const pkg = JSON.parse(read(path.join(__dirname, '..', 'package.json')));
+    const script = pkg.scripts && pkg.scripts.version;
+    assert.ok(script, 'package.json needs a `version` script, or `npm version` bumps the root alone');
+    assert.ok(/stamp-version/.test(script),
+      `the version script must run scripts/stamp-version.js; got: ${script}`);
+    assert.ok(/git add\s+app\/package\.json/.test(script),
+      'the version script must STAGE app/package.json — npm only commits what the script staged');
+    assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'stamp-version.js')),
+      'scripts/stamp-version.js is missing; the version hook and the failure hint both name it');
   });
   check('C1: the npm tarball ships vendor/grammars, not just the packaged Electron app', () => {
     // CRITICAL (final whole-branch review, C1): package.json's "files"
@@ -5534,11 +5623,37 @@ async function main() {
   fs.writeFileSync(path.join(rDir, 'sessNoAsk.jsonl'), jsonl([
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Resumed after a crash and finished wiring the webhook retries; the full suite is passing again.' }] }, cwd: projR, timestamp: '2026-07-12T09:40:00.000Z' },
   ]));
+  // The markdown-flattening fixture needs a session that SURVIVES, so it edits
+  // a real file in the project. It used to ride on sessOut, which the
+  // containment rule now suppresses entirely (see the check below).
+  const MD_SUMMARY_IN = '## Queue patch\n\n**Rebuilt** the queue drainer and `verified` it twice | all targets\n```bash\nmake test\n```\nGreen across the board.';
+  fs.writeFileSync(path.join(rDir, 'sessMd.jsonl'), jsonl([
+    { type: 'user', message: { role: 'user', content: 'Rebuild the queue drainer' }, cwd: projR, timestamp: '2026-07-12T09:33:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(projR, 'queue.js') } }] }, cwd: projR, timestamp: '2026-07-12T09:34:00.000Z' },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: MD_SUMMARY_IN }] }, cwd: projR, timestamp: '2026-07-12T09:35:00.000Z' },
+  ]));
   syncOnce();
 
-  check('fix: out-of-project files are excluded from the block and memory DB', () => {
+  // CHANGED WITH THE CONTAINMENT RULE (lib/project-resolve.js rehomeEvents).
+  // Before: sessOut's outside-project edit kept the session cwd, so the session
+  // survived and the block rendered "Files: (outside project)" for it — the
+  // assertion this check used to make. Now the edit does not carry a project it
+  // is not inside, which leaves a zero-edit Claude Code session, which is ops
+  // noise (lib/classify.js) — so the ask and the agent's own summary go with it.
+  // A session that edited nothing in a project must not appear in that project;
+  // losing its ask is the cost, not a leak. test/suites/project-attribution.test.js
+  // pins the rule and the mechanism.
+  check('fix: a session that edited nothing in the project does not appear in it', () => {
     const md = richMd();
-    assert.ok(md.includes('Files: (outside project)'), 'placeholder missing for an outside-only session');
+    assert.ok(!md.includes('Patch the temp build script'),
+      "an outside-only session's ask survived in the block");
+    assert.ok(!md.includes('Rewrote the scratch build runner'),
+      "an outside-only session's summary survived in the block");
+    assert.ok(!md.includes('Files: (outside project)'),
+      'the placeholder rendered for a session that should no longer be there at all');
+    // Unchanged intent: the foreign path itself must never appear anywhere,
+    // which the surface filters (digest.dedupeFiles, memorydb.relFile) still
+    // guarantee independently for events captured before the rule.
     assert.ok(!md.includes('tmp-script.sh') && !md.includes('outside-place'), 'foreign path leaked into the block');
     const mem = read(path.join(projR, '.membridge', 'memory.json')) + read(path.join(projR, '.membridge', 'memory.md'));
     assert.ok(!mem.includes('tmp-script.sh') && !mem.includes('outside-place'), 'foreign path leaked into the memory DB');
@@ -5546,7 +5661,7 @@ async function main() {
   check('fix: plainText flattens markdown before clipping', () => {
     const flat = digest.plainText('## Heading\n**bold** and `inline` text\n```js\nlet x = 1\n```\ncol a | col b');
     assert.strictEqual(flat, 'Heading bold and inline text let x = 1 col a col b');
-    const line = richMd().split('\n').find(l => l.includes('Rewrote the scratch build runner'));
+    const line = richMd().split('\n').find(l => l.includes('Rebuilt the queue drainer'));
     assert.ok(line && line.trim().startsWith('Did:'), 'flattened summary missing from the block');
     assert.ok(!/[*`|#]/.test(line), `markdown survived into the Did line: ${line}`);
   });
@@ -5593,11 +5708,22 @@ async function main() {
       assert.ok(!body.includes('secret-todo-999'), 'todo item text reached the server');
       assert.ok(mock2.entries.some(e => e.summary === null), 'summary-less entries should push null');
     });
-    check('fix: out-of-project files never reach the server', () => {
-      const row = mock2.entries.find(e => e.ask.includes('Patch the temp build script'));
-      assert.ok(row, 'sessOut entry not pushed');
-      assert.deepStrictEqual(row.files, [], `files said: ${JSON.stringify(row.files)}`);
+    // CHANGED WITH THE CONTAINMENT RULE. Before: sessOut was PUSHED, with an
+    // empty files array — the assertion was that the row existed and that its
+    // foreign file had been stripped. Now the session never becomes shareable
+    // (its only edit no longer carries the project), so teamsync's
+    // filterShareableEntries drops it and no row exists at all. Nothing about a
+    // session that did no work in this project reaches a teammate's machine.
+    check('fix: a session that edited nothing in the project is never pushed', () => {
+      const row = mock2.entries.find(e => e.ask && e.ask.includes('Patch the temp build script'));
+      assert.ok(!row, 'an outside-only session was pushed to the server');
       assert.ok(!JSON.stringify(mock2.entries).includes('tmp-script.sh'), 'foreign path reached the server');
+      assert.ok(!JSON.stringify(mock2.entries).includes('Rewrote the scratch build runner'),
+        "an outside-only session's summary reached the server");
+      // The in-project session pushed alongside it is the control: this is a
+      // suppression, not a broken push.
+      assert.ok(mock2.entries.some(e => e.ask && e.ask.includes('Rebuild the queue drainer')),
+        'the in-project session should still push');
     });
   } finally {
     delete process.env.MEMBRIDGE_TEAM_URL;
@@ -5754,6 +5880,58 @@ async function main() {
     assert.strictEqual(kept.filter(e => e.kind === 'usage').length, 50, 'usage still honours its own cap');
     assert.strictEqual(kept.filter(e => e.kind === 'read').length, 20,
       'every read must survive — usage volume must not consume the read budget');
+  });
+  // Third instance of the same lesson, forced by subagent edit capture. Edits
+  // used to share the narrative budget with prompts and summaries. Measured on
+  // the reporting user's live state: Membridge sat exactly AT the 1,000
+  // narrative cap (361 edits, 462 summaries, 152 prompts), and capturing
+  // subagent edits more than doubles edit volume -- which would have evicted
+  // ~400 summaries and prompts, trading one kind of missing history for
+  // another. Edits now ride their own budget and stay narrative to isPlumbing.
+  check('mergeEvents: a flood of edit events cannot evict prompts and summaries', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'edit-budget');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const evs = [];
+    for (let j = 0; j < 20; j++) {
+      evs.push({ ts: at(j * 2), project, source: 'Claude Code', kind: 'prompt', session: 's1', text: 'ask ' + j });
+      evs.push({ ts: at(j * 2 + 1), project, source: 'Claude Code', kind: 'summary', session: 's1', text: 'did ' + j });
+    }
+    // ...then bury them under far more edits than the narrative cap allows,
+    // exactly as a subagent-heavy session does.
+    for (let j = 0; j < 400; j++) {
+      evs.push({ ts: at(100 + j), project, source: 'Claude Code', kind: 'edit', session: 's1', file: `f${j}.js` });
+    }
+    digest.mergeEvents(state, evs, { maxStoredEvents: 50, maxEditEvents: 200 });
+    const kept = state.projects[path.resolve(project)].events;
+    assert.strictEqual(kept.filter(e => e.kind === 'prompt').length, 20,
+      'every prompt must survive — edit volume must not consume the narrative budget');
+    assert.strictEqual(kept.filter(e => e.kind === 'summary').length, 20,
+      'every summary must survive — this is the history the product is made of');
+    assert.strictEqual(kept.filter(e => e.kind === 'edit').length, 200, 'edits honour their own cap');
+    const tss = kept.map(e => e.ts);
+    assert.deepStrictEqual(tss, tss.slice().sort(),
+      'all four capped partitions must be re-interleaved in ts order');
+    // An edit is still NARRATIVE to isPlumbing: server.js and memorydb.js read
+    // that predicate as "is this real work", so flipping it would erase edits
+    // from the feed and the block entirely. Only the CAP is separate.
+    assert.strictEqual(digest.isPlumbing({ kind: 'edit' }), false,
+      'edits must stay non-plumbing — only their capping budget is separate');
+  });
+  check('mergeEvents: edits are bounded by their own cap, newest kept', () => {
+    const state = { projects: {} };
+    const project = path.join(ROOT, 'projects', 'edit-budget-cap');
+    const T0 = Date.parse('2026-07-28T10:00:00.000Z');
+    const at = i => new Date(T0 + i * 1000).toISOString();
+    const evs = [];
+    for (let j = 0; j < 60; j++) {
+      evs.push({ ts: at(j), project, source: 'Claude Code', kind: 'edit', session: 's1', file: `f${j}.js` });
+    }
+    digest.mergeEvents(state, evs, { maxEditEvents: 25 });
+    const edits = state.projects[path.resolve(project)].events.filter(e => e.kind === 'edit');
+    assert.strictEqual(edits.length, 25, 'edits honour their own cap');
+    assert.strictEqual(edits[0].file, 'f35.js', 'the edit cap must slice from the tail (newest kept)');
   });
   check('mergeEvents: reads are bounded by their own cap, newest kept', () => {
     const state = { projects: {} };
@@ -13727,31 +13905,74 @@ async function main() {
       const mcpSrc = readSource(path.join(__dirname, '..', 'lib', 'mcp.js'));
       const serverSrc = readSource(path.join(__dirname, '..', 'lib', 'server.js'));
 
-      // ONE entry assembly. The hook calls projectEntries directly; allActivity
-      // must call it too rather than repeating memorydb.buildEntries +
-      // feed.normalizeLocal in its own loop, which is exactly what the branch
-      // version did.
+      // ONE entry assembly. The hook calls projectEntries directly; the
+      // whole-machine read must reach it too rather than repeating
+      // memorydb.buildEntries + feed.normalizeLocal in its own loop, which is
+      // exactly what the branch version did.
+      //
+      // The chain gained a link when search moved onto the FTS5 index
+      // (lib/search-index.js): allActivity -> projectCorpus -> projectEntries.
+      // projectCorpus exists so the index can refill ONE project through the
+      // same assembly the whole-machine read uses, so it is asserted as part
+      // of the chain rather than treated as an escape from it.
       assert.ok(/activity\.projectEntries\(/.test(hookSrc),
         'the search hook no longer builds entries through projectEntries');
       assert.ok(/module\.exports[\s\S]*projectEntries/.test(activitySrc),
         'lib/activity.js stopped exporting projectEntries, which the hook needs');
+      const projectCorpusBody = activitySrc.slice(
+        activitySrc.indexOf('function projectCorpus'),
+        activitySrc.indexOf('function allActivity'));
       const allActivityBody = activitySrc.slice(
         activitySrc.indexOf('function allActivity'),
-        activitySrc.indexOf('function deriveDeferred'));
-      assert.ok(allActivityBody.includes('projectEntries('),
-        'allActivity no longer delegates to projectEntries');
-      assert.ok(!/buildEntries\(/.test(allActivityBody),
-        'allActivity re-inlined the per-project assembly instead of calling projectEntries; '
-        + 'that is the split this module exists to prevent');
+        activitySrc.indexOf('function projectSearchFingerprint'));
+      assert.ok(projectCorpusBody.includes('projectEntries('),
+        'projectCorpus no longer delegates to projectEntries');
+      assert.ok(allActivityBody.includes('projectCorpus('),
+        'allActivity no longer delegates to projectCorpus');
+      for (const [name, body] of [['projectCorpus', projectCorpusBody], ['allActivity', allActivityBody]]) {
+        assert.ok(!/buildEntries\(/.test(body),
+          `${name} re-inlined the per-project assembly instead of delegating; `
+          + 'that is the split this module exists to prevent');
+      }
+      // The index must be refilled through that same assembly. Reading rows
+      // straight out of state.json here would rebuild the second corpus this
+      // whole check exists to prevent, only now persisted to disk.
+      const freshenBody = activitySrc.slice(
+        activitySrc.indexOf('function freshenIndex'),
+        activitySrc.indexOf('function revokedProjects'));
+      assert.ok(freshenBody.includes('projectCorpus('),
+        'freshenIndex fills the search index from something other than the shared assembly');
 
-      // ONE scorer. rankWithFallback holds the strict-then-relaxed policy, so
-      // "no results" means the same thing on every surface. A direct
-      // rankEntries call from a search surface silently opts out of it.
+      // ONE ranking. Both search surfaces now answer out of the same BM25
+      // index, which is the strongest form this invariant has taken: they no
+      // longer merely share a scorer, they share the stored ranking itself.
       for (const [name, src] of [['lib/activity.js', activitySrc], ['lib/hooks-search.js', hookSrc]]) {
-        assert.ok(/rankWithFallback\(/.test(src), `${name} does not rank through rankWithFallback`);
+        assert.ok(/searchLib\.searchPasses\(/.test(src),
+          `${name} no longer takes its strict/relaxed passes from lib/search.js`);
+        assert.ok(/searchIndex\.search\(/.test(src),
+          `${name} stopped answering out of the shared BM25 index`);
         assert.ok(!/searchLib\.rankEntries\(/.test(src),
           `${name} calls rankEntries directly, bypassing the shared strict/relaxed policy`);
+        assert.ok(!/buildMatch\(/.test(src),
+          `${name} hand-builds an FTS5 MATCH instead of going through searchPasses`);
       }
+      // The hook keeps the in-memory scorer as a FALLBACK only — a machine
+      // whose daemon has never run has no index, and a hook that answered
+      // nothing there would be a silent regression from what shipped before.
+      assert.ok(/rankWithFallback\(/.test(hookSrc),
+        'lib/hooks-search.js dropped its in-memory fallback; an unindexed project now serves nothing');
+      // ...and it must stay READ-ONLY. It is spawned per Grep under a hard
+      // timeout; writing here would add a per-tool-call writer to a database
+      // the daemon is already maintaining, and make one Grep pay to re-index
+      // a 50,000-row archive.
+      for (const writer of ['replaceAll(', 'replaceProject(', 'freshenIndex(', 'freshenProject(']) {
+        assert.ok(!hookSrc.includes(`searchIndex.${writer}`) && !hookSrc.includes(`activity.${writer}`),
+          `lib/hooks-search.js writes to the search index (${writer}); the hook must only read`);
+      }
+      const searchSrc = readSource(path.join(__dirname, '..', 'lib', 'search.js'));
+      assert.ok(/function rankWithFallback/.test(searchSrc) && /function searchPasses/.test(searchSrc),
+        'the two spellings of the strict/relaxed policy no longer live side by side in lib/search.js, '
+        + 'which is the only thing stopping them from drifting apart');
 
       // ONE search. Both the MCP tool and the dashboard endpoint delegate
       // rather than each assembling and ranking their own corpus.
@@ -16704,7 +16925,10 @@ async function main() {
     ];
     projectResolve.rehomeEvents(events, tracked, { resolveRoot });
     const by = k => events.filter(e => e.kind === k);
-    assert.deepStrictEqual(by('edit').map(e => e.project), [A, A, B, '/home']);
+    // CHANGED WITH THE CONTAINMENT RULE: the last edit resolves to no root and
+    // is not inside /home either, so its project is CLEARED (was: left on the
+    // '/home' cwd). See test/suites/project-attribution.test.js.
+    assert.deepStrictEqual(by('edit').map(e => e.project), [A, A, B, null]);
     assert.strictEqual(by('prompt')[0].project, A);
     assert.strictEqual(by('summary')[0].project, A);
   });
@@ -21956,9 +22180,17 @@ const repoRoot = require('../lib/repo-root');
       });
 
       await check('POST /api/project/access is refused for a member role', async () => {
+        // Counted rather than compared against zero: since 029 the join and
+        // link paths MATERIALIZE a row per (member, project), so the table is
+        // legitimately non-empty by now. The claim being tested is unchanged —
+        // the refused write added nothing — and a count delta states it without
+        // depending on the table having been empty.
+        const before = mockAccess.projectAccess.length;
         const res = await apiAs('member', 'POST', '/api/project/access', { path: PROJECT, memberId: 'other', canSee: false });
         assert.strictEqual(res.status, 403);
-        assert.strictEqual(mockAccess.projectAccess.length, 0, 'a refused write must never reach the backend');
+        assert.strictEqual(mockAccess.projectAccess.length, before, 'a refused write must never reach the backend');
+        assert.ok(!mockAccess.projectAccess.some(r => r.member_id === 'other'),
+          'no row may exist for the member the refused write targeted');
       });
 
       await check('POST /api/project/access writes an audit row', async () => {
@@ -22604,7 +22836,7 @@ const repoRoot = require('../lib/repo-root');
       const stOwner = util.loadState();
       stOwner.projects[PROJECT] = { events: [] };
       util.saveState(stOwner);
-      await teamsync.linkProject(util.getConfig(), PROJECT, t17Team.team_id, 'T17Co');
+      const t17Link = await teamsync.linkProject(util.getConfig(), PROJECT, t17Team.team_id, 'T17Co');
 
       process.env.MEMBRIDGE_HOME = HOME_MEMBER;
       util.ensureConfig();
@@ -22654,6 +22886,666 @@ const repoRoot = require('../lib/repo-root');
         const after = (await apiAs('owner', 'GET', '/api/team/audit')).body.events;
         assert.strictEqual(after.length, before + 1);
         assert.strictEqual(after[0].action, 'access-default-revoked');
+      });
+
+      // ===== 028: default_access must be ENFORCED, not merely stored =====
+      // Everything above this line only proved the toggle ROUND-TRIPS. 026 added
+      // the column and its manager-gated RPC, but can_see_project (025 §1) never
+      // referenced it — it returned "no explicit false row exists", i.e.
+      // hardcoded default-allow. So a project with default_access = false was
+      // fully readable by anyone with no project_access row, which is precisely
+      // the case the toggle exists for. Confirmed live against production
+      // Supabase before writing 028_enforce_project_access_default.sql.
+      //
+      // These checks run through the two reads the predicate actually gates
+      // (/api/feed -> team_feed, /api/team/projects -> the project_stats view)
+      // plus the two reads that DISPLAY canSee (/api/project/access and the
+      // access matrix), because a panel that disagrees with enforcement is the
+      // same bug wearing a different hat: it is what an admin audits with.
+      //
+      // The default is already false here — the check immediately above set it.
+      const PROJECT_B = path.join(ROOT, 'projects', 't17-app-b');
+      homeFor.late = path.join(ROOT, 'home-t17-late');
+      portFor.late = P(82);
+
+      const seedEntry = (projectId, session) => mock17.entries.push({
+        id: mock17.entries.length + 1,
+        project_id: projectId,
+        author_id: ownerCreds.userId,
+        author_name: 'Owner17',
+        ts: '2026-07-20T10:00:00.000Z',
+        source: 'Claude Code',
+        ask: null,
+        files: [],
+        session,
+        created_at: new Date().toISOString(),
+      });
+      seedEntry(t17Link.projectId, 's-t17-1');
+
+      const feedCountFor = async (role, projectPath = PROJECT) => {
+        const res = await apiAs(role, 'GET', `/api/feed?project=${encodeURIComponent(projectPath)}`);
+        assert.strictEqual(res.status, 200);
+        return res.body.entries.filter(e => e.project === path.basename(projectPath)).length;
+      };
+      const statsSeesProject = async (role, projectId = t17Link.projectId) => {
+        const res = await apiAs(role, 'GET', `/api/team/projects?teamId=${encodeURIComponent(t17Team.team_id)}`);
+        assert.strictEqual(res.status, 200);
+        return res.body.projects.some(p => p.project_id === projectId);
+      };
+      const panelCanSee = async (memberId, projectPath = PROJECT) => {
+        const res = await apiAs('owner', 'GET', `/api/project/access?path=${encodeURIComponent(projectPath)}`);
+        assert.strictEqual(res.status, 200);
+        const row = res.body.members.find(m => m.memberId === memberId);
+        assert.ok(row, `member ${memberId} missing from the access panel`);
+        return row.canSee;
+      };
+      const matrixCanSee = async (memberId, projectPath = PROJECT) => {
+        const res = await apiAs('owner', 'GET', '/api/team/access-matrix');
+        assert.strictEqual(res.status, 200);
+        const row = res.body.rows.find(r => r.projectPath === projectPath);
+        assert.ok(row, `${path.basename(projectPath)} must appear as a matrix row`);
+        return row.access[memberId];
+      };
+      // Reads the stored row directly. The point of 029 is that these rows EXIST,
+      // so "no row" is now a finding rather than the normal state, and the checks
+      // below have to be able to say which.
+      const accessRow = (memberId, projectId = t17Link.projectId) =>
+        mock17.projectAccess.find(r => r.project_key === projectId && r.member_id === memberId);
+      const setDefault = async (value, projectPath = PROJECT) => {
+        const res = await apiAs('owner', 'POST', '/api/project/access-default',
+          { path: projectPath, defaultAccess: value });
+        assert.strictEqual(res.status, 200);
+      };
+      const setAccess = async (memberId, canSee, projectPath = PROJECT) => {
+        const res = await apiAs('owner', 'POST', '/api/project/access', { path: projectPath, memberId, canSee });
+        assert.strictEqual(res.status, 200);
+      };
+
+      // 029 materialized a row for the owner when link_project ran and for the
+      // member when join_team ran, both from the default in force at that
+      // moment (true). The default is false NOW — set by the round-trip check
+      // above — so this is the exact scenario 028 alone got wrong.
+      await check('029: flipping default_access off leaves existing members — including the owner — with the access they already had', async () => {
+        for (const [who, id] of [['owner', ownerCreds.userId], ['member', memberCreds.userId]]) {
+          const row = accessRow(id);
+          assert.ok(row, `${who} must have a materialized project_access row`);
+          assert.strictEqual(row.can_see, true, `${who}'s materialized row must record the default in force when they arrived`);
+        }
+        assert.strictEqual(await feedCountFor('member'), 1, 'an existing member keeps reading the project');
+        assert.strictEqual(await statsSeesProject('member'), true);
+        assert.strictEqual(await feedCountFor('owner'), 1, 'and so does the owner who flipped the switch');
+        assert.strictEqual(await statsSeesProject('owner'), true);
+        assert.strictEqual(await panelCanSee(memberCreds.userId), true);
+        assert.strictEqual(await panelCanSee(ownerCreds.userId), true);
+        assert.strictEqual(await matrixCanSee(memberCreds.userId), true);
+        assert.strictEqual(await matrixCanSee(ownerCreds.userId), true);
+      });
+
+      // The other half of the label: it governs people who arrive AFTER. This
+      // third identity joins while the default is off, so the join path records
+      // can_see = false for them — no explicit revoke is written anywhere.
+      process.env.MEMBRIDGE_HOME = homeFor.late;
+      util.ensureConfig();
+      const lateCreds = await teamsync.signup(util.getConfig(), 't17-late@test.dev', 'pw-t17l', 'Late17');
+      await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
+
+      await check('029: a member who joins while default_access is off gets no access, with no explicit revoke anywhere', async () => {
+        const row = accessRow(lateCreds.userId);
+        assert.ok(row, 'the join path must materialize a row for the new member');
+        assert.strictEqual(row.can_see, false, "and record the project's default at the moment they joined");
+        assert.strictEqual(await feedCountFor('late'), 0);
+        assert.strictEqual(await statsSeesProject('late'), false);
+        assert.strictEqual(await panelCanSee(lateCreds.userId), false);
+        assert.strictEqual(await matrixCanSee(lateCreds.userId), false);
+        // The two who were already here are untouched by that join.
+        assert.strictEqual(await feedCountFor('owner'), 1);
+        assert.strictEqual(await feedCountFor('member'), 1);
+      });
+
+      // The property timestamp grandfathering cannot hold: with joined_at
+      // compared against a default_access_set_at, this sequence would move the
+      // timestamp past the latecomer's joined_at and silently hand them access.
+      // Materialized rows are a function of member state, not of flag history.
+      await check('029: toggling default_access off and on again changes nobody\'s access — no timing dependence', async () => {
+        await setDefault(true);
+        await setDefault(false);
+        assert.strictEqual(await feedCountFor('owner'), 1, 'an existing member is unaffected by the flag moving');
+        assert.strictEqual(await feedCountFor('member'), 1);
+        assert.strictEqual(await feedCountFor('late'), 0,
+          'and someone who joined while it was off stays out until explicitly granted');
+        assert.strictEqual(accessRow(lateCreds.userId).can_see, false, 'no row may be rewritten by a flag flip');
+      });
+
+      await check('an explicit can_see = true row grants despite default_access = false', async () => {
+        await setAccess(lateCreds.userId, true);
+        assert.strictEqual(await feedCountFor('late'), 1, 'an explicit grant must beat the project default');
+        assert.strictEqual(await statsSeesProject('late'), true);
+        assert.strictEqual(await panelCanSee(lateCreds.userId), true);
+      });
+
+      await check('an explicit can_see = false row revokes despite default_access = true', async () => {
+        await setDefault(true);
+        await setAccess(memberCreds.userId, false);
+        assert.strictEqual(await feedCountFor('member'), 0, 'an explicit revoke must beat an on default');
+        assert.strictEqual(await statsSeesProject('member'), false);
+        // The over-broad-fix catcher: a predicate that denied unconditionally, or
+        // one that lost a tier, fails on these two lines.
+        assert.strictEqual(await feedCountFor('owner'), 1);
+        assert.strictEqual(await statsSeesProject('owner'), true);
+      });
+
+      await check('panel and matrix distinguish the revoked member from the rest', async () => {
+        assert.strictEqual(await panelCanSee(memberCreds.userId), false);
+        assert.strictEqual(await panelCanSee(ownerCreds.userId), true);
+        assert.strictEqual(await matrixCanSee(memberCreds.userId), false);
+        assert.strictEqual(await matrixCanSee(ownerCreds.userId), true);
+      });
+
+      // 029's header says tier 2 stops being the main path and becomes a safety
+      // net. This is the only way to reach it now: a row that is missing for a
+      // reason 029 did not anticipate. It must fail CLOSED on a closed project,
+      // and it is also what keeps lib/api-access.js's defaultAccess fallback
+      // (the 028 change to readAccess and accessMatrix) under test.
+      await check('028 tier 2 survives as a safety net: a member with no row falls through to the project default, failing closed', async () => {
+        const i = mock17.projectAccess.findIndex(r =>
+          r.project_key === t17Link.projectId && r.member_id === lateCreds.userId);
+        assert.notStrictEqual(i, -1);
+        mock17.projectAccess.splice(i, 1);
+        assert.strictEqual(await feedCountFor('late'), 1, 'an ON default still admits a row-less member');
+        await setDefault(false);
+        assert.strictEqual(await feedCountFor('late'), 0, 'an OFF default must deny a row-less member');
+        assert.strictEqual(await statsSeesProject('late'), false);
+        assert.strictEqual(await panelCanSee(lateCreds.userId), false, 'and the panel must say so too');
+        assert.strictEqual(await matrixCanSee(lateCreds.userId), false);
+        await setDefault(true);
+      });
+
+      // The backfill is a migration statement, not an endpoint, so it is driven
+      // through the mock's mirror of it. This asserts the RULE (on conflict do
+      // nothing over the primary key), not Postgres's execution of it.
+      await check('029 backfill: idempotent, and never overturns an explicit can_see = false', async () => {
+        assert.strictEqual(accessRow(memberCreds.userId).can_see, false, 'precondition: a deliberate revoke is in place');
+        const first = mock17.backfillProjectAccess();
+        assert.ok(first >= 1, 'the first run must fill the row deleted above');
+        const lengthAfterFirst = mock17.projectAccess.length;
+        const second = mock17.backfillProjectAccess();
+        assert.strictEqual(second, 0, 'a second run must insert nothing');
+        assert.strictEqual(mock17.projectAccess.length, lengthAfterFirst, 'and must not duplicate a single row');
+        assert.strictEqual(accessRow(memberCreds.userId).can_see, false,
+          'the deliberate revoke must survive every re-run — there is no do-update anywhere in 029');
+        assert.strictEqual(await feedCountFor('member'), 0, 'and it must still be enforced afterwards');
+      });
+
+      // 029 §3: the writer that is easy to forget. A project created after
+      // members exist must materialize rows for them, or they fall through to
+      // tier 2 and a flag that was never meant to apply to them governs them.
+      await check('029: a project linked after members exist is readable by those members regardless of its default', async () => {
+        fs.mkdirSync(PROJECT_B, { recursive: true });
+        process.env.MEMBRIDGE_HOME = homeFor.owner;
+        const stB = util.loadState();
+        stB.projects[PROJECT_B] = { events: [] };
+        util.saveState(stB);
+        const linkB = await teamsync.linkProject(util.getConfig(), PROJECT_B, t17Team.team_id, 'T17Co');
+        seedEntry(linkB.projectId, 's-t17-b');
+        for (const [who, id] of [['owner', ownerCreds.userId], ['member', memberCreds.userId], ['late', lateCreds.userId]]) {
+          const row = accessRow(id, linkB.projectId);
+          assert.ok(row, `${who} must get a row for a project linked while they were a member`);
+          assert.strictEqual(row.can_see, true);
+        }
+        // Now close it to newcomers. Everyone who was already here keeps it.
+        await setDefault(false, PROJECT_B);
+        for (const role of ['owner', 'member', 'late']) {
+          assert.strictEqual(await feedCountFor(role, PROJECT_B), 1,
+            `${role} was a member when it was linked, so an off default must not reach them`);
+        }
+        assert.strictEqual(await statsSeesProject('late', linkB.projectId), true);
+      });
+
+      // 029 §5's decision, pinned: removal cascades the rows away (024's FK), so
+      // a re-joining member is treated as a new arrival. The upside is that no
+      // stale grant is inherited; the trade-off named in the header is that no
+      // stale REVOKE is inherited either.
+      await check('029: removing a member drops their access rows, and a re-join takes today\'s default rather than an old grant', async () => {
+        assert.strictEqual(accessRow(lateCreds.userId).can_see, true, 'precondition: they currently hold an explicit grant');
+        const removed = await apiAs('owner', 'POST', '/api/team/remove-member',
+          { teamId: t17Team.team_id, userId: lateCreds.userId });
+        assert.strictEqual(removed.status, 200);
+        assert.strictEqual(mock17.projectAccess.filter(r => r.member_id === lateCreds.userId).length, 0,
+          "a departed member's access rows must not survive them");
+        await setDefault(false);
+        process.env.MEMBRIDGE_HOME = homeFor.late;
+        await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
+        assert.strictEqual(accessRow(lateCreds.userId).can_see, false,
+          'the re-join must take the CURRENT default, not resurrect the grant they used to have');
+        assert.strictEqual(await feedCountFor('late'), 0);
+      });
+
+      // ===== 032: the invariant 029 could only ASSUME =====
+      // 029 §3 says in its own header that "every (member, project) pair has a
+      // row" holds "only for as long as callers use the RPC; it is not enforced
+      // anywhere", because `projects_insert` (schema.sql:118) lets a member POST
+      // straight to /rest/v1/projects. Two things established before writing the
+      // migration, both of which the checks below depend on:
+      //
+      //   * NOTHING IN THE CLIENT TAKES THAT PATH. link_project at
+      //     lib/teamsync.js:1206 is the only writer of public.projects in the
+      //     tree. This mock had no POST route for /rest/v1/projects at all until
+      //     this ticket added one, which is the same fact from another angle.
+      //   * SO THE POST ROUTE HERE IS NOT MODELLING A CLIENT. It models the
+      //     CAPABILITY THE POLICY GRANTS — what a member could do with the anon
+      //     key and their own bearer token. That is the surface under test.
+      //
+      // 032 adds an AFTER INSERT trigger on public.projects so the rows are
+      // written by the INSERT rather than by the RPC, which covers this path
+      // too. mock17.flags.noProjectInsertTrigger suppresses it and is how these
+      // checks are proven non-vacuous — with it set, every one of them fails.
+      //
+      // WHAT THESE CANNOT PROVE: the mock is JavaScript. It cannot exercise
+      // PL/pgSQL, trigger ordering, `security definer` rights, or whether the
+      // real project_access_insert policy admits the trigger's write. Those need
+      // the live database. What is under test here is the RULE 032 encodes.
+      const tokenFor = userId => {
+        const hit = [...mock17.sessions.entries()].find(([, id]) => id === userId);
+        assert.ok(hit, `no live session for ${userId}`);
+        return hit[0];
+      };
+      const postProjectDirect = async (userId, row) => {
+        const r = await fetch(`http://127.0.0.1:${MOCK17_PORT}/rest/v1/projects`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: 'anon-test',
+            Authorization: `Bearer ${tokenFor(userId)}`,
+          },
+          body: JSON.stringify(row),
+        });
+        const text = await r.text();
+        return { status: r.status, body: text ? JSON.parse(text) : null };
+      };
+      const rowsForProject = projectId =>
+        mock17.projectAccess.filter(r => r.project_key === projectId);
+
+      await check('032: a project created by direct POST — never through link_project — still materializes a row for every current member', async () => {
+        const before = mock17.projectAccess.length;
+        const res = await postProjectDirect(memberCreds.userId, {
+          team_id: t17Team.team_id, name: 't17-direct', repo_url: 'https://git.test/t17-direct',
+          created_by: memberCreds.userId,
+        });
+        assert.strictEqual(res.status, 201, `direct POST should be permitted by projects_insert: ${JSON.stringify(res.body)}`);
+        const projectId = res.body[0].id;
+        // An ordinary MEMBER created it, not a manager. Under project_access_insert
+        // (024:78, `with check is_team_manager`) they could not write these rows
+        // themselves — the trigger's `security definer` is what makes it possible,
+        // and 029 §3 already depends on exactly that.
+        const rows = rowsForProject(projectId);
+        assert.strictEqual(rows.length, 3,
+          'owner, member and late are all current members, so all three need a row');
+        for (const [who, id] of [['owner', ownerCreds.userId], ['member', memberCreds.userId], ['late', lateCreds.userId]]) {
+          const row = rows.find(r => r.member_id === id);
+          assert.ok(row, `${who} must have a materialized row for a directly-created project`);
+          assert.strictEqual(row.can_see, true, "and it must carry the project's default at insert time");
+          assert.strictEqual(row.team_id, t17Team.team_id, 'team_id must come from the project row, never a literal');
+          assert.strictEqual(row.updated_by, null, 'no human made this choice, so updated_by stays NULL');
+        }
+        assert.strictEqual(mock17.projectAccess.length, before + 3);
+        // And the rows are load-bearing, not decoration: the project is readable.
+        seedEntry(projectId, 's-t17-direct');
+        for (const role of ['owner', 'member', 'late']) {
+          assert.strictEqual(await statsSeesProject(role, projectId), true,
+            `${role} must be able to see a project they hold a materialized row for`);
+        }
+      });
+
+      await check("032: the trigger records the project's OWN default, so a closed project stays closed instead of leaning on tier 2", async () => {
+        // The catcher for a trigger that hardcodes `true` instead of reading
+        // NEW.default_access. Without this, a directly-created closed project
+        // would materialize three can_see = true rows and be MORE open than one
+        // created through link_project — a fix that inverted the bug.
+        const res = await postProjectDirect(ownerCreds.userId, {
+          team_id: t17Team.team_id, name: 't17-direct-closed', created_by: ownerCreds.userId,
+          default_access: false,
+        });
+        assert.strictEqual(res.status, 201);
+        const projectId = res.body[0].id;
+        const rows = rowsForProject(projectId);
+        assert.strictEqual(rows.length, 3, 'a closed project still gets a row per member — that is the point of 029');
+        for (const row of rows) {
+          assert.strictEqual(row.can_see, false, 'every row must record the off default, not a hardcoded true');
+        }
+        seedEntry(projectId, 's-t17-direct-closed');
+        for (const role of ['owner', 'member', 'late']) {
+          assert.strictEqual(await statsSeesProject(role, projectId), false,
+            `${role} must not see a project created closed`);
+        }
+      });
+
+      await check('032: the trigger is INSERT-scoped — changing default_access later rewrites nobody', async () => {
+        // 032 §2 deliberately does not fire on UPDATE. If it did, it would become
+        // a second writer to rows a manager may have set by hand, and flipping
+        // the flag would move existing members — the precise behaviour 028/029
+        // exist to remove.
+        const res = await postProjectDirect(ownerCreds.userId, {
+          team_id: t17Team.team_id, name: 't17-direct-flip', created_by: ownerCreds.userId,
+        });
+        assert.strictEqual(res.status, 201);
+        const projectId = res.body[0].id;
+        const snapshot = rowsForProject(projectId).map(r => `${r.member_id}:${r.can_see}`).sort();
+        assert.strictEqual(snapshot.length, 3);
+        // Flip the stored flag the way set_project_access_default would, then
+        // assert the derived rows did NOT move with it.
+        mock17.projects.find(p => p.id === projectId).defaultAccess = false;
+        const after = rowsForProject(projectId).map(r => `${r.member_id}:${r.can_see}`).sort();
+        assert.deepStrictEqual(after, snapshot, 'an UPDATE to default_access must not re-derive access rows');
+        for (const row of rowsForProject(projectId)) {
+          assert.strictEqual(row.can_see, true, 'members present at insert keep the access they were given');
+        }
+      });
+
+      await check('032 does not widen projects_insert: a non-member is refused, and created_by cannot be spoofed', async () => {
+        // Pinning both halves of the policy predicate
+        // (`is_team_member(team_id) and created_by = auth.uid()`), because 032
+        // leaves the policy in place on purpose and a later "cleanup" that
+        // loosened it would otherwise be invisible.
+        const outsider = await teamsync.signup(util.getConfig(), 't17-outsider@test.dev', 'pw-t17x', 'Outsider17');
+        const refused = await postProjectDirect(outsider.userId, {
+          team_id: t17Team.team_id, name: 't17-outsider', created_by: outsider.userId,
+        });
+        assert.strictEqual(refused.status, 403, 'a non-member must not be able to create a project in this team');
+        assert.strictEqual(mock17.projects.some(p => p.name === 't17-outsider'), false,
+          'and no project row may survive the refusal');
+
+        const spoofed = await postProjectDirect(memberCreds.userId, {
+          team_id: t17Team.team_id, name: 't17-spoofed', created_by: ownerCreds.userId,
+        });
+        assert.strictEqual(spoofed.status, 403, 'created_by must equal auth.uid(); a member cannot blame the owner');
+        assert.strictEqual(mock17.projects.some(p => p.name === 't17-spoofed'), false);
+      });
+
+      await check("032 closes the ACCESS gap and no more: link_project's repo_url dedup is still bypassed by a direct POST", async () => {
+        // Stated so nobody reads 032 as having made the direct path equivalent
+        // to the RPC. It is not. link_project adopts an existing project with a
+        // matching repo_url; a direct POST cannot, because `unique (team_id,
+        // name)` (schema.sql:33) is the only constraint that binds this path.
+        // Two rows for one repository under different names is a REAL remaining
+        // difference — it is the duplicate-project problem, tracked separately,
+        // and it needs a data write to resolve, not a policy change.
+        const repo = 'https://git.test/t17-direct';
+        const existing = mock17.projects.filter(p => p.teamId === t17Team.team_id && p.repoUrl === repo);
+        assert.strictEqual(existing.length, 1, 'precondition: one project already holds this repo_url');
+        const res = await postProjectDirect(ownerCreds.userId, {
+          team_id: t17Team.team_id, name: 't17-direct-twin', repo_url: repo, created_by: ownerCreds.userId,
+        });
+        assert.strictEqual(res.status, 201, 'the unique constraint is on (team_id, name), so a new NAME is accepted');
+        const twins = mock17.projects.filter(p => p.teamId === t17Team.team_id && p.repoUrl === repo);
+        assert.strictEqual(twins.length, 2,
+          'so one repository can still end up as two project rows — 032 does not claim to fix this');
+        // But every one of those rows is at least correctly governed, which IS
+        // what 032 claims: the duplicate is visible, not silently ungoverned.
+        assert.strictEqual(rowsForProject(res.body[0].id).length, 3,
+          'even an unwanted duplicate must not be a row-less project');
+      });
+
+      // ===== 033: revocation must apply to WRITES, not only to reads =====
+      // 025 added can_see_project to memory_entries_select and left
+      // memory_entries_insert (schema.sql:124) and memory_entries_update (012:16)
+      // gating on author_id + is_team_member alone. So a member revoked from a
+      // project could still push into it: write-only access to a project they
+      // cannot read back. Their daemon keeps uploading that project's summaries,
+      // file lists and prompts on every pass, teammates who can see the project
+      // keep reading them, and neither the revoked member (who cannot see the
+      // project) nor the manager who revoked them has any indication.
+      //
+      // A FRESH IDENTITY, not HOME_MEMBER, for two reasons: this needs
+      // `encrypt: false` (otherwise the fail-closed no-team-key branch at
+      // lib/teamsync.js:2129 pauses the push BEFORE any RLS check and the test
+      // would be measuring the wrong refusal), and it needs a push cursor of its
+      // own that cannot disturb the panel-reading homes above.
+      //
+      // The writer joins while PROJECT's default_access is false, so 029's join
+      // path records can_see = false for them with no explicit revoke — the
+      // revoked state, arrived at the way it actually happens.
+      const HOME_WRITER = path.join(ROOT, 'home-t17-writer');
+      homeFor.writer = HOME_WRITER;
+      portFor.writer = P(83);
+      process.env.MEMBRIDGE_HOME = HOME_WRITER;
+      util.ensureConfig();
+      {
+        const cfgW = util.loadUserConfig();
+        cfgW.team = { ...(cfgW.team || {}), encrypt: false };
+        util.saveUserConfig(cfgW);
+      }
+      const writerCreds = await teamsync.signup(util.getConfig(), 't17-writer@test.dev', 'pw-t17w', 'Writer17');
+      await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
+
+      // A CONTROL PAIR in one sync pass: one project this identity is revoked
+      // from, one it can see. Without the second, a blanket push failure would
+      // pass every assertion below for the wrong reason.
+      const projectBId = mock17.projects.find(p => p.name === 't17-app-b').id;
+      await setAccess(writerCreds.userId, true, PROJECT_B);
+
+      const W_CLOSED = path.join(ROOT, 'projects-t17w', 'closed-app');
+      const W_OPEN = path.join(ROOT, 'projects-t17w', 'open-app');
+      for (const [dir, projectId] of [[W_CLOSED, t17Link.projectId], [W_OPEN, projectBId]]) {
+        fs.mkdirSync(path.join(dir, '.membridge'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.membridge', 'team.json'),
+          JSON.stringify({ projectId, teamId: t17Team.team_id }));
+      }
+      process.env.MEMBRIDGE_HOME = HOME_WRITER;
+      const stW = util.loadState();
+      stW.projects = {
+        [W_CLOSED]: { events: [{ ts: '2026-07-21T10:00:00.000Z', source: 'Codex', kind: 'prompt', text: 'REVOKED-WRITE-CLOSED', session: 'w1' }] },
+        [W_OPEN]: { events: [{ ts: '2026-07-21T10:00:00.000Z', source: 'Codex', kind: 'prompt', text: 'ALLOWED-WRITE-OPEN', session: 'w2' }] },
+      };
+      util.saveState(stW);
+      const deniedBefore = mock17.stats.deniedInserts;
+      const rW = await teamsync.syncTeams();
+
+      await check('the client already declines to push into a project it has lost read access to', async () => {
+        // PRE-EXISTING behaviour, pinned here because it is what bounds 033's
+        // scope and it was not obvious: syncOnce probes visibleProjectIds once
+        // per team and, on positive confirmation that a linked project is not in
+        // the set, stamps teamAccessLost, drops the cached teammate rows and
+        // `continue`s — "no push, no pull, no backfill for a project we may not
+        // read" (lib/teamsync.js:2096-2106). So in the ordinary case a revoked
+        // member's daemon does NOT keep uploading, and 033 is not what stops it.
+        assert.strictEqual(accessRow(writerCreds.userId).can_see, false,
+          'precondition: this identity is revoked from PROJECT');
+        process.env.MEMBRIDGE_HOME = HOME_WRITER;
+        assert.ok(util.loadState().projects[W_CLOSED].teamAccessLost,
+          'the revoked project must be marked as access-lost');
+        assert.ok(!rW.synced.includes(W_CLOSED), 'and skipped entirely, not merely refused');
+        assert.strictEqual(mock17.stats.deniedInserts, deniedBefore,
+          'the client never even attempted the write, so the backend had nothing to refuse');
+        assert.ok(!JSON.stringify(mock17.entries).includes('REVOKED-WRITE-CLOSED'));
+      });
+
+      await check('033: the refusal is per-project — a project the same identity CAN see still publishes and still pulls', async () => {
+        // The over-broad-fix catcher. A predicate that denied unconditionally,
+        // or one that lost the can_see tier, fails here rather than above.
+        assert.ok(JSON.stringify(mock17.entries).includes('ALLOWED-WRITE-OPEN'),
+          'a permitted write must still land in the same pass as a refused one');
+        assert.ok(!rW.errors.some(e => e.includes(W_OPEN)),
+          `the visible project must not report an error: ${JSON.stringify(rW.errors)}`);
+        // And the pull half is untouched by the push refusal — lib/teamsync.js
+        // 2146-2154 keeps reading on purpose ("publishing and reading are
+        // INDEPENDENT"), which is a property worth pinning, not just a comment.
+        assert.ok(rW.synced.includes(W_OPEN), 'the visible project must count as synced');
+        assert.ok(rW.changed.includes(W_OPEN),
+          'and its teammate entries must still have been pulled');
+      });
+
+      // ===== WHERE 033 IS ACTUALLY LOAD-BEARING =====
+      // The client's gate above is positive-confirmation only, and
+      // visibleProjectIds (lib/teamsync.js:1092-1112) returns NULL on three
+      // inputs: a thrown request, a non-array body, and — deliberately — an
+      // EMPTY visible set, because [] is genuinely ambiguous between "revoked
+      // from everything", "backend has no project_stats view" and "deployment
+      // misconfigured", and the caller DELETES local data on absence.
+      //
+      // Its own comment names the cost it accepted: "revocation from a member's
+      // ONLY project is not detected here". What it could not know is that the
+      // undetected case was not merely a stale read — pre-033 the backend
+      // ACCEPTED the push, because memory_entries_insert never checked
+      // can_see_project. So a member revoked from every project they could see
+      // (in practice: their only one) skipped the gate, pushed, and the write
+      // landed. No attacker, no stale client, first-party code path.
+      //
+      // This is the window 033 closes, and 024's own header says this is where
+      // the backstop belongs: "RLS is the backstop if that check is ever
+      // bypassed or wrong, not the only gate."
+      const HOME_SOLE = path.join(ROOT, 'home-t17-sole');
+      homeFor.sole = HOME_SOLE;
+      portFor.sole = P(84);
+      process.env.MEMBRIDGE_HOME = HOME_SOLE;
+      util.ensureConfig();
+      {
+        const cfgS = util.loadUserConfig();
+        cfgS.team = { ...(cfgS.team || {}), encrypt: false };
+        util.saveUserConfig(cfgS);
+      }
+      const soleCreds = await teamsync.signup(util.getConfig(), 't17-sole@test.dev', 'pw-t17s', 'Sole17');
+      await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
+      // Close EVERY project in the team to this identity, so project_stats
+      // returns [] and the probe cannot answer. Written straight onto the rows
+      // rather than through the API because several of these projects have no
+      // local path on any machine in this fixture.
+      for (const p of mock17.projects.filter(x => x.teamId === t17Team.team_id)) {
+        const row = mock17.projectAccess.find(r => r.project_key === p.id && r.member_id === soleCreds.userId);
+        if (row) row.can_see = false;
+        else {
+          mock17.projectAccess.push({
+            team_id: p.teamId, project_key: p.id, member_id: soleCreds.userId,
+            can_see: false, updated_at: new Date().toISOString(), updated_by: ownerCreds.userId,
+          });
+        }
+      }
+      const S_CLOSED = path.join(ROOT, 'projects-t17s', 'only-app');
+      fs.mkdirSync(path.join(S_CLOSED, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(S_CLOSED, '.membridge', 'team.json'),
+        JSON.stringify({ projectId: t17Link.projectId, teamId: t17Team.team_id }));
+      process.env.MEMBRIDGE_HOME = HOME_SOLE;
+      const stS = util.loadState();
+      stS.projects = {
+        [S_CLOSED]: { events: [{ ts: '2026-07-22T10:00:00.000Z', source: 'Codex', kind: 'prompt', text: 'SOLE-REVOKED-WRITE', session: 's1' }] },
+      };
+      util.saveState(stS);
+      const soleDeniedBefore = mock17.stats.deniedInserts;
+      const rS = await teamsync.syncTeams();
+
+      await check('033: an identity revoked from EVERY project slips the client gate, and the backend is what refuses the write', async () => {
+        process.env.MEMBRIDGE_HOME = HOME_SOLE;
+        const st = util.loadState();
+        // The gate did NOT fire — this is the fail-open window, not the path above.
+        assert.strictEqual(st.projects[S_CLOSED].teamAccessLost, undefined,
+          'precondition: the empty-visible-set probe is inconclusive, so the gate is skipped');
+        // So the client really did attempt the write, and 033 is what stopped it.
+        assert.ok(mock17.stats.deniedInserts > soleDeniedBefore,
+          'the push must have been attempted and refused by the backend');
+        assert.ok(!JSON.stringify(mock17.entries).includes('SOLE-REVOKED-WRITE'),
+          'a revoked write must not land — this is the whole of 033');
+        const err = rS.errors.find(e => e.includes(S_CLOSED));
+        assert.ok(err, `the refusal must be reported, not swallowed: ${JSON.stringify(rS.errors)}`);
+        assert.ok(/team push failed/.test(err), `and reported as a push failure: ${err}`);
+      });
+
+      await check('033: a refused push advances no cursor and sets no success flag — the entries stay held, not lost', async () => {
+        // This codebase's signature defect is a flag recording a success the code
+        // never achieved. pushProject advances proj.teamPushTs only AFTER the
+        // upsert returns (lib/teamsync.js:1321-1323), so a refusal must leave the
+        // cursor untouched and the entry still queued locally.
+        process.env.MEMBRIDGE_HOME = HOME_SOLE;
+        const st = util.loadState();
+        assert.strictEqual(st.projects[S_CLOSED].teamPushTs, undefined,
+          'a batch that never landed must not move the push cursor');
+        assert.strictEqual(st.projects[S_CLOSED].events.length, 1,
+          'the held entry must still be on disk, not discarded as sent');
+        // A permanent rejection, retried through machinery built for transient
+        // ones: identical outcome next pass, one more error each time.
+        const again = await teamsync.syncTeams();
+        assert.ok(again.errors.some(e => e.includes(S_CLOSED)), 'the refusal must recur, not silently resolve');
+        assert.ok(!JSON.stringify(mock17.entries).includes('SOLE-REVOKED-WRITE'));
+        process.env.MEMBRIDGE_HOME = HOME_SOLE;
+        assert.strictEqual(util.loadState().projects[S_CLOSED].teamPushTs, undefined);
+      });
+
+      await check('033: the RLS hint names both causes and no longer tells a correctly-linked project to unlink', async () => {
+        // rlsHint (lib/teamsync.js) fires on /security|not a member/i, which
+        // PostgREST's `new row violates row-level security policy` matches. Before
+        // 033 an RLS refusal on a write had one plausible cause, so the hint
+        // asserted it outright and told the user to run `membridge team unlink`.
+        // 033 adds a second cause the message cannot distinguish, and for a member
+        // revoked from one project the old text was wrong on both counts — with
+        // the destructive half (unlink) being the actionable one.
+        const err = rS.errors.find(e => e.includes(S_CLOSED));
+        assert.ok(/revoked/i.test(err), `the hint must offer revocation as a cause: ${err}`);
+        assert.ok(/not a member/i.test(err), 'and must still offer the wrong-team cause');
+        assert.ok(!/join it or run/.test(err), 'the old "join it or run ... unlink" instruction must be gone');
+        assert.ok(/held locally/.test(err), 'and must say the entries are not lost');
+        assert.ok(/discard a link that may be correct/.test(err),
+          `unlink must be described as a hazard, not prescribed: ${err}`);
+      });
+
+      // ===== readAccess must not invent an access list it cannot read =====
+      // GET /api/project/access had NO role gate, while the data it reports is
+      // manager-only at the backend: project_access_select is
+      // `using (is_team_manager(team_id))` (025 §6). RLS on SELECT filters rows
+      // rather than raising, so a non-manager's read returned `200 []` — the same
+      // response as "this project has no explicit access rows". readAccess then
+      // applied its defaultAccess fallback to EVERY member instead of only the
+      // row-less ones and reported the whole team as able to see the project.
+      //
+      // 028 could not have fixed this. It improved the fallback from a hardcoded
+      // `true` to the project's real default_access, but a better fallback cannot
+      // help a caller that mistakes "not allowed to look" for "nothing there".
+      await check('readAccess refuses a non-manager instead of reporting an access list it cannot see', async () => {
+        assert.strictEqual(accessRow(memberCreds.userId).can_see, false,
+          'precondition: this member is explicitly revoked from the project');
+        const res = await apiAs('member', 'GET', `/api/project/access?path=${encodeURIComponent(PROJECT)}`);
+        assert.strictEqual(res.status, 403,
+          `a member must be refused, not handed a guess: ${JSON.stringify(res.body)}`);
+        // And the refusal must not leak the thing it is refusing.
+        const payload = JSON.stringify(res.body || {});
+        assert.ok(!payload.includes(ownerCreds.userId) && !payload.includes(lateCreds.userId),
+          `a refusal must not enumerate teammates: ${payload}`);
+        assert.ok(!/canSee/.test(payload), 'and must not carry per-member flags at all');
+      });
+
+      await check('the ungated version could not have known better: a non-manager gets an empty list, not an error', async () => {
+        // Pins the FACT that made the fabrication silent, the same way the
+        // project_access PK-order check pins why 034 is needed. If
+        // project_access_select is ever widened back to is_team_member, this
+        // check changes and the reasoning above must be revisited rather than
+        // rediscovered. A test that cannot see the premise it depends on is the
+        // failure mode worth avoiding here.
+        const r = await fetch(
+          `http://127.0.0.1:${MOCK17_PORT}/rest/v1/project_access`
+          + `?team_id=eq.${encodeURIComponent(t17Team.team_id)}`
+          + `&project_key=eq.${encodeURIComponent(t17Link.projectId)}&select=member_id,can_see`,
+          { headers: { apikey: 'anon-test', Authorization: `Bearer ${tokenFor(memberCreds.userId)}` } });
+        assert.strictEqual(r.status, 200, 'RLS filters a SELECT; it does not reject it');
+        assert.deepStrictEqual(await r.json(), [],
+          'a non-manager sees zero rows — indistinguishable from a project with no restrictions, '
+          + 'which is exactly why readAccess must refuse rather than interpret this');
+        // Meanwhile the rows really do exist, so "empty" was never the truth.
+        assert.ok(mock17.projectAccess.some(x =>
+          x.project_key === t17Link.projectId && x.can_see === false),
+        'the project genuinely has revoked members that read hid');
+      });
+
+      await check('the manager path still reports the TRUE per-member flags, not a blanket answer', async () => {
+        // The over-broad-fix catcher: a gate that refused everyone, or one that
+        // dropped the rows, would pass the two checks above and break the panel.
+        const res = await apiAs('owner', 'GET', `/api/project/access?path=${encodeURIComponent(PROJECT)}`);
+        assert.strictEqual(res.status, 200);
+        const by = new Map(res.body.members.map(m => [m.memberId, m.canSee]));
+        assert.strictEqual(by.get(ownerCreds.userId), true, 'the owner holds an explicit grant');
+        assert.strictEqual(by.get(memberCreds.userId), false, 'and the revoked member must read as revoked');
+        assert.strictEqual(by.get(lateCreds.userId), false);
+        assert.strictEqual(res.body.defaultAccess, false, 'and the project default must still be reported');
+        // Distinct values in one response is the point: a fabricated list is
+        // uniform, a real one is not.
+        assert.strictEqual(new Set(by.values()).size, 2,
+          'a real access list distinguishes members; a guessed one cannot');
       });
     } finally {
       delete process.env.MEMBRIDGE_TEAM_URL;
@@ -23198,8 +24090,27 @@ const repoRoot = require('../lib/repo-root');
   // stayed invisible until a teammate happened to push again. Measured live:
   // 65 team entries, 7 with decisions, no index. backfillProjects closes it.
   {
+    // THESE FIXTURES USED TO BE LINK-AGNOSTIC, and that hid a real defect.
+    // Every project here had teamEntries but no .membridge/team.json, so
+    // "linked" and "unlinked with stale rows left behind" were the same fixture
+    // state and no test could tell them apart. teamsync's unlinkProject drops
+    // team.json and prunes the durable archive but does NOT clear
+    // proj.teamEntries, and it never sets teamAccessLost — so util.teamRowsFor
+    // still hands those rows out, the backfill built an index from them, and the
+    // "never rewrite an existing index" guard made that index permanent. An
+    // unlinked project kept feeding teammate decisions into every agent's
+    // context indefinitely.
+    //
+    // So the linked fixtures now carry a real link, which is what lets the
+    // unlinked case below be a DISTINCT state with its own assertions.
+    const linkTeam = projectPath => {
+      fs.mkdirSync(path.join(projectPath, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(projectPath, '.membridge', 'team.json'),
+        JSON.stringify({ version: 1, projectId: `pid-${path.basename(projectPath)}`, teamId: 'team-backfill' }));
+    };
     const bfRoot = path.join(ROOT, 'projects', 'backfill-proj');
     fs.mkdirSync(bfRoot, { recursive: true });
+    linkTeam(bfRoot);
     const storedRow = { author: 'Andrew', ts: '2026-07-28T09:00:00Z', decisions: 'upgraded users must still see this', gotchas: '', changes: [{ file: 'lib/x.js', note: 'careful here' }] };
     const bfState = { projects: {
       [bfRoot]: { teamEntries: [storedRow] },
@@ -23233,6 +24144,7 @@ const repoRoot = require('../lib/repo-root');
     check('notes-backfill: afterTeamPull honours the kill switch', () => {
       const kp = path.join(ROOT, 'projects', 'backfill-killed');
       fs.mkdirSync(kp, { recursive: true });
+      linkTeam(kp); // a LINKED project, so this measures the kill switch and not the link check
       const st = util.loadState();
       util.saveState({ ...st, projects: { ...(st.projects || {}), [kp]: { teamEntries: [{ author: 'A', ts: '2026-07-28T09:00:00Z', decisions: 'x', gotchas: '' }] } } });
       const cfg = util.getConfig();
@@ -23263,6 +24175,127 @@ const repoRoot = require('../lib/repo-root');
     check('notes-backfill: malformed state yields [] and never throws', () => {
       assert.deepStrictEqual(notesStore.backfillProjects(null, 'x'), []);
       assert.deepStrictEqual(notesStore.backfillProjects({ projects: 'nope' }, 'x'), []);
+    });
+
+    // ---- the state the fixtures above could not previously express ----
+    check('notes-backfill: an UNLINKED project with stale team rows gets no index', () => {
+      // unlinkProject leaves teamEntries in state, so this is not a contrived
+      // shape — it is what every project unlinked before this fix looks like.
+      const up = path.join(ROOT, 'projects', 'backfill-unlinked');
+      fs.mkdirSync(up, { recursive: true });
+      const st = { projects: { [up]: { teamEntries: [storedRow] } } };
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T12:00:00Z'), [],
+        'a project with no team.json must not be backfilled from rows unlink left behind');
+      assert.ok(!fs.existsSync(notesStore.notesPath(up)), 'and no index file may be conjured for it');
+      // The rows themselves are still readable — this fix covers the notes index
+      // only, and pinning that boundary keeps the wider teamEntries-survives-
+      // unlink problem visible instead of looking solved.
+      assert.strictEqual(util.teamRowsFor(st.projects[up]).length, 1,
+        'teamRowsFor still serves the stale rows; that is a separate, wider fix');
+    });
+
+    check('notes-backfill: unlinking SELF-HEALS — a full index left by a pre-fix unlink is emptied', () => {
+      // WHAT THIS BRANCH IS ACTUALLY FOR, stated narrowly on purpose.
+      // teamsync.unlinkProject erases this index at the source, so an unlink
+      // performed on a build that has that erase needs nothing from here. The
+      // gap is the install that unlinked EARLIER: it still has the stale rows
+      // and a FULL index on disk, unlinkProject will never run for it again, and
+      // the "never write over an existing index" guard means nothing else would
+      // ever go back for it. This pass is what reaches those.
+      //
+      // EMPTIED, not deleted — matching the source erase, and for the reason
+      // that erase gives: the backfill guard is "does an index exist", so
+      // removing the file would hand the next pass permission to rebuild it from
+      // the rows the unlink left behind.
+      const hp = path.join(ROOT, 'projects', 'backfill-selfheal');
+      fs.mkdirSync(hp, { recursive: true });
+      linkTeam(hp);
+      const st = { projects: { [hp]: { teamEntries: [storedRow] } } };
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T12:00:00Z'), [hp],
+        'precondition: while linked, the index is built');
+      const ix = notesStore.read(hp);
+      assert.ok(ix && ix.prose.length, 'precondition: it really holds teammate content');
+
+      // Drop team.json and leave teamEntries and the full index exactly where
+      // they are — the on-disk shape of every project unlinked before the source
+      // erase shipped.
+      fs.unlinkSync(path.join(hp, '.membridge', 'team.json'));
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T13:00:00Z'), [],
+        'an unlinked project is not "rebuilt"; it is cleaned up');
+      const erased = notesStore.read(hp);
+      assert.ok(erased, 'the index file must survive as an empty index, not be removed');
+      assert.strictEqual((erased.prose || []).length, 0,
+        'the stale teammate prose must be gone — leaving it serves a project the user unlinked');
+      assert.deepStrictEqual(erased.byFile || {}, {},
+        'and so must the per-file notes');
+
+      // Idempotent: a second pass must not rewrite an already-empty index every
+      // time the daemon ticks.
+      const before = fs.statSync(notesStore.notesPath(hp)).mtimeMs;
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T13:30:00Z'), []);
+      assert.strictEqual(fs.statSync(notesStore.notesPath(hp)).mtimeMs, before,
+        'an already-empty index was rewritten — clearTeammateNotes must no-op');
+
+      // Re-linking refills it through the PULL path, not through this backfill:
+      // afterTeamPull's changed-project loop calls rebuildTeammateNotes
+      // unconditionally, while the backfill deliberately never writes over an
+      // index that exists. Asserted rather than assumed, because "the erase is
+      // recoverable" is the whole reason emptying is safe.
+      linkTeam(hp);
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T14:00:00Z'), [],
+        'the backfill must not write over an existing index, even an empty one');
+      assert.ok(notesStore.rebuildTeammateNotes(hp, [storedRow], '2026-07-28T14:00:00Z'),
+        're-linking must be able to refill the index from the rows');
+      assert.ok((notesStore.read(hp).prose || []).length,
+        'and the refilled index must hold the teammate content again');
+    });
+
+    check('notes-backfill: a still-linked project with an index is left completely alone', () => {
+      // NAMED FOR WHAT IT ACTUALLY VERIFIES. This started out claiming to prove
+      // that an UNREADABLE link is not treated as an unlink, and it did not: the
+      // link probe cannot be made to fail from here, so the check exercised the
+      // ordinary linked path and passed for a reason unrelated to its name. A
+      // check that cannot see the thing it claims to test is worse than no check,
+      // so the name now matches the assertion and the untested branch is called
+      // out below rather than papered over.
+      //
+      // What it does prove is the regression that matters most once deletion is
+      // on the table: adding the unlink cleanup must not make a LIVE project's
+      // index churn or vanish.
+      const ep = path.join(ROOT, 'projects', 'backfill-stillinked');
+      fs.mkdirSync(ep, { recursive: true });
+      linkTeam(ep);
+      const st = { projects: { [ep]: { teamEntries: [storedRow] } } };
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T15:00:00Z'), [ep]);
+      const before = fs.readFileSync(notesStore.notesPath(ep), 'utf8');
+      assert.deepStrictEqual(notesStore.backfillProjects(st, '2026-07-28T16:00:00Z'), []);
+      assert.strictEqual(fs.readFileSync(notesStore.notesPath(ep), 'utf8'), before,
+        'a linked project with an index must be left byte-identical');
+    });
+
+    check('notes-backfill: only ENOENT counts as unlinked — an inconclusive link probe never deletes', () => {
+      // The branch the check above could NOT reach, tested at the unit it lives
+      // in. isTeamLinked uses statSync rather than existsSync precisely because
+      // existsSync never throws: it answers false for EACCES, ELOOP and EIO just
+      // as it does for a genuinely absent file, so with existsSync "I could not
+      // look" and "it is gone" were the same answer — and the caller DELETES on
+      // "gone". Same failure shape as reading an RLS-filtered empty list as "no
+      // restrictions": an empty result mistaken for an answer.
+      //
+      // A real EACCES cannot be staged portably here (chmod is a no-op as root,
+      // which is how CI containers run), so this drives the classifier directly
+      // through the errno values statSync would raise.
+      const classify = notesStore._isTeamLinkedForTest;
+      assert.strictEqual(typeof classify, 'function', 'the link classifier must be reachable to test');
+      assert.strictEqual(classify(() => { const e = new Error('nope'); e.code = 'ENOENT'; throw e; }), false,
+        'a genuinely absent team.json means unlinked');
+      assert.strictEqual(classify(() => { const e = new Error('nope'); e.code = 'ENOTDIR'; throw e; }), false,
+        'a .membridge that is not a directory also means unlinked');
+      for (const code of ['EACCES', 'EPERM', 'EIO', 'ELOOP', 'EMFILE', undefined]) {
+        assert.strictEqual(classify(() => { const e = new Error('nope'); e.code = code; throw e; }), true,
+          `${code} is inconclusive and must NOT be read as unlinked — it would delete a live index`);
+      }
+      assert.strictEqual(classify(() => ({ isFile: () => true })), true, 'a successful stat means linked');
     });
   }
 

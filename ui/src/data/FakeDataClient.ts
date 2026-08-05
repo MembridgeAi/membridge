@@ -1,6 +1,6 @@
 import type { DataClient, Capabilities } from './DataClient'
 import type {
-  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
+  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
   Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
@@ -8,6 +8,12 @@ import type {
 export interface FakeOptions {
   solo?: boolean
   role?: Role
+  // The daemon's sync-loop health (Status.health). Omitted => the healthy 'ok'
+  // fixture. Pass an object to drive 'erroring'/'stalled'/'unknown'. Pass NULL
+  // to model a daemon older than the field, which sends `running` alone -- the
+  // one case a client must not render as 'unknown', since the ignorance is the
+  // client's, not the daemon's.
+  health?: DaemonHealth | null
   skeletonAvailable?: boolean
   empty?: boolean
   failWith?: string
@@ -77,6 +83,37 @@ function emptyBrief(): Pick<StreamEntry, 'summaryFull' | 'decisions' | 'gotchas'
 // A 60-prompt session's chain, newest-first (one prompt a minute counting
 // back from the base) -- exercises the 5-then-25 paging without a live
 // daemon or a hand-written 60-row literal.
+/**
+ * A faithful port of lib/activity.js's `matchesAuthor`, which is what the real
+ * /api/search actually applies. The previous inline filter here was
+ * `e.authorId === filters.author`: exact id equality, and no notion of the
+ * leading '!' the "Hide mine" control sends. That modelled neither half of the
+ * daemon's behaviour, so a test could assert a negated filter was SENT and the
+ * fake would quietly return the wrong rows for it either way.
+ *
+ * Two deliberate fidelity gaps remain, both belonging to the daemon ticket
+ * rather than to this file:
+ *   - Real rows carry `authorId: null` for EVERY author, local and teammate
+ *     alike (measured against a live daemon), so on real data the id branch
+ *     below can never fire and only the name substring can match. These
+ *     fixtures still carry ids, which is exactly why the suite stayed green
+ *     over a person filter that returns nothing in production.
+ *   - Real display names alias -- one teammate appears as both "Andrew Brown"
+ *     and "andrewludwigbrown" -- so name matching is partial on real data in a
+ *     way no fixture here reproduces.
+ * Making the fixtures realistic turns the person-filter tests red, and they
+ * cannot go green until the daemon exposes a usable identity. Left as is on
+ * purpose; see the notes on those tests in features/search/SearchPage.test.tsx.
+ */
+function matchesAuthorLikeDaemon(e: { author: string; authorId: string }, filter: string | null): boolean {
+  if (!filter) return true
+  const negated = filter.startsWith('!')
+  const want = negated ? filter.slice(1) : filter
+  if (!want) return true
+  const hit = e.authorId === want || e.author.toLowerCase().includes(want.toLowerCase())
+  return negated ? !hit : hit
+}
+
 function longPromptChain(count: number): SessionPrompt[] {
   const base = Date.parse('2026-07-28T22:00:00Z')
   return Array.from({ length: count }, (_, i) => ({
@@ -196,9 +233,20 @@ export class FakeDataClient implements DataClient {
   private get viewerId(): string {
     return this.opts.viewerId ?? 'me'
   }
+  // `health` follows opts.health, and `running` is DERIVED from it exactly the
+  // way lib/server.js derives it (ok/erroring are running; stalled/unknown are
+  // not) -- so a fixture can never present a combination the daemon cannot
+  // produce, which is the only way a test of these states proves anything.
+  // opts.health === null models the daemon that predates the field: `health` is
+  // omitted entirely and `running` stays true.
   getStatus() {
+    const health = this.opts.health === undefined
+      ? { state: 'ok' as const, lastTickAt: '2026-07-29T21:00:00Z', lastTickError: null, staleForSec: 5 }
+      : this.opts.health
     return this.guard<Status>({
-      running: true, version: '0.1.7', solo: !!this.opts.solo, setupDone: true,
+      ...(health ? { health } : {}),
+      running: health ? (health.state === 'ok' || health.state === 'erroring') : true,
+      version: '0.1.7', solo: !!this.opts.solo, setupDone: true,
       projectCount: this.opts.empty ? 0 : 3, intervalSec: 60, lastSync: '2026-07-29T21:00:00Z',
       teamLastSync: this.opts.solo ? null : (this.opts.teamLastSync !== undefined ? this.opts.teamLastSync : '2026-07-29T21:00:00Z'),
       tools: ['Claude Code', 'Codex'],
@@ -223,9 +271,15 @@ export class FakeDataClient implements DataClient {
     }
     return out
   }
-  // The shared project's roster: a strict subset (6 of N) once the team is
-  // bigger than 6, so the Access cell's "+N chip and count label" case is a
+  // The shared project's ACCESS roster: a strict subset (6 of N) once the team
+  // is bigger than 6, so the Access cell's "+N chip and count label" case is a
   // real state rather than always collapsing to "whole team".
+  //
+  // getProjects() below also seeds `recentAuthorIds` from this, which is not a
+  // naming slip: making the fixture's recent authors a subset of the people with
+  // access keeps a demo screen plausible. Nothing may infer from that overlap --
+  // in production the two are unrelated sets, which is the whole reason
+  // recentAuthorIds stopped being called memberIds (see types.ts).
   private sharedMemberIds(): string[] {
     if (this.opts.solo) return [this.viewerId]
     return this.teamMembers().slice(0, 6).map(m => m.id)
@@ -237,7 +291,7 @@ export class FakeDataClient implements DataClient {
         path: '/Users/x/membridge', name: 'membridge', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
-        shared: !this.opts.solo, memberIds: this.sharedMemberIds(),
+        shared: !this.opts.solo, recentAuthorIds: this.sharedMemberIds(),
         sessionsThisWeek: 31, dailyCounts: [3, 5, 2, 6, 4, 5, 6], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
         sync: { state: 'up-to-date' },
@@ -246,7 +300,7 @@ export class FakeDataClient implements DataClient {
         path: '/Users/x/sublease', name: 'sublease', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
-        shared: false, memberIds: [this.viewerId],
+        shared: false, recentAuthorIds: [this.viewerId],
         sessionsThisWeek: 4, dailyCounts: [1, 0, 1, 0, 1, 1, 0], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
         latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
         sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
@@ -258,7 +312,7 @@ export class FakeDataClient implements DataClient {
           path: '/Users/x/old-prototype', name: 'old-prototype', exists: true, archived: true, missing: false, paused: true,
           lastSync: '2026-06-30T10:00:00Z', lastActivity: '2026-06-30T10:00:00Z',
           sessionsTotal: 12, tools: ['Claude Code'],
-          shared: false, memberIds: [this.viewerId],
+          shared: false, recentAuthorIds: [this.viewerId],
           sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
           latestSummary: null,
           sync: { state: 'paused' },
@@ -267,7 +321,7 @@ export class FakeDataClient implements DataClient {
           path: '/Users/x/deleted-folder', name: 'deleted-folder', exists: false, archived: true, missing: true, paused: true,
           lastSync: '2026-06-01T10:00:00Z', lastActivity: '2026-06-01T10:00:00Z',
           sessionsTotal: 3, tools: ['Codex'],
-          shared: false, memberIds: [this.viewerId],
+          shared: false, recentAuthorIds: [this.viewerId],
           sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
           latestSummary: null,
           sync: { state: 'paused' },
@@ -307,7 +361,7 @@ export class FakeDataClient implements DataClient {
     ]
   }
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }) {
-    if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null })
+    if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null, dayDigests: [] })
     let entries = this.feedFixture()
       .filter(e => !filters.author || e.authorId === filters.author)
       .filter(e => !filters.project || e.projectPath === filters.project)
@@ -316,7 +370,10 @@ export class FakeDataClient implements DataClient {
     if (opts.before) entries = entries.filter(e => e.at <= opts.before!)
     const page = entries.slice(0, opts.limit)
     const nextBefore = entries.length > opts.limit ? page[page.length - 1].at : null
-    return this.guard<FeedPage>({ entries: page, nextBefore })
+    // No dayDigests: the fixture transport deliberately exercises the
+    // no-digest daemon, which is the state every client must degrade to. Tests
+    // that need one supply it by mocking getFeed.
+    return this.guard<FeedPage>({ entries: page, nextBefore, dayDigests: [] })
   }
   // The demo/test transport's search: the same fixture rows, filtered by a
   // plain case-insensitive substring over the fields the real scorer weights
@@ -327,7 +384,7 @@ export class FakeDataClient implements DataClient {
     const q = query.trim().toLowerCase()
     if (!q || this.opts.empty) return this.guard<SearchPage>({ query: q, total: 0, results: [] })
     const hits = this.feedFixture()
-      .filter(e => !filters.author || e.authorId === filters.author)
+      .filter(e => matchesAuthorLikeDaemon(e, filters.author))
       .filter(e => !filters.project || e.projectPath === filters.project)
       .filter(e => !filters.source || e.tool === filters.source)
       .map(e => {
@@ -355,7 +412,10 @@ export class FakeDataClient implements DataClient {
     return this.guard<DeleteProjectResult>({ path: projectPath, scope: 'local', deleted: true })
   }
   copyForAI() { return this.guard('digest text') }
-  getProjectAccess() {
+  // The path is declared (same reason archiveProject's is): tests spy on this
+  // to assert WHICH project's access the projects grid asked for, and a
+  // zero-arg signature made that assertion untypable.
+  getProjectAccess(_projectPath: string) {
     return this.guard({
       members: [{ memberId: this.viewerId, canSee: true }, { memberId: 'andrew', canSee: true }, { memberId: 'sarah', canSee: false }],
       defaultAccess: true,
@@ -375,9 +435,10 @@ export class FakeDataClient implements DataClient {
     })
   }
   // All member surfaces read teamMembers() above, so the roster, the matrix,
-  // settings memberCount and the shared project's memberIds always agree --
-  // 'andrew' was once absent here while three other fixtures referenced him,
-  // and anything joining those against getMembers() silently dropped him.
+  // settings memberCount and the shared project's fixture author set always
+  // agree -- 'andrew' was once absent here while three other fixtures
+  // referenced him, and anything joining those against getMembers() silently
+  // dropped him.
   getMembers() {
     return this.guard<Member[]>(this.teamMembers())
   }
@@ -421,6 +482,12 @@ export class FakeDataClient implements DataClient {
   // daemon accepts a token, a UUID and a pasted URL and the UI must not be
   // written against a narrower idea of what is valid.
   joinTeam() { return this.guard<{ id: string; name: string }>({ id: 'team-acme', name: 'Acme AI' }) }
+
+  // Genuinely nothing to do: this fake resolves fixtures directly and has no
+  // request cache to stand down. Kept as an explicit no-op (not omitted) so a
+  // test can still spy on it and prove Recheck asks the transport for a real
+  // round trip -- which is the only thing the UI can be held to here.
+  forgetCachedReads(): void {}
 
   // The selection is real state here, not a no-op stub: every team-scoped
   // fixture below reads selectedTeam(), so a test can prove the app actually
@@ -590,7 +657,15 @@ export class FakeDataClient implements DataClient {
   }
 
   restartDaemon() { return this.guard<void>(undefined) }
-  checkForUpdates() { return this.guard({ current: '0.1.7', latest: '0.1.7', updateAvailable: null }) }
+  // Explicitly the DataClient signature, not the narrow shape TS would infer
+  // from this one fixture: `latest` legitimately comes back null (the daemon's
+  // network probe failed) and `updateAvailable` legitimately comes back a
+  // version string, and a test overriding this method has to be able to say so.
+  checkForUpdates() {
+    return this.guard<{ current: string; latest: string | null; updateAvailable: string | null }>(
+      { current: '0.1.7', latest: '0.1.7', updateAvailable: null },
+    )
+  }
   openConfigFile() { return this.guard<void>(undefined) }
   openMemoryFile() { return this.guard<void>(undefined) }
   leaveTeam() { return this.guard<void>(undefined) }

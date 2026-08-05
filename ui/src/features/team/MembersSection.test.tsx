@@ -3,7 +3,35 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
+import type { AccessMatrix } from '../../data/types'
 import { MembersSection } from './MembersSection'
+
+/** An access matrix in which Sarah is blocked from exactly `blocked`, told as
+ *  shared rows, plus one shared row she can see (so a test cannot pass just by
+ *  counting rows) and one PRIVATE row where her flag is false. The daemon never
+ *  sends false on an unshared row -- it fills `true` for everyone -- but the
+ *  private row is here to prove the reader gates on `shared` rather than
+ *  reading the flag off any row it is handed. */
+function matrixBlockingSarahFrom(blocked: string[]): AccessMatrix {
+  const seen = (name: string, sarah: boolean, shared: boolean) => ({
+    projectPath: `/Users/x/${name}`, projectName: name, shared,
+    access: { me: true, andrew: true, sarah },
+  })
+  return {
+    members: [{ id: 'me', name: 'Marco' }, { id: 'andrew', name: 'Andrew' }, { id: 'sarah', name: 'Sarah' }],
+    rows: [
+      ...blocked.map(name => seen(name, false, true)),
+      seen('visible-to-all', true, true),
+      seen('my-private-thing', false, false),
+    ],
+  }
+}
+
+async function openRemoveDialogForSarah() {
+  await userEvent.click(await screen.findByRole('button', { name: /more actions for Sarah/i }))
+  await userEvent.click(screen.getByRole('menuitem', { name: /remove from team/i }))
+  return screen.findByRole('dialog')
+}
 
 describe('MembersSection (the People section of the Team page)', () => {
   it('confirms before removing a member and says what removal does, honestly', async () => {
@@ -24,6 +52,123 @@ describe('MembersSection (the People section of the Team page)', () => {
     expect(dialog).toHaveTextContent(/never syncs again/i)
     expect(dialog).toHaveTextContent(/keeps its copy/i)
     expect(dialog.textContent).not.toMatch(/retroactive/i)
+  })
+
+  // U-2: public.project_access cascades on the team_members foreign key, so
+  // removing a member deletes their per-project revokes with their membership.
+  // The half everyone reasons about is the good one -- no stale GRANT survives a
+  // rejoin. The mirror half is invisible: no stale REVOKE survives either, so
+  // revoke, remove, re-invite, and the project they were blocked from is
+  // visible to them again with nothing anywhere having said so. The removal
+  // dialog is the last moment that information both exists and is about to be
+  // destroyed, which is why it is said there. (Not at invite time: an invite is
+  // a bearer token with no addressee, so at mint time there is nobody to warn
+  // about, by construction.)
+  describe('removal warns that the member\'s per-project blocks will be lost', () => {
+    it('names the projects and what happens if they rejoin', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'getAccessMatrix').mockResolvedValue(matrixBlockingSarahFrom(['membridge', 'billing']))
+      renderWith(client, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      // Count and names, so the admin can decide whether the rejoin is a
+      // problem without leaving this dialog to go read the Projects grid.
+      await within(dialog).findByText(/blocked from 2 shared projects/i)
+      expect(dialog).toHaveTextContent(/billing/)
+      expect(dialog).toHaveTextContent(/membridge/)
+      expect(dialog).toHaveTextContent(/if Sarah rejoins later/i)
+      expect(dialog).toHaveTextContent(/re-apply the blocks by hand/i)
+      // The private row's false flag must not be counted: the daemon fills
+      // `true` for every member of an unshared project, so a false there is
+      // not a revoke and naming it would invent a block that does not exist.
+      expect(dialog.textContent).not.toMatch(/my-private-thing/)
+      expect(dialog.textContent).not.toMatch(/visible-to-all/)
+      // The original consequence is still the lead -- this is appended, not
+      // substituted.
+      expect(dialog).toHaveTextContent(/cuts off access to every shared project/i)
+    })
+
+    it('reads as one block, not "1 projects", for a single revoke', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'getAccessMatrix').mockResolvedValue(matrixBlockingSarahFrom(['membridge']))
+      renderWith(client, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      await within(dialog).findByText(/blocked from 1 shared project \(membridge\)/i)
+      expect(dialog).toHaveTextContent(/deletes that block/i)
+      expect(dialog).toHaveTextContent(/that project becomes visible again/i)
+      expect(dialog.textContent).not.toMatch(/1 shared projects/i)
+    })
+
+    it('counts the overflow rather than listing a dozen project names', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'getAccessMatrix')
+        .mockResolvedValue(matrixBlockingSarahFrom(['a1', 'a2', 'a3', 'a4', 'a5', 'a6']))
+      renderWith(client, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      await within(dialog).findByText(/blocked from 6 shared projects \(a1, a2, a3, a4, and 2 more\)/i)
+    })
+
+    // U-4: with the warning appended, the message had grown to five sentences in
+    // a single <p> -- on a destructive action, which is the worst place for a
+    // wall of text. The question and its immediate answer are the first
+    // paragraph; everything that follows from it, including the block warning,
+    // is the second.
+    it('reads as a question plus its consequences, not one block of text', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'getAccessMatrix').mockResolvedValue(matrixBlockingSarahFrom(['membridge']))
+      renderWith(client, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      await within(dialog).findByText(/blocked from 1 shared project/i)
+
+      const paragraphs = [...dialog.querySelectorAll('.dialog-message')]
+      expect(paragraphs).toHaveLength(2)
+      // First paragraph answers the title's question and stops there.
+      expect(paragraphs[0].textContent).toMatch(/cuts off access to every shared project right away\.$/i)
+      expect(paragraphs[0].textContent).not.toMatch(/blocked from|already synced/i)
+      // Second carries the consequences, block warning included -- the part
+      // most likely to go unread as the tail of a long paragraph.
+      expect(paragraphs[1].textContent).toMatch(/nothing new reaches their machine/i)
+      expect(paragraphs[1].textContent).toMatch(/blocked from 1 shared project/i)
+    })
+
+    it('leaves the dialog untouched for a member who has no blocks', async () => {
+      // The default fixture's matrix grants every member every shared project.
+      renderApp({}, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      expect(dialog).toHaveTextContent(/cuts off access to every shared project/i)
+      // Deliberately NOT a reassuring "no blocks to lose" line: that is a claim
+      // the matrix cannot make when it failed to load, and the two cases must
+      // not be worded so as to be confusable.
+      expect(dialog.textContent).not.toMatch(/blocked from|re-apply/i)
+    })
+
+    it('still removes the member while the matrix is in flight', async () => {
+      const client = new FakeDataClient()
+      // Never resolves: the matrix read is permanently pending.
+      vi.spyOn(client, 'getAccessMatrix').mockImplementation(() => new Promise<AccessMatrix>(() => {}))
+      const removeSpy = vi.spyOn(client, 'removeMember')
+      renderWith(client, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      expect(dialog.textContent).not.toMatch(/blocked from/i)
+      const confirm = within(dialog).getByRole('button', { name: /remove from team/i })
+      expect(confirm).toBeEnabled()
+      await userEvent.click(confirm)
+      expect(removeSpy).toHaveBeenCalledWith('sarah')
+    })
+
+    it('still removes the member when the matrix read failed', async () => {
+      const client = new FakeDataClient()
+      vi.spyOn(client, 'getAccessMatrix').mockRejectedValue(new Error('access matrix unreachable'))
+      const removeSpy = vi.spyOn(client, 'removeMember')
+      renderWith(client, <MembersSection />)
+      const dialog = await openRemoveDialogForSarah()
+      expect(dialog.textContent).not.toMatch(/blocked from/i)
+      // A failed access read must not become a second permission system: the
+      // manager keeps the ability to remove someone, and the dialog degrades
+      // to the text it had before this warning existed rather than guessing.
+      expect(dialog.textContent).not.toMatch(/access matrix unreachable/i)
+      await userEvent.click(within(dialog).getByRole('button', { name: /remove from team/i }))
+      expect(removeSpy).toHaveBeenCalledWith('sarah')
+    })
   })
 
   it('says plainly when a member has shared nothing, without guessing why', async () => {
@@ -47,14 +192,21 @@ describe('MembersSection (the People section of the Team page)', () => {
     expect(screen.queryByRole('button', { name: /invite/i })).toBeNull()
   })
 
-  it('never calls getAudit or getInvites for a member role', async () => {
+  // All three endpoints are owner/admin-only on the daemon (lib/api-access.js
+  // 403s a member for the audit and the access matrix), so a member-role viewer
+  // must not fire a single one of them -- including the access matrix the
+  // removal warning reads, which is gated on the same canManage check that
+  // decides whether a removal control is offered at all.
+  it('never calls getAudit, getInvites or getAccessMatrix for a member role', async () => {
     const client = new FakeDataClient({ role: 'member' })
     const auditSpy = vi.spyOn(client, 'getAudit')
     const invitesSpy = vi.spyOn(client, 'getInvites')
+    const matrixSpy = vi.spyOn(client, 'getAccessMatrix')
     renderWith(client, <MembersSection />)
     await screen.findByText('Sarah')
     expect(auditSpy).not.toHaveBeenCalled()
     expect(invitesSpy).not.toHaveBeenCalled()
+    expect(matrixSpy).not.toHaveBeenCalled()
   })
 
   // "Transfer ownership" was a control that could not work. It called
@@ -138,8 +290,27 @@ describe('MembersSection (the People section of the Team page)', () => {
   // more" exists.
   it('labels the audit list by event count, not a time window it never queries', async () => {
     renderApp({}, <MembersSection />)
-    expect(await screen.findByText('Audit · last 4 events')).toBeInTheDocument()
+    // Heading reads "Team activity", not the jargon "Audit"; still counts the
+    // rows actually on screen (the only number that stays true once "Show
+    // more" exists), never a time window nothing queries.
+    expect(await screen.findByText('Team activity · last 4 events')).toBeInTheDocument()
     expect(screen.queryByText(/last 30 days/i)).toBeNull()
+  })
+
+  it('labels and legends the invite list so a bare token is not the first thing read', async () => {
+    renderApp({}, <MembersSection />)
+    expect(await screen.findByText(/outstanding invite links · token · uses · expiry/i)).toBeInTheDocument()
+  })
+
+  it('counts the People by membership, not with the misleading word "active"', async () => {
+    renderApp({}, <MembersSection />)
+    await screen.findByText('Sarah')
+    const membersHeading = screen.getByRole('heading', { name: 'People' })
+    const head = membersHeading.parentElement as HTMLElement
+    // The count beside "People" is a plain member count; "active" implied an
+    // inactive set the roster never shows.
+    expect(within(head).getByText(/^\d+ members?$/)).toBeInTheDocument()
+    expect(within(head).queryByText(/active/i)).toBeNull()
   })
 
   it('revokes a pending invite via a real DataClient call', async () => {

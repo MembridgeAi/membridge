@@ -3,8 +3,19 @@
 The `curl | sh` installer is pinned to one release (version + SHA-256). Every
 release regenerates and republishes `install.sh`.
 
-1. Bump `version` in `package.json` (and let `scripts/prepare-app.js` sync
-   `app/package.json` on the next build).
+1. Bump the version with `npm version <version>`. That writes `package.json` and
+   `package-lock.json`, runs the `version` script (`scripts/stamp-version.js`),
+   and commits `app/package.json` along with them — `app/package.json` is a
+   committed file that `app.getVersion()` reads, so it has to move in the same
+   commit.
+
+   Bumping by hand instead is fine, but then run `node scripts/stamp-version.js`
+   and commit `app/package.json` too. This step used to read "let
+   `scripts/prepare-app.js` sync `app/package.json` on the next build", and
+   packaging does still stamp it — but nobody ran a build between the bump and
+   the commit for either 0.2.9 or 0.3.0, so the committed file sat two releases
+   behind while every shipped dmg was correct. CI now fails on that drift and
+   names the command above.
 2. Create the GitHub release tagged `v<version>`. Publishing the release
    triggers the **Build app** workflow, which builds the macOS and Windows
    zips on CI and attaches them with `--clobber` — CI's zips are the

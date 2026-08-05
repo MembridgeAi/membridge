@@ -92,6 +92,130 @@ async function main() {
       const ranked = search.rankEntries([older, newer], 'vault');
       assert.strictEqual(ranked[0].ts, '2026-06-01T00:00:00.000Z');
     });
+
+    // --- usage as a relevance prior (opts.retrievalsOf) ---
+    // Reinforcement, NOT recency: the module header's ban on recency weighting
+    // stands. A six-month-old gotcha the team keeps coming back to is more
+    // likely to be the answer than an equally-worded one nobody ever needed,
+    // and that is a claim about demand, not about the clock.
+
+    check('search: a proven memory outranks an equally-relevant never-retrieved one', () => {
+      // The unused entry is the NEWER of the two, so it wins the ts tiebreak.
+      // Only the usage prior can put the proven one on top.
+      const unused = { ts: '2026-06-01T00:00:00.000Z', session: 'unused', decisions: 'vault rotation runs per epoch' };
+      const proven = { ts: '2026-01-01T00:00:00.000Z', session: 'proven', decisions: 'vault rotation runs per epoch' };
+      const ranked = search.rankEntries([unused, proven], 'vault rotation', {
+        retrievalsOf: e => (e.session === 'proven' ? 6 : 0),
+      });
+      assert.strictEqual(ranked[0].session, 'proven', 'usage did not lift the entry the team actually leans on');
+    });
+
+    check('search: usage cannot overturn a clearly stronger lexical match', () => {
+      const strong = {
+        ts: '2026-01-01T00:00:00.000Z', session: 'strong',
+        headline: 'vault rotation rewritten',
+        decisions: 'vault rotation runs per epoch',
+        files: ['infra/vault-rotation.tf'],
+      };
+      const weak = { ts: '2026-06-01T00:00:00.000Z', session: 'weak', summary: 'vault rotation mentioned' };
+      const ranked = search.rankEntries([strong, weak], 'vault rotation', {
+        retrievalsOf: e => (e.session === 'weak' ? 10000 : 0),
+      });
+      assert.strictEqual(ranked[0].session, 'strong', 'a popular weak match buried the better answer');
+    });
+
+    check('search: usage never changes which entries match — only their order', () => {
+      const partial = { ts: '2026-07-01T00:00:00.000Z', summary: 'only vault, no other terms' };
+      assert.deepStrictEqual(
+        search.rankEntries([partial], 'vault rotation epochs', { retrievalsOf: () => 9999 }), [],
+        'a heavily-used entry that fails the AND-bias must still not be a result');
+    });
+
+    check('search: omitting retrievalsOf leaves the raw lexical score untouched', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', decisions: 'vault rotation runs per epoch' };
+      const plain = search.rankEntries([e], 'vault rotation');
+      const zeroed = search.rankEntries([e], 'vault rotation', { retrievalsOf: () => 0 });
+      assert.strictEqual(Number.isInteger(plain[0].score), true,
+        'the unboosted score must stay the raw lexical integer');
+      assert.strictEqual(zeroed[0].score, plain[0].score, 'zero retrievals must not move the score');
+    });
+
+    check('search: the usage boost saturates — it can never double a score', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', decisions: 'vault rotation runs per epoch' };
+      const base = search.rankEntries([e], 'vault rotation')[0].score;
+      const many = search.rankEntries([e], 'vault rotation', { retrievalsOf: () => 100000 })[0].score;
+      assert.ok(many > base, 'heavy usage bought nothing at all');
+      assert.ok(many <= base * 1.5 + 1e-9, `the boost is unbounded (${base} -> ${many})`);
+    });
+
+    // --- the strict/relaxed policy, in the form the FTS5 index consumes ---
+    // rankWithFallback holds this policy for in-memory scoring; searchPasses
+    // is the SAME policy expressed as query passes, so the index-backed
+    // surfaces cannot drift into a different definition of "no results".
+
+    check('search: searchPasses strict pass is a MAJORITY of terms, matching scoreEntry', () => {
+      // Not "all terms". scoreEntry's strict gate is floor(n/2)+1, and a pass
+      // that required every term would drop the partial matches the harness
+      // scenario "old exact beats recent partial" depends on being returned.
+      const passes = search.searchPasses('vault rotation epochs');
+      assert.strictEqual(passes.length, 2);
+      assert.deepStrictEqual(passes[0], { terms: ['vault', 'rotation', 'epochs'], minTerms: 2 });
+      assert.deepStrictEqual(passes[1], { terms: ['vault', 'rotation', 'epochs'], minTerms: 1 });
+    });
+
+    check('search: the strict majority matches rankEntries term-for-term', () => {
+      // Pinned against the in-memory scorer directly, so the two definitions of
+      // "strict" cannot drift apart silently.
+      // Multi-character terms on purpose: tokenize drops anything shorter than
+      // two characters, so single letters would make every query empty here.
+      for (const q of ['aa bb', 'aa bb cc', 'aa bb cc dd', 'aa bb cc dd ee']) {
+        const terms = [...new Set(search.tokenize(q))];
+        assert.strictEqual(search.searchPasses(q)[0].minTerms, Math.floor(terms.length / 2) + 1,
+          `strict pass disagrees with scoreEntry's gate for "${q}"`);
+      }
+    });
+
+    check('search: matchedFields names the fields a term actually hit', () => {
+      // The index ranks by BM25 and cannot say WHICH field matched, but the
+      // result contract has always carried that. Derived here, from the same
+      // FIELD_WEIGHTS keys and the same tokenizer the scorer uses, so the two
+      // surfaces cannot disagree about what "matched" means.
+      const e = {
+        headline: 'rewrote token refresh',
+        summary: 'unrelated prose',
+        files: ['lib/token-refresh.js'],
+      };
+      assert.deepStrictEqual(search.matchedFields(e, ['token']), ['headline', 'files']);
+      assert.deepStrictEqual(search.matchedFields(e, ['nothinghere']), []);
+      assert.deepStrictEqual(search.matchedFields({}, ['token']), []);
+    });
+
+    check('search: matchedFields agrees with scoreEntry on the same entry', () => {
+      const e = { ts: '2026-01-01', decisions: 'vault rotation per epoch', summary: 'vault notes' };
+      const terms = [...new Set(search.tokenize('vault rotation'))];
+      assert.deepStrictEqual(search.matchedFields(e, terms),
+        search.scoreEntry(e, terms, 'vault rotation').matched,
+        'the derived matched-field list drifted from the scorer\'s');
+    });
+
+    check('search: a single-term query gets no relaxed pass — there is nothing to relax', () => {
+      const passes = search.searchPasses('vault');
+      assert.strictEqual(passes.length, 1);
+      assert.strictEqual(passes[0].minTerms, 1);
+    });
+
+    check('search: searchPasses drops stopwords and yields nothing for a query made only of them', () => {
+      assert.deepStrictEqual(search.searchPasses('what did we do'), []);
+      assert.deepStrictEqual(search.searchPasses(''), []);
+      assert.deepStrictEqual(search.searchPasses('who touched auth.js')[0].terms, ['touched', 'auth.js']);
+    });
+
+    check('search: retrievalsOf does not mutate the entries it is asked about', () => {
+      const e = { ts: '2026-07-01T00:00:00.000Z', summary: 'auth' };
+      const before = JSON.stringify(e);
+      search.rankEntries([e], 'auth', { retrievalsOf: () => 12 });
+      assert.strictEqual(JSON.stringify(e), before);
+    });
   }
 
   h.finish();

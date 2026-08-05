@@ -5,17 +5,24 @@ interface SettingRowProps {
   description?: string
   children: ReactNode
   testId?: string
+  /** What went wrong with THIS row's action, already named ("Couldn't restart
+   *  MemBridge."). The group used to share one line reading "Couldn't save the
+   *  change." for four unrelated controls, so pressing Restart told you a save
+   *  had failed and nothing said which control was broken. Each row now owns
+   *  its own message, and the row is the thing that identifies the action. */
+  error?: string | null
 }
 
 /** One row inside a Settings group: a label (+ optional description) on the
  *  left, a status/control area on the right -- matches settings-solo-v2.html's
  *  .srow. A hairline separator only, never a card. */
-export function SettingRow({ label, description, children, testId }: SettingRowProps) {
+export function SettingRow({ label, description, children, testId, error }: SettingRowProps) {
   return (
     <div className="setting-row" data-testid={testId}>
       <div className="setting-row-label">
         {label}
         {description && <div className="setting-row-desc">{description}</div>}
+        {error && <div className="setting-row-error" role="alert">{error}</div>}
       </div>
       {/* .setting-row-ctl (settings.css) is `flex: none`: it never shrinks
        *  or wraps, so a control that renders several chips at once (the MCP

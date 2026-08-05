@@ -1,6 +1,6 @@
 {
   "name": "membridge-app",
-  "version": "0.2.8",
+  "version": "0.3.2",
   "description": "Shared memory across your AI coding tools. A tiny background daemon that watches Claude Code, Codex and any other agent's session logs, distills a brief per-project memory, and syncs it into the context files every tool reads (CLAUDE.md, AGENTS.md, ...).",
   "main": "main.js",
   "author": "Andrew Brown & Marco Melika",

@@ -3,11 +3,11 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
   Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
-  dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
+  dedupeLiveSessions, feedQueryString, mapDayDigests, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
   mapSession, mapStreamEntry, memberActivity, syncStateOf,
   type RawFeedEntry, type RawFeedPayload, type RawMemberRow, type RawProjectRow, type RawSearchPayload, type RawSessionPayload, type RawTeamFeedEntry,
 } from './mappers'
@@ -124,6 +124,55 @@ function readStoredTeamId(): string | null {
   }
 }
 
+// /api/status as it arrives: `health` is additive, so a daemon older than that
+// field sends this payload without it. Typed as `unknown` rather than
+// `DaemonHealth` because a cast is not a check -- this is the boundary, and an
+// unrecognised `state` string reaching the UI would be rendered as a state
+// nothing knows how to describe.
+type RawStatus = Omit<Status, 'health'> & { health?: unknown }
+
+const HEALTH_STATES: readonly DaemonHealthState[] = ['ok', 'erroring', 'stalled', 'unknown']
+
+function isHealthState(v: unknown): v is DaemonHealthState {
+  return typeof v === 'string' && (HEALTH_STATES as readonly string[]).includes(v)
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v : null
+}
+
+/**
+ * Normalizes `health` at the boundary, tolerantly, the same way every other raw
+ * payload in this client is.
+ *
+ * ABSENT stays ABSENT. It is tempting to synthesise `{ state: 'unknown' }` for
+ * an older daemon and give consumers one shape to handle, and it would be
+ * wrong: 'unknown' means the DAEMON has not observed a pass yet, whereas a
+ * missing field means THIS CLIENT cannot see the answer. Collapsing them would
+ * show "not checked yet" to someone whose daemon simply predates the field,
+ * which is reporting our own ignorance as theirs. Consumers fall back to
+ * `running` instead.
+ *
+ * A present-but-unrecognised `state` is also dropped rather than passed
+ * through: a future fifth state must degrade to today's running/not-running
+ * rendering, not to a chip with a raw token in it.
+ */
+function normalizeStatus(raw: RawStatus): Status {
+  const { health, ...rest } = raw
+  if (!health || typeof health !== 'object') return rest
+  const h = health as Record<string, unknown>
+  if (!isHealthState(h.state)) return rest
+  return {
+    ...rest,
+    health: {
+      state: h.state,
+      lastTickAt: str(h.lastTickAt),
+      lastTickError: str(h.lastTickError),
+      staleForSec: typeof h.staleForSec === 'number' && Number.isFinite(h.staleForSec) ? h.staleForSec : null,
+    },
+  }
+}
+
 export class LocalDaemonClient implements DataClient {
   readonly capabilities: Capabilities = {
     daemonControl: true,
@@ -206,6 +255,15 @@ export class LocalDaemonClient implements DataClient {
   // -- byte-identical to what a single-team install always sent.
   private teamParam(prefix: '?' | '&'): string {
     return this.teamId ? `${prefix}teamId=${encodeURIComponent(this.teamId)}` : ''
+  }
+
+  // Settings' "Recheck" (see DataClient.forgetCachedReads). Same instrument
+  // leaveTeam() reaches for, and for the same reason: the effect wanted here
+  // spans several endpoints, so scoping by key would just be a list to forget
+  // to update. The cost of over-clearing is at most a few requests the app was
+  // about to make anyway; the cost of under-clearing is a button that lies.
+  forgetCachedReads(): void {
+    this.requestCache.clear()
   }
 
   selectedTeamId(): string | null {
@@ -315,7 +373,7 @@ export class LocalDaemonClient implements DataClient {
   }
 
   getStatus(): Promise<Status> {
-    return this.requestCache.get('status', () => get<Status>('/api/status'))
+    return this.requestCache.get('status', async () => normalizeStatus(await get<RawStatus>('/api/status')))
   }
 
   // getStatus() here is for intervalSec, which sizes the "behind" grace period
@@ -356,7 +414,7 @@ export class LocalDaemonClient implements DataClient {
   async getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }): Promise<FeedPage> {
     const qs = feedQueryString(filters, opts)
     const raw = await this.requestCache.get(`feed:page:${qs}`, () => get<RawFeedPayload>(`/api/feed?${qs}`))
-    return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null }
+    return { entries: raw.entries.map(mapFeedEntry), nextBefore: raw.nextBefore ?? null, dayDigests: mapDayDigests(raw.dayDigests) }
   }
 
   async search(query: string, filters: FeedFilters, limit: number): Promise<SearchPage> {

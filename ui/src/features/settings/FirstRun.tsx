@@ -26,6 +26,11 @@ function watchingBody(tools: string[]): string {
  * setSetting.isError -- a rejected write looked identical to a successful
  * one (the toggle silently reverted next render, "Get started" silently did
  * nothing). Both now surface a real failure via role="alert".
+ *
+ * Settings-honesty finding: "Get started" wrote setupCompletedAt only, so the
+ * summaries consent this screen showed as ON was never recorded unless the
+ * user happened to touch the switch. It now writes the displayed value too --
+ * see finish().
  */
 export function FirstRun() {
   const statusQuery = useStatus()
@@ -36,9 +41,8 @@ export function FirstRun() {
   if (hasError) {
     return (
       <div className="first-run">
-        <p className="settings-error" role="alert">
-          Couldn't reach the daemon. {errorMessage(statusQuery.error ?? settingsQuery.error)}
-        </p>
+        <p className="settings-error" role="alert">Couldn't reach MemBridge.</p>
+        <p className="settings-group-hint">{errorMessage(statusQuery.error ?? settingsQuery.error)}</p>
       </div>
     )
   }
@@ -58,7 +62,26 @@ export function FirstRun() {
   // same default consent.js/hooks.js apply when the wizard is skipped.
   const summariesOn = summaries?.enabled ?? true
 
-  const finish = () => setSetting.mutate({ key: 'setupCompletedAt', value: new Date().toISOString() })
+  // The screen used to DISPLAY this switch as on while writing nothing but
+  // setupCompletedAt, so a user who read "yes, summarise my sessions", left
+  // the switch alone and pressed Get started had consented to something the
+  // daemon never recorded -- the assumed `?? true` above stayed an assumption,
+  // and the one hard rule on this page is that nothing claims a state the code
+  // did not observe (cf. DeliveryControl's installed === null handling).
+  //
+  // Writing the DISPLAYED value makes the display true, rather than dropping
+  // to a can't-tell rendering on a consent screen where a visible default is
+  // the point. Consent first, setupCompletedAt second and only on success: a
+  // rejected consent write must not complete setup, or the takeover comes down
+  // over an unrecorded choice with nowhere left to notice.
+  async function finish() {
+    try {
+      await setSetting.mutateAsync({ key: 'distill', value: { enabled: summariesOn } })
+      await setSetting.mutateAsync({ key: 'setupCompletedAt', value: new Date().toISOString() })
+    } catch {
+      // setSetting.isError renders the message below.
+    }
+  }
 
   return (
     <div className="first-run">

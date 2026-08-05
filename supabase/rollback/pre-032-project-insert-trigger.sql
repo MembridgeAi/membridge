@@ -1,0 +1,26 @@
+-- Rollback for 032_materialize_project_access_on_insert.sql.
+--
+-- OUTSIDE supabase/migrations/ ON PURPOSE so nothing applies it by accident —
+-- same placement and reasoning as pre-028-029-snapshot.sql and
+-- pre-031-rls-auto-enable.sql.
+--
+-- WHAT 032 ADDED, AND THEREFORE ALL THIS HAS TO UNDO: one trigger and one
+-- trigger function, both NEW. Neither existed before 032, so unlike the other
+-- two rollback files in this directory there is no prior definition to restore
+-- and nothing had to be read out of the live system to write this — there was
+-- no earlier version of either object to capture. Confirmed against the repo:
+-- `grep -rn "projects_materialize_access" supabase/` matches only 032 and this
+-- file.
+--
+-- WHAT IT CANNOT UNDO. 032 writes no rows, so there is nothing to un-write —
+-- but that is not the same as leaving no trace. Any project INSERTed while the
+-- trigger was live has real project_access rows, and dropping the trigger does
+-- NOT remove them. That is deliberate: those rows are correct, they are what
+-- 029 would have written had the project been created through link_project, and
+-- deleting them would hand a project back to tier 2 and change who can see it.
+-- If they genuinely must go, they have to be identified and removed by hand,
+-- and that is a data write with its own review — do not bolt it onto this file.
+--
+-- Safe to run twice; safe to run if 032 was never applied.
+drop trigger if exists projects_materialize_access on public.projects;
+drop function if exists public.projects_materialize_access();

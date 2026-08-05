@@ -11,6 +11,40 @@ input, select { font: inherit; border-radius: var(--r); background: var(--panel2
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .scroll-x { overflow-x: auto; scrollbar-gutter: stable; }
 
+/* Put this on any element whose text is ARBITRARY-LENGTH USER DATA with no
+ * guaranteed break opportunity: a display name, a team name, a project name, an
+ * absolute path, an echoed filter string. Not on prose — a sentence already
+ * breaks at its spaces, and `anywhere` would only let it break mid-word.
+ *
+ * WHAT IT IS FOR. An element's min-content width is a FLOOR its container
+ * cannot render below, so one unbreakable string sets a minimum width for
+ * everything above it. `.shell-main` (app.css) is `min-width: 0` +
+ * `overflow-x: auto`, so the window is never exceeded — the symptom is a
+ * horizontal scrollbar inside the content column, with content only reachable
+ * by scrolling. Measured in Chromium at the 900px window floor (170px rail,
+ * 730px of content), before this rule existed: a 48-character author name on
+ * Feed produced 16px of that scroll and a 140-character one produced 803px; a
+ * 78-character team name produced 3px and a 150-character one 648px.
+ *
+ * `anywhere`, NEVER `break-word`, and never the ellipsis pattern. Only
+ * `anywhere` participates in intrinsic (min-content) sizing. `break-word` is
+ * ignored for it, and `overflow: hidden` + `text-overflow: ellipsis` +
+ * `white-space: nowrap` bounds an element's PAINTED box while leaving its
+ * min-content contribution untouched — both were measured as exactly zero
+ * improvement (1132px, unchanged) on the Projects table. See the long note in
+ * features/projects/projects.css, which is where that was measured and which
+ * keeps its own declarations rather than this class, so the rule and the
+ * measurement that justifies it stay in one place.
+ *
+ * `white-space: nowrap` DEFEATS this rule: nowrap makes the whole string one
+ * unbreakable unit, so spaces stop helping and a name with spaces is as bad as
+ * one without. If you are adding this class, check for a nowrap to remove.
+ *
+ * A caller that also needs to bound HEIGHT (because the wrap it just enabled
+ * makes a cell very tall) adds a line clamp locally, plus the full value in
+ * `title` so nothing clamped becomes unrecoverable. */
+.wrap-anywhere { overflow-wrap: anywhere; }
+
 /* Focus — a designed ring, not the browser default. :focus-visible only,
    so a mouse click doesn't draw a ring nobody asked for; keyboard focus
    always gets one, clearly, in the one color reserved for "this means

@@ -52,36 +52,40 @@
   border-bottom: 1px solid var(--line);
 }
 
-/* Day card: one person's work in one project on one local day. The header is
- * a <button> (it toggles in place and navigates nowhere), so every default
- * control style has to be reset back to the row idiom: the card must read as
- * part of the same stream as the EntryRows it expands into, not as a form
- * control sitting in one. Grid mirrors .entry-row's three columns (avatar /
- * who / meta) on purpose, so a collapsed card and an expanded row share one
- * left edge instead of stepping in and out by a few pixels. */
+/* Day card: one person's work across every project they touched on one local
+ * day, as one row of the feed. The WHOLE card is an <a> to that day's own page
+ * (it navigates, so it must not be a button), which means the default link
+ * styles have to be reset back to the row idiom, and they really do have to
+ * be set here, because there is no bare `a` selector anywhere in this CSS
+ * tree, so an unreset card head renders underlined in the browser's default
+ * link blue. Grid mirrors .entry-row's columns (avatar / who / meta) on
+ * purpose, so a card and a row share one left edge instead of stepping in and
+ * out by a few pixels. */
 .day-card {
-  border-bottom: 1px solid var(--line);
-}
-.day-card-head {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
   column-gap: 10px;
-  width: 100%;
   padding: 10px 16px;
   align-items: start;
   text-align: left;
-  font: inherit;
+  border-bottom: 1px solid var(--line);
   color: inherit;
-  background: transparent;
-  border: 0;
+  text-decoration: none;
   cursor: pointer;
 }
-.day-card-head:hover {
+.day-card:hover {
   background: var(--panel2);
 }
+/* The card holding the session a ?session= deep link named. Accent on the
+ * leading edge, not a fill, so "this one" does not read as "selected". */
+.day-card-targeted {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 @media (prefers-reduced-motion: no-preference) {
-  .day-card-head { transition: background-color var(--dur-fast) var(--ease-out); }
-  .day-card { animation: settle-in var(--dur-base) var(--ease-out) both; }
+  .day-card {
+    animation: settle-in var(--dur-base) var(--ease-out) both;
+    transition: background-color var(--dur-fast) var(--ease-out);
+  }
 }
 .day-card-avatar-cell {
   display: flex;
@@ -90,10 +94,26 @@
 .day-card-who-cell {
   min-width: 0;
 }
+/* `white-space: nowrap` REMOVED. It was the worst version of the width defect
+ * in this app: nowrap made the author's whole display name one unbreakable
+ * unit, so its spaces stopped helping and min-content became the full string —
+ * measured at the 900px floor, a 48-character name produced 16px of horizontal
+ * scroll inside the content column and a 140-character one produced 803px. That
+ * is realistic human input, not pathological input. The name now wraps, and
+ * `.wrap-anywhere` in the markup handles the no-space case.
+ *
+ * No line clamp here, deliberately, and this is the one place T1's companion
+ * treatment is NOT applied — see DayCard.tsx for the measurement that decided
+ * it. */
 .day-card-who {
   font-weight: var(--fw-medium);
-  white-space: nowrap;
 }
+/* Carries the project name, which is arbitrary-length user data. Its
+ * `.wrap-anywhere` inherits down to the name, which is the point: this span
+ * used to overflow its own grid cell and collide with .day-card-meta well
+ * BELOW any scrolling threshold — measured at the 900px floor, a 53-character
+ * project name painted to x=792 while the cell ended at 771 and the meta
+ * column began at 781. */
 .day-card-sub {
   margin-left: 6px;
   color: var(--text3);
@@ -105,7 +125,9 @@
   font-size: 10px;
   white-space: nowrap;
 }
-.day-card-meta .live-dot {
+.day-card-meta .live-dot,
+.day-head-sub .live-dot,
+.day-session-live .live-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
@@ -114,7 +136,9 @@
   background: var(--green);
 }
 @media (prefers-reduced-motion: no-preference) {
-  .day-card-meta .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+  .day-card-meta .live-dot,
+  .day-head-sub .live-dot,
+  .day-session-live .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
 }
 /* The overview sentence: the card's whole reason to exist, so it gets the
  * row's reading size and spans to the stat line rather than stopping at the
@@ -139,6 +163,30 @@
   color: var(--amber);
   font-style: italic;
 }
+/* One step more specific than the sentence above it: what was actually done,
+ * in one to three sentences. Muted and smaller, so the two lines read as
+ * headline then detail rather than as two competing summaries. These two are
+ * the ONLY text the card carries; everything else is on the day view. */
+.day-card-intent {
+  grid-column: 2 / 4;
+  grid-row: 3;
+  margin-top: 3px;
+  color: var(--text2);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+}
+/* The sentence above did not cover the whole day. Amber and italic, matching
+ * the opaque state: like it, this is a condition to act on rather than an
+ * absence to ignore, and a reader who cannot see it is reading a summary that
+ * is quietly out of date. */
+.day-card-coverage {
+  grid-column: 2 / 4;
+  grid-row: 4;
+  margin-top: 2px;
+  color: var(--amber);
+  font-size: var(--fs-xs);
+  font-style: italic;
+}
 /* Bottom-right stat line. Grid-placed in the meta column under the live
  * indicator so it stays put when the overview wraps to two lines. */
 .day-card-stats {
@@ -158,14 +206,246 @@
   font-size: var(--fs-lg);
   line-height: 1;
 }
-/* Expanded: the day's sessions, indented under their card so the nesting is
- * visible without a second border colour. */
-.day-card-sessions {
-  border-top: 1px solid var(--line);
+/* ------------------------------------------------------------------------
+ * The day view (/days/:daySlug): what a card used to try to expand into, and
+ * could not fit.
+ * ---------------------------------------------------------------------- */
+.day-page {
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-4);
+  gap: var(--sp-4);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .day-page { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+.day-back {
+  align-self: flex-start;
+  color: var(--text3);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+}
+.day-back:hover {
+  color: var(--text2);
+}
+.day-head {
+  padding-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+.day-head-who {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.day-head-name {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+}
+.day-head-sub {
+  color: var(--text3);
+  font-size: var(--fs-xs);
+}
+.day-head-overview {
+  margin: var(--sp-3) 0 0;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  line-height: var(--lh-snug);
+}
+.day-head-overview-empty {
+  color: var(--text3);
+}
+.day-head-overview-opaque {
+  color: var(--amber);
+  font-style: italic;
+}
+.day-head-intent {
+  margin: var(--sp-2) 0 0;
+  color: var(--text2);
+  font-size: var(--fs-md);
+  line-height: var(--lh-base);
+}
+
+.day-head-coverage {
+  margin: var(--sp-2) 0 0;
+  color: var(--amber);
+  font-size: var(--fs-base);
+  font-style: italic;
+}
+
+/* A day that is not on the loaded pages. The feed is paged, so this is a miss
+ * far more often than it is a bad link, and the copy says so. */
+.day-missing {
+  padding: var(--sp-5) 0;
+}
+.day-missing-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+}
+.day-missing-note {
+  margin: var(--sp-2) 0 var(--sp-3);
+  color: var(--text3);
+  font-size: var(--fs-base);
+  max-width: 46ch;
+}
+
+.day-section-title {
+  margin: 0 0 var(--sp-2);
+  color: var(--text3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.day-section-count {
+  margin-left: 6px;
+  font-family: var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Files touched. One per line rather than a wrapped run: a path is read from
+ * its tail, and a wrapped run puts the tails wherever the line happens to
+ * break. */
+.day-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.day-file {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 0;
+  min-width: 0;
+}
+.day-file-name {
+  font-size: var(--fs-sm);
+  color: var(--text2);
+  white-space: nowrap;
+}
+.day-file-touches {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--text3);
+}
+.day-file-note {
+  color: var(--text3);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.day-more {
+  margin-top: 6px;
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--text2);
+  background: transparent;
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.day-more:hover {
   background: var(--panel2);
 }
-.day-card-sessions .entry-row:last-child {
-  border-bottom: 0;
+
+/* What was done. The page's substance, so it gets a reading size rather than
+ * the muted metadata size around it. */
+.day-bullets {
+  margin: 0;
+  padding: 0 0 0 var(--sp-3);
+  list-style: none;
+}
+.day-bullet {
+  position: relative;
+  padding: 2px 0;
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-snug);
+}
+.day-bullet::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 9px;
+  width: 3px;
+  height: 3px;
+  background: var(--line2);
+}
+
+/* Prompts, grouped by session. The rule down the left is what says "these
+ * belong to the session named above them" without a box per session. */
+.day-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.day-session {
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+/* The session a ?session= deep link sent the reader to. Accent, not
+ * background, so it reads as "this one" without becoming a second card. */
+.day-session-targeted {
+  border-left-color: var(--accent);
+}
+.day-session-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.day-session-link,
+.day-session-range {
+  font-size: var(--fs-sm);
+  color: var(--text2);
+  text-decoration: none;
+}
+.day-session-link:hover {
+  color: var(--accent2);
+}
+.day-session-affordance {
+  margin-left: 3px;
+  color: var(--text3);
+}
+.day-session-project,
+.day-session-tool,
+.day-session-live {
+  font-size: var(--fs-2xs);
+  color: var(--text3);
+}
+/* Which project a session ran in, shown only on a day that spans several.
+ * Slightly stronger than the tool beside it: on a mixed day it is the field
+ * the reader is actually sorting the groups by. */
+.day-session-project {
+  color: var(--text2);
+}
+.day-prompts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.day-prompt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 0;
+  font-size: var(--fs-base);
+  line-height: var(--lh-snug);
+}
+.day-prompt-time {
+  flex: none;
+  color: var(--text3);
+  font-size: var(--fs-2xs);
+}
+.day-prompt-text {
+  color: var(--text2);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .feed-empty-note {

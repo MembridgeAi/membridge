@@ -75,6 +75,15 @@
   color: var(--text3);
   font-size: 10.5px;
 }
+/* Per-row failure, attached to the control that failed rather than to the
+ * group. Deliberately NOT the .settings-error box: a full-width tinted panel
+ * inside a hairline row would out-shout the row it belongs to, and there can
+ * be several rows failing at once. */
+.setting-row-error {
+  margin-top: 2px;
+  color: var(--red);
+  font-size: 10.5px;
+}
 .setting-row-ctl {
   flex: none;
   display: flex;
@@ -91,6 +100,17 @@
   color: var(--text3);
   font-size: 11px;
   font-style: italic;
+}
+/* A full sentence inside a row's control area, for an outcome that cannot be
+ * said in a chip's worth of words ("the update check could not reach
+ * GitHub"). Same colour and size as .settings-metric, but WRAPPING: metric is
+ * `white-space: nowrap` for short values like "3 paths", and a sentence given
+ * that treatment pushes the page into horizontal scroll. */
+.settings-note {
+  color: var(--text2);
+  font-size: 10.5px;
+  max-width: 42ch;
+  line-height: var(--lh-base);
 }
 
 .settings-btn {

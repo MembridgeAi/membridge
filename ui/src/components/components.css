@@ -144,6 +144,13 @@
   transform: translateX(11px);
   background: var(--accent);
 }
+/* A write for this switch is in flight. The switch has already moved to the
+ * chosen value (optimistic), so this only has to say "not settled yet" and
+ * stop reading as clickable -- it must NOT hide the value. */
+.toggle-pending {
+  opacity: 0.65;
+  cursor: progress;
+}
 
 /* Avatar — the one non-switch exception: avatars representing people are
  * circles, per the global constraint. Nothing else gets border-radius: 50%. */
@@ -211,6 +218,14 @@
   margin: 0 0 12px;
   color: var(--red);
   font-size: 11px;
+}
+/* ConfirmDialog errorTone="retryable": the action did not happen and nothing
+ * was changed, but the identical attempt may succeed. Amber is what this system
+ * already uses for "needs attention, not broken" (the Private tag, sync
+ * warnings), and red here would read as final -- sending the user off to fix a
+ * permission they have while the real cause is their connection. */
+.dialog-error-retryable {
+  color: var(--amber);
 }
 /* The typed-confirmation input (ConfirmDialog confirmInput): full width so
  * the expected text is readable, monospace to make an exact match obvious. */

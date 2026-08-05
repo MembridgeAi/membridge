@@ -1,4 +1,4 @@
-import { expiresIn } from '../../data/relativeTime'
+import { absoluteTime, expiresIn } from '../../data/relativeTime'
 import type { Invite } from '../../data/types'
 
 interface InviteRowProps {
@@ -34,7 +34,7 @@ export function InviteRow({ invite, pending, onRevoke }: InviteRowProps) {
     <div className="invite-row" data-testid={`invite-row-${invite.id}`}>
       <span className="mono invite-token">{invite.id}</span>
       <span className="invite-uses">{usesLabel(invite)}</span>
-      <span className="invite-expiry">
+      <span className="invite-expiry" title={absoluteTime(invite.expiresAt) || undefined}>
         {invite.expiresAt ? expiresIn(invite.expiresAt) : 'never expires'}
       </span>
       <div className="invite-actions">

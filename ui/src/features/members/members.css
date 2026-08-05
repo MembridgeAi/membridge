@@ -97,32 +97,11 @@
   font-size: 10.5px;
 }
 
-.members-cols {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
-.members-list {
-  flex: 1;
-  min-width: 0;
-  border-right: 1px solid var(--line);
-}
-.members-side {
-  width: 320px;
-  flex-shrink: 0;
-}
-@media (max-width: 1000px) {
-  .members-cols {
-    flex-direction: column;
-  }
-  .members-list {
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-  }
-  .members-side {
-    width: auto;
-  }
-}
+/* REMOVED: .members-cols / .members-list / .members-side and their
+ * max-width:1000px block. A two-column Members screen that no longer exists --
+ * the roster renders as MembersSection inside the Team page now, and grep across
+ * ui/src found no reference to any of the three from any component. Same call as
+ * dropping .projects-table's `.who` column rules in T1. */
 
 .members-empty-note {
   margin: 0;
@@ -235,11 +214,22 @@
 .member-name {
   font-weight: 600;
 }
+/* `text-overflow: ellipsis` REMOVED, along with the `overflow: hidden` that
+ * existed to serve it. The two were incoherent: ellipsis requires
+ * `white-space: nowrap`, which was never set here, so the ellipsis could never
+ * render and `overflow: hidden` was silently CLIPPING a long email with no
+ * indication that anything had been cut.
+ *
+ * Of the two coherent fixes, this takes the wrapping one rather than adding
+ * nowrap: it matches every other bound added for this defect (see
+ * styles/base.css's .wrap-anywhere, which MemberRow applies here), it bounds
+ * intrinsic width rather than only the painted box, and it leaves the whole
+ * address on screen so there is nothing to recover via `title`. Adding nowrap
+ * would have made the ellipsis work while making min-content the full string —
+ * the opposite of what this file needs. */
 .member-email {
   color: var(--text3);
   font-size: 10.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .member-mid {
   display: flex;

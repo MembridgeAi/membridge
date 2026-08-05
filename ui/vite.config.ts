@@ -11,6 +11,12 @@ export default defineConfig({
   build: { outDir: 'dist', emptyOutDir: true },
   test: {
     environment: 'jsdom',
+    // The other half of the same gotcha the timeouts below guard: the default
+    // 'forks' pool cannot reliably start its workers when the machine is busy
+    // (several agents compiling at once), and a worker that never starts is
+    // reported as a test failure. This had only ever been passed ad hoc as
+    // --pool=threads. Pin it.
+    pool: 'threads',
     setupFiles: ['./vitest.setup.ts'],
     globals: true,
     passWithNoTests: true,

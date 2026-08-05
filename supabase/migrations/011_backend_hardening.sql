@@ -32,6 +32,25 @@
 -- guard never hides a change"). This IS that new migration, so drop-if-exists
 -- then create is the correct, re-runnable way to change the body — running
 -- this file twice drops and recreates the identical policy both times.
+--
+-- !! SUPERSEDED — READ BEFORE RE-RUNNING THIS FILE !!
+-- The team_keys_insert body below is superseded by
+-- 030_team_keys_definer_membership.sql. The inline EXISTS is evaluated with the
+-- CALLER's privileges, so it is subject to RLS on public.team_members
+-- (team_members_select, schema.sql:112) and reads any row RLS hides from the
+-- caller as ABSENT — reporting a genuine member as a non-member. That made
+-- sealing the encryption key to a NEWLY JOINED teammate fail with no error, so
+-- new members could not decrypt any team history. 030 replaces the EXISTS with
+-- public.is_team_member_uid(team_id, member_user_id), a SECURITY DEFINER helper
+-- that reads team_members without RLS; the security property this section added
+-- is preserved, only the visibility of the membership fact changes. Production
+-- has run 030's form since it was applied by hand.
+--
+-- So: re-running 011 on its own, or replaying supabase/migrations/ in order,
+-- REVERTS that fix and silently re-breaks key sealing for new members. Apply
+-- 030 after any replay that reaches this file. The SQL below is left exactly as
+-- applied — an applied migration is a historical record, not a live source of
+-- truth. Do not edit it; change the policy in a new migration.
 -- ---------------------------------------------------------------------------
 drop policy if exists team_keys_insert on public.team_keys;
 
