@@ -96,6 +96,42 @@ function collectClosure(rootDir, rootPkg) {
   return { bundled, skippedOptional };
 }
 
+// app/package.json must always track the root package.json — a stale version
+// labels a fresh build as an old release (the 0.2.1/0.2.2 dmgs self-reported
+// 0.2.0), and electron-builder stamps license/author/description into the
+// bundle while its own module collection resolves against app/package.json's
+// dependencies. Sync all of it so none of these can drift again.
+//
+// Deliberately OUTSIDE main() and free of every dependency main() has, so
+// scripts/stamp-version.js can call it on a checkout with no node_modules.
+// While this lived at the end of main(), the closure walk above it threw
+// ENOENT on such a checkout and the stamp never ran — so the only way to
+// stamp the version was a full packaging run. That is why the committed file
+// sat two releases behind (0.2.9 and 0.3.0 both bumped the root alone) even
+// though every shipped build was correctly stamped.
+//
+// Returns the field names it changed; [] means already in lockstep. Writes
+// only on real drift, so a no-op leaves the file and its mtime alone.
+function syncAppManifest(root) {
+  const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const appPkgPath = path.join(root, 'app', 'package.json');
+  const appPkg = JSON.parse(fs.readFileSync(appPkgPath, 'utf8'));
+  const synced = {
+    version: rootPkg.version,
+    description: rootPkg.description,
+    author: rootPkg.author,
+    license: rootPkg.license,
+    dependencies: rootPkg.dependencies || {},
+  };
+  const drifted = Object.keys(synced)
+    .filter(k => JSON.stringify(appPkg[k]) !== JSON.stringify(synced[k]));
+  if (drifted.length) {
+    Object.assign(appPkg, synced);
+    fs.writeFileSync(appPkgPath, JSON.stringify(appPkg, null, 2) + '\n');
+  }
+  return drifted;
+}
+
 function main() {
   const root = path.join(__dirname, '..');
 
@@ -189,30 +225,12 @@ function main() {
   if (uiGate) console.warn(uiGate.message);
   else console.log('app/ui/dist refreshed from ui/dist/');
 
-  // app/package.json must always track the root package.json — a stale
-  // version labels a fresh build as an old release (the 0.2.1/0.2.2 dmgs
-  // self-reported 0.2.0), and electron-builder stamps license/author/
-  // description into the bundle while its own module collection resolves
-  // against app/package.json's dependencies. Sync all of it so none of these
-  // can drift again.
-  const appPkgPath = path.join(root, 'app', 'package.json');
-  const appPkg = JSON.parse(fs.readFileSync(appPkgPath, 'utf8'));
-  const synced = {
-    version: rootPkg.version,
-    description: rootPkg.description,
-    author: rootPkg.author,
-    license: rootPkg.license,
-    dependencies: rootPkg.dependencies || {},
-  };
-  const drifted = Object.keys(synced)
-    .filter(k => JSON.stringify(appPkg[k]) !== JSON.stringify(synced[k]));
+  const drifted = syncAppManifest(root);
   if (drifted.length) {
-    Object.assign(appPkg, synced);
-    fs.writeFileSync(appPkgPath, JSON.stringify(appPkg, null, 2) + '\n');
     console.log(`app package.json synced from root (${drifted.join(', ')})`);
   }
 }
 
 if (require.main === module) main();
 
-module.exports = { grammarsGate, GRAMMARS_ALLOW_ENV, resolvePkgDir, collectClosure };
+module.exports = { grammarsGate, GRAMMARS_ALLOW_ENV, resolvePkgDir, collectClosure, syncAppManifest };

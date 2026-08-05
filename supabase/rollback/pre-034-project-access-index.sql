@@ -1,0 +1,25 @@
+-- Rollback for 034_project_access_lookup_index.sql.
+--
+-- OUTSIDE supabase/migrations/ ON PURPOSE so nothing applies it by accident —
+-- same placement and reasoning as the other files in this directory.
+--
+-- 034 created ONE index and nothing else. There was no prior version of it to
+-- capture: `grep -rn "create index" supabase/` shows project_access had no index
+-- other than its primary key before 034, so this is a plain drop rather than a
+-- restore, and nothing needed to be read out of the live system to write it.
+--
+-- WHAT IT CANNOT UNDO: nothing. An index carries no data of its own and its
+-- absence changes no query result — dropping it only returns the planner to the
+-- scans it was choosing before. That is the whole reason an index is the safest
+-- thing in this directory to roll back.
+--
+-- WHAT IT WILL DO, so it is not run casually: restore a full scan of
+-- project_access on every can_see_project call, which is once per candidate row
+-- in memory_entries_select, team_feed and team_feed_counts, once per project in
+-- project_stats, and once per row written under 033. Do not run this to
+-- troubleshoot a slow feed; it is the direction that makes it slower.
+--
+-- Uses `if exists`, so it is safe to run twice and safe to run if 034 was never
+-- applied. Not written CONCURRENTLY for the same transaction reason 034 gives; if
+-- the lock matters, run `drop index concurrently` outside a transaction instead.
+drop index if exists public.project_access_project_member_idx;

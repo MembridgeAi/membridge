@@ -1,0 +1,121 @@
+-- 028_enforce_project_access_default.sql — the "New members join with access"
+-- toggle was STORED but never ENFORCED. 026 added public.projects
+-- .default_access and the manager-gated RPC that writes it, and the Project
+-- page reads it back, so the control looks like it works. But
+-- can_see_project() — the one predicate every read path consults — never
+-- referenced the column: it returned "not exists (an explicit false row)",
+-- i.e. default-ALLOW, hardcoded. A project with default_access = false was
+-- therefore fully readable by a brand-new member who had no project_access
+-- row yet, which is exactly the case the toggle exists to cover.
+--
+-- Confirmed against the live backend: 026 IS applied (the column exists) and
+-- 025 IS applied (the function exists), and the deployed function body does
+-- not mention default_access. This is a NEW migration, not a missing one.
+-- No project currently has default_access = false, so nothing is exposed
+-- today — the control has simply never worked, and would have failed
+-- silently the first time it was used.
+--
+-- Additive on top of 025/026 — do not edit those files. Every statement below
+-- is re-runnable.
+--
+-- HOW TO APPLY — SQL EDITOR ONLY, AND NEVER `supabase db push` IN THIS PROJECT.
+-- Paste this file into the Supabase SQL editor (which runs it in one
+-- transaction) and run it, then do the same with 029. Order matters: 028 first,
+-- then 029.
+--
+-- `db push` is not merely unnecessary here, it is actively dangerous:
+-- supabase_migrations.schema_migrations holds only TWO rows, so none of the
+-- repo's numbered migration files is recorded as applied. A push would therefore
+-- try to apply all thirty-plus of them against a database that already has most
+-- of their effects — including 030 and 031, which are a separate and unreviewed
+-- ticket, and including 029's row-writing backfill. Apply files by hand, one at
+-- a time, until the migration table reflects reality.
+--
+-- BLAST RADIUS — this function has FOUR call sites, all of which pick up the
+-- new rule automatically because the signature is unchanged:
+--   1. public.memory_entries select policy      (025_enforce_project_access.sql:48-54)
+--   2. public.project_stats view WHERE clause   (025_enforce_project_access.sql:70-81)
+--   3. public.team_feed RPC body                (025_enforce_project_access.sql:124)
+--   4. public.team_feed_counts RPC body         (027_team_feed_counts.sql:58)
+-- Call site 4 matters more than it looks: 027's own header already argues that
+-- a count is a disclosure ("your team wrote 4,812 entries about a project you
+-- were removed from" is a leak with no row content attached), so the
+-- unenforced default was leaking more than row bodies. 025 and 027 themselves
+-- stay untouched — `create or replace` with an unchanged signature is what
+-- makes that possible, and it also preserves existing privileges, so no grant
+-- changes are needed here either.
+
+-- ---------------------------------------------------------------------------
+-- can_see_project(p_project uuid) — three-tier resolution, replacing 025's
+-- hardcoded default-allow:
+--
+--   1. an explicit public.project_access row for this member wins;
+--   2. otherwise the project's own default_access decides;
+--   3. otherwise (no project row at all) allow.
+--
+-- WHY bool_and RATHER THAN A BARE SCALAR SUBSELECT. Over ZERO rows bool_and
+-- returns NULL, which is precisely the fall-through coalesce() needs to reach
+-- tier 2 — a scalar `select a.can_see` would also return NULL there, but only
+-- by accident of there being no row, and it would raise on more than one. Over
+-- MULTIPLE rows bool_and lets any explicit `false` win, so if the primary key
+-- (team_id, project_key, member_id) ever stops making this set a single row —
+-- a member on two teams that both share the same project row, say — the
+-- function fails CLOSED instead of returning a nondeterministic grant.
+--
+-- WHY TIER 1 IS DECISIVE WHENEVER A ROW EXISTS. project_access.can_see is
+-- `boolean not null default true` (024_project_access_and_audit.sql:34,
+-- confirmed live). bool_and over one or more rows therefore cannot return NULL,
+-- so an existing row ALWAYS settles the answer and can never fall through to
+-- tier 2. That is what makes the deliberate revoke authoritative: without the
+-- NOT NULL, a row with can_see = NULL would read as "no opinion" and hand a
+-- revoked member back to the project's default, which is the opposite of what
+-- the admin asked for. The only NULL bool_and can produce here is the
+-- zero-row NULL, which is exactly the fall-through tier 2 is for.
+--
+-- WHY THE ::text CAST STAYS. project_access.project_key is text holding the
+-- uuid, deliberately (024_project_access_and_audit.sql:32 — "Stored as text
+-- (not uuid) so this table never has to change shape if a future project
+-- identifier isn't a uuid"). The cast is load-bearing, not decoration.
+--
+-- WHY TIER 3 IS `true` AND NOT `false`. This is a privacy control, so
+-- fail-open would normally be the wrong default. It is kept only because THE
+-- BRANCH IS UNREACHABLE, and that rests on TWO facts, not one.
+--
+-- FACT 1 — projects.default_access is NOT NULL (026:15, confirmed live). This is
+-- the load-bearing one and it is easy to miss: tier 3 is reached whenever tier 2
+-- evaluates to NULL, not only when the project row is absent. If default_access
+-- were nullable, a real, existing project with a NULL default would return NULL
+-- from tier 2 and fall straight through to fail-open tier 3 — every read path
+-- silently allowed, with the project row present and the column populated as far
+-- as anyone reviewing the data would see. So `alter table public.projects alter
+-- column default_access drop not null` would open this hole with no other change
+-- and no error anywhere. If that constraint ever has to go, tier 3 must become
+-- `false` in the same migration.
+--
+-- FACT 2 — every call site passes an id that comes from public.projects itself,
+-- so the row cannot be missing:
+--   * memory_entries: project_id is `uuid not null references
+--     public.projects (id)` (schema.sql:45) — the foreign key alone closes it,
+--     which is why no appeal to the policy's other conjunct is made here.
+--     (An earlier draft of this header argued that the is_team_member half
+--     "fails regardless"; that assumed AND short-circuits in a fixed order,
+--     which Postgres does not guarantee. The FK needs no such help.)
+--   * project_stats: the view iterates `from public.projects p` and passes
+--     p.id, so the row is the loop variable.
+--   * team_feed and team_feed_counts: both `join public.projects p on
+--     p.id = e.project_id` before the predicate is reached.
+--
+-- So tier 3 can only be hit by a NEW caller that passes an id from somewhere
+-- other than projects, and such a caller must be reviewed on its own terms
+-- rather than inheriting a default from here. Recorded as a decision, not an
+-- oversight.
+-- ---------------------------------------------------------------------------
+create or replace function public.can_see_project(p_project uuid)
+returns boolean language sql security definer set search_path = public stable as $$
+  select coalesce(
+    (select bool_and(a.can_see) from public.project_access a
+       where a.project_key = p_project::text and a.member_id = auth.uid()),
+    (select p.default_access from public.projects p where p.id = p_project),
+    true
+  );
+$$;

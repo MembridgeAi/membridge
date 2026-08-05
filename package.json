@@ -32,6 +32,7 @@
   ],
   "scripts": {
     "test": "node test/run.js",
+    "version": "node scripts/stamp-version.js && git add app/package.json",
     "build:ui": "node scripts/build-ui.js",
     "prepack": "npm run build:ui",
     "prepublishOnly": "npm test",

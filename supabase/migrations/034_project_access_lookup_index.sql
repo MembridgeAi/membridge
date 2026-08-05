@@ -1,0 +1,78 @@
+-- 034_project_access_lookup_index.sql — index public.project_access for the way
+-- can_see_project actually queries it. Today there is NO index that can serve
+-- that lookup, and it runs once per row of every gated read.
+--
+-- THE MISMATCH, read out of this repo:
+--
+--   project_access primary key  (024:37)   (team_id, project_key, member_id)
+--   can_see_project's predicate (028:117)  (project_key, member_id)
+--
+-- A btree index can only be used from its LEADING column inwards. The primary
+-- key's leading column is team_id, and can_see_project never mentions team_id —
+-- so the PK index cannot serve this lookup. `grep -rn "create index" supabase/`
+-- confirms project_access has no other index at all: the PK is its only one.
+-- (Postgres does not create an index for the referencing side of a foreign key,
+-- so the FK on (team_id, member_id) at 024:38-39 does not help either, and its
+-- leading column is team_id as well.)
+--
+-- So every call scans the whole table. That is not once per request:
+--
+--   memory_entries_select policy  025:50   once per candidate ENTRY ROW
+--   team_feed                     025:124  once per candidate entry row
+--   team_feed_counts              027:58   once per candidate entry row
+--   project_stats view            025:74   once per project
+--   memory_entries_insert/update  033      once per row written
+--
+-- Cost is rows(project_access) x rows(memory_entries) for a feed page. Both
+-- grow with the team: project_access is one row per (member, project) — and 029
+-- made that dense on purpose, materializing a row for every pair where before
+-- there were only explicit revokes — while memory_entries grows forever. So the
+-- product this fixes got worse exactly when 029 landed.
+--
+-- WHY (project_key, member_id) AND NOT (team_id, project_key, member_id).
+-- Because that is what the function filters on, and adding team_id to the front
+-- would reproduce the existing problem. can_see_project can safely ignore
+-- team_id: project_key is projects.id::text, a uuid, so it is globally unique
+-- and identifies the team implicitly. That is also why bool_and in that function
+-- sees at most one row.
+--
+-- INCLUDE (can_see) rather than a third key column: can_see is not something
+-- this lookup ever searches or orders by, it is the only value the function
+-- reads. Carrying it in the index leaf makes the lookup INDEX-ONLY — no heap
+-- fetch at all — which is the difference that matters when the call is per-row.
+--
+-- RISK CLASS: DDL, ADDITIVE. Creates one index. Writes no rows, changes no
+-- policy, changes no query RESULT — only the plan chosen to produce it. An index
+-- is the most reversible object in this schema: `drop index` restores the
+-- previous plans exactly (supabase/rollback/pre-034-project-access-index.sql).
+--
+-- LOCKING, STATED BECAUSE `CREATE INDEX` IS NOT FREE. A plain CREATE INDEX takes
+-- a SHARE lock on the table, blocking writes to project_access (not reads) for
+-- the duration. That is the right trade here: project_access holds one row per
+-- (member, project), so for any team this product currently has it is hundreds
+-- of rows and the build is effectively instant. It is NOT written CONCURRENTLY
+-- on purpose — `create index concurrently` cannot run inside a transaction
+-- block, and the SQL editor this project applies migrations through runs the
+-- whole file in one transaction, so it would simply fail. If this table is ever
+-- large enough for the lock to matter, run this INSTEAD, on its own, outside any
+-- transaction:
+--   create index concurrently if not exists project_access_project_member_idx
+--     on public.project_access (project_key, member_id) include (can_see);
+--
+-- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` IN THIS PROJECT, for
+-- the reason 031, 032 and 033 all give. Re-runnable via `if not exists`.
+--
+-- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+--
+-- WHAT THIS COMMIT CANNOT DEMONSTRATE. No database was available while writing
+-- it, so the improvement is argued from the index/predicate mismatch above, not
+-- measured. Nothing in the offline suite can execute a Postgres planner. To
+-- settle it, before and after:
+--   explain (analyze, buffers) select public.can_see_project('<a real project id>');
+-- Expect a Seq Scan (or a full index-only scan of the PK) on project_access
+-- before, and an Index Only Scan using project_access_project_member_idx after.
+-- The per-row shape is visible on a gated read instead:
+--   explain (analyze, buffers) select * from public.team_feed limit 50;
+-- where the pre-index plan repeats the project_access scan per entry row.
+create index if not exists project_access_project_member_idx
+  on public.project_access (project_key, member_id) include (can_see);
