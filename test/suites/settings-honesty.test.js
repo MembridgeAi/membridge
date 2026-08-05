@@ -221,6 +221,41 @@ async function main() {
     }
   }
 
+  // --- Finding 1, the half that shipped broken: BOTH loops have to report ---
+  //
+  // `running` being derived instead of asserted only helps a loop that actually
+  // records its passes, and for one release only bin/membridge.js did. The tray
+  // app is the NORMAL INSTALL and it never called noteTick, so every desktop
+  // user's /api/status read `running: false` with health `unknown` however well
+  // sync was working — the honest field, permanently blind. Caught by running
+  // the shipped 0.3.1 build, not by this suite, which is why the check exists.
+  //
+  // STATIC, deliberately. app/main.js is an Electron main process: it cannot be
+  // required here (no `electron` module outside the runtime) and the suite has no
+  // way to drive its timer. So this asserts the WIRING both loops must have,
+  // which is the part that went missing. It cannot prove the calls run — the
+  // reachable-state checks above do that for the server side.
+  {
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '..', '..');
+    const loops = [
+      ['bin/membridge.js', 'the CLI daemon loop'],
+      ['app/main.js', 'the tray app loop (the normal install)'],
+    ];
+    for (const [rel, label] of loops) {
+      check(`tick: ${label} records a completed pass`, () => {
+        const src = fs.readFileSync(path.join(root, rel), 'utf8');
+        assert.ok(/noteTick\(\s*\{\s*ok:\s*true/.test(src),
+          `${rel} never records a successful pass, so /api/status cannot say this loop is healthy`);
+        assert.ok(/noteTick\(\s*\{\s*ok:\s*false/.test(src),
+          `${rel} never records a failing pass, so a throwing loop ages into "stalled" instead of "erroring"`);
+        assert.ok(/\bnoteTick\b/.test(src.split('\n').filter(l => /require|lib\(/.test(l)).join('\n')),
+          `${rel} calls noteTick without importing it`);
+      });
+    }
+  }
+
   h.finish();
 }
 

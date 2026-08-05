@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.3.2 — 2026-08-05
+
+- **Fixed: the desktop app said it was not running.** 0.3.1 replaced a status
+  field that always claimed the daemon was healthy with one that reports what the
+  sync loop actually did — but only the command-line daemon was changed to record
+  its passes. The desktop app, which is how nearly everyone runs MemBridge, never
+  recorded one, so it reported itself as not running and its health as unknown no
+  matter how well it was syncing: no dot in the sidebar, and a Settings page that
+  could not say the app was up. Both loops record their passes now, and a test
+  fails if either one stops.
+
+  The two loops also agree on what "healthy" means: it covers the local sync
+  pass, and a failed team pull is reported through the team status instead, so a
+  backend problem does not get described as a broken sync loop.
+
 ## 0.3.1 — 2026-08-05
 
 - **Every page now fits the window it opens in.** Projects, Feed and Team each

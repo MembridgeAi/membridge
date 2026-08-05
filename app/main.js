@@ -18,7 +18,7 @@ function lib(m) {
 const util = lib('util');
 const { syncOnce } = lib('scan');
 const notesStore = lib('teammate-notes-store');
-const { startServer, boundPort } = lib('server');
+const { startServer, boundPort, noteTick } = lib('server');
 const teamsync = lib('teamsync');
 const hooks = lib('hooks');
 const autostart = lib('autostart');
@@ -110,8 +110,29 @@ function takeOverDaemon() {
 async function runSync() {
   if (syncBusy) return;
   syncBusy = true;
+  // Whether the LOCAL pass got through. It decides which of the two noteTick
+  // calls below is the honest one, and it must be scoped to syncOnce alone --
+  // see the note at noteTick.
+  let localPassDone = false;
   try {
     syncOnce();
+    localPassDone = true;
+    // Record that a pass completed, so /api/status reports the sync loop's real
+    // state instead of asserting a healthy one.
+    //
+    // THIS LOOP NEEDS ITS OWN CALL. bin/membridge.js has one; for a release this
+    // file did not, and the tray app is the NORMAL INSTALL -- so every desktop
+    // user's status read `running: false` with health `unknown` no matter how
+    // well sync was working, while the CLI path and every test stayed green.
+    // Exactly the shape that left app users with no teammate-notes index (see
+    // afterTeamPull below): logic both loops need, wired into only one of them.
+    //
+    // Scoped to the SYNCHRONOUS local pass, matching bin/membridge.js, so
+    // "healthy" means the same thing in both loops. A team-pull failure below is
+    // deliberately not folded in: it surfaces through teamLastSync /
+    // teamAuthPaused and the tray menu's failure row, and treating it as a sick
+    // sync loop would point at the wrong problem.
+    noteTick({ ok: true });
     const teamResult = await teamsync.syncTeams();
     // Team pulls mark the affected project dirty. Re-render immediately so
     // every local AI tool sees new teammate context in the same timer pass.
@@ -131,6 +152,12 @@ async function runSync() {
     // succeeds again.
     lastSyncFailed = true;
     util.log(`tray app sync error: ${err.stack || err}`);
+    // Only when the LOCAL pass is what failed. A throwing pass is not a dead
+    // loop -- this catch is why the loop keeps going -- so it is recorded as
+    // erroring rather than left to age into "stalled", which would describe the
+    // wrong problem. If the local pass already succeeded and the team pull threw,
+    // the ok above stands: see the note there.
+    if (!localPassDone) noteTick({ ok: false, error: err.message });
   } finally {
     syncBusy = false;
   }
