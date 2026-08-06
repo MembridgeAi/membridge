@@ -1371,19 +1371,70 @@ async function main() {
       'a real path with an extension must not be redacted');
   });
 
-  check('redact: a high-entropy token that recurs in the same text is left alone (identifier, not credential)', () => {
-    // looksLikeSecret bails on a token appearing twice or more: a value that
-    // repeats is an identifier being referred to, not a one-off credential.
-    // The comment on that guard says false positives "would eat session ids",
-    // and nothing asserted it -- flipping its `return false` to `return true`
-    // survived the full suite.
-    const twice = `first ${SLASH_TOKEN} and again ${SLASH_TOKEN} end`;
-    assert.strictEqual(redactLib.redactDefault(twice), twice,
-      'a recurring high-entropy identifier was redacted; that guard exists so session ids survive');
-    // ...and the discriminator: the SAME token once IS redacted, so this is
-    // the recurrence rule and not the token simply being unmatchable.
-    assert.ok(redactLib.redactDefault(`once ${SLASH_TOKEN} end`).includes('[redacted:high-entropy]'),
-      'the same token appearing once must still be caught, or the check above proves nothing');
+  // REPLACES a check that pinned the OPPOSITE behaviour. I originally wrote
+  // this to assert a recurring token is left alone, because that is what
+  // looksLikeSecret did and nothing had pinned it. The redaction audit showed
+  // the rule was the defect, not the contract: repeating a secret made it MORE
+  // likely to ship, so "here is the key: X, now use X" leaked while the terser
+  // sentence did not. Pinning existing behaviour is only worth doing once you
+  // know the behaviour is right.
+  check('redact: repeating a secret does not make it safe — a token is judged on shape, not frequency', () => {
+    const once = `here is the key ${SLASH_TOKEN} end`;
+    const twice = `here is the key ${SLASH_TOKEN}, now use ${SLASH_TOKEN} end`;
+    for (const [label, text] of [['once', once], ['twice', twice]]) {
+      const out = redactLib.redactDefault(text);
+      assert.ok(!out.includes(SLASH_TOKEN),
+        `a high-entropy secret mentioned ${label} survived redaction -> ${out}`);
+      assert.ok(out.includes('[redacted:high-entropy]'), `no marker emitted for the ${label} case -> ${out}`);
+    }
+    // The identifier shapes the old recurrence rule claimed to protect are
+    // exempt BY SHAPE, which is why dropping it was affordable. A repeated
+    // UUID (a session id — the case its comment actually named) and a repeated
+    // git SHA must both still survive.
+    const uuid = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+    const sha = 'a'.repeat(39) + 'f';
+    for (const [label, id] of [['UUID session id', uuid], ['40-char hex SHA', sha]]) {
+      const text = `${label} ${id} and again ${id}`;
+      assert.strictEqual(redactLib.redactDefault(text), text, `a repeated ${label} was redacted -> ${redactLib.redactDefault(text)}`);
+    }
+  });
+
+  check('redact: credentials in a URL are redacted for ANY scheme, not a database allowlist', () => {
+    // Routed from the redaction audit. The scheme list named six database
+    // protocols; http, https, ftp and the git transports were absent, so a CI
+    // bot's password in a git remote shipped verbatim. The case that hid it:
+    // `x-token:PW@` IS caught, but only because the USERNAME ends in "token"
+    // and the secret-assignment pattern fires -- so any realistic-looking
+    // example passes while the general case leaks. Hence a username with no
+    // credential-ish word in it.
+    for (const url of [
+      'git+https://ci-bot:s3cretPassw0rd@github.com/acme/app.git',
+      'curl https://admin:hunter2hunter2@api.example.com/v1/x',
+      'ftp://deploy:Pa55word123@files.example.com/drop',
+      'postgres://user:hunter2hunter2@db.example.com:5432/app',
+    ]) {
+      const out = redactLib.redactDefault(url);
+      assert.ok(out.includes('[redacted:credentials]'), `no credentials marker -> ${out}`);
+      assert.ok(!/:(?:s3cretPassw0rd|hunter2hunter2|Pa55word123)@/.test(out), `the password survived -> ${out}`);
+      // scheme and host are deliberately kept: the point is a readable record
+      // of what was contacted, minus the secret.
+      assert.ok(/(github\.com|api\.example\.com|files\.example\.com|db\.example\.com)/.test(out),
+        `the host was destroyed along with the credential -> ${out}`);
+    }
+    // A URL with no userinfo must be untouched, or this pattern is just eating
+    // links.
+    const clean = 'https://github.com/acme/app.git';
+    assert.strictEqual(redactLib.redactDefault(clean), clean, 'a credential-free URL was altered');
+  });
+
+  check('redact: an npmrc _auth line is redacted; the word "auth" in prose is not', () => {
+    const out = redactLib.redactDefault('//registry.npmjs.org/:_auth=aGVsbG86c2VjcmV0cGFzcw==');
+    assert.ok(!out.includes('aGVsbG86c2VjcmV0cGFzcw=='), `npmrc _auth credential survived -> ${out}`);
+    // The reason this is its own narrow pattern rather than adding "auth" to
+    // the secret-assignment word list: that would eat ordinary config and prose.
+    for (const benign of ['auth: true', 'set oauth_url = https://example.com/cb', 'the auth flow is documented']) {
+      assert.strictEqual(redactLib.redactDefault(benign), benign, `benign text was redacted -> ${redactLib.redactDefault(benign)}`);
+    }
   });
 
   check('redact: redactDefaults:false opts out; redactExtra is additive', () => {

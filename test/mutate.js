@@ -38,6 +38,16 @@
 //
 // Mutants are written to the real file and reverted in a finally, plus on
 // SIGINT/SIGTERM. If this process is killed -9 mid-run, `git diff` the target.
+//
+// ONE WORKTREE, ONE MUTATION RUN, AND NOTHING ELSE. This edits lib/ in place,
+// so any test you start while a run is in flight is testing a deliberately
+// broken product. It looks exactly like a flake: unrelated checks failing with
+// plausible messages, green again on a re-run once the finally has restored
+// the file. Hit live -- a backgrounded run against lib/redact.js produced four
+// "failures" in the redaction suite that were the mutant, not the code. Before
+// diagnosing any surprising red, `git status lib/` and check for a run in
+// flight (`pgrep -fl mutate.js`). To work while one runs, use a separate
+// worktree.
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -52,7 +62,10 @@ function parseArgs(argv) {
     else if (a === '--suites') out.suites = argv[++i].split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--mode') out.mode = argv[++i];
     else if (a === '--limit') out.limit = Number(argv[++i]);
-    else if (a === '--filter') out.filter = argv[++i];
+    // Comma-separated: re-running a handful of named survivors against the
+    // monolith is the normal second pass, and one filter per invocation meant
+    // paying the ~110s core run once per mutant instead of once per batch.
+    else if (a === '--filter') out.filter = argv[++i].split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--list') out.list = true;
   }
   return out;
@@ -231,7 +244,7 @@ function main() {
   // summary describes the set actually being run. Counting it over the whole
   // file made the footer report exclusions that had nothing to do with the
   // mutants on screen.
-  if (args.filter) mutants = mutants.filter(m => m.id.includes(args.filter) || m.context.includes(args.filter));
+  if (args.filter) mutants = mutants.filter(m => args.filter.some(f => m.id.includes(f) || m.context.includes(f)));
   if (!mutants.length) {
     console.error(`--filter ${JSON.stringify(args.filter)} matched no mutants`);
     process.exit(1);
