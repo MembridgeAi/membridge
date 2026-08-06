@@ -898,6 +898,7 @@ async function main() {
     const kcBob = mkMemKeychain();
     const mockE2E = createMockSupabase();
     let e2eErr = null, resAlice = null, resBob = null, bobEntries = null, origRows = null;
+    let bobState = null, bobLedger = null;
     try {
       await new Promise(r => mockE2E.server.listen(P(53), '127.0.0.1', r));
       process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(53)}`;
@@ -929,6 +930,11 @@ async function main() {
       util.saveState(stA);
       resAlice = await teamsync.syncTeams({ project: projE2E, cryptoDeps: { keychain: kcAlice, teamcrypto: tcE2E } });
       origRows = mockE2E.entries.map(e => ({ ...e }));
+      // Move the sealed rows into a high id range so a plausibly PRE-cutover
+      // row can be planted BELOW them below. The mock hands out ids 1,2,3…;
+      // real installs have thousands of pre-E2E rows under the first sealed
+      // one, and that gap is exactly what the downgrade gate must not black out.
+      for (const e of mockE2E.entries) e.id += 1000;
 
       // Inject fake plaintext into every stored content column: cutover rows
       // carry none, so anything readable server-side is server-controlled. A
@@ -937,14 +943,30 @@ async function main() {
       for (const e of mockE2E.entries) {
         e.ask = 'TAMPERED ask'; e.summary = 'TAMPERED summary'; e.decisions = 'TAMPERED';
       }
-      // Plus one plaintext-only row (no ciphertext): must pull through as-is.
+      // Plus one plaintext-only row (no ciphertext) ABOVE the sealed rows:
+      // this is the silent downgrade — a row the server can write in the clear
+      // into a team that is encrypting, which used to render as authentic
+      // teammate content under a green E2E badge.
       const alice = mockE2E.users.get('alice-e2e@test.dev');
       mockE2E.entries.push({
         project_id: linkE.projectId, author_id: alice.id, author_name: 'Alice',
         ts: '2026-07-18T12:30:00.000Z', source: 'Codex', session: 'plain1',
         ask: 'plain only row', goal: null, decisions: null, gotchas: null,
         summary: 'no cipher here', files: ['docs/x.md'], changes: null,
+        id: 2000,
         created_at: new Date(Date.now() + 60000).toISOString(),
+      });
+      // And one plaintext row from BEFORE the team turned E2E on (id below
+      // every sealed row this device has opened). Blacking these out would
+      // brick the history of every install that predates the cutover, so it
+      // must still read.
+      mockE2E.entries.push({
+        project_id: linkE.projectId, author_id: alice.id, author_name: 'Alice',
+        ts: '2026-06-01T09:00:00.000Z', source: 'Codex', session: 'legacy1',
+        ask: 'from before e2e', goal: null, decisions: null, gotchas: null,
+        summary: 'pre-cutover history', files: ['docs/old.md'], changes: null,
+        id: 7,
+        created_at: new Date(Date.now() + 90000).toISOString(),
       });
 
       // Bob: pull and decrypt.
@@ -954,6 +976,8 @@ async function main() {
       util.saveState(stB);
       resBob = await teamsync.syncTeams({ project: projE2E, cryptoDeps: { keychain: kcBob, teamcrypto: tcE2E } });
       bobEntries = (util.loadState().projects[projE2E] || {}).teamEntries || [];
+      bobState = util.loadState();
+      bobLedger = (bobState.teamE2E || {})[teamE.team_id] || null;
     } catch (e) { e2eErr = e; } finally {
       process.env.MEMBRIDGE_HOME = savedHome;
       process.env.MEMBRIDGE_TEAM_URL = savedUrl2;
@@ -986,13 +1010,49 @@ async function main() {
         'tampered plaintext surfaced — pull must take content from the ciphertext');
     });
 
-    check('teamsync: pull keeps a plaintext-only row unchanged', () => {
+    // THE DOWNGRADE GATE. `if (teamCrypto && r.ciphertext && r.nonce)` asked
+    // only whether the row HAD ciphertext, so a row served without any skipped
+    // the crypto branch entirely and its server-written plaintext columns
+    // rendered as authentic teammate content — no undecryptable flag, badge
+    // still green. Omitting the ciphertext is the same attack as corrupting it,
+    // and it is reachable with no attacker at all: one teammate running
+    // team.encrypt=false pushes exactly this row shape.
+    check('teamsync: a plaintext row from a team that is encrypting renders opaque (no silent downgrade)', () => {
       assert.ok(!e2eErr, `e2e scenario threw: ${e2eErr && e2eErr.message}`);
       const plain = bobEntries.find(e => e.session === 'plain1');
-      assert.ok(plain, 'plaintext-only row missing from pull');
-      assert.strictEqual(plain.ask, 'plain only row');
-      assert.strictEqual(plain.summary, 'no cipher here');
-      assert.deepStrictEqual(plain.files, ['docs/x.md']);
+      assert.ok(plain, 'the ciphertext-less row must still be stored, as an opaque row');
+      assert.strictEqual(plain.undecryptable, true,
+        'a row with no ciphertext from an encrypting team must be marked undecryptable');
+      assert.strictEqual(plain.ask, null, 'server-written plaintext must not become content');
+      assert.strictEqual(plain.summary, null, 'server-written plaintext must not become content');
+      assert.deepStrictEqual(plain.files, [], 'server-written file list must not become content');
+    });
+
+    // The other half of the same rule: fail closed WITHOUT bricking installs
+    // that predate E2E. Distinguished by locally-held evidence only — the row
+    // sits below the lowest id this device has actually DECRYPTED, so it comes
+    // from before the team's cutover. Config cannot make this call (encryption
+    // is default-on, so it says "encrypted" for teams that never sealed a byte)
+    // and the server must not be allowed to.
+    check('teamsync: a pre-cutover plaintext row (below the lowest decrypted id) still reads', () => {
+      assert.ok(!e2eErr, `e2e scenario threw: ${e2eErr && e2eErr.message}`);
+      const legacy = bobEntries.find(e => e.session === 'legacy1');
+      assert.ok(legacy, 'pre-cutover row missing from pull');
+      assert.ok(!legacy.undecryptable, 'pre-cutover history must not be blacked out');
+      assert.strictEqual(legacy.ask, 'from before e2e');
+      assert.strictEqual(legacy.summary, 'pre-cutover history');
+      assert.deepStrictEqual(legacy.files, ['docs/old.md']);
+    });
+
+    check('teamsync: the E2E ledger records observed ciphertext and the downgrade, so the badge can report what was VERIFIED', () => {
+      assert.ok(!e2eErr, `e2e scenario threw: ${e2eErr && e2eErr.message}`);
+      assert.ok(bobLedger, 'state.teamE2E must carry a record for the team just pulled');
+      assert.strictEqual(bobLedger.active, true, 'observing ciphertext must ratchet the team to active');
+      assert.ok(Number.isFinite(bobLedger.minSealedId),
+        'the lowest DECRYPTED row id is the pre-cutover boundary and must be recorded');
+      assert.ok(bobLedger.lastDowngradeAt, 'the plaintext row must be recorded as a downgrade');
+      assert.ok(/no ciphertext/.test(bobState.teamPlaintextRows || ''),
+        `the pass must surface the downgrade for the status badge, got: ${JSON.stringify(bobState.teamPlaintextRows)}`);
     });
 
     check('teamsync: round trip — Bob recovers exactly what Alice pushed, through the ciphertext', () => {
@@ -1032,7 +1092,7 @@ async function main() {
         setTeamCfg();
         await teamsync.signup(util.getConfig(), 'dana-e2e@test.dev', 'pw-d', 'Dana');
         const teamT = await teamsync.createTeam(util.getConfig(), 'TamperTeam');
-        await teamsync.linkProject(util.getConfig(), projT, teamT.team_id, 'TamperTeam');
+        const linkT = await teamsync.linkProject(util.getConfig(), projT, teamT.team_id, 'TamperTeam');
 
         process.env.MEMBRIDGE_HOME = homeE;
         setTeamCfg();
@@ -1084,6 +1144,18 @@ async function main() {
           { ts: '2026-07-18T15:00:00.000Z', source: 'Claude Code', kind: 'prompt', text: 'fresh content after corruption', session: 't2' });
         util.saveState(stD2);
         await teamsync.syncTeams({ project: projT, cryptoDeps: { keychain: kcDana, teamcrypto: tcE2E } });
+
+        // Sweep: the SAME defect lived in the feed's own decrypt path
+        // (decryptTeamRows), where a row with no ciphertext was pushed through
+        // untouched. The dashboard renders these directly off the server, so
+        // this was the shorter route to the same lie.
+        mockT.entries.push({
+          project_id: linkT.projectId, author_id: mockT.users.get('dana-e2e@test.dev').id,
+          author_name: 'Dana', ts: '2026-07-18T16:00:00.000Z', source: 'Codex', session: 'feedplain',
+          ask: 'PLAINTEXT feed row', goal: null, decisions: null, gotchas: null,
+          summary: 'PLAINTEXT feed row', files: [], changes: null, headline: null,
+          id: 9000, created_at: new Date(Date.now() + 120000).toISOString(),
+        });
 
         process.env.MEMBRIDGE_HOME = homeE;
         const rawE2 = util.loadUserConfig();
@@ -1146,6 +1218,8 @@ async function main() {
           `fresh encrypted row must decrypt in the feed, got: ${JSON.stringify(feedEve.entries.map(e => ({ ask: e.ask, undecryptable: e.undecryptable })))}`);
         assert.ok(feedEve.entries.some(e => e.undecryptable === true),
           'corrupted rows must carry the undecryptable marker through normalizeTeam');
+        assert.ok(!JSON.stringify(feedEve.entries).includes('PLAINTEXT feed row'),
+          'a feed row with NO ciphertext from an encrypting team must render opaque, not as content');
       });
 
       check('feed: feedPayload refreshes a stale token instead of rendering every team row opaque', () => {
