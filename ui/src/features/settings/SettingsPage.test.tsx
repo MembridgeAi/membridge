@@ -628,9 +628,23 @@ describe('SettingsPage', () => {
       return screen.findByTestId('setting-plaintext')
     }
 
-    it('says ciphertext only when nothing readable is stored', async () => {
+    // "content sealed", not "ciphertext only": the routing envelope
+    // (project, author_id, author_name, ts, source, session) ships in clear --
+    // docs/ENCRYPTION-SPEC.md 0.1. The old chip claimed the server holds
+    // nothing readable at all, which is not true, so the assertion pins the
+    // narrower claim AND pins that the broader one is gone.
+    it('says content is sealed when no readable copy is stored', async () => {
       const row = await withPrivacy({ endToEnd: true, plaintextShared: false })
-      expect(within(row).getByText(/end-to-end, ciphertext only/i)).toBeInTheDocument()
+      expect(within(row).getByText(/end-to-end, content sealed/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+    })
+
+    it('never claims nothing readable reaches the server', async () => {
+      const row = await withPrivacy({ endToEnd: true, plaintextShared: false })
+      expect(within(row).queryByText(/nothing readable is stored/i)).toBeNull()
+      // and it names the metadata that does travel in clear
+      expect(within(row).getByText(/routing metadata/i)).toBeInTheDocument()
+      expect(within(row).getByText(/display name/i)).toBeInTheDocument()
     })
 
     it('warns when rows are encrypted but a readable copy is stored too', async () => {
@@ -638,7 +652,7 @@ describe('SettingsPage', () => {
       const chip = within(row).getByText(/end-to-end, readable copy also stored/i)
       expect(chip.className).toMatch(/chip-warn/)
       expect(within(row).getByText(/the server can read your memory/i)).toBeInTheDocument()
-      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+      expect(within(row).queryByText(/content sealed/i)).toBeNull()
     })
 
     // With no key the daemon's plaintext-nulling never runs (it lives inside
@@ -653,7 +667,7 @@ describe('SettingsPage', () => {
       // No reassuring chip of any kind -- the row's description explains what
       // end-to-end MEANS, which is not the same as claiming it is in force.
       expect(row.querySelector('.chip-ok')).toBeNull()
-      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+      expect(within(row).queryByText(/content sealed/i)).toBeNull()
     })
   })
 
