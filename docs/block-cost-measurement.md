@@ -79,6 +79,37 @@ along there too and those requests are counted.
 
 ---
 
+## Baseline snapshot — 2026-08-05, immediately after the Tier A fix
+
+Captured deliberately at this moment: **after** REV-4 (`7e9a6de`, which decoupled
+Tier A from the store) and **before** any eligibility change. A before-and-after
+is only useful if someone wrote down the before.
+
+| | value |
+|---|---|
+| sessions / requests | 99 / 23,280 |
+| `avoided.tokens` | 57,071 |
+| `avoided.serves` | 16 |
+| `avoided.tierA` / `tierB` / `tierUnknown` | **3 / 13 / 0** |
+| `billed.tokens` | 6,452,031 |
+| `holdout.skips` | 1 (gate is 30) |
+| block cost, once-only / ride-along | 149,994 / 38,436,524 |
+
+**What to expect, and how to read it.** REV-4 lets Tier A serve when the store
+entry is missing or stale — cases where it previously stayed silent for no
+reason, since Tier A never reads a skeleton. **`tierA` should therefore rise on
+its own, and that rise is a side effect of a correctness fix, not the mechanism
+working better.** If `avoided` moves and `tierA` is what moved, that is this
+change and nothing more. If `tierB` moves, that is genuinely more files becoming
+eligible.
+
+`tierUnknown` is 0 here and should stay 0. Any non-zero value means serve rows
+are arriving without a tier, and the attribution above stops being reliable
+until that is explained — it is a tripwire, not a metric.
+
+Numbers move between runs because the install is live; re-run
+`node scripts/measure-block-cost.js` for current values.
+
 ## The three qualifiers
 
 **These carry equal weight with the ratio above. A reader who takes the ratio
