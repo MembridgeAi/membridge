@@ -14,7 +14,7 @@
 // memory_entries.author_id alone blocks it for anyone who has ever synced a
 // single entry — which is every real user. So 046 did not break account
 // deletion in general; it removed the last population that could still be
-// deleted, someone who joined a team and did nothing else. 049 restores that
+// deleted, someone who joined a team and did nothing else. 050 restores that
 // population and nothing more, and the counter-checks below exist so this
 // suite can never be read as claiming otherwise.
 //
@@ -123,8 +123,8 @@ async function main() {
         'the membership rows did not cascade away with the account');
     });
 
-    // COUNTER-CHECK, green before AND after 049, and it is here to stop this
-    // suite being read as "049 makes account deletion work". It does not.
+    // COUNTER-CHECK, green before AND after 050, and it is here to stop this
+    // suite being read as "050 makes account deletion work". It does not.
     // memory_entries.author_id is NOT NULL with no on-delete (schema.sql:46),
     // so anyone who has ever synced one entry is still blocked — by a
     // constraint that predates this session by a long way. Making deletion
@@ -134,7 +134,7 @@ async function main() {
       const refusal = deleteFails(busyCreds.userId);
       assert.ok(refusal, 'a user with synced entries must still be refused');
       assert.match(refusal, /memory_entries_author_id_fkey/,
-        `049 must not be mistaken for making account deletion work; got: ${refusal}`);
+        `050 must not be mistaken for making account deletion work; got: ${refusal}`);
       assert.doesNotMatch(refusal, /team_audit_actor_id_fkey/,
         'the audit trail should no longer be the constraint that refuses');
     });
@@ -146,7 +146,7 @@ async function main() {
     // removes someone is the actor on a row about the person they removed.
     // Cascading their deletion would erase that record — so "delete my
     // account" would become a way to unmake decisions imposed on colleagues.
-    // Green before 049 (the deletion is refused, so nothing is erased) and
+    // Green before 050 (the deletion is refused, so nothing is erased) and
     // after (set null keeps the row); RED only under `on delete cascade`.
     await check('deleting an account keeps the rows recording what they did to others', async () => {
       const row = (await auditOf(alpha.team_id))
@@ -155,7 +155,7 @@ async function main() {
         'the deleted admin was the ACTOR on this row, but its SUBJECT is a colleague and it ' +
         'records a decision that still affects them. `on delete cascade` would erase it, making ' +
         '"delete my account" a way to unmake decisions imposed on other people — which is why ' +
-        '049 is `on delete set null`');
+        '050 is `on delete set null`');
       assert.strictEqual(row.targetName, 'Busy',
         `the subject must still be named on the surviving row, got ${JSON.stringify(row.targetName)}`);
       assert.strictEqual(row.actorName, 'A deleted account',

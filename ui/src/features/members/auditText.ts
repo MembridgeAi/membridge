@@ -53,7 +53,7 @@ export function auditSentence(event: AuditEvent): string {
     }
     case 'member-joined':
       return 'joined the team'
-    // Distinct from member-removed on purpose: 048 records a voluntary
+    // Distinct from member-removed on purpose: 049 records a voluntary
     // departure, and the daemon records a removal. Being removed and choosing
     // to go are different events, and anyone counting departures has to count
     // both. Without this case the row falls through to the raw shape and reads

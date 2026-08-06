@@ -1,8 +1,26 @@
--- 048_audit_member_left.sql: record a voluntary departure. The mirror of 046,
+-- 049_audit_member_left.sql: record a voluntary departure. The mirror of 046,
 -- and the reason 046 alone is not enough: a trail that shows people arriving
 -- and never leaving is WORSE than one that shows neither, because it reads as
 -- complete. An admin auditing "who has access" would see five joins, no
 -- departures, and conclude five people are on the team.
+--
+-- NUMBERING: written as 048 and renumbered to 049. 048 was already registered
+-- to the security lane (`ops_audit.via_role`) when this file claimed it, and
+-- the collision is worth recording because of HOW IT HID: two migrations with
+-- different filenames do not conflict in git. Both branches merge clean, both
+-- files simply coexist, and the first sign of trouble is whoever applies them
+-- finding two 048s. An integration dry run caught it; no check did.
+--
+-- The number now comes from the registry in supabase/APPLY-RUNBOOK.md (on
+-- `agent-sec`), which is the single source and must be READ BEFORE the file is
+-- written -- `ls supabase/migrations` cannot see another branch's claims,
+-- which is precisely how all three of this session's collisions happened.
+--
+-- The registry's own gate did not catch this one either, and its blind spot is
+-- the shape this lane keeps finding: it verified that every number had a row
+-- and that every file mapped to a registered number. Both were true with two
+-- files at 048. Nothing checked that a number is claimed by only ONE file --
+-- a check on the record rather than on the reality. That check now exists.
 --
 -- THE FINDING. leave_team (002:252) deletes the caller's own team_members row
 -- and writes nothing. The daemon cannot write it either, for the same reason a
@@ -116,7 +134,7 @@
 -- Re-runnable: `create or replace` for the function, drop-then-create for the
 -- trigger.
 --
--- Rollback: supabase/rollback/pre-048-audit-member-left.sql.
+-- Rollback: supabase/rollback/pre-049-audit-member-left.sql.
 
 -- ---------------------------------------------------------------------------
 -- 1. The trigger function.

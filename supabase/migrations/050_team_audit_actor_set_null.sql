@@ -1,7 +1,24 @@
--- 049_team_audit_actor_set_null.sql: stop the audit trail from pinning an
+-- 050_team_audit_actor_set_null.sql: stop the audit trail from pinning an
 -- account open. `team_audit.actor_id references auth.users (id)` was declared
 -- with no on-delete action (024:44), so deleting a user who has ANY audit row
 -- fails on that constraint.
+--
+-- NUMBERING: written as 049 and renumbered to 050. 049 was reserved by the
+-- registry to hold this lane's departure migration while it moved off a
+-- collision at 048 -- see 049_audit_member_left.sql's header for that story.
+-- 050 is this lane's number per the registry in supabase/APPLY-RUNBOOK.md (on
+-- `agent-sec`), which is the single source for migration numbers and must be
+-- read BEFORE writing the file, not after merging it.
+--
+-- REGISTRY ROW STILL NEEDED: at the time of writing, the runbook's table lists
+-- 037-049 and says "Next free number: 050" -- it has no row for 050 yet. The
+-- gate the security lane added (test/suites/migration-state.test.js) fails a
+-- migration file whose number has no row, so this file will fail that check
+-- until somebody with write access to that branch adds one reading
+-- "050 | team_audit.actor_id set null so a deleted account is not pinned open
+-- | agent-removal | no". Flagged rather than worked around: writing a rival
+-- copy of the registry onto this branch would defeat the point of it being
+-- single-source.
 --
 -- THIS IS A REGRESSION FROM 046, and this file is written by the lane that
 -- caused it. Before 046 a plain member had no audit rows at all -- the trail
@@ -37,7 +54,7 @@
 -- nothing else. That is a narrower regression than "nobody can delete their
 -- account any more", and saying otherwise would overstate this file's value.
 --
--- 049 fixes ONLY team_audit.actor_id. After it, account deletion is still
+-- 050 fixes ONLY team_audit.actor_id. After it, account deletion is still
 -- blocked by the other six. Making deletion actually work is a feature, not a
 -- constraint tweak: the NOT NULL ones cannot take `set null` at all, and
 -- memory_entries.author_id would have to either cascade (which is what
@@ -83,7 +100,7 @@
 -- WHAT SET NULL DOES NOT ACHIEVE, said plainly: it is not erasure. It drops
 -- the link between the row and the account. The person's DISPLAY NAME is
 -- still on the trail, in `detail.targetName`, on their own member-joined
--- (046) and member-left (048) rows and on any member-removed row about them.
+-- (046) and member-left (049) rows and on any member-removed row about them.
 -- Scrubbing that is an UPDATE on an append-only table and a different
 -- decision -- one with a legal dimension (audit logs are commonly retained
 -- under a separate lawful basis from the account itself), not one to smuggle
@@ -91,7 +108,7 @@
 -- should read this paragraph as the answer: it is not sufficient.
 -- ===========================================================================
 --
--- Deploy gate, same discipline as 044/045/046/048: apply to the LIVE Supabase
+-- Deploy gate, same discipline as 044/045/046/049: apply to the LIVE Supabase
 -- before shipping. Constraint changes are invisible to the offline suite
 -- except through the model in test/mock-supabase.js.
 --
@@ -104,7 +121,7 @@
 --   select conname from pg_constraint
 --    where conrelid = 'public.team_audit'::regclass and contype = 'f';
 --
--- Rollback: supabase/rollback/pre-049-team-audit-actor-set-null.sql.
+-- Rollback: supabase/rollback/pre-050-team-audit-actor-set-null.sql.
 
 alter table public.team_audit
   drop constraint if exists team_audit_actor_id_fkey;

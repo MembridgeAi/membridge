@@ -1,5 +1,5 @@
 'use strict';
-// Recording a departure — 048_audit_member_left.sql.
+// Recording a departure — 049_audit_member_left.sql.
 //
 // 046 made arrivals recordable. Without this, the trail shows people arriving
 // and never leaving, which is WORSE than showing neither: an admin auditing
@@ -13,7 +13,7 @@
 //
 //   1. IT FIRES ON REMOVALS TOO. The daemon already writes `member-removed`,
 //      so an unguarded trigger gives every removal two rows saying different
-//      things about one event. 048 fires only when the person who ended the
+//      things about one event. 049 fires only when the person who ended the
 //      membership IS the person whose membership ended.
 //
 //   2. IT FIRES ON CASCADES. team_members hangs off teams and off auth.users,
@@ -22,7 +22,7 @@
 //      foreign key and ABORTS THE DELETE. An unguarded trigger here does not
 //      make team deletion noisy, it makes team deletion fail.
 //
-// Both hazards get a counter-check that passes before AND after 048, so
+// Both hazards get a counter-check that passes before AND after 049, so
 // neither can be satisfied by the fix itself. New file rather than a section
 // in join-audit.test.js: this needs a throwaway team to destroy and a
 // four-identity fixture, and that suite is a single narrative about arrivals.
@@ -127,7 +127,7 @@ async function main() {
     // ---------------------------------------------------------------------
     // HAZARD 1 — the trigger fires on removals too.
     // ---------------------------------------------------------------------
-    // COUNTER-CHECK, green before AND after 048: before, no member-left row
+    // COUNTER-CHECK, green before AND after 049: before, no member-left row
     // exists anywhere; after, the WHEN clause excludes a delete whose actor is
     // not its subject. Only DROPPING that clause turns this red, which is
     // exactly the wrong fix it guards — a removal that produces both a
@@ -159,7 +159,7 @@ async function main() {
     // ---------------------------------------------------------------------
     // HAZARD 2 — the trigger fires on cascades.
     // ---------------------------------------------------------------------
-    // COUNTER-CHECK, green before AND after 048. mock.deleteTeamCascade models
+    // COUNTER-CHECK, green before AND after 049. mock.deleteTeamCascade models
     // `delete from public.teams where id = ...` in Postgres' order: the parent
     // row first, then the referencing rows — which is why the trigger sees a
     // team that no longer exists. The mock enforces team_audit's team_id
@@ -176,7 +176,7 @@ async function main() {
       const before = mock.teamAudit.length;
       assert.doesNotThrow(() => mock.deleteTeamCascade(doomed.team_id, ownerCreds.userId),
         'the delete trigger wrote a team_audit row for a team being deleted, which violates ' +
-        'team_audit_team_id_fkey and aborts the whole deletion — 048\'s teams-existence guard ' +
+        'team_audit_team_id_fkey and aborts the whole deletion — 049\'s teams-existence guard ' +
         'is what prevents this');
       assert.strictEqual(mock.teams.has(doomed.team_id), false, 'the team survived its own deletion');
       assert.ok(mock.teamAudit.length <= before, 'the cascade added audit rows instead of removing them');

@@ -1,15 +1,15 @@
--- Rollback for 048_audit_member_left.sql.
+-- Rollback for 049_audit_member_left.sql.
 --
 -- OUTSIDE supabase/migrations/ ON PURPOSE so nothing applies it by accident —
 -- same placement and reasoning as the other files in this directory.
 --
--- 048 created ONE function and ONE trigger and nothing else. Neither existed
+-- 049 created ONE function and ONE trigger and nothing else. Neither existed
 -- before it, so this is a plain drop rather than a restore, and nothing had to
 -- be read out of the live system to write it. It does NOT touch 046's
 -- team_members_audit_join trigger, the daemon's member-removed write, or
--- leave_team itself — 048 changed none of them.
+-- leave_team itself — 049 changed none of them.
 --
--- Independent of every other rollback in this directory. 044, 045, 046 and 048
+-- Independent of every other rollback in this directory. 044, 045, 046 and 049
 -- touch four disjoint sets of objects; any subset can be reverted alone.
 --
 -- WHAT IT CANNOT UNDO: the member-left rows already written stay written.
@@ -22,7 +22,7 @@
 -- neither, because it reads as complete: an admin auditing who has access
 -- would see the joins, no departures, and conclude everyone who ever joined is
 -- still there. Removals would still be recorded (the daemon writes those and
--- 048 never touched that path), so the gap is specifically and only voluntary
+-- 049 never touched that path), so the gap is specifically and only voluntary
 -- departures — the ones nobody else witnessed.
 
 drop trigger if exists team_members_audit_leave on public.team_members;

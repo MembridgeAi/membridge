@@ -107,20 +107,20 @@ function createMockSupabase() {
     // audited at all — the joiner is role 'member', team_audit's insert policy
     // is manager-only, and recordAudit swallows the refusal.
     noMemberJoinTrigger: false,
-    // Stands in for "048 not applied": suppresses the AFTER DELETE trigger on
+    // Stands in for "049 not applied": suppresses the AFTER DELETE trigger on
     // public.team_members, restoring the backend where a voluntary departure
     // is recorded nowhere -- the leaver is not a manager, and by the time the
     // row would be written they are not a member either.
     noMemberLeaveTrigger: false,
-    // Removes 048's teams-existence guard while LEAVING the trigger in place,
+    // Removes 049's teams-existence guard while LEAVING the trigger in place,
     // so a test can demonstrate that the guard is what stops a team deletion
     // from aborting on team_audit's own foreign key.
     noLeaveCascadeGuard: false,
-    // Stands in for "049 not applied": team_audit.actor_id keeps its original
+    // Stands in for "050 not applied": team_audit.actor_id keeps its original
     // no-on-delete-action foreign key, so any audit row naming a user as actor
     // blocks deleting that account. Since 046 that is every member.
     noAuditActorSetNull: false,
-    // Stands in for the WRONG version of 049: `on delete cascade` instead of
+    // Stands in for the WRONG version of 050: `on delete cascade` instead of
     // `on delete set null`, which deletes every audit row the departing user
     // was the actor for -- including rows about what they did to OTHER people.
     auditActorCascade: false,
@@ -237,7 +237,7 @@ function createMockSupabase() {
       created_at: new Date(Date.now() + teamAudit.length).toISOString(),
     });
   };
-  // 048_audit_member_left.sql: the AFTER DELETE trigger on team_members.
+  // 049_audit_member_left.sql: the AFTER DELETE trigger on team_members.
   //
   // `deleter` is the mock's stand-in for auth.uid() — the authed caller of
   // whatever statement removed the row. The WHEN clause is the whole
@@ -250,11 +250,11 @@ function createMockSupabase() {
   // guard rather than a tidiness one: team_audit.team_id references teams on
   // delete cascade, so a row inserted for a team being deleted violates that
   // FK and aborts the delete. deleteTeamCascade below exercises exactly that.
-  // flags.noMemberLeaveTrigger stands in for "048 not applied".
+  // flags.noMemberLeaveTrigger stands in for "049 not applied".
   const memberDeleteTrigger = (row, deleter) => {
     if (flags.noMemberLeaveTrigger) return;
-    if (!deleter || deleter !== row.userId) return;          // 048's WHEN clause
-    // 048's BODY guard, separate from the FK below on purpose: the guard is
+    if (!deleter || deleter !== row.userId) return;          // 049's WHEN clause
+    // 049's BODY guard, separate from the FK below on purpose: the guard is
     // the migration's, the FK is the database's, and flags.noLeaveCascadeGuard
     // removes only the former so a test can show what the latter then does.
     if (!flags.noLeaveCascadeGuard && !teams.has(row.teamId)) return;
@@ -421,7 +421,7 @@ function createMockSupabase() {
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === body.p_user);
       const removedRow = i !== -1 ? members[i] : null;
       if (i !== -1) members.splice(i, 1);
-      if (removedRow) memberDeleteTrigger(removedRow, userId); // 048: no-op, actor is not the subject
+      if (removedRow) memberDeleteTrigger(removedRow, userId); // 049: no-op, actor is not the subject
       cascadeAccessRows(body.p_team, body.p_user); // 024's FK cascade (see 029 §5)
       // 044 §1: removal rotates the team's standing invite code AND revokes
       // every outstanding invite link, unconditionally. Both halves matter: a
@@ -461,7 +461,7 @@ function createMockSupabase() {
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === userId);
       const leftRow = i !== -1 ? members[i] : null;
       if (i !== -1) members.splice(i, 1);
-      if (leftRow) memberDeleteTrigger(leftRow, userId); // 048
+      if (leftRow) memberDeleteTrigger(leftRow, userId); // 049
       cascadeAccessRows(body.p_team, userId); // 024's FK cascade (see 029 §5)
       // 045: a voluntary departure rotates the standing invite code and
       // revokes outstanding invite links, exactly as a removal does. Same two
@@ -1171,7 +1171,7 @@ function createMockSupabase() {
   // every `references auth.users (id)` declared with no on-delete action stops
   // the delete dead. Six of them do, and only ONE (team_audit.actor_id) is
   // this session's doing. A model that skipped the other five would let a test
-  // claim 049 "unblocks account deletion", which it does not.
+  // claim 050 "unblocks account deletion", which it does not.
   //
   // Throws with the offending constraint name, as Postgres does, so a test can
   // assert WHICH constraint refused rather than merely that something did.
@@ -1187,9 +1187,9 @@ function createMockSupabase() {
       [entries.some(e => e.author_id === userId), 'memory_entries_author_id_fkey'],
       // invites.created_by NOT NULL, no on-delete (002:58)
       [[...invites.values()].some(i => i.createdBy === userId), 'invites_created_by_fkey'],
-      // team_audit.actor_id, nullable, no on-delete (024:44) UNTIL 049 makes
+      // team_audit.actor_id, nullable, no on-delete (024:44) UNTIL 050 makes
       // it `on delete set null`. flags.noAuditActorSetNull stands in for
-      // "049 not applied".
+      // "050 not applied".
       [flags.noAuditActorSetNull && teamAudit.some(r => r.actor_id === userId), 'team_audit_actor_id_fkey'],
     ];
     for (const [blocked, constraint] of blockers) {
@@ -1198,7 +1198,7 @@ function createMockSupabase() {
           `update or delete on table "users" violates foreign key constraint "${constraint}"`);
       }
     }
-    // 049: the surviving rows keep the event and lose the link.
+    // 050: the surviving rows keep the event and lose the link.
     if (flags.auditActorCascade) {
       for (let i = teamAudit.length - 1; i >= 0; i--) {
         if (teamAudit[i].actor_id === userId) teamAudit.splice(i, 1);
@@ -1208,7 +1208,7 @@ function createMockSupabase() {
     }
     // The three FKs that already cascade: team_members.user_id (schema.sql:19),
     // member_pubkeys.user_id (009:30), team_keys.member_user_id (009:46).
-    // NOTE: no memberDeleteTrigger call. 048's trigger is gated on
+    // NOTE: no memberDeleteTrigger call. 049's trigger is gated on
     // auth.uid() = old.user_id and this path runs as the operator, so it does
     // not fire — modelled by simply not calling it, which is what the WHEN
     // clause amounts to here.
@@ -1220,7 +1220,7 @@ function createMockSupabase() {
   // Postgres' `delete from public.teams where id = ...`, cascades and all.
   // Not an HTTP route: no client can delete a team (there is no policy and no
   // RPC), so this models an operator action taken in the SQL editor -- which
-  // is precisely the path 048's cascade guard exists for. Order matches
+  // is precisely the path 049's cascade guard exists for. Order matches
   // Postgres: the parent row goes first, THEN the referencing rows are
   // cascade-deleted, which is why the trigger sees a team that no longer
   // exists. `actor` stands in for auth.uid() of whoever ran it.
