@@ -375,6 +375,36 @@ async function main() {
     // Both are signature-stable (void / void, same arguments), so they belong to
     // the guardable group on the same terms as the rest.
     'remove_member', 'leave_team',
+    // Added by the SEC-15 integration dry run, and the same cross-lane shape one
+    // round on: 002_team_v2.sql defines team_members_list and the deletion
+    // lane's 053 supersedes it, so the collision exists only in the merged tree.
+    // 053 arrived after the round that closed this class for the functions
+    // above, which is why it missed the convention rather than declined it.
+    //
+    // DROP-CARRYING, the second of the two shapes. 053 adds auth.users.deleted_at
+    // to the return table — four columns to five — and create-or-replace cannot
+    // change a return type, so 053 must `drop function if exists` first. That is
+    // the condition this check names as disqualifying the guard.
+    //
+    // Recorded honestly, because it differs from team_feed/my_teams in one
+    // respect and the difference should not be glossed: the drop lives only in
+    // the NEWEST file here. 002 is a bare create-or-replace, so guarding 002
+    // alone would not leave a drop live the way guarding 004 would for
+    // team_feed, and would in principle be safe. It is still not converted, for
+    // the reason that keeps all fifteen entries above unconverted: 002's body is
+    // `$$`-quoted, wrapping it in `do $guard$` is nested dollar quoting written
+    // by hand, and there is no Postgres in this environment to parse the result
+    // before it is pasted into a SQL editor. Converting exactly one function
+    // that way — in the oldest and most foundational file in the set, whose
+    // failure mode is "half the file ran" — buys less than it risks.
+    //
+    // What protects the live database in the meantime is not this entry but
+    // Postgres itself: re-running 002 against a database that already has 053
+    // raises "cannot change return type of existing function", which is loud
+    // and stops the file. The silent-revert hazard this check exists for does
+    // not apply to a supersession that changes the return type; that is the
+    // same fact that puts it in this group.
+    'team_members_list',
   ]);
 
   check('no NEW function is superseded across migrations without a re-run guard', () => {
