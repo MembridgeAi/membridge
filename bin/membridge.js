@@ -288,6 +288,8 @@ function cmdStatus() {
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
   console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'}, Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
+  printEffectiveHook();
+  printCaptureHealth(config);
   printMcpStatus(config);
   const encOn = ((config.team || {}).encrypt !== false);
   const keyAlerts = Array.isArray(state.keyAlerts) ? state.keyAlerts.length : 0;
@@ -311,6 +313,65 @@ function cmdStatus() {
   }
   if (!captured) printEmptyState(config, running);
   prompts.flushValueMoment(config);
+}
+
+// WHICH copy of MemBridge actually runs when a session stops.
+//
+// `membridge status` reports on the process you just launched; the hook that
+// fires reports to whatever absolute path is in ~/.claude/settings.json. Those
+// are routinely different copies (an installed app plus a dev checkout is the
+// normal developer setup) and until this line existed the difference was
+// inferable only by reading three files by hand. It matters because the
+// registered copy is the one whose prompt, caps and checkpoint rule decide
+// what gets captured — editing the other one changes nothing.
+function printEffectiveHook() {
+  let e;
+  try { e = hooks.effectiveHooks(); } catch { return; }
+  if (!e) return;
+  if (e.error) {
+    console.log(`Hook:      cannot read ${e.file}: ${e.error}`);
+    return;
+  }
+  const stop = e.stop || {};
+  if (!stop.registered) {
+    console.log(`Hook:      no Stop hook registered in ${e.file}`);
+    return;
+  }
+  const version = stop.version ? `v${stop.version}` : 'version unstamped';
+  const note = stop.vintage === 'newer'
+    ? ` — NEWER than this install (v${e.self.version}); do not "update", that is a downgrade`
+    : stop.vintage === 'outdated'
+      ? ` — older than this install (v${e.self.version}); \`membridge setup-hooks\` refreshes it`
+      : '';
+  console.log(`Hook:      Stop runs ${stop.script || '(unparseable command)'} (${version})${note}`);
+  if (stop.wrapper) console.log(`           via wrapper: ${stop.wrapper}`);
+  if (!stop.live) console.log('           WARNING: that command does not resolve — every stop is silently doing nothing');
+  if (stop.script && e.self.script && path.resolve(stop.script) !== path.resolve(e.self.script)) {
+    console.log(`           this install: ${e.self.script} (v${e.self.version}) — NOT the code that runs on a stop`);
+  }
+}
+
+// Did capture actually happen, and when it didn't, WHY.
+//
+// Every silent allow in the Stop hook used to look identical from outside:
+// exit 0, no output. That covered "nothing to capture" and "the daemon is
+// dead so nothing CAN be captured" with one representation, and on this
+// machine 39 of 49 logged stops were silent with no way to tell them apart.
+// lib/hook-stops.js records the distinction; this prints it.
+function printCaptureHealth(config) {
+  let s;
+  try { s = require('../lib/hook-stops').summarize(); } catch { return; }
+  if (!s || !s.stops) return;
+  const last = s.lastCapture
+    ? `${s.lastCapture.ts}${s.lastCapture.verification ? ` (${s.lastCapture.verification})` : ''}`
+    : 'NEVER — no summary line has been written since this log began';
+  console.log(`Capture:   ${s.stops} recorded stop(s), ${s.blocked} asked for a summary; last capture ${last}`);
+  const warn = [];
+  if (s.silentBecauseUnknown) warn.push(`${s.silentBecauseUnknown} stop(s) could not be judged at all (daemon down or state.json stale)`);
+  if (s.incomplete) warn.push(`${s.incomplete} hook run(s) started and never finished (killed, most likely the 10s timeout)`);
+  if (s.unhonoredBlocks) warn.push(`${s.unhonoredBlocks} summary ask(s) never answered by the agent`);
+  for (const w of warn) console.log(`           ${w}`);
+  void config;
 }
 
 // Which AI tools can actually call MemBridge's MCP server, and — the part that
