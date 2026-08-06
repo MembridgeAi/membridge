@@ -207,6 +207,35 @@ change either way.
 
 ---
 
+## 8. `agent-s54` is verified — a ninth branch for the real merge
+
+**What it is.** The integration assembly (`claude/ops/ASSEMBLY.md` on
+`docs/assembly-procedure`) excluded `agent-s54`, one commit (`b2e2169`),
+because it shipped self-labelled UNVERIFIED — recovered, unattributed work
+nobody had run the test suite for. It fixes `readAccess` in
+`lib/api-access.js`, which returned `default_access: true` for a project whose
+backend row was missing, so a deleted project rendered as visible-to-everyone
+in the exact grid an admin uses to audit who sees what.
+
+It is now verified: its test fails against the unfixed code with exactly that
+defect, passes with the fix, and the full monolith is 1319/1319 with it
+applied. The decision is to include it.
+
+**Why this is on your list and not just the runbook.** Per `canonical-sources.md`,
+no agent merges — that is always a human step. This is not a decision for you
+to make; the call is already made. It is a status update so whoever sits down
+to do the real merge (you, or whoever you hand it to) pins nine branches, not
+eight.
+
+**If never done.** A verified fix sits unmerged, and the admin access grid
+keeps telling a team's admins that a deleted project is visible to everyone
+until someone folds `agent-s54` in.
+
+**Time: none on its own** — it rides along with whichever batch gets merged
+next. Pin `agent-s54` at `b2e2169` per `ASSEMBLY.md` step 1.
+
+---
+
 ## What is NOT on this list, and why
 
 The database's access rules were audited end to end today and **no table is
