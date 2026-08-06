@@ -9,7 +9,7 @@ import {
 
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SignOutResult, SkeletonStats, Status, StreamEntry,
+  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SharePromptsMode, SignOutResult, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
@@ -121,6 +121,11 @@ export interface FakeOptions {
   // whose folder is gone (missing) -- the Archived section's two render
   // states. Opt-in so fixtures that predate archiving are untouched.
   withArchived?: boolean
+  // Settings.team.sharePrompts override. Defaults to 'off' (the daemon's own
+  // silent default -- teamsync's `=== true` check treats anything else as
+  // off), so a plain fixture models a fresh install that has not touched
+  // the setting. Only meaningful in team mode; ignored on solo.
+  sharePrompts?: SharePromptsMode
 }
 
 // A 60-prompt session's chain, newest-first (one prompt a minute counting
@@ -868,7 +873,14 @@ export class FakeDataClient implements DataClient {
         // team list) carries the older-daemon unknown. Falling back to the real
         // roster length here keeps memberCountUnknown scoped to the surface it
         // is about instead of quietly widening a second type.
-        return t ? { ...t, memberCount: t.memberCount ?? this.teamMembers().length, inviteCode: 'INV-7F3K9Q' } : null
+        return t ? {
+          ...t,
+          memberCount: t.memberCount ?? this.teamMembers().length,
+          inviteCode: 'INV-7F3K9Q',
+          // Defaults to 'off' unless a test explicitly overrides it -- matches
+          // the daemon's own default (teamsync's `=== true` check).
+          sharePrompts: this.opts.sharePrompts ?? 'off',
+        } : null
       })(),
       viewerId: this.viewerId,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
