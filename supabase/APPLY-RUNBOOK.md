@@ -30,8 +30,9 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 048 | `ops_audit.via_role` — records the verified credential beside the self-reported actor | `agent-sec` | no |
 | 049 | Records a voluntary departure in the audit trail | `agent-removal` | no |
 | 050 | Stops the audit trail pinning a deleted account open | `agent-removal` | no |
+| 051 | Drops the now-vestigial `memory_entries_delete` policy | `agent-sec` | no |
 
-**Next free number: 051.**
+**Next free number: 052.**
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
@@ -65,7 +66,8 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 10 | `046_audit_member_joined.sql` | Records in the audit trail when somebody joins a team. *(removal lane)* |
 | 11 | `049_audit_member_left.sql` | Records in the audit trail when somebody leaves a team, as the mirror of 046. *(removal lane)* |
 | 12 | `050_team_audit_actor_set_null.sql` | Stops those audit rows from making a member's account undeletable. **Must not be left behind — see below.** *(removal lane)* |
-| 13 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
+| 13 | `051_drop_memory_entries_delete_policy.sql` | Removes a database rule that no longer does anything, and would quietly start doing something again if a permission were ever restored. |
+| 14 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
 
 **Why `031` is last.** It is the only one that changes how the database behaves for *future* work rather than fixing something specific, and it is the only one reconstructed from a live object rather than written from scratch. Do it when the other five are known good, so that if anything odd happens afterwards you know which change to look at.
 
@@ -88,7 +90,7 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 >
 > So the rule for this whole batch is one line: **apply everything here before the next release goes out.**
 
-There is ONE ordering constraint among these thirteen, `050` (below), and no others — confirmed by merging all three branches together and reading every header, not assumed. `041`, `044`, `045` and `046` each state in their own headers that they are order-independent, and `046` and `038` were checked against each other in both directions. Each one touches a different thing, and none of them depends on another having run first.
+There is ONE ordering constraint among these fourteen, `050` (below), and no others — confirmed by merging all three branches together and reading every header, not assumed. `041`, `044`, `045` and `046` each state in their own headers that they are order-independent, and `046` and `038` were checked against each other in both directions. Each one touches a different thing, and none of them depends on another having run first.
 
 `047` is the exception to that and is not in the table above: it changes the credential the ops panel logs in with, so it is a database step **and** a Worker deploy. It has its own section, its own order, and its own rollback.
 
@@ -150,6 +152,18 @@ Most likely it returns nothing. If it returns rows, **read them before deleting 
 
 ---
 
+### 4b. `051_drop_memory_entries_delete_policy.sql` — the pair to step 4
+
+**Does:** step 4 took away the *permission* to delete shared memory directly. This removes the *rule* that used to allow it, which now has nothing to act on.
+
+**Apply it any time, before or after step 4** — it needs nothing else and either order is safe.
+
+**After applying, check:** the same thing as step 4 — self-serve deletion in the app still works, and still shows in the audit trail. Nothing else should change, because the rule being removed already had no effect.
+
+**Why bother removing something that does nothing:** if the permission is ever restored — most likely by someone running a broad `grant` across the schema, which is how it got there originally — then with the rule still present, direct unrecorded deletion quietly works again. With the rule gone, the database refuses regardless. Removing it is the stronger of the two states, not the tidier one.
+
+---
+
 ### 5. `042_definer_function_hardening.sql`
 
 **Does:** three database functions were callable by anyone holding the public key; they now are not. Separately, a function that answered *"is person X on team Y?"* now refuses unless you are on team Y yourself.
@@ -205,7 +219,7 @@ These come from the backend and removal lanes rather than the security one. They
 
 ---
 
-### 13. `031_ensure_rls_event_trigger.sql`
+### 14. `031_ensure_rls_event_trigger.sql`
 
 **Does:** there is a safety net that switches on row-level security whenever a table is created. Today, if it fails, it writes a line to a log nobody reads and lets the table be created anyway. After this, it refuses the creation.
 
@@ -225,7 +239,7 @@ drop table public.rls_smoke_test;
 
 ---
 
-## 14. `047_ops_panel_roles.sql` — do this one separately
+## 15. `047_ops_panel_roles.sql` — do this one separately
 
 **This one is different from the six above and should not be done in the same sitting.** The others fix something and are finished when the SQL is applied. This one changes *which credential the ops panel logs in with*, so it is a database step **and** a Worker deploy, and the two have to happen in the right order.
 
@@ -346,6 +360,10 @@ A lane moved underneath the dry run three separate times: it committed a new mig
 The practical consequence, and the reason this is written down rather than left as a war story:
 
 > **A dry run proves the shape composes. It cannot prove the shape is still current.**
+>
+> The SEC-14 run measured `2103/2103` node checks across 54 suites plus `992` UI tests. **What that figure actually covers is narrower than "the batch":** `agent-sec` and `agent-removal` were merged whole; `agent-backend2` was merged at a point it has since moved two commits beyond; `agent-hunt` was never merged at all and is nineteen commits away. So it is two branches whole and one stale — a real result about a real assembled tree, and not a claim about today's branches.
+>
+> The sharpest illustration: one of the backend lane's commits was authored **seventy-seven seconds after the assembly HEAD**, about a minute into the test run. Not a missed merge — work that did not exist when the tree was built. With six lanes live, a dry run is stale within two minutes of starting.
 >
 > Whoever does the real merge must re-run these checks at merge time — the two `grep -c` commands above, `node test/run.js migration-state`, and the full suite — against whatever the branches actually contain *then*. Do not trust this section, or any report, as evidence about a tree you have not just assembled yourself. The checks are cheap; the report has a timestamp and the branches do not care about it.
 
