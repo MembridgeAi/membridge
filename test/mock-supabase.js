@@ -81,7 +81,13 @@ function createMockSupabase() {
   const teamKeys = [];              // team_keys rows: { team_id, epoch, member_user_id, sealed_team_key } (009)
   const projectAccess = [];         // project_access rows (023): { team_id, project_key, member_id, can_see, updated_at, updated_by }
   const teamAudit = [];             // team_audit rows (023): { id, team_id, actor_id, action, object_type, object_key, detail, created_at }
-  const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0 };
+  // logoutCalls counts POST /auth/v1/logout — the GoTrue call that actually
+  // ends a session server-side by revoking its refresh token. It is a counter
+  // rather than a boolean because "signed out" must be provable per sign-out,
+  // not once per process: a daemon that deletes its local credentials file and
+  // never tells the backend leaves a refresh token that keeps minting valid
+  // access tokens for anyone holding a copy of that file.
+  const stats = { refreshCalls: 0, inserts: 0, deniedInserts: 0, logoutCalls: 0 };
   // Test knobs for backend quirks. rejectSummary is kept for back-compat;
   // rejectColumns is the general form — any column name added here provokes the
   // PostgREST "schema cache" error until the POST body no longer carries it, so
@@ -96,6 +102,28 @@ function createMockSupabase() {
     // memory_entries write check, restoring the pre-033 backend where a revoked
     // member could still push into a project they cannot read.
     noWriteAccessCheck: false,
+    // Stands in for "046 not applied": suppresses the AFTER INSERT trigger on
+    // public.team_members, restoring the backend where a join cannot be
+    // audited at all — the joiner is role 'member', team_audit's insert policy
+    // is manager-only, and recordAudit swallows the refusal.
+    noMemberJoinTrigger: false,
+    // Stands in for "049 not applied": suppresses the AFTER DELETE trigger on
+    // public.team_members, restoring the backend where a voluntary departure
+    // is recorded nowhere -- the leaver is not a manager, and by the time the
+    // row would be written they are not a member either.
+    noMemberLeaveTrigger: false,
+    // Removes 049's teams-existence guard while LEAVING the trigger in place,
+    // so a test can demonstrate that the guard is what stops a team deletion
+    // from aborting on team_audit's own foreign key.
+    noLeaveCascadeGuard: false,
+    // Stands in for "050 not applied": team_audit.actor_id keeps its original
+    // no-on-delete-action foreign key, so any audit row naming a user as actor
+    // blocks deleting that account. Since 046 that is every member.
+    noAuditActorSetNull: false,
+    // Stands in for the WRONG version of 050: `on delete cascade` instead of
+    // `on delete set null`, which deletes every audit row the departing user
+    // was the actor for -- including rows about what they did to OTHER people.
+    auditActorCascade: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -163,6 +191,86 @@ function createMockSupabase() {
     if (flags.noProjectInsertTrigger) return;
     materializeForProject(project);
   };
+  // team_audit.team_id is `references public.teams (id) on delete cascade`
+  // (024:43). The mock has no FK engine, so the constraint is enforced here,
+  // and it THROWS rather than skipping — because that is what Postgres does,
+  // and the consequence is the whole point: an insert naming a team that is
+  // being deleted aborts the statement that triggered it. A trigger on
+  // team_members that writes during a `delete from teams` cascade therefore
+  // does not make team deletion chatty, it makes team deletion FAIL.
+  const insertAuditRow = row => {
+    if (!teams.has(row.team_id)) {
+      throw new Error(
+        'insert or update on table "team_audit" violates foreign key constraint ' +
+        `"team_audit_team_id_fkey" (team ${row.team_id} does not exist)`);
+    }
+    teamAudit.push(row);
+  };
+  // 046_audit_member_joined.sql: the AFTER INSERT trigger on
+  // public.team_members. Modelled as a function called from every membership
+  // insert -- the same shape projectsInsertTrigger uses for 032 -- rather than
+  // inlined at the three RPCs, so it can be disabled on its own to prove the
+  // checks that depend on it actually fail without it.
+  //
+  // Two properties are the whole point and both are load-bearing here:
+  //   * it fires from the INSERT, so a repeat join (`on conflict do nothing`,
+  //     modelled below as the isMember guard) writes nothing;
+  //   * `when (new.role <> 'owner')` excludes create_team's founder row -- a
+  //     team's creator is not joining it.
+  // The row itself is composed entirely from the inserted values: no argument
+  // reaches it, which is why the real one is a trigger and not an RPC.
+  // flags.noMemberJoinTrigger stands in for "046 not applied".
+  const memberInsertTrigger = row => {
+    if (flags.noMemberJoinTrigger) return;
+    if (row.role === 'owner') return;
+    insertAuditRow({
+      id: uuid(),
+      team_id: row.teamId,
+      actor_id: row.userId,
+      action: 'member-joined',
+      object_type: 'member',
+      object_key: row.userId,
+      detail: { memberId: row.userId, targetName: row.displayName },
+      // Offset by the current row count, the same convention the POST route
+      // below uses, so two events written inside one millisecond still sort
+      // deterministically against each other.
+      created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+    });
+  };
+  // 049_audit_member_left.sql: the AFTER DELETE trigger on team_members.
+  //
+  // `deleter` is the mock's stand-in for auth.uid() — the authed caller of
+  // whatever statement removed the row. The WHEN clause is the whole
+  // removal-vs-departure decision and is modelled exactly: fires only when the
+  // person who ended the membership IS the person whose membership ended, so
+  // remove_member (a manager deleting somebody else's row) writes nothing here
+  // and the daemon's member-removed stays the only row for a removal.
+  //
+  // The teams-existence check is the cascade guard, and it is a correctness
+  // guard rather than a tidiness one: team_audit.team_id references teams on
+  // delete cascade, so a row inserted for a team being deleted violates that
+  // FK and aborts the delete. deleteTeamCascade below exercises exactly that.
+  // flags.noMemberLeaveTrigger stands in for "049 not applied".
+  const memberDeleteTrigger = (row, deleter) => {
+    if (flags.noMemberLeaveTrigger) return;
+    if (!deleter || deleter !== row.userId) return;          // 049's WHEN clause
+    // 049's BODY guard, separate from the FK below on purpose: the guard is
+    // the migration's, the FK is the database's, and flags.noLeaveCascadeGuard
+    // removes only the former so a test can show what the latter then does.
+    if (!flags.noLeaveCascadeGuard && !teams.has(row.teamId)) return;
+    insertAuditRow({
+      id: uuid(),
+      team_id: row.teamId,
+      actor_id: row.userId,
+      action: 'member-left',
+      object_type: 'member',
+      object_key: row.userId,
+      // old.display_name — the only place the name still exists once the row
+      // is gone. Captured here or lost for good.
+      detail: { memberId: row.userId, targetName: row.displayName },
+      created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+    });
+  };
   // 029 §5: project_access carries `foreign key (team_id, member_id)
   // references team_members (team_id, user_id) on delete cascade` (024:38-39),
   // so deleting a membership deletes its access rows in the real backend with
@@ -201,16 +309,23 @@ function createMockSupabase() {
   function handleRpc(res, fn, body, userId) {
     if (!userId) return json(res, 401, { message: 'not authenticated' });
     if (fn === 'create_team') {
-      const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdAt: new Date().toISOString() };
+      // createdBy: teams.created_by is NOT NULL and references auth.users with
+      // no on-delete action (schema.sql:13), so it blocks deleting the creator's
+      // account. Recorded here or deleteUserCascade's blocker list is vacuous.
+      const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdBy: userId, createdAt: new Date().toISOString() };
       teams.set(team.id, team);
-      members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() });
+      const ownerRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() };
+      members.push(ownerRow);
+      memberInsertTrigger(ownerRow); // 046: no-op for an owner row, called anyway so the gate is what excludes it
       return json(res, 200, [{ team_id: team.id, invite_code: team.inviteCode }]);
     }
     if (fn === 'join_team') {
       const team = [...teams.values()].find(t => t.inviteCode === body.p_code);
       if (!team) return json(res, 400, { message: 'invalid invite code' });
       if (!isMember(team.id, userId)) {
-        members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() });
+        const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
+        members.push(joinRow);
+        memberInsertTrigger(joinRow); // 046
       }
       // 029 §2: record this member's access to every project the team already
       // shares. Runs on a repeat join too, where it is a no-op.
@@ -224,7 +339,9 @@ function createMockSupabase() {
         : null;
       if (!row) row = projects.find(p => p.teamId === body.p_team && p.name === body.p_name);
       if (!row) {
-        row = { id: uuid(), teamId: body.p_team, name: body.p_name, repoUrl: body.p_repo_url || null };
+        // createdBy: projects.created_by, same shape as teams.created_by
+        // (schema.sql:31) and the same blocking effect.
+        row = { id: uuid(), teamId: body.p_team, name: body.p_name, repoUrl: body.p_repo_url || null, createdBy: userId };
         projects.push(row);
       }
       // 029 §3: unconditional, on the adopt-existing branch as well as the
@@ -240,7 +357,14 @@ function createMockSupabase() {
           team_id: m.teamId,
           team_name: t.name,
           role: m.role,
-          invite_code: t.inviteCode,
+          // 044 §2: the standing invite code goes to MANAGERS only. A plain
+          // member's row keeps the column and carries null in it — the
+          // RETURNS TABLE signature is fixed, so this is a null value rather
+          // than an absent key, and clients that read it positionally are
+          // unaffected. Modelled here because it is the difference between
+          // "an ordinary member can read a permanent join credential" and
+          // "they cannot", which no client-side check can prove on its own.
+          invite_code: ['owner', 'admin'].includes(m.role) ? t.inviteCode : null,
           member_count: members.filter(x => x.teamId === m.teamId).length,
           created_at: t.createdAt || null,
         };
@@ -252,6 +376,8 @@ function createMockSupabase() {
       if (!isManager(body.p_team, userId)) return json(res, 403, { message: 'only a team owner or admin can create invite links' });
       const inv = {
         token: shortToken(), teamId: body.p_team,
+        // invites.created_by, NOT NULL, no on-delete (002:58).
+        createdBy: userId,
         expiresAt: body.p_expires_at || null, maxUses: body.p_max_uses || null,
         useCount: 0, revokedAt: null,
         // Offset by the current row count so two invites minted inside the
@@ -277,7 +403,9 @@ function createMockSupabase() {
       if (inv.maxUses !== null && inv.useCount >= inv.maxUses) return json(res, 400, { message: 'this invite link has already been used' });
       const team = teams.get(inv.teamId);
       if (!isMember(team.id, userId)) {
-        members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() });
+        const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
+        members.push(joinRow);
+        memberInsertTrigger(joinRow); // 046
         inv.useCount++;
       }
       // 029 §2. In the real function this insert comes AFTER the membership
@@ -291,8 +419,22 @@ function createMockSupabase() {
       if (!isManager(body.p_team, userId)) return json(res, 403, { message: 'only a team owner or admin can remove members' });
       if (memberRole(body.p_team, body.p_user) === 'owner') return json(res, 400, { message: 'the team owner cannot be removed' });
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === body.p_user);
+      const removedRow = i !== -1 ? members[i] : null;
       if (i !== -1) members.splice(i, 1);
+      if (removedRow) memberDeleteTrigger(removedRow, userId); // 049: no-op, actor is not the subject
       cascadeAccessRows(body.p_team, body.p_user); // 024's FK cascade (see 029 §5)
+      // 044 §1: removal rotates the team's standing invite code AND revokes
+      // every outstanding invite link, unconditionally. Both halves matter: a
+      // departing member may hold either credential, and create_invite
+      // defaults to no expiry and no use cap, so the link they joined with
+      // redeems again after they are removed. Same two statements
+      // rotate_invite runs, and with the same blast radius — everyone else's
+      // copy of the code and every live link die too.
+      const removedFrom = teams.get(body.p_team);
+      if (removedFrom) removedFrom.inviteCode = uuid();
+      for (const inv of invites.values()) {
+        if (inv.teamId === body.p_team && !inv.revokedAt) inv.revokedAt = new Date().toISOString();
+      }
       return json(res, 200, null);
     }
     if (fn === 'set_role') {
@@ -317,8 +459,21 @@ function createMockSupabase() {
     if (fn === 'leave_team') {
       if (memberRole(body.p_team, userId) === 'owner') return json(res, 400, { message: 'the owner cannot leave their own team' });
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === userId);
+      const leftRow = i !== -1 ? members[i] : null;
       if (i !== -1) members.splice(i, 1);
+      if (leftRow) memberDeleteTrigger(leftRow, userId); // 049
       cascadeAccessRows(body.p_team, userId); // 024's FK cascade (see 029 §5)
+      // 045: a voluntary departure rotates the standing invite code and
+      // revokes outstanding invite links, exactly as a removal does. Same two
+      // statements as 044 §1 -- see 045's header for why the same remedy fits
+      // a departure nobody else chose: leaving is one-shot per membership, and
+      // after 044 §2 an admin who resigns is the role most certain to be
+      // holding the code.
+      const leftFrom = teams.get(body.p_team);
+      if (leftFrom) leftFrom.inviteCode = uuid();
+      for (const inv of invites.values()) {
+        if (inv.teamId === body.p_team && !inv.revokedAt) inv.revokedAt = new Date().toISOString();
+      }
       return json(res, 200, null);
     }
     if (fn === 'team_members_list') {
@@ -645,6 +800,22 @@ function createMockSupabase() {
         users.set(body.email, user);
         return json(res, 200, newSession(user));
       }
+      // GoTrue's session teardown. Revoking here is what makes a sign-out
+      // durable: the refresh token stops working, so a leaked or copied
+      // credentials file cannot be replayed into a fresh access token. Modelled
+      // faithfully (the token really is dropped) so a test can tell "the daemon
+      // called this" apart from "the daemon deleted a local file and stopped".
+      if (url.pathname === '/auth/v1/logout') {
+        stats.logoutCalls++;
+        const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        const userId = sessions.get(token);
+        if (userId) {
+          for (const [rt, uid] of refreshTokens) if (uid === userId) refreshTokens.delete(rt);
+          sessions.delete(token);
+        }
+        res.writeHead(204);
+        return res.end();
+      }
       if (url.pathname === '/auth/v1/user') {
         // What loginWithTokens calls to verify an OAuth access token. Only
         // tokens this mock issued (or a test seeded into `sessions`) resolve.
@@ -870,6 +1041,25 @@ function createMockSupabase() {
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const q = url.searchParams;
         const teamEq = (q.get('team_id') || '').replace(/^eq\./, '');
+        // token=eq.<token> — the single-row lookup lib/api-access.js
+        // inviteTeamId uses to answer "which team is this invite for?", so the
+        // revoke route can file its audit event against the invite's OWN team
+        // instead of teams[0]. Supported as an ALTERNATIVE to the team_id
+        // filter, never as a way around RLS: invites_select is
+        // `is_team_member(team_id)`, and RLS on select FILTERS rather than
+        // raising, so a caller who is not a member of the invite's team must
+        // see an empty result and not a 403. That is exactly what the
+        // isMember check below produces.
+        const tokenEq = (q.get('token') || '').replace(/^eq\./, '');
+        if (tokenEq) {
+          const inv = invites.get(tokenEq);
+          if (!inv || !isMember(inv.teamId, userId)) return json(res, 200, []);
+          return json(res, 200, [{
+            token: inv.token, team_id: inv.teamId, created_at: inv.createdAt,
+            expires_at: inv.expiresAt, max_uses: inv.maxUses,
+            use_count: inv.useCount, revoked_at: inv.revokedAt || null,
+          }]);
+        }
         if (!teamEq || !isMember(teamEq, userId)) return json(res, 200, []);
         // revoked_at is both a supported FILTER and a returned column:
         // readInvites selects it and derives `revoked` from it, so dropping it
@@ -979,7 +1169,81 @@ function createMockSupabase() {
     return inserted;
   };
 
-  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess };
+  // Postgres' `delete from auth.users where id = ...`, constraints and all.
+  //
+  // Not an HTTP route: no client can delete an account. This models the
+  // operator/GoTrue action, and it models the BLOCKING constraints rather than
+  // only the cascading ones, because the blockers are the interesting part —
+  // every `references auth.users (id)` declared with no on-delete action stops
+  // the delete dead. Six of them do, and only ONE (team_audit.actor_id) is
+  // this session's doing. A model that skipped the other five would let a test
+  // claim 050 "unblocks account deletion", which it does not.
+  //
+  // Throws with the offending constraint name, as Postgres does, so a test can
+  // assert WHICH constraint refused rather than merely that something did.
+  const deleteUserCascade = userId => {
+    const blockers = [
+      // teams.created_by NOT NULL, no on-delete (schema.sql:13)
+      [[...teams.values()].some(t => t.createdBy === userId), 'teams_created_by_fkey'],
+      // projects.created_by NOT NULL, no on-delete (schema.sql:31)
+      [projects.some(p => p.createdBy === userId), 'projects_created_by_fkey'],
+      // memory_entries.author_id NOT NULL, no on-delete (schema.sql:46) — this
+      // is the one that makes account deletion impossible for every real user,
+      // and it predates today by a long way.
+      [entries.some(e => e.author_id === userId), 'memory_entries_author_id_fkey'],
+      // invites.created_by NOT NULL, no on-delete (002:58)
+      [[...invites.values()].some(i => i.createdBy === userId), 'invites_created_by_fkey'],
+      // team_audit.actor_id, nullable, no on-delete (024:44) UNTIL 050 makes
+      // it `on delete set null`. flags.noAuditActorSetNull stands in for
+      // "050 not applied".
+      [flags.noAuditActorSetNull && teamAudit.some(r => r.actor_id === userId), 'team_audit_actor_id_fkey'],
+    ];
+    for (const [blocked, constraint] of blockers) {
+      if (blocked) {
+        throw new Error(
+          `update or delete on table "users" violates foreign key constraint "${constraint}"`);
+      }
+    }
+    // 050: the surviving rows keep the event and lose the link.
+    if (flags.auditActorCascade) {
+      for (let i = teamAudit.length - 1; i >= 0; i--) {
+        if (teamAudit[i].actor_id === userId) teamAudit.splice(i, 1);
+      }
+    } else if (!flags.noAuditActorSetNull) {
+      for (const r of teamAudit) if (r.actor_id === userId) r.actor_id = null;
+    }
+    // The three FKs that already cascade: team_members.user_id (schema.sql:19),
+    // member_pubkeys.user_id (009:30), team_keys.member_user_id (009:46).
+    // NOTE: no memberDeleteTrigger call. 049's trigger is gated on
+    // auth.uid() = old.user_id and this path runs as the operator, so it does
+    // not fire — modelled by simply not calling it, which is what the WHEN
+    // clause amounts to here.
+    for (let i = members.length - 1; i >= 0; i--) if (members[i].userId === userId) members.splice(i, 1);
+    for (const [k, v] of pubkeys) if (k === userId || (v && v.user_id === userId)) pubkeys.delete(k);
+    for (let i = teamKeys.length - 1; i >= 0; i--) if (teamKeys[i].member_user_id === userId) teamKeys.splice(i, 1);
+    users.delete([...users.entries()].find(([, u]) => u.id === userId)?.[0]);
+  };
+  // Postgres' `delete from public.teams where id = ...`, cascades and all.
+  // Not an HTTP route: no client can delete a team (there is no policy and no
+  // RPC), so this models an operator action taken in the SQL editor -- which
+  // is precisely the path 049's cascade guard exists for. Order matches
+  // Postgres: the parent row goes first, THEN the referencing rows are
+  // cascade-deleted, which is why the trigger sees a team that no longer
+  // exists. `actor` stands in for auth.uid() of whoever ran it.
+  const deleteTeamCascade = (teamId, actor) => {
+    teams.delete(teamId);
+    for (let i = members.length - 1; i >= 0; i--) {
+      if (members[i].teamId !== teamId) continue;
+      const row = members[i];
+      members.splice(i, 1);
+      memberDeleteTrigger(row, actor);
+    }
+    // team_audit.team_id references teams on delete cascade (024:43).
+    for (let i = teamAudit.length - 1; i >= 0; i--) {
+      if (teamAudit[i].team_id === teamId) teamAudit.splice(i, 1);
+    }
+  };
+  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, deleteTeamCascade, deleteUserCascade };
 }
 
 module.exports = { createMockSupabase, pgTimestamptz };

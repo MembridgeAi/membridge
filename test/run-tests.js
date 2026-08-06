@@ -23113,6 +23113,15 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(mock17.projectAccess.filter(r => r.member_id === lateCreds.userId).length, 0,
           "a departed member's access rows must not survive them");
         await setDefault(false);
+        // 044: the removal above ROTATED teams.invite_code, so the value
+        // captured from create_team at the top of this fixture is now dead —
+        // that is the whole point of the migration, and it is pinned in
+        // test/suites/removal-durability.test.js. This section is about access
+        // ROWS, not about credential lifetime, so it re-reads the team's
+        // current code and carries on. Every later joinTeam in this fixture
+        // reads t17Team.invite_code too, which is why the capture is refreshed
+        // in place rather than shadowed by a local.
+        t17Team.invite_code = mock17.teams.get(t17Team.team_id).inviteCode;
         process.env.MEMBRIDGE_HOME = homeFor.late;
         await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
         assert.strictEqual(accessRow(lateCreds.userId).can_see, false,
