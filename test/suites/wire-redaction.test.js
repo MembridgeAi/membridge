@@ -11,6 +11,29 @@
 // a field that never enters the net is not protected at all, and no improvement
 // to the patterns will ever reach it.
 //
+// STATUS: five checks FAIL, on purpose. They are a confirmed finding in product
+// code, not a broken test — `files` and `changes[].file` never pass through
+// redactText, and this suite is find-only. Do not "fix" them by relaxing the
+// assertions; the fix is a scrub() call in lib/teamsync.js entryToRow.
+//
+// The failures are EXECUTED, not inferred: each plants a synthetic secret and
+// drives the real code. Three prove it in the row object entryToRow returns.
+// The other two close the two objections that survive that, because "somebody
+// forgot to wrap this field" is easy to wave away and "a secret placed here
+// ships" is not:
+//   - encryption does NOT contain it. plaintextOff nulls the plaintext column,
+//     so the database reads clean, while encryptRow seals the RAW value into
+//     the ciphertext every teammate decrypts.
+//   - the direct entryToRow call is not a lab artefact. Driving the real push
+//     (signup, link, syncTeams) lands the secret in the backend's table, with
+//     `files` built by memorydb.buildEntries and translated by wireKeyFor —
+//     which also rules out path translation quietly sanitizing it.
+//
+// Each of those two asserts a secret is ABSENT, so each one first proves the
+// payload EXISTS — a sealed payload was handed over, a row actually arrived.
+// Without that, an empty result would satisfy the assertion and turn a real
+// finding green, which is the one outcome worse than not testing it.
+//
 // HOW THE FIXTURE IS BUILT, AND HOW YOU CAN TELL IT IS SYNTHETIC. Every secret
 // below is generated here, at test time, by the seeded PRNG in `gen()` — a
 // plain LCG with a literal seed, visible in this file. No value was copied from
@@ -20,10 +43,16 @@
 // unambiguously: that isolates "did this field pass through redaction" from
 // "does some pattern happen to match this shape", which is the whole point.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check } = h;
+const { check, ROOT, P } = h;
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const digest = require('../../lib/digest');
 const teamsync = require('../../lib/teamsync');
+const util = require('../../lib/util');
+const { createMockSupabase } = require('../mock-supabase');
+
+const MOCK_PORT = P(62);
 
 // Deterministic, obviously machine-generated. Same output every run.
 let seed = 20260805;
@@ -37,6 +66,19 @@ const gen = n => Array.from({ length: n },
 // for why the needle must not contain a newline.
 const NEEDLE = gen(48);
 const SECRET = `-----BEGIN RSA PRIVATE KEY-----\n${gen(64)}\n${NEEDLE}\n-----END RSA PRIVATE KEY-----`;
+
+// A SECOND synthetic secret, shaped for the fields the finding is about.
+// A PEM in a filesystem path is a fair unit-test probe but an easy thing to
+// wave away ("nobody puts a private key in a path"). This one is the realistic
+// version of the same leak: a file whose NAME carries a credential —
+// `secrets/<token>.pem` — which is an ordinary thing to find in a repo and is
+// exactly what a path-shaped field ships.
+//
+// Synthetic by the same seeded LCG above: `ghp_` plus 36 generated alphanumeric
+// characters. The prefix is a real FORMAT so the `github-token` default pattern
+// matches it unambiguously; the body has never been a valid token anywhere.
+const TOKEN = `ghp_${gen(36)}`;
+const TOKEN_FILE = `secrets/${TOKEN}.pem`;
 
 const regexes = digest.compileRedactions({});
 const creds = { userId: 'user-1', displayName: 'Tester' };
@@ -77,6 +119,18 @@ async function main() {
     assert.ok(!selfCheck.includes(NEEDLE),
       'the synthetic PEM marker must be caught by the default patterns, or this ' +
       'suite proves nothing about the boundary');
+  });
+
+  // Same guard for the second fixture secret. Without it, "the token did not
+  // appear" could mean the boundary is fine OR that no pattern would ever have
+  // caught this token — and those are opposite conclusions.
+  await check('the synthetic token is redactable at all (guards the two findings below)', () => {
+    const scrubbed = digest.redactText(`ref ${TOKEN} end`, regexes);
+    assert.ok(!scrubbed.includes(TOKEN),
+      'the synthetic github-token marker must be caught by the default patterns, ' +
+      'or the filename findings prove nothing');
+    assert.match(scrubbed, /^ref .* end$/,
+      'and it must remove the token WITHOUT eating the text around it');
   });
 
   // The fields that DO go through scrub(). These pass today and are pinned so
@@ -129,12 +183,147 @@ async function main() {
       'a non-array files value passes through the ternary untouched');
   });
 
+  // -------------------------------------------------------------------------
+  // THE SAME FINDING, WITH THE TWO OBJECTIONS TO IT CLOSED.
+  // -------------------------------------------------------------------------
+  // The three checks above prove the secret is in the ROW OBJECT entryToRow
+  // returns. Two reasonable objections survive that, and both are answered
+  // below by execution rather than by argument — because "the wrap is missing"
+  // is easy to shrug off and "a secret placed here ships" is not.
+  //
+  // OBJECTION 1: "encryption contains it." It does not. plaintextOff (the
+  // shipped default — plaintextOffFor returns true unless explicitly set false)
+  // nulls the plaintext `files` column, which is what makes this look contained
+  // when reading the database. But encryptRow seals `files` and `changes` INTO
+  // the ciphertext, and every teammate decrypts that. So the effect of
+  // encryption here is to hide the leak from the operator while delivering it
+  // intact to exactly the people the redactor exists to protect it from.
+  //
+  // This is the mirror image of the ordering check further down. That one seals
+  // a secret in `summary` and proves the ciphertext carries the REDACTED text.
+  // This one seals a secret in `files` and finds the raw text. Same instrument,
+  // same payload, opposite answer — which is the clearest possible statement of
+  // what "this field never enters the net" costs.
+  await check('encryption does not contain the finding: files[] rides RAW inside the ciphertext', () => {
+    let sealed = null;
+    const row = rowWith({ files: [TOKEN_FILE] });
+    const out = teamsync.encryptRow(row, 'team-key', 1, {
+      teamcrypto: {
+        encrypt: payload => { sealed = payload; return { ciphertext: 'c', nonce: 'n' }; },
+      },
+      plaintextOff: true,
+    });
+    // PRECONDITIONS, and they matter more here than usual: this check asserts a
+    // secret is ABSENT, so anything that quietly produced an empty payload would
+    // make it pass and hide the finding. Both are asserted before the claim.
+    assert.ok(sealed, 'encryptRow must hand a payload to teamcrypto.encrypt');
+    assert.strictEqual(out.files, null,
+      'fixture: plaintextOff must null the plaintext files column — if it did ' +
+      'not, this check would be about the wrong column');
+    assert.ok(collectStrings(sealed).some(s => s.includes('secrets/')),
+      'fixture: the sealed payload must actually carry the files field');
+
+    assert.ok(!collectStrings(sealed).some(s => s.includes(TOKEN)),
+      'a credential embedded in a FILENAME is sealed into the ciphertext ' +
+      'unredacted. plaintextOff nulls the plaintext column, so the database ' +
+      'looks clean while every teammate who decrypts the row gets the raw ' +
+      'token. Encryption hides this leak; it does not contain it.');
+  });
+
+  // OBJECTION 2: "entryToRow called directly is not the real path." Also no.
+  // The check below drives the actual push — signup, createTeam, linkProject,
+  // syncTeams — against the mock backend, with a real captured edit event whose
+  // FILENAME carries the token, and reads the row that lands in the backend's
+  // table. Nothing is hand-built: `files` here is whatever memorydb.buildEntries
+  // derived and whatever wireKeyFor translated it into, which also closes the
+  // narrower objection that path translation might sanitize the value.
+  const mock = createMockSupabase();
+  await new Promise(r => mock.server.listen(MOCK_PORT, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${MOCK_PORT}`;
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  try {
+    util.ensureConfig();
+    // The documented escape hatch every other team suite uses: keeps the mock
+    // round trip off the real macOS keychain. It also puts the row on the wire
+    // in PLAINTEXT, which is the weaker of the two shipping modes for this
+    // finding — the ciphertext case is covered by the check above, so between
+    // them both modes are accounted for.
+    const cfg = util.loadUserConfig();
+    cfg.team = { ...(cfg.team || {}), encrypt: false };
+    util.saveUserConfig(cfg);
+
+    await teamsync.signup(util.getConfig(), 'wire@test.dev', 'pw-wire', 'Wirer');
+    const team = await teamsync.createTeam(util.getConfig(), 'WireCo');
+
+    const projectKey = path.join(ROOT, 'projects', 'wire-leak-app');
+    fs.mkdirSync(projectKey, { recursive: true });
+    {
+      const st = util.loadState();
+      st.projects = {
+        ...(st.projects || {}),
+        [projectKey]: {
+          events: [
+            { kind: 'prompt', session: 'wire-1', source: 'Claude Code', ts: '2026-08-04T10:00:00.000Z', text: 'store the deploy key' },
+            // The leak carrier: an ordinary captured edit whose path happens to
+            // name a credential. buildEntries turns this into files[].
+            { kind: 'edit', session: 'wire-1', source: 'Claude Code', ts: '2026-08-04T10:01:00.000Z', file: path.join(projectKey, TOKEN_FILE) },
+            {
+              kind: 'summary', session: 'wire-1', source: 'Distilled', ts: '2026-08-04T10:05:00.000Z',
+              text: 'Stored the deploy key.', headline: 'deploy key stored',
+              goal: '', decisions: '', gotchas: '', highlights: [],
+            },
+          ],
+        },
+      };
+      util.saveState(st);
+    }
+    const link = await teamsync.linkProject(util.getConfig(), projectKey, team.team_id, 'WireCo');
+    const res = await teamsync.syncTeams({});
+    const pushed = mock.entries.filter(e => e.project_id === link.projectId);
+
+    await check('end to end: a credential in a filename REACHES the backend table', () => {
+      // PRECONDITION FIRST, and it is load-bearing in the inverted direction.
+      // This check asserts the token is ABSENT from the pushed row. If nothing
+      // were ever pushed, that assertion would be trivially satisfied and the
+      // finding would silently turn green. So: prove a row arrived, and prove
+      // it carries the files field, before saying anything about its content.
+      assert.deepStrictEqual(res.errors, [], `the push failed: ${JSON.stringify(res.errors)}`);
+      assert.strictEqual(pushed.length, 1,
+        `fixture: expected exactly one pushed row, got ${pushed.length} — with ` +
+        'no row on the wire the leak assertion below would pass vacuously');
+      assert.ok(Array.isArray(pushed[0].files) && pushed[0].files.length,
+        'fixture: the pushed row carries no files field, so there is nothing to leak');
+
+      assert.ok(!collectStrings(pushed[0]).some(s => s.includes(TOKEN)),
+        'a credential embedded in a filename travelled the REAL push path — ' +
+        'buildEntries to entryToRow to wireKeyFor to the backend — and landed ' +
+        'in another machine\'s reach with the token intact. This is not a ' +
+        'hypothetical about an unwrapped field: it is the field shipping. ' +
+        `Row files: ${JSON.stringify(pushed[0].files)}`);
+    });
+  } finally {
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mock.server.close(r));
+  }
+
   // THE PROPERTY THAT WOULD BE CATASTROPHIC TO LOSE, pinned because nothing else
   // states it: encryptRow runs on entryToRow's OUTPUT, so the ciphertext carries
   // the redacted text. If the order were ever swapped — encrypt the local entry,
   // then scrub the plaintext columns — every field would be redacted in the
   // clear and intact inside the ciphertext, which every teammate decrypts. That
   // failure would be invisible in the database and total on the receiving end.
+  //
+  // DELIBERATELY UNCHANGED. This is already the right instrument: it drives
+  // encryptRow with an injected teamcrypto and inspects the actual sealed
+  // payload, so it tests the ordering as EXECUTED rather than as written. There
+  // is nothing to convert, and it was not touched for symmetry with the
+  // conversions elsewhere in this branch. It is also the one check here that
+  // must keep PASSING — the two findings above are about a field that never
+  // enters the net, while this is about the net being applied in the right
+  // order to the fields that do. Do not fold them together: a future fix that
+  // wrapped files[] would turn the findings green and leave this exactly as it
+  // is, which is correct.
   await check('the ciphertext carries the REDACTED text, not the raw entry', () => {
     let sealed = null;
     const row = rowWith({ summary: `before ${SECRET} after` });
