@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
+  InviteOptions, Member, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -115,7 +115,22 @@ export interface DataClient {
   // cloudflare/ops-dashboard's own JOIN_BASE + token construction works --
   // since settings.webUrl is null on a build with no hosted join page
   // configured (self-hosted, empty lib/backend.json).
-  createInviteLink(teamId: string): Promise<{ token: string }>
+  /**
+   * Mints a single-purpose invite token.
+   *
+   * `options` is REQUIRED, not optional, and that is the fix. POST
+   * /api/team/invite has always accepted expiresDays and maxUses; this client
+   * posted { teamId } alone, and on the daemon absent used to mean null --
+   * "never expires, unlimited uses". Every invite the app ever minted was
+   * permanent (agent-sec cff17e3). The daemon now defaults an omitted value to
+   * 7 days / single use, but leaving the argument optional here would let a
+   * caller silently go back to not deciding, and the SCREEN is what should
+   * decide, since the screen is what tells the user what they are handing out.
+   *
+   * `maxUses: 0` and `expiresDays: 0` are the daemon's deliberate opt-out,
+   * meaning "no limit" -- distinct from omitting the field.
+   */
+  createInviteLink(teamId: string, options: InviteOptions): Promise<{ token: string }>
   revokeInvite(inviteId: string): Promise<void>
   setMemberRole(memberId: string, role: Role): Promise<void>
   removeMember(memberId: string): Promise<void>

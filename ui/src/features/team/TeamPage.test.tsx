@@ -4,7 +4,7 @@
 // team -- the app never said "you are signed out", and Settings' only team
 // control was "Leave team", so anyone wanting to start a team dead-ended.
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { screen, cleanup } from '@testing-library/react'
+import { screen, cleanup, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
@@ -112,7 +112,10 @@ describe('TeamPage, signed in with no team', () => {
     await userEvent.click(screen.getByRole('button', { name: /create team/i }))
 
     expect(createTeam).toHaveBeenCalledWith('Acme AI')
-    expect(mint).toHaveBeenCalledWith('team-new')
+    // Now carries the bounds the screen is showing -- the create-team flow
+    // mints through the same shareInvite path, so it cannot quietly mint a
+    // permanent link while the UI displays 7 days / single use.
+    expect(mint).toHaveBeenCalledWith('team-new', { expiresDays: 7, maxUses: 1 })
     // Same link shape the Members page already mints and the hosted join page
     // actually redeems (cloudflare/join reads location.hash).
     expect(await screen.findByText(/https:\/\/join\.membridge\.me\/#tok_9f2aQ7/)).toBeInTheDocument()
@@ -149,7 +152,9 @@ describe('TeamPage, signed in on a team', () => {
     renderWith(client, <TeamPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
 
-    expect(mint).toHaveBeenCalledWith('team-1')
+    // Carries the bounds the screen is displaying, not a bare teamId that
+    // would let the daemon decide what the user is handing out.
+    expect(mint).toHaveBeenCalledWith('team-1', { expiresDays: 7, maxUses: 1 })
     expect(writeText).toHaveBeenCalledWith('https://join.membridge.me/#tok_9f2aQ7')
     expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
   })
@@ -286,6 +291,60 @@ describe('TeamPage sign-out reports whether the session was really ended', () =>
 
     expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument()
     expect(screen.getByTestId('signout-not-revoked')).toHaveTextContent(/until it expires/i)
+  })
+})
+
+// The security lane bounded invite lifetime on the daemon (agent-sec cff17e3):
+// POST /api/team/invite has always accepted expiresDays and maxUses, but the UI
+// posted { teamId } alone, so absent meant null -- "never expires, unlimited
+// uses". Every invite the app had ever minted was permanent.
+//
+// The daemon now defaults an omitted value to 7 days / single use. That closes
+// the hole, but it leaves the UI stating nothing and offering nothing: the
+// screen has to let a user SET the lifetime, and what it says has to match what
+// the minted invite really has. The old row rendered "unlimited" as a fixed
+// string with no way to change it, which is how this went unnoticed.
+describe('minting an invite link lets the user set its lifetime', () => {
+  const onTeam = () => new FakeDataClient()
+
+  it('offers controls for expiry and use count', async () => {
+    renderWith(onTeam(), <TeamPage />)
+    expect(await screen.findByLabelText(/expires/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/uses/i)).toBeInTheDocument()
+  })
+
+  // The defaults on screen must be the ones the daemon would apply, or the
+  // screen is describing an invite the backend is not going to mint.
+  it('defaults to the daemon own 7 days and single use', async () => {
+    renderWith(onTeam(), <TeamPage />)
+    expect(await screen.findByLabelText(/expires/i)).toHaveValue('7')
+    expect(screen.getByLabelText(/uses/i)).toHaveValue('1')
+  })
+
+  it('sends the chosen values, so what the screen says is what the invite gets', async () => {
+    const client = onTeam()
+    const mint = vi.spyOn(client, 'createInviteLink')
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+    renderWith(client, <TeamPage />)
+    await userEvent.selectOptions(await screen.findByLabelText(/expires/i), '30')
+    await userEvent.selectOptions(screen.getByLabelText(/uses/i), '0')
+    await userEvent.click(screen.getByRole('button', { name: /^copy invite link$/i }))
+    // 0 uses is the daemon's deliberate opt-out meaning "no limit" -- passed
+    // through as 0, not dropped, because omitting it would silently mean 1.
+    await waitFor(() => expect(mint).toHaveBeenCalledWith('team-1', { expiresDays: 30, maxUses: 0 }))
+  })
+
+  // The counter-check: the defaults must travel too. Sending nothing would let
+  // the daemon apply its own default -- the same answer today, but it would
+  // stop the screen from being the thing that decides, which is what made the
+  // original bug invisible.
+  it('sends the defaults explicitly rather than relying on the daemon to guess', async () => {
+    const client = onTeam()
+    const mint = vi.spyOn(client, 'createInviteLink')
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+    renderWith(client, <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    await waitFor(() => expect(mint).toHaveBeenCalledWith('team-1', { expiresDays: 7, maxUses: 1 }))
   })
 })
 

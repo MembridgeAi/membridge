@@ -391,6 +391,14 @@ export interface Member {
 // pastes, and everyone who redeems one joins as a member. Those two fields
 // existed on this type before any endpoint could fill them, which is why the
 // row rendered a permanently blank address.
+/** Lifetime bounds for a freshly minted invite. `0` means "no limit" -- the
+ *  daemon's deliberate opt-out -- and is NOT the same as omitting the field,
+ *  which is why both are always sent explicitly. */
+export interface InviteOptions {
+  expiresDays: number
+  maxUses: number
+}
+
 export interface Invite {
   /** The invite token. Also the id: it is the primary key AND exactly what
    *  revoking takes, so a row needs nothing else to be revocable. */

@@ -5,7 +5,7 @@
 // document.hidden and blanked the dashboard mid screen-recording).
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDataClient } from './DataClientProvider'
-import type { AccessMatrix, DeleteProjectResult, FeedFilters, Role, Settings } from './types'
+import type { AccessMatrix, DeleteProjectResult, FeedFilters, InviteOptions, Role, Settings } from './types'
 
 const LIVE = { refetchInterval: 10_000, refetchIntervalInBackground: false } as const
 
@@ -481,7 +481,8 @@ export function useCreateInviteLink() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (teamId: string) => c.createInviteLink(teamId),
+    mutationFn: (v: { teamId: string } & InviteOptions) =>
+      c.createInviteLink(v.teamId, { expiresDays: v.expiresDays, maxUses: v.maxUses }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['audit'] }) },
   })
 }

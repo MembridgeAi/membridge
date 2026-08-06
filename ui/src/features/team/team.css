@@ -248,3 +248,16 @@
   font-size: var(--fs-sm);
   max-width: 74ch;
 }
+
+/* Invite lifetime controls. Inline row above the copy button: the token goes
+ * straight to the clipboard, so these have to be readable BEFORE the click --
+ * there is no confirmation step in which to discover what was handed out. */
+.team-invite-bounds {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text2);
+}

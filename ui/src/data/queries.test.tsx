@@ -87,7 +87,7 @@ describe('every audit-writing mutation refreshes the audit trail', () => {
   it('useCreateInviteLink invalidates audit (invite-created)', async () => {
     const { qc, hook } = mountHook(() => useCreateInviteLink())
     const spy = vi.spyOn(qc, 'invalidateQueries')
-    await hook().mutateAsync('team-1')
+    await hook().mutateAsync({ teamId: 'team-1', expiresDays: 7, maxUses: 1 })
     expect(spy).toHaveBeenCalledWith({ queryKey: ['audit'] })
   })
 

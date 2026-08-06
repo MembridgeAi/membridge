@@ -9,7 +9,7 @@ import {
 
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SignOutResult, SkeletonStats, Status, StreamEntry,
+  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SignOutResult, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
@@ -728,7 +728,12 @@ export class FakeDataClient implements DataClient {
       { id: 'i2', createdAt: '2026-07-20T09:00:00Z', expiresAt: null, maxUses: null, useCount: 0, revoked: false },
     ])
   }
-  createInviteLink() { return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' }) }
+  // Takes the options so a test can assert what the SCREEN decided, not just
+  // that something was minted. The token is fixed; the interesting assertion
+  // is the bounds the caller asked for.
+  createInviteLink(_teamId: string, _options: InviteOptions) {
+    return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' })
+  }
   revokeInvite() { return this.guard<void>(undefined) }
   setMemberRole() { return this.guard<void>(undefined) }
   removeMember() { return this.guard<void>(undefined) }

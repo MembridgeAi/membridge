@@ -244,6 +244,12 @@ export function TeamPage() {
   // rather than in the mutation, because it has to survive the re-render into
   // the signed-out view -- that is the only screen the user sees afterwards.
   const [revokeFailure, setRevokeFailure] = useState<string | null>(null)
+  // Mirrors lib/server.js's INVITE_DEFAULT_EXPIRES_DAYS / INVITE_DEFAULT_MAX_USES.
+  // The screen states them and SENDS them rather than letting the daemon fill in
+  // an omitted field: an invite the user cannot see the terms of is how every
+  // invite this app minted ended up permanent (agent-sec cff17e3).
+  const [expiresDays, setExpiresDays] = useState(7)
+  const [maxUses, setMaxUses] = useState(1)
 
   // Only the "Copied" confirmation fades; the value itself stays on screen so
   // the viewer can always see exactly what was shared.
@@ -290,7 +296,7 @@ export function TeamPage() {
     setActionError(null)
     if (webUrl && teamId) {
       try {
-        const { token } = await mintInvite.mutateAsync(teamId)
+        const { token } = await mintInvite.mutateAsync({ teamId, expiresDays, maxUses })
         // The hosted join page reads its token from location.hash
         // (cloudflare/join/public/index.html), so the redeemable link is
         // `<webUrl>/#<token>` -- the same shape the Members page mints.
@@ -447,6 +453,40 @@ export function TeamPage() {
                 You are the {roleLabel(team.role)}
                 {memberCountLabel(team.memberCount) && ` · ${memberCountLabel(team.memberCount)}`}
               </p>
+              {/* The terms of the link BEFORE it is minted, because the token
+                  goes straight to the clipboard -- there is no confirmation
+                  step where a user could otherwise discover what they just
+                  handed out. Every invite this app minted before agent-sec
+                  cff17e3 was permanent and unlimited, and nothing on screen
+                  ever said so or offered a way to change it.
+
+                  Only for the LINK path: `inviteCode` is the standing team
+                  code, long-lived and unlimited-use by design, and these
+                  bounds do not apply to it. */}
+              {canMintLink && (
+                <div className="team-invite-bounds">
+                  <label htmlFor="invite-expires">Expires</label>
+                  <select
+                    id="invite-expires" value={String(expiresDays)}
+                    onChange={e => setExpiresDays(Number(e.target.value))}
+                  >
+                    <option value="1">in 1 day</option>
+                    <option value="7">in 7 days</option>
+                    <option value="30">in 30 days</option>
+                    {/* 0 is the daemon's explicit opt-out, not an omission. */}
+                    <option value="0">never</option>
+                  </select>
+                  <label htmlFor="invite-uses">Uses</label>
+                  <select
+                    id="invite-uses" value={String(maxUses)}
+                    onChange={e => setMaxUses(Number(e.target.value))}
+                  >
+                    <option value="1">once</option>
+                    <option value="5">up to 5 times</option>
+                    <option value="0">unlimited</option>
+                  </select>
+                </div>
+              )}
               {(canMintLink || inviteCode) && (
                 <div className="team-actions">
                   <button

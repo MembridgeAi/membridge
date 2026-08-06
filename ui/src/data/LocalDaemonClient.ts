@@ -4,7 +4,7 @@
 import type { Capabilities, DataClient } from './DataClient'
 import type {
   AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  Member, Project, Role, SearchPage, InviteOptions, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -635,8 +635,8 @@ export class LocalDaemonClient implements DataClient {
   // (teamsync.inviteUrl -- the CLI/app/settings consumer), not the hash-based
   // shape the Members-page UI needs, so only the token is taken here; the
   // caller builds `${webUrl}/#${token}` itself.
-  async createInviteLink(teamId: string): Promise<{ token: string }> {
-    const inv = await post<{ token: string }>('/api/team/invite', { teamId })
+  async createInviteLink(teamId: string, options: InviteOptions): Promise<{ token: string }> {
+    const inv = await post<{ token: string }>('/api/team/invite', { teamId, expiresDays: options.expiresDays, maxUses: options.maxUses })
     return { token: inv.token }
   }
 
