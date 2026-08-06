@@ -351,6 +351,12 @@ Three branches carry this work — `agent-sec`, `agent-backend2` and `agent-remo
 
    Practical rule: after a renumber, list every migration number on disk and read what claims it, rather than grepping for the numbers you touched.
 
+6. **`agent-hunt` does NOT merge cleanly — 11 files, 18 conflict regions**, and a large share of them are self-inflicted. It was never part of the dry run, and it is not test-only: it changes `lib/server.js`, `lib/teamsync.js`, `lib/feed.js`, `lib/digest.js` and `lib/team-archive.js`, plus the headers of four already-applied migrations (`031`–`034`).
+
+   Five of the conflicts are `add/add` on test suites, and the cause is worth naming because it is a habit, not an accident: those files were brought onto the security branch with `git checkout agent-hunt -- <file>` rather than by merging or cherry-picking. **A file copied that way has no shared history with the original, so git cannot three-way merge it and reports add/add — a conflict guaranteed at the moment of import, and invisible until someone merges the branch properly.** If you need one file from another branch and it may ever be merged, cherry-pick the commit instead.
+
+   Of `agent-hunt`'s 19 test suites, 14 would merge with no conflict; the 5 that conflict are the ones that were imported. Which of its deliberate red findings are now closed by the other lanes' fixes is being audited from the hunt side separately.
+
 Everything else merged cleanly, and the combined test suite was run — see the SEC-14 report.
 
 **This section exists because the merge had to be dry-run twice in one evening**, and the second run found more than the first.
