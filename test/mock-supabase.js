@@ -116,6 +116,14 @@ function createMockSupabase() {
     // so a test can demonstrate that the guard is what stops a team deletion
     // from aborting on team_audit's own foreign key.
     noLeaveCascadeGuard: false,
+    // Stands in for "049 not applied": team_audit.actor_id keeps its original
+    // no-on-delete-action foreign key, so any audit row naming a user as actor
+    // blocks deleting that account. Since 046 that is every member.
+    noAuditActorSetNull: false,
+    // Stands in for the WRONG version of 049: `on delete cascade` instead of
+    // `on delete set null`, which deletes every audit row the departing user
+    // was the actor for -- including rows about what they did to OTHER people.
+    auditActorCascade: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -301,7 +309,10 @@ function createMockSupabase() {
   function handleRpc(res, fn, body, userId) {
     if (!userId) return json(res, 401, { message: 'not authenticated' });
     if (fn === 'create_team') {
-      const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdAt: new Date().toISOString() };
+      // createdBy: teams.created_by is NOT NULL and references auth.users with
+      // no on-delete action (schema.sql:13), so it blocks deleting the creator's
+      // account. Recorded here or deleteUserCascade's blocker list is vacuous.
+      const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdBy: userId, createdAt: new Date().toISOString() };
       teams.set(team.id, team);
       const ownerRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() };
       members.push(ownerRow);
@@ -328,7 +339,9 @@ function createMockSupabase() {
         : null;
       if (!row) row = projects.find(p => p.teamId === body.p_team && p.name === body.p_name);
       if (!row) {
-        row = { id: uuid(), teamId: body.p_team, name: body.p_name, repoUrl: body.p_repo_url || null };
+        // createdBy: projects.created_by, same shape as teams.created_by
+        // (schema.sql:31) and the same blocking effect.
+        row = { id: uuid(), teamId: body.p_team, name: body.p_name, repoUrl: body.p_repo_url || null, createdBy: userId };
         projects.push(row);
       }
       // 029 §3: unconditional, on the adopt-existing branch as well as the
@@ -363,6 +376,8 @@ function createMockSupabase() {
       if (!isManager(body.p_team, userId)) return json(res, 403, { message: 'only a team owner or admin can create invite links' });
       const inv = {
         token: shortToken(), teamId: body.p_team,
+        // invites.created_by, NOT NULL, no on-delete (002:58).
+        createdBy: userId,
         expiresAt: body.p_expires_at || null, maxUses: body.p_max_uses || null,
         useCount: 0, revokedAt: null,
         // Offset by the current row count so two invites minted inside the
@@ -1148,6 +1163,60 @@ function createMockSupabase() {
     return inserted;
   };
 
+  // Postgres' `delete from auth.users where id = ...`, constraints and all.
+  //
+  // Not an HTTP route: no client can delete an account. This models the
+  // operator/GoTrue action, and it models the BLOCKING constraints rather than
+  // only the cascading ones, because the blockers are the interesting part —
+  // every `references auth.users (id)` declared with no on-delete action stops
+  // the delete dead. Six of them do, and only ONE (team_audit.actor_id) is
+  // this session's doing. A model that skipped the other five would let a test
+  // claim 049 "unblocks account deletion", which it does not.
+  //
+  // Throws with the offending constraint name, as Postgres does, so a test can
+  // assert WHICH constraint refused rather than merely that something did.
+  const deleteUserCascade = userId => {
+    const blockers = [
+      // teams.created_by NOT NULL, no on-delete (schema.sql:13)
+      [[...teams.values()].some(t => t.createdBy === userId), 'teams_created_by_fkey'],
+      // projects.created_by NOT NULL, no on-delete (schema.sql:31)
+      [projects.some(p => p.createdBy === userId), 'projects_created_by_fkey'],
+      // memory_entries.author_id NOT NULL, no on-delete (schema.sql:46) — this
+      // is the one that makes account deletion impossible for every real user,
+      // and it predates today by a long way.
+      [entries.some(e => e.author_id === userId), 'memory_entries_author_id_fkey'],
+      // invites.created_by NOT NULL, no on-delete (002:58)
+      [[...invites.values()].some(i => i.createdBy === userId), 'invites_created_by_fkey'],
+      // team_audit.actor_id, nullable, no on-delete (024:44) UNTIL 049 makes
+      // it `on delete set null`. flags.noAuditActorSetNull stands in for
+      // "049 not applied".
+      [flags.noAuditActorSetNull && teamAudit.some(r => r.actor_id === userId), 'team_audit_actor_id_fkey'],
+    ];
+    for (const [blocked, constraint] of blockers) {
+      if (blocked) {
+        throw new Error(
+          `update or delete on table "users" violates foreign key constraint "${constraint}"`);
+      }
+    }
+    // 049: the surviving rows keep the event and lose the link.
+    if (flags.auditActorCascade) {
+      for (let i = teamAudit.length - 1; i >= 0; i--) {
+        if (teamAudit[i].actor_id === userId) teamAudit.splice(i, 1);
+      }
+    } else if (!flags.noAuditActorSetNull) {
+      for (const r of teamAudit) if (r.actor_id === userId) r.actor_id = null;
+    }
+    // The three FKs that already cascade: team_members.user_id (schema.sql:19),
+    // member_pubkeys.user_id (009:30), team_keys.member_user_id (009:46).
+    // NOTE: no memberDeleteTrigger call. 048's trigger is gated on
+    // auth.uid() = old.user_id and this path runs as the operator, so it does
+    // not fire — modelled by simply not calling it, which is what the WHEN
+    // clause amounts to here.
+    for (let i = members.length - 1; i >= 0; i--) if (members[i].userId === userId) members.splice(i, 1);
+    for (const [k, v] of pubkeys) if (k === userId || (v && v.user_id === userId)) pubkeys.delete(k);
+    for (let i = teamKeys.length - 1; i >= 0; i--) if (teamKeys[i].member_user_id === userId) teamKeys.splice(i, 1);
+    users.delete([...users.entries()].find(([, u]) => u.id === userId)?.[0]);
+  };
   // Postgres' `delete from public.teams where id = ...`, cascades and all.
   // Not an HTTP route: no client can delete a team (there is no policy and no
   // RPC), so this models an operator action taken in the SQL editor -- which
@@ -1168,7 +1237,7 @@ function createMockSupabase() {
       if (teamAudit[i].team_id === teamId) teamAudit.splice(i, 1);
     }
   };
-  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, deleteTeamCascade };
+  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, deleteTeamCascade, deleteUserCascade };
 }
 
 module.exports = { createMockSupabase, pgTimestamptz };

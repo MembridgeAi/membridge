@@ -1,0 +1,132 @@
+-- 049_team_audit_actor_set_null.sql: stop the audit trail from pinning an
+-- account open. `team_audit.actor_id references auth.users (id)` was declared
+-- with no on-delete action (024:44), so deleting a user who has ANY audit row
+-- fails on that constraint.
+--
+-- THIS IS A REGRESSION FROM 046, and this file is written by the lane that
+-- caused it. Before 046 a plain member had no audit rows at all -- the trail
+-- recorded invite churn, role changes and removals, all written by managers --
+-- so this constraint never touched them. 046 gives every member a
+-- `member-joined` row naming them as actor, which pins their account open.
+--
+-- ===========================================================================
+-- WHAT THIS DOES *NOT* FIX, STATED FIRST BECAUSE IT IS THE BIGGER FACT
+--
+-- Account deletion is blocked by SIX foreign keys, not one, and five of them
+-- predate this session. Every `references auth.users (id)` in the schema,
+-- audited:
+--
+--   BLOCKING (no on-delete action):
+--     teams.created_by            NOT NULL  schema.sql:13   -- created a team
+--     projects.created_by         NOT NULL  schema.sql:31   -- linked a project
+--     projects.archived_by        nullable  schema.sql:41   -- archived one
+--     memory_entries.author_id    NOT NULL  schema.sql:46   -- EVER SYNCED
+--     project_access.updated_by   nullable  024:36          -- set access
+--     invites.created_by          NOT NULL  002:58          -- minted an invite
+--     team_audit.actor_id         nullable  024:44          -- THIS FILE
+--
+--   ALREADY SAFE (on delete cascade):
+--     team_members.user_id        schema.sql:19
+--     member_pubkeys.user_id      009:30
+--     team_keys.member_user_id    009:46
+--
+-- memory_entries.author_id alone means account deletion was ALREADY impossible
+-- for anyone who had ever synced a single entry -- which is every real user.
+-- So 046 did not break account deletion in general; it removed the last
+-- population that could still be deleted: someone who joined a team and did
+-- nothing else. That is a narrower regression than "nobody can delete their
+-- account any more", and saying otherwise would overstate this file's value.
+--
+-- 049 fixes ONLY team_audit.actor_id. After it, account deletion is still
+-- blocked by the other six. Making deletion actually work is a feature, not a
+-- constraint tweak: the NOT NULL ones cannot take `set null` at all, and
+-- memory_entries.author_id would have to either cascade (which is what
+-- delete_my_entries, 035, already offers as a deliberate and audited action)
+-- or reassign. Two of the remaining nullable ones -- project_access.updated_by
+-- and projects.archived_by -- are the same one-line change as this file, and
+-- are deliberately NOT included here because they sit on tables the security
+-- and backend lanes are actively editing. Reaching into another lane's table
+-- to make a change they cannot see is the hazard 046 exists to avoid.
+-- ===========================================================================
+--
+-- ===========================================================================
+-- SET NULL, NOT CASCADE
+--
+-- Cascade is the tidier-looking option and it is wrong, for three reasons:
+--
+-- 1. IT IS A DELETE ON AN APPEND-ONLY TABLE. team_audit has no update policy
+--    and no delete policy -- not an oversight but the stated design (024 §5:
+--    "no policy means no access ... so the trail can never be edited or
+--    pruned through the API, only ever appended to", restated by 025 §5).
+--    A cascade would reach that same effect through the side door, by an
+--    action taken on a different table entirely.
+--
+-- 2. IT ERASES EVIDENCE OF WHAT SOMEONE DID TO OTHER PEOPLE. actor_id is not
+--    only on rows about the actor. An admin who revoked five colleagues'
+--    project access, changed two people's roles and removed a member is the
+--    actor on eight rows that are ABOUT THOSE OTHER PEOPLE. Cascading their
+--    account deletion would delete all eight -- so the trail would lose the
+--    record of access changes that still affect everyone else, on the say-so
+--    of the person who made them. "Delete my account" must not be a way to
+--    unmake decisions imposed on colleagues.
+--
+-- 3. THE SCHEMA ALREADY MADE THIS CALL. ops_audit.target_team is
+--    `references public.teams (id) on delete set null` (021:42) -- the same
+--    problem (a dead link on a record worth keeping) answered the same way,
+--    on the one table in this schema whose whole purpose is to outlive what
+--    it describes.
+--
+-- SET NULL is legal here with no data migration: actor_id is already nullable
+-- (024:44 declares it without NOT NULL), so no existing row changes and no
+-- rewrite is needed.
+--
+-- WHAT SET NULL DOES NOT ACHIEVE, said plainly: it is not erasure. It drops
+-- the link between the row and the account. The person's DISPLAY NAME is
+-- still on the trail, in `detail.targetName`, on their own member-joined
+-- (046) and member-left (048) rows and on any member-removed row about them.
+-- Scrubbing that is an UPDATE on an append-only table and a different
+-- decision -- one with a legal dimension (audit logs are commonly retained
+-- under a separate lawful basis from the account itself), not one to smuggle
+-- in behind a constraint change. Anyone reading this file for GDPR assurance
+-- should read this paragraph as the answer: it is not sufficient.
+-- ===========================================================================
+--
+-- Deploy gate, same discipline as 044/045/046/048: apply to the LIVE Supabase
+-- before shipping. Constraint changes are invisible to the offline suite
+-- except through the model in test/mock-supabase.js.
+--
+-- Re-runnable, and the drop-then-add is the only way to change an FK's
+-- referential action -- Postgres has no `alter constraint ... on delete`.
+-- The constraint name is Postgres' default for an inline column reference
+-- (`<table>_<column>_fkey`), which is what 024:44 produced; if a backend was
+-- built by hand and named it something else, the DROP is a no-op and the ADD
+-- fails on the duplicate. Check with:
+--   select conname from pg_constraint
+--    where conrelid = 'public.team_audit'::regclass and contype = 'f';
+--
+-- Rollback: supabase/rollback/pre-049-team-audit-actor-set-null.sql.
+
+alter table public.team_audit
+  drop constraint if exists team_audit_actor_id_fkey;
+
+alter table public.team_audit
+  add constraint team_audit_actor_id_fkey
+  foreign key (actor_id) references auth.users (id)
+  on delete set null;
+
+-- ---------------------------------------------------------------------------
+-- RENDERING, which is a client change and lives in lib/api-access.js readAudit
+-- rather than here -- noted so the two are not read apart.
+--
+-- A null actor_id is not "we could not resolve this person". It is a positive
+-- fact: their account was deleted. readAudit distinguishes the two, because
+-- collapsing them would resurrect the bug this branch already fixed once --
+-- a row rendering "Unknown" when the database knows exactly what happened.
+--
+-- It also must NOT fall back to detail.targetName for a null actor. That name
+-- belongs to the account that was just deleted, and reusing it would make the
+-- deletion cosmetic: the row would still say who it was. The self-acting
+-- fallback readAudit uses for a DEPARTED member (who still exists and still
+-- has a name) is exactly wrong here, and the null check runs first for that
+-- reason.
+-- ---------------------------------------------------------------------------
