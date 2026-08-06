@@ -348,6 +348,54 @@ describe('minting an invite link lets the user set its lifetime', () => {
   })
 })
 
+// TeamPage.tsx:274 gated the invite affordance on `!!(webUrl && team)` with no
+// role check, but create_invite is manager-gated on the daemon. A plain member
+// saw "Copy invite link", clicked it, and got a 403 -- and the "copy the code
+// instead" fallback that used to soften that was removed on purpose, because
+// handing the standing team code to ordinary members was itself the hole being
+// closed. So the button was left unaccompanied: an affordance whose only
+// possible outcome is an error.
+describe('inviting is offered only to people who can actually invite', () => {
+  it('offers no invite control to a plain member', async () => {
+    renderWith(new FakeDataClient({ role: 'member' }), <TeamPage />)
+    await screen.findByText('MemBridge HQ')
+    expect(screen.queryByRole('button', { name: /copy invite link/i })).toBeNull()
+    // The standing code is not a consolation prize -- handing it to a member
+    // is the thing the security lane removed.
+    expect(screen.queryByRole('button', { name: /copy invite code/i })).toBeNull()
+    // And no orphaned lifetime controls for a link they cannot mint.
+    expect(screen.queryByLabelText(/expires/i)).toBeNull()
+  })
+
+  // Not silence. A member who finds no affordance at all cannot tell whether
+  // the feature is missing, broken, or not theirs -- so say which. The People
+  // list immediately below names every member and their role, so this points
+  // at the answer rather than duplicating it (two lists that can disagree is
+  // how the roster and the invite area would drift apart).
+  it('tells the member that inviting is an owner/admin action, rather than saying nothing', async () => {
+    renderWith(new FakeDataClient({ role: 'member' }), <TeamPage />)
+    const note = await screen.findByTestId('invite-manager-only')
+    expect(note).toHaveTextContent(/owner/i)
+    expect(note).toHaveTextContent(/admin/i)
+    // Points at the roster that is already on this page.
+    expect(note).toHaveTextContent(/below/i)
+  })
+
+  // THE COUNTER-CHECK, both directions.
+  it('still offers the control to an admin, and says nothing about permission', async () => {
+    renderWith(new FakeDataClient({ role: 'admin' }), <TeamPage />)
+    expect(await screen.findByRole('button', { name: /copy invite link/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/expires/i)).toBeInTheDocument()
+    expect(screen.queryByTestId('invite-manager-only')).toBeNull()
+  })
+
+  it('still offers the control to the owner', async () => {
+    renderWith(new FakeDataClient({ role: 'owner' }), <TeamPage />)
+    expect(await screen.findByRole('button', { name: /copy invite link/i })).toBeInTheDocument()
+    expect(screen.queryByTestId('invite-manager-only')).toBeNull()
+  })
+})
+
 describe('Team page routing', () => {
   it('is in the rail even on a machine with no team, and resolves at /team', async () => {
     visit('/team')

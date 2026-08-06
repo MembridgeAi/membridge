@@ -268,10 +268,16 @@ export function TeamPage() {
   const team = (selectedId ? account?.teams.find(t => t.id === selectedId) : undefined) ?? account?.teams[0] ?? null
   const webUrl = account?.webUrl ?? null
   const inviteCode = team ? account?.inviteCode ?? null : null
-  // A real link needs both a hosted join page and a team to mint against;
-  // without a webUrl the control degrades to the standing code rather than
-  // producing a URL nothing can redeem.
-  const canMintLink = !!(webUrl && team)
+  // create_invite is manager-gated on the daemon, so an ordinary member who
+  // clicked this got a 403 -- an affordance whose only possible outcome is an
+  // error, which reads as the app being broken rather than as a permission
+  // they do not have. The "copy the standing code instead" fallback is NOT the
+  // consolation prize: handing that code to ordinary members is the hole the
+  // security lane closed, so the whole affordance goes rather than degrading.
+  const canInvite = team ? team.role === 'owner' || team.role === 'admin' : false
+  // A real link also needs a hosted join page to mint against; without a
+  // webUrl there is no URL anything could redeem.
+  const canMintLink = !!(webUrl && team && canInvite)
 
   async function present(kind: 'link' | 'code', value: string, copy: boolean) {
     if (!copy) {
@@ -463,6 +469,19 @@ export function TeamPage() {
                   Only for the LINK path: `inviteCode` is the standing team
                   code, long-lived and unlimited-use by design, and these
                   bounds do not apply to it. */}
+              {/* Not silence. A member who finds no control cannot tell whether
+                  inviting is missing, broken, or simply not theirs, so the page
+                  says which. It does NOT name the owner and admins here: the
+                  People list immediately below already names every member with
+                  their role, and a second copy of that answer is one that can
+                  disagree with the first. Pointing at it is the version that
+                  cannot drift. */}
+              {team && !canInvite && (
+                <p className="team-note" data-testid="invite-manager-only">
+                  Only the team’s owner and admins can invite people. You can see who they are in
+                  the People list below.
+                </p>
+              )}
               {canMintLink && (
                 <div className="team-invite-bounds">
                   <label htmlFor="invite-expires">Expires</label>
@@ -487,7 +506,7 @@ export function TeamPage() {
                   </select>
                 </div>
               )}
-              {(canMintLink || inviteCode) && (
+              {canInvite && (canMintLink || inviteCode) && (
                 <div className="team-actions">
                   <button
                     type="button" className="team-btn team-btn-primary"
