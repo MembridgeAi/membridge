@@ -28,11 +28,11 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 046 | Joining a team writes an audit row | `agent-removal` | no |
 | 047 | Two scoped Postgres roles for the ops panel | `agent-sec` | no |
 | 048 | `ops_audit.via_role` — records the verified credential beside the self-reported actor | `agent-sec` | no |
-| 049 | Records a voluntary departure in the audit trail | `agent-removal` | no — **file currently numbered 048 on that branch and must be renumbered to 049** |
+| 049 | Records a voluntary departure in the audit trail | `agent-removal` | no |
+| 050 | Stops the audit trail pinning a deleted account open | `agent-removal` | no |
 
-**Next free number: 050.**
+**Next free number: 051.**
 
-> **049 was allocated by the registry owner, not claimed by the lane.** `agent-removal` committed its departure-audit migration as `048`, which this table had already assigned. Neither branch conflicts on it — different filenames — so it would have merged silently. It is recorded here as 049 so the number is reserved while that lane renumbers; the fix belongs on `agent-removal`, not here.
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
 
@@ -301,7 +301,26 @@ Three branches carry this work — `agent-sec`, `agent-backend2` and `agent-remo
 
 3. **Check for two files sharing a migration number.** This already happened once: `agent-removal` committed a migration as `048` while the registry had assigned `048` elsewhere. Git does **not** conflict on that — different filenames, different paths, both files simply coexist — so it survives a merge in silence and only surfaces when someone applies them. `test/suites/migration-state.test.js` now fails on it; run that suite after merging, before doing anything else.
 
+4. **`test/mock-supabase.js` has THREE places where two lanes both added something, and git only conflicts on one of them.** This is the important entry. Two of the three merge *silently* and produce a file that is syntactically fine and behaviourally wrong:
+
+   | What | Does git conflict? | What goes wrong if you don't fix it |
+   |------|--------------------|--------------------------------------|
+   | The `flags` object | **Yes** | You resolve it, so it gets attention. Keep both. |
+   | The `/auth/v1/logout` handler | **No** | Two handlers for one route. The first wins and the second — the one honouring `failLogout` — becomes dead code, so a test that checks sign-out reports a *refused* revocation honestly fails for the wrong reason. |
+   | The `return { ... }` at the end | **No** | Two `return`s in one function. The first wins and **everything after it is unreachable**, including helpers the second lane defined. The symptom is `mock.deleteTeamCascade is not a function`, three suites away from the cause. |
+
+   After merging, check for both by hand — they are one-line checks and they are not optional:
+
+   ```
+   grep -c "url.pathname === '/auth/v1/logout'" test/mock-supabase.js   # must be 1
+   grep -c "^  return { server"                 test/mock-supabase.js   # must be 1
+   ```
+
+   The fix in both cases is to collapse the two into one that does both jobs. Working versions of both are in the SEC-14 dry-run tree.
+
 Everything else merged cleanly, and the combined test suite was run — see the SEC-14 report.
+
+**This section exists because the merge had to be dry-run twice in one evening.** The first run was already stale by the time it finished: a lane committed a new migration, and later renumbered, while the run was in flight. That is not an accident of timing to be waited out — with several lanes active it is the normal condition, and it is the reason to assemble the batch once deliberately rather than discovering its shape in Marco's SQL editor.
 
 ---
 
