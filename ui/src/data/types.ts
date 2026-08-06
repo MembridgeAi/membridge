@@ -303,6 +303,28 @@ export interface FeedPage {
  *  user_id, display_name, role, joined_at. A teammate's paused daemon or expired
  *  token lives on THEIR machine and is not knowable here — so this models
  *  "when did anything of theirs last arrive", never a diagnosis. */
+/**
+ * What signing out actually achieved. TWO outcomes, not one.
+ *
+ * This machine forgetting the session always happens: teamsync.signOut deletes
+ * credentials.json unconditionally, so a user offline or behind an outage can
+ * still sign out of their own laptop. Ending the session on the BACKEND can
+ * fail independently.
+ *
+ * `revoked` is true ONLY when the backend confirmed it -- never inferred from
+ * the absence of an error. When it is false, any copy of credentials.json
+ * taken before the sign-out (a backup, a synced folder, another process as the
+ * same user) still mints valid tokens until the session expires, and no retry
+ * from here can change that: the credentials are already gone from this
+ * machine, so there is nothing left to revoke WITH. Changing the account
+ * password is the only certain remedy.
+ */
+export interface SignOutResult {
+  revoked: boolean
+  /** The backend's own wording for why revocation failed; null when revoked. */
+  revokeError: string | null
+}
+
 export interface Member {
   id: string
   name: string

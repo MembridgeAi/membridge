@@ -233,3 +233,18 @@
   color: var(--text3);
   font-size: var(--fs-sm);
 }
+
+/* Sign-out whose backend revocation failed. Amber, not red: the sign-out did
+ * happen on this machine and the user did nothing wrong -- what is being stated
+ * is a limit on what it achieved. Text is --text, never --amber (which fails
+ * contrast on its own tint); the ⚠ carries the non-colour half of the signal. */
+.team-revoke-warning {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--amber-dim);
+  border: 1px solid var(--amber);
+  border-radius: var(--r);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  max-width: 74ch;
+}

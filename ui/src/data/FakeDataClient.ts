@@ -9,7 +9,7 @@ import {
 
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SignOutResult, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
@@ -42,6 +42,9 @@ function rawFeedEntry(over: Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project'
 }
 
 export interface FakeOptions {
+  /** Models a sign-out whose BACKEND revocation failed, carrying the daemon's
+   *  wording. Null/absent = the backend confirmed the session was ended. */
+  signOutRevokeError?: string | null
   solo?: boolean
   role?: Role
   // The daemon's sync-loop health (Status.health). Omitted => the healthy 'ok'
@@ -595,7 +598,14 @@ export class FakeDataClient implements DataClient {
   signUp(credentials: { displayName: string; email: string; password: string }) {
     return this.guard<{ needsConfirmation: boolean; email: string }>({ needsConfirmation: true, email: credentials.email })
   }
-  signOut() { return this.guard<void>(undefined) }
+  // Default is the good path: the backend confirmed the revocation. The
+  // failure is opt-in via `signOutRevokeError` rather than the default,
+  // because a fixture that failed revocation by default would make every
+  // unrelated sign-out test render the warning.
+  signOut() {
+    const err = this.opts.signOutRevokeError ?? null
+    return this.guard<SignOutResult>({ revoked: !err, revokeError: err })
+  }
   createTeam(name: string) {
     return this.guard<{ id: string; inviteCode: string | null }>({ id: 'team-new', inviteCode: `INV-${name.slice(0, 3).toUpperCase()}` })
   }

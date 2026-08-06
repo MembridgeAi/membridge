@@ -3,7 +3,7 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, McpRegisterResult,
   Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
@@ -341,9 +341,17 @@ export class LocalDaemonClient implements DataClient {
     return { needsConfirmation: !!r.needsConfirmation, email: r.email }
   }
 
-  async signOut(): Promise<void> {
-    await postReadingError<{ authenticated: boolean }>('/api/team/logout')
+  async signOut(): Promise<SignOutResult> {
+    const r = await postReadingError<{ authenticated: boolean; revoked?: boolean; revokeError?: string | null }>('/api/team/logout')
     this.requestCache.clear()
+    // `revoked` FAILS CLOSED to false. A daemon too old to send the field has
+    // not revoked anything -- it only deleted the local file -- so treating a
+    // missing field as success would restore exactly the false assurance this
+    // reports. Defaulting the other way is the security-relevant direction.
+    return {
+      revoked: r.revoked === true,
+      revokeError: r.revoked === true ? null : (r.revokeError ?? null),
+    }
   }
 
   // postReadingError, not post: every reason a join fails is a sentence the

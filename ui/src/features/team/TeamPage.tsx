@@ -240,6 +240,10 @@ export function TeamPage() {
 
   const [share, setShare] = useState<Share | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  // The backend's wording for a revocation that did NOT happen, held here
+  // rather than in the mutation, because it has to survive the re-render into
+  // the signed-out view -- that is the only screen the user sees afterwards.
+  const [revokeFailure, setRevokeFailure] = useState<string | null>(null)
 
   // Only the "Copied" confirmation fades; the value itself stays on screen so
   // the viewer can always see exactly what was shared.
@@ -316,8 +320,12 @@ export function TeamPage() {
   async function handleSignOut() {
     setActionError(null)
     setShare(null)
+    setRevokeFailure(null)
     try {
-      await signOut.mutateAsync()
+      const out = await signOut.mutateAsync()
+      // Only when the backend did NOT confirm. `revoked` is never inferred
+      // from the absence of an error, so this is the one honest trigger.
+      if (!out.revoked) setRevokeFailure(out.revokeError || 'the server did not confirm it')
     } catch (err) {
       setActionError(errorMessage(err))
     }
@@ -350,6 +358,26 @@ export function TeamPage() {
           "Loading…" line where the account card will be, replaced with
           placeholder rows that hold that card's shape. */}
       {!account && <LoadingRows rows={2} label="Loading your account" testId="team-loading" />}
+
+      {/* Sign-out is two outcomes and this is the one the screen used to hide.
+          The local credential file is always deleted -- that is why the user is
+          looking at the sign-in card -- but the SESSION may still be alive on
+          the backend, and any copy of the credentials taken before now keeps
+          working until it expires.
+
+          Deliberately no "try again": the credentials are gone from this
+          machine, so there is nothing left to revoke WITH, and offering a retry
+          would name a remedy that cannot work. Matches the CLI's wording for
+          the same outcome (bin/membridge.js cmdLogout), so the two surfaces
+          cannot tell the user different things about the same event. */}
+      {revokeFailure && (
+        <p className="team-revoke-warning" role="alert" data-testid="signout-not-revoked">
+          ⚠ Signed out on this machine only. The session could not be ended on the server:
+          {' '}{revokeFailure}. A copy of this machine’s credentials taken before now can still
+          use that session until it expires. Changing your account password is the way to end
+          it for certain.
+        </p>
+      )}
 
       {account && !account.authenticated && <SignInCard configured={account.configured} />}
 

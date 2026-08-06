@@ -4,7 +4,7 @@
 // team -- the app never said "you are signed out", and Settings' only team
 // control was "Leave team", so anyone wanting to start a team dead-ended.
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { screen, cleanup } from '@testing-library/react'
+import { screen, cleanup, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
@@ -208,6 +208,69 @@ describe('TeamPage, signed in on a team', () => {
     renderWith(new FakeDataClient(), <TeamPage />)
     await screen.findByText('MemBridge HQ')
     expect(screen.queryByRole('button', { name: /leave team/i })).toBeNull()
+  })
+})
+
+// Sign-out is TWO outcomes, not one. This machine forgetting the session
+// always happens -- teamsync.signOut deletes credentials.json unconditionally,
+// so a user offline can still sign out of their own laptop. Ending the session
+// on the BACKEND can fail, and when it does, any copy of credentials.json
+// taken before now still mints valid tokens until the session expires.
+//
+// The daemon reports both (`revoked` is true only when the backend confirmed
+// it, never inferred from silence). The screen rendered one outcome, so a
+// failed revocation looked exactly like a clean one -- a security claim
+// nothing supported, and the same shape as the keyAlert chip that could never
+// fire.
+describe('TeamPage sign-out reports whether the session was really ended', () => {
+  const signOutReturning = (revoked: boolean, revokeError: string | null) => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'signOut').mockResolvedValue({ revoked, revokeError })
+    return client
+  }
+
+  it('says the session may still be usable, and names the certain remedy, when revocation failed', async () => {
+    renderWith(signOutReturning(false, 'network unreachable'), <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
+
+    const notice = await screen.findByTestId('signout-not-revoked')
+    // Scoped honestly: the machine forgot, the server did not.
+    expect(notice).toHaveTextContent(/this machine/i)
+    // The backend's own words, not a generic failure.
+    expect(notice).toHaveTextContent(/network unreachable/)
+    // The consequence the user actually needs: a copy still works until the
+    // session expires.
+    expect(notice).toHaveTextContent(/until it expires/i)
+    // The one real remedy.
+    expect(notice).toHaveTextContent(/password/i)
+  })
+
+  // The wording rule the backend lane set deliberately, and the reason this is
+  // asserted as an ABSENCE: by the time this renders the credentials are gone
+  // from this machine, so there is nothing left to revoke WITH. "Try again"
+  // would be a remedy that cannot work.
+  it('never offers a retry, which could not revoke anything', async () => {
+    renderWith(signOutReturning(false, 'network unreachable'), <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
+    const notice = await screen.findByTestId('signout-not-revoked')
+    expect(notice.textContent).not.toMatch(/try again|retry|later/i)
+    expect(screen.queryByRole('button', { name: /try again|retry/i })).toBeNull()
+  })
+
+  // THE COUNTER-CHECK. A confirmed revocation must stay quiet -- warning on
+  // every sign-out would be the same false alarm in the other direction.
+  it('says nothing extra when the backend confirmed the revocation', async () => {
+    const client = signOutReturning(true, null)
+    const spy = vi.spyOn(client, 'signOut')
+    renderWith(client, <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
+    // Anchored on the call having RESOLVED, not on the page flipping to the
+    // sign-in card: FakeDataClient.getTeamAccount keeps reporting
+    // `authenticated: true`, so the signed-out view never renders here and
+    // waiting for it would time out on a build that is behaving correctly.
+    await waitFor(() => expect(spy).toHaveBeenCalled())
+    expect(screen.queryByTestId('signout-not-revoked')).toBeNull()
+    expect(screen.queryByText(/until it expires/i)).toBeNull()
   })
 })
 

@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  Member, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -91,8 +91,11 @@ export interface DataClient {
   // state, not a failure, and callers MUST say so (silence there reads as a
   // rejected sign-up).
   signUp(credentials: { displayName: string; email: string; password: string }): Promise<{ needsConfirmation: boolean; email: string }>
-  // POST /api/team/logout -- clears this machine's stored credentials.
-  signOut(): Promise<void>
+  // POST /api/team/logout -- clears this machine's stored credentials AND asks
+  // the backend to end the session. The two can disagree, which is why this
+  // resolves a result instead of void: a caller that renders a clean "signed
+  // out" over `revoked: false` is making a security claim nothing supports.
+  signOut(): Promise<SignOutResult>
   // POST /api/team/create. Resolves the created team's id and its standing
   // invite code (lib/teamsync.js createTeam returns { team_id, invite_code }).
   createTeam(name: string): Promise<{ id: string; inviteCode: string | null }>
