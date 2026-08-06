@@ -7,8 +7,10 @@ import { App } from '../../app/App'
 import { FEED_PAGE_SIZE } from '../../data/queries'
 import type { FeedEntry, FeedFilters, FeedPage as FeedPageData } from '../../data/types'
 import { ROUTES, dayHref, daySessionHref, sessionHref } from '../../app/routes'
-import { buildDayCards, dayCardKey, daySlug } from './dayCards'
-import { DayPage, sessionTimeRange } from './DayPage'
+import { DAY_FILE_LIMIT, buildDayCards, dayCardKey, daySlug } from './dayCards'
+import { DayPage } from './DayPage'
+import { MAX_AUTO_PAGES } from './FeedPage'
+import { sessionTimeRange } from './DaySessionRow'
 
 const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
   id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:00:00Z',
@@ -115,15 +117,15 @@ describe('DayPage: a real day', () => {
     const entries = aDay()
     const { container, slug } = renderDay(entries)
     await screen.findByText('Ports fixed and pushed')
-    const hrefs = [...container.querySelectorAll('.day-session-link')].map(a => a.getAttribute('href'))
+    const hrefs = [...container.querySelectorAll('.day-sessions .day-session-row')].map(a => a.getAttribute('href'))
     expect(hrefs).toEqual(['s-2', 's-1'].map(id => sessionHref(id, dayHref(slug))))
   })
 
-  it('puts the sections in the owner\'s order: files, then what was done, then prompts', async () => {
+  it('puts the sections in the owner\'s order: files, then summaries, then sessions', async () => {
     const { container } = renderDay(aDay())
     await screen.findByText('Ports fixed and pushed')
     const titles = [...container.querySelectorAll('.day-section-title')].map(el => el.textContent)
-    expect(titles).toEqual(['Files touched2', 'What was done', 'Prompts'])
+    expect(titles).toEqual(['Files touched2', 'Summaries1', 'Sessions2'])
   })
 
   it('offers a real way back to the Feed', async () => {
@@ -138,13 +140,13 @@ describe('DayPage: a real day', () => {
     const { container } = renderDay([entry({ id: 'a', session: 's-1', outcome: '', intent: 'start', files: [] })])
     await screen.findByText(/No summary yet/)
     const titles = [...container.querySelectorAll('.day-section-title')].map(el => el.textContent)
-    expect(titles).toEqual(['Prompts'])
+    expect(titles).toEqual(['Sessions1'])
   })
 
   it('names which project a session ran in only on a day that spans several', async () => {
     const oneProject = renderDay(aDay())
     await screen.findByText('Ports fixed and pushed')
-    expect(oneProject.container.querySelectorAll('.day-session-project')).toHaveLength(0)
+    expect(oneProject.container.querySelectorAll('.day-session-row-project')).toHaveLength(0)
     oneProject.unmount()
 
     const mixed = renderDay([
@@ -152,7 +154,7 @@ describe('DayPage: a real day', () => {
       entry({ id: 'b', session: 's-2', at: '2026-07-29T19:00:00Z', outcome: 'sublease work', project: 'sublease', projectPath: '/Users/x/sublease' }),
     ])
     await screen.findByText('membridge work')
-    expect([...mixed.container.querySelectorAll('.day-session-project')].map(el => el.textContent))
+    expect([...mixed.container.querySelectorAll('.day-sessions .day-session-row-project')].map(el => el.textContent))
       .toEqual(['membridge', 'sublease'])
   })
 
@@ -164,8 +166,251 @@ describe('DayPage: a real day', () => {
     const targeted = container.querySelectorAll('.day-session-targeted')
     expect(targeted).toHaveLength(1)
     // And a session opened from here comes back to the day, still marked.
-    const href = targeted[0].querySelector('.day-session-link')!.getAttribute('href')
+    const href = targeted[0].querySelector('.day-session-row')!.getAttribute('href')
     expect(href).toBe(sessionHref('s-1', daySessionHref(cards[0].slug, 's-1')))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The three sections, as the owner asked for them.
+//
+// A note on how the folds are asserted: jsdom implements <details> as a plain
+// element with a reflected `open` attribute and NO activation behavior on
+// <summary> (node_modules/jsdom/.../HTMLDetailsElement-impl.js), so clicking a
+// summary does not toggle anything and a closed fold's children are still in
+// the DOM. Presence therefore proves nothing about open or closed. These tests
+// assert the `open` property, which is the real state, and assert that the
+// list lives INSIDE .day-fold-body, which is the real "it is behind the fold".
+// ---------------------------------------------------------------------------
+describe('DayPage: files touched, as a disclosure above the summaries', () => {
+  /** 47 distinct paths: three the day kept coming back to, and 44 it touched
+   *  once. Built as one entry's `files`, which dayFiles counts per occurrence. */
+  const wideFiles = [
+    ...Array.from({ length: 9 }, () => 'ui/src/features/feed/dayCards.ts'),
+    ...Array.from({ length: 7 }, () => 'ui/src/features/feed/feed.css'),
+    ...Array.from({ length: 5 }, () => 'ui/src/features/feed/DayPage.tsx'),
+    ...Array.from({ length: 44 }, (_, i) => `lib/mod${String(i).padStart(2, '0')}.js`),
+  ]
+
+  const bigDay = () => [
+    entry({
+      id: 'a', session: 's-1', at: '2026-07-29T18:00:00Z', tool: 'Claude Code',
+      outcome: 'Hook ownership now decided by durability',
+      intent: 'make the summary hook fire on session boundaries',
+      files: wideFiles,
+      decisions: '- Durability beats recency\n- Merged before writing settings.json',
+    }),
+    entry({
+      id: 'c', session: 's-2', at: '2026-07-29T21:00:00Z', tool: 'Codex', distilled: true,
+      outcome: 'Ports fixed and pushed',
+      intent: 'fix the port collision in the test suite',
+      files: [],
+    }),
+  ]
+
+  const filesFold = (container: HTMLElement) =>
+    container.querySelector('.day-fold-body .day-files')!.closest('details') as HTMLDetailsElement
+
+  it('heads the page with all three sections, in order, each carrying its count', async () => {
+    const { container } = renderDay(bigDay())
+    await screen.findByText('Ports fixed and pushed')
+    const titles = [...container.querySelectorAll('.day-section-title')].map(el => el.textContent)
+    expect(titles).toEqual(['Files touched47', 'Summaries3', 'Sessions2'])
+  })
+
+  it('starts the files fold closed, so the summaries stay above the fold', async () => {
+    const { container } = renderDay(bigDay())
+    await screen.findByText('Ports fixed and pushed')
+    expect(filesFold(container).open).toBe(false)
+  })
+
+  it('names the three most-touched files, with their counts, while closed', async () => {
+    const { container } = renderDay(bigDay())
+    await screen.findByText('Ports fixed and pushed')
+    // Counts on all three including a 1x, because here the number is the
+    // ranking evidence rather than a badge.
+    expect(container.querySelector('.day-fold-peek')!.textContent)
+      .toBe('…/feed/dayCards.ts 9x · …/feed/feed.css 7x · …/feed/DayPage.tsx 5x')
+  })
+
+  it('puts the full ranked list behind the fold, most-touched first', async () => {
+    const { container } = renderDay(bigDay())
+    await screen.findByText('Ports fixed and pushed')
+    const body = filesFold(container).querySelector('.day-fold-body')!
+    const files = [...body.querySelectorAll('.day-file-name')].map(el => el.textContent)
+    expect(files).toHaveLength(DAY_FILE_LIMIT)
+    expect(files.slice(0, 3)).toEqual([
+      'ui/src/features/feed/dayCards.ts',
+      'ui/src/features/feed/feed.css',
+      'ui/src/features/feed/DayPage.tsx',
+    ])
+  })
+
+  it('keeps "+N more" inside the fold and still expanding the list', async () => {
+    const { container } = renderDay(bigDay())
+    await screen.findByText('Ports fixed and pushed')
+    const more = await screen.findByRole('button', { name: '+35 more' })
+    expect(more.closest('.day-fold-body')).not.toBeNull()
+
+    await userEvent.click(more)
+    expect(container.querySelectorAll('.day-file-name')).toHaveLength(47)
+    // The heading count is the TOTAL throughout, never the shown-so-far number.
+    expect(container.querySelector('.day-section-count')!.textContent).toBe('47')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Show fewer' }))
+    expect(container.querySelectorAll('.day-file-name')).toHaveLength(DAY_FILE_LIMIT)
+  })
+
+  it('does not fold three files or fewer, because a chevron over nothing is a lie', async () => {
+    const { container } = renderDay([entry({
+      id: 'a', session: 's-1', outcome: 'a narrow day',
+      files: ['lib/hooks.js', 'lib/feed.js', 'lib/scan.js'],
+    })])
+    await screen.findByText('a narrow day')
+    expect(container.querySelector('.day-files')!.closest('details')).toBeNull()
+    expect(container.querySelector('.day-fold-peek')).toBeNull()
+    expect(container.querySelectorAll('.day-file-name')).toHaveLength(3)
+  })
+
+  it('drops the files section entirely on a day that touched none', async () => {
+    const { container } = renderDay([entry({ id: 'a', session: 's-1', outcome: 'no files', files: [] })])
+    await screen.findByText('no files')
+    expect(container.querySelector('.day-files')).toBeNull()
+    expect([...container.querySelectorAll('.day-section-title')].map(el => el.textContent))
+      .not.toContain('Files touched')
+  })
+})
+
+describe('DayPage: summaries, grouped under the session that produced them', () => {
+  const aDay = () => [
+    entry({
+      id: 'a', session: 's-1', at: '2026-07-29T18:00:00Z', tool: 'Claude Code',
+      outcome: 'Hook ownership now decided by durability',
+      intent: 'make the summary hook fire on session boundaries',
+    }),
+    entry({
+      id: 'c', session: 's-2', at: '2026-07-29T21:00:00Z', tool: 'Codex', distilled: true,
+      outcome: 'Ports fixed and pushed', intent: 'fix the port collision',
+    }),
+  ]
+
+  it('opens by default, because it is the answer the page exists to give', async () => {
+    const { container } = renderDay(aDay())
+    await screen.findByText('Ports fixed and pushed')
+    const fold = container.querySelector('.day-summaries')!.closest('details') as HTMLDetailsElement
+    expect(fold.open).toBe(true)
+  })
+
+  it('puts each session\'s bullets under a row that names that session', async () => {
+    const { container, slug } = renderDay(aDay())
+    await screen.findByText('Ports fixed and pushed')
+    const groups = [...container.querySelectorAll('.day-summary-group')]
+    expect(groups).toHaveLength(1)
+    const row = groups[0].querySelector('.day-session-row')!
+    expect(row.textContent).toContain('Claude Code')
+    expect([...groups[0].querySelectorAll('.day-bullet')].map(el => el.textContent))
+      .toEqual(['Hook ownership now decided by durability'])
+    // The point of the row: read a bullet, click into the run that produced it.
+    expect(row.tagName).toBe('A')
+    expect(row.getAttribute('href')).toBe(sessionHref('s-1', dayHref(slug)))
+  })
+
+  it('carries no prompt count, because the bullets are already underneath', async () => {
+    const { container } = renderDay(aDay())
+    await screen.findByText('Ports fixed and pushed')
+    expect(container.querySelector('.day-summary-group .day-session-row-meta')).toBeNull()
+  })
+
+  it('names the project on a summary row only when the day spans several', async () => {
+    const oneProject = renderDay(aDay())
+    await screen.findByText('Ports fixed and pushed')
+    expect(oneProject.container.querySelectorAll('.day-summary-group .day-session-row-project')).toHaveLength(0)
+    oneProject.unmount()
+
+    const mixed = renderDay([
+      entry({ id: 'a', session: 's-1', at: '2026-07-29T20:00:00Z', outcome: 'membridge work', project: 'membridge', projectPath: '/Users/x/membridge' }),
+      entry({ id: 'b', session: 's-2', at: '2026-07-29T19:00:00Z', outcome: 'sublease work', project: 'sublease', projectPath: '/Users/x/sublease' }),
+    ])
+    await screen.findByText('membridge work')
+    expect([...mixed.container.querySelectorAll('.day-summary-group .day-session-row-project')].map(el => el.textContent))
+      .toEqual(['sublease'])
+  })
+
+  it('drops the summaries section entirely when no session produced a point', async () => {
+    const { container } = renderDay([entry({ id: 'a', session: 's-1', outcome: '', intent: 'just an ask' })])
+    await screen.findByText(/No summary yet/)
+    expect(container.querySelector('.day-summaries')).toBeNull()
+    expect([...container.querySelectorAll('.day-section-title')].map(el => el.textContent))
+      .not.toContain('Summaries')
+  })
+})
+
+describe('DayPage: sessions you click into', () => {
+  const chatty = () => [
+    entry({ id: 'a', session: 's-1', at: '2026-07-29T18:00:00Z', outcome: 'the day\'s work', intent: 'first ask' }),
+    entry({ id: 'b', session: 's-1', at: '2026-07-29T19:00:00Z', outcome: 'the day\'s work', intent: 'second ask' }),
+  ]
+
+  it('makes the whole session header one link, not a timestamp with a chevron', async () => {
+    const { container, slug } = renderDay(chatty())
+    await screen.findByText('first ask')
+    const row = container.querySelector('.day-sessions .day-session-row')!
+    expect(row.tagName).toBe('A')
+    expect(row.getAttribute('href')).toBe(sessionHref('s-1', dayHref(slug)))
+    // Everything a reader targets is inside the one anchor.
+    expect(row.querySelector('.day-session-row-time')!.textContent).toBe('11:00 AM to 12:00 PM')
+    expect(row.querySelector('.day-session-row-chevron')).not.toBeNull()
+  })
+
+  it('says how many prompts a session captured, in words', async () => {
+    const many = renderDay(chatty())
+    await screen.findByText('first ask')
+    expect(many.container.querySelector('.day-sessions .day-session-row-meta')!.textContent).toBe('2 prompts')
+    many.unmount()
+
+    const one = renderDay([entry({ id: 'a', session: 's-9', outcome: 'one ask only', intent: 'the only ask' })])
+    await screen.findByText('the only ask')
+    expect(one.container.querySelector('.day-sessions .day-session-row-meta')!.textContent).toBe('1 prompt')
+    one.unmount()
+
+    // A session that captured no prompt says nothing, rather than "0 prompts".
+    const none = renderDay([entry({ id: 'a', session: 's-8', outcome: 'no ask captured', intent: null })])
+    await screen.findByText('no ask captured')
+    expect(none.container.querySelector('.day-sessions .day-session-row-meta')).toBeNull()
+  })
+
+  // <a> inside <a> is unnestable by the parser: the live DOM would silently
+  // stop matching this JSX and every structural assertion here would go
+  // strange. The prompts are a SIBLING of the row, never a child.
+  it('keeps the prompt list a sibling of the row, never inside the anchor', async () => {
+    const { container } = renderDay(chatty())
+    await screen.findByText('first ask')
+    const row = container.querySelector('.day-sessions .day-session-row')!
+    expect(row.querySelector('.day-prompt')).toBeNull()
+    expect(row.querySelector('a')).toBeNull()
+    expect(row.nextElementSibling!.tagName).toBe('OL')
+  })
+
+  // The complaint this section answers is that sessions drop down instead of
+  // opening. A per-session fold here would reintroduce exactly that.
+  it('leaves the prompts unfolded, not behind a second disclosure', async () => {
+    const { container } = renderDay(chatty())
+    await screen.findByText('first ask')
+    expect(container.querySelector('.day-session details')).toBeNull()
+    expect([...container.querySelectorAll('.day-prompt-text')].map(el => el.textContent))
+      .toEqual(['first ask', 'second ask'])
+  })
+
+  it('renders a session with no id as a row that is plainly not a link', async () => {
+    const { container } = renderDay([entry({ id: 'bare', session: null, outcome: 'a bare-plumbing row' })])
+    await screen.findByText('a bare-plumbing row')
+    const rows = [...container.querySelectorAll('.day-session-row')]
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row.tagName).not.toBe('A')
+      expect(row.classList.contains('day-session-row-static')).toBe(true)
+      expect(row.querySelector('.day-session-row-chevron')).toBeNull()
+    }
   })
 })
 
@@ -393,10 +638,20 @@ describe('DayPage: reached through the route, not the prop', () => {
 // pulled up from far further back.
 // ---------------------------------------------------------------------------
 describe('DayPage: a card clicked out of a filtered feed', () => {
-  // One person's 160 rows, all on the same local day, bury everybody else:
-  // that is more than the day view could ever walk back to on its own, so the
-  // ONLY way to reach Sarah's day is to ask the question the feed asked.
-  const noisy = Array.from({ length: 160 }, (_, i) => entry({
+  // One person's rows, all on the same local day, bury everybody else: that is
+  // more than the day view could ever walk back to on its own, so the ONLY way
+  // to reach Sarah's day is to ask the question the feed asked.
+  //
+  // THE COUNT IS LOAD-BEARING and must stay ahead of MAX_AUTO_PAGES. /api/feed's
+  // `before` is inclusive, so page one carries FEED_PAGE_SIZE rows and every
+  // page after it adds only FEED_PAGE_SIZE - 1 new ones: the walk reaches
+  // 30 + (MAX_AUTO_PAGES - 1) * 29 rows, which is 146 at a cap of 5 and 407 at
+  // a cap of 14. At 160 rows this fixture was exhausted in 6 calls, so raising
+  // the cap did not just break the count assertion below, it reached Sarah and
+  // destroyed the premise of the test: "not in view" stopped being true. 420
+  // keeps the day genuinely out of reach at both caps, with room to raise it
+  // again before this needs revisiting.
+  const noisy = Array.from({ length: 420 }, (_, i) => entry({
     id: `n${i}`, session: `n${i}`, authorId: 'marco', author: 'Marco',
     at: new Date(Date.parse('2026-07-29T20:00:00Z') - i * 60_000).toISOString(),
     outcome: 'busy teammate',
@@ -443,7 +698,11 @@ describe('DayPage: a card clicked out of a filtered feed', () => {
 
     expect(await screen.findByText(/not in view/i)).toBeInTheDocument()
     await new Promise(resolve => setTimeout(resolve, 400))
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(5)
+    // Against the CONSTANT, never a literal. This asserted `<= 5` while
+    // DayPage's cap was 5; the moment the feed raised MAX_AUTO_PAGES the
+    // assertion failed on a bound that had moved legitimately, which is a test
+    // reporting its own staleness as a defect in the code.
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(MAX_AUTO_PAGES)
     const cursors = spy.mock.calls.map(([, opts]) => opts.before)
     expect(new Set(cursors).size).toBe(cursors.length)
   })
