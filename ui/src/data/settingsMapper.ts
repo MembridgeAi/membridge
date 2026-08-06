@@ -1,7 +1,7 @@
 // Settings-specific mapping, split out of mappers.ts (Task 18) to keep that
 // file focused on feed/project/member mapping -- Settings' raw shape and
 // fold logic is a large, self-contained unit of its own.
-import type { DeliveryChannel, HooksVersionStatus, Role, Settings, Status } from './types'
+import type { DeliveryChannel, HooksVersionStatus, Role, Settings, SharePromptsMode, Status } from './types'
 
 // One row per AI tool mcp-register.js attempted -- see lib/mcp-register.js's
 // `row()` for the full shape; only the fields this page actually renders are
@@ -56,6 +56,37 @@ export interface RawSettingsPayload {
   // disk. Optional for the same reason; absence maps to [] (nothing flagged
   // stale), never "everything is stale".
   excludeStale?: string[]
+  // The team-scoped config subtree /api/settings surfaces. Optional and its
+  // fields are typed loose because rollout is staged: an older daemon sends
+  // no team key at all, a mid-rollout one may still send `sharePrompts` as a
+  // boolean, and the current daemon sends the three-value string plus the
+  // legacy 'on' alias -- see normalizeSharePrompts below, and Settings.team
+  // in types.ts. Both `url` and `anonKey` are here because /api/settings
+  // returns them today and settingsPayload's `team` shape is what the mapper
+  // reads; the app does not yet render either but naming them keeps the
+  // type honest about the wire.
+  team?: {
+    url?: string
+    anonKey?: string
+    customBackend?: boolean
+    sharePrompts?: unknown
+  }
+}
+
+// Normalize whatever /api/settings' team.sharePrompts happens to be on this
+// daemon into the three-value client type. Absence and any unrecognised
+// value default to 'off' -- the safest reading, since teamsync's own
+// isSharingPrompts check on the daemon side is `=== true`, so anything that
+// is not an explicit "share" already behaves like off.
+export function normalizeSharePrompts(value: unknown): SharePromptsMode {
+  if (value === true) return 'verbatim'
+  if (value === false) return 'off'
+  if (value === 'off' || value === 'distilled' || value === 'verbatim') return value
+  // Legacy string alias -- the pre-migration on-disk value some machines
+  // wrote before the three-value form landed. Accepted as verbatim so a
+  // user who had opted into raw sharing does not silently get demoted.
+  if (value === 'on') return 'verbatim'
+  return 'off'
 }
 
 const MINUTE = 60_000
@@ -219,7 +250,19 @@ export function mapSettings(raw: RawSettingsPayload, status: Status, team: RawTe
     // remains the right signal for "is anyone else actually here" (the access
     // columns), and is still read for that elsewhere.
     team: team
-      ? { id: team.team_id, name: team.team_name, role: team.role, memberCount: team.memberCount ?? 0, inviteCode: teamMeta.inviteCode }
+      ? {
+          id: team.team_id,
+          name: team.team_name,
+          role: team.role,
+          memberCount: team.memberCount ?? 0,
+          inviteCode: teamMeta.inviteCode,
+          // Read from /api/settings' team subtree (config.team on disk),
+          // never from the /api/team roster: sharePrompts is a MACHINE
+          // preference, not a team-membership fact, and lives on this
+          // client's own config regardless of whether the roster read
+          // succeeded.
+          sharePrompts: normalizeSharePrompts(raw.team?.sharePrompts),
+        }
       : null,
     viewerId: teamMeta.viewerId,
     webUrl: teamMeta.webUrl,
