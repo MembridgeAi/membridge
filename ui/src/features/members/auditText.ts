@@ -53,6 +53,15 @@ export function auditSentence(event: AuditEvent): string {
     }
     case 'member-joined':
       return 'joined the team'
+    // Distinct from member-removed on purpose: 048 records a voluntary
+    // departure, and the daemon records a removal. Being removed and choosing
+    // to go are different events, and anyone counting departures has to count
+    // both. Without this case the row falls through to the raw shape and reads
+    // "member-left member 8f21c0de-…", which names neither the action nor the
+    // person -- the exact failure the header above says this function exists
+    // to end.
+    case 'member-left':
+      return 'left the team'
     case 'invite-created':
       return 'created an invite'
     case 'invite-revoked':

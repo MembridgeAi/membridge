@@ -42,6 +42,10 @@ describe('audit rows in words', () => {
   it('covers membership and invite events', () => {
     expect(auditSentence(event({ action: 'member-removed', targetName: 'Priya' }))).toBe('removed Priya from the team')
     expect(auditSentence(event({ action: 'member-joined' }))).toBe('joined the team')
+    // Leaving and being removed are different events and must read differently:
+    // the actor of a departure is its own subject, so "left the team" needs no
+    // target phrase, where "removed Priya" does.
+    expect(auditSentence(event({ action: 'member-left', targetName: 'Priya' }))).toBe('left the team')
     expect(auditSentence(event({ action: 'invite-created' }))).toBe('created an invite')
     expect(auditSentence(event({ action: 'invite-revoked' }))).toBe('revoked an invite')
     expect(auditSentence(event({ action: 'team-renamed', detail: JSON.stringify({ name: 'Acme AI' }) })))
