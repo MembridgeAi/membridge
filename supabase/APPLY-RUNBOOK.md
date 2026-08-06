@@ -106,7 +106,7 @@ There is ONE ordering constraint among these fourteen, `050` (below), and no oth
 
 **If that breaks,** the new rule is stricter than intended — it requires the project to be visible to you under the normal project rules, which for a manager of that team it always is. Report it rather than working around it.
 
-**Optional cleanup, separate and NOT automatic.** The new rule governs *future* writes; any bad row already in the table keeps working. Run this to see whether there are any:
+**This second step is NOT optional, and it is not cleanup — it is the fix for every row that already exists.** A database rule of this kind is checked when a row is *written*. Rows written before it went in were never checked against it, and the database still honours them exactly as before. So applying the migration protects future writes and changes nothing at all about the ones already there. Run this to see what is there:
 
 ```sql
 select a.team_id, a.project_key, a.member_id, a.can_see, a.updated_at, a.updated_by
@@ -116,7 +116,11 @@ select a.team_id, a.project_key, a.member_id, a.can_see, a.updated_at, a.updated
  order by a.updated_at desc;
 ```
 
-Most likely it returns nothing. If it returns rows, **read them before deleting anything** — the query also matches harmless leftovers from deleted projects, not just bad grants. The matching `delete` is in `037`'s header when you want it.
+**How many rows this returns is unknown — nobody has run it.** Running it is how it becomes known, which is the whole reason it is a separate step rather than something the migration does for you.
+
+If it returns rows, **read them before deleting anything** — the query also matches harmless leftovers from deleted projects, not just bad grants. The matching `delete` is in `037`'s header when you want it.
+
+**If you skip this step:** every mismatched row that already exists carries on granting or denying somebody access to a project in another team, indefinitely. Nothing will go red about it, no test will catch it, and the migration you just applied will not touch it. The only thing that finds those rows is the query above.
 
 ---
 
