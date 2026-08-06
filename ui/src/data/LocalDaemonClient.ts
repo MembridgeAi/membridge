@@ -577,8 +577,19 @@ export class LocalDaemonClient implements DataClient {
   // (teamsync.inviteUrl -- the CLI/app/settings consumer), not the hash-based
   // shape the Members-page UI needs, so only the token is taken here; the
   // caller builds `${webUrl}/#${token}` itself.
-  async createInviteLink(teamId: string): Promise<{ token: string }> {
-    const inv = await post<{ token: string }>('/api/team/invite', { teamId })
+  // INV-1: opts is forwarded so a caller CAN set a lifetime. Omitting it no
+  // longer means "forever" -- the daemon applies its single-purpose defaults
+  // (lib/server.js INVITE_DEFAULT_*). Passing 0 for either field is the
+  // explicit opt-out that restores the old unlimited behaviour.
+  async createInviteLink(
+    teamId: string,
+    opts?: { expiresDays?: number; maxUses?: number },
+  ): Promise<{ token: string }> {
+    const inv = await post<{ token: string }>('/api/team/invite', {
+      teamId,
+      ...(opts?.expiresDays === undefined ? {} : { expiresDays: opts.expiresDays }),
+      ...(opts?.maxUses === undefined ? {} : { maxUses: opts.maxUses }),
+    })
     return { token: inv.token }
   }
 

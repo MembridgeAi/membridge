@@ -112,7 +112,14 @@ export interface DataClient {
   // cloudflare/ops-dashboard's own JOIN_BASE + token construction works --
   // since settings.webUrl is null on a build with no hosted join page
   // configured (self-hosted, empty lib/backend.json).
-  createInviteLink(teamId: string): Promise<{ token: string }>
+  // opts is optional and rarely passed: omitting it gets the daemon's
+  // single-purpose defaults (7 days, 1 use) rather than the permanent,
+  // unlimited link every mint used to produce. 0 for either means "no limit",
+  // deliberately.
+  createInviteLink(
+    teamId: string,
+    opts?: { expiresDays?: number; maxUses?: number },
+  ): Promise<{ token: string }>
   revokeInvite(inviteId: string): Promise<void>
   setMemberRole(memberId: string, role: Role): Promise<void>
   removeMember(memberId: string): Promise<void>

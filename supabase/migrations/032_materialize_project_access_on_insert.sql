@@ -13,22 +13,12 @@
 --    Every member is then row-less on that project and governed by tier 2 —
 --    the retroactive behaviour this migration exists to remove."
 --
--- (That quote describes the backend as it stood when 032 was written. The
--- `projects_insert` policy it names no longer exists — 036 dropped it — so the
--- direct-POST path is closed as well as covered. See §3.)
---
 -- This is that ticket. A row-less project is not a cosmetic problem: tier 2 is
 -- the project's own `default_access`, so a project created off the RPC path is
 -- retroactively governed by a flag 028/029 exist specifically to stop applying
 -- to existing members, and flipping that flag later silently moves everybody.
 --
--- WHAT IT DOES NOT DO, AND WHY — `projects_insert` IS LEFT ALONE BY THIS FILE.
--- SUPERSEDED: the policy was dropped later, by 036_drop_projects_insert.sql.
--- The reasoning below is kept because it is still why THIS migration is shaped
--- the way it is, but read finding 2 with 036's header beside it: the fact it
--- calls unverifiable was subsequently measured on the live database, and it came
--- back the way that made the drop safe. See §3, which has been updated.
---
+-- WHAT IT DOES NOT DO, AND WHY — `projects_insert` IS LEFT ALONE.
 -- The obvious alternative was to revoke the direct-POST capability instead of
 -- covering it. Two findings, in order:
 --
@@ -56,9 +46,8 @@
 --
 -- The trigger below closes the actual harm — a row-less project — on EVERY
 -- insert path, including the direct POST, without taking that bet. Whether to
--- additionally revoke the unused capability was left as a separate, smaller
--- decision for a human with a psql prompt; the queries that settled it are in
--- §3, and 036 is the answer they produced.
+-- additionally revoke the unused capability is a separate, smaller decision for
+-- a human with a psql prompt; the query that settles it is in §3.
 --
 -- RISK CLASS: DDL ONLY. This migration replaces a function and creates a
 -- trigger. It writes no rows and deletes none, so it is reversible by dropping
@@ -76,18 +65,13 @@
 -- Paste this file into the SQL editor, which runs it in one transaction. Every
 -- statement below is re-runnable.
 --
--- APPLIED — live on project mefgbiecvoszjorwzkfz, verified read-only 2026-08-05.
--- This line said "UNAPPLIED AS OF THIS COMMIT" for four releases after the
--- statements below had already been run, which is worse than saying nothing:
--- it invites someone to re-apply a live migration, and it under-reports what
--- the backend already enforces. Re-check it, do not trust it:
---
---   select pg_get_triggerdef(t.oid) from pg_trigger t
---    where t.tgname = 'projects_materialize_access' and not t.tgisinternal;
---
--- Returned, at the time of writing: CREATE TRIGGER projects_materialize_access
--- AFTER INSERT ON public.projects FOR EACH ROW EXECUTE FUNCTION
--- projects_materialize_access() — matching §2 below exactly.
+-- APPLIED — LIVE. Verified against the running database on 2026-08-05, in the
+-- audit that also confirmed 030, 033 and 034. This line previously read
+-- "UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any
+-- database." That was true when written and false since. Corrected in place
+-- because a stale applied-status marker is not a harmless nit: anyone reasoning
+-- about what the backend actually enforces reads it and concludes this
+-- hardening is not in force.
 
 -- ---------------------------------------------------------------------------
 -- 1. The trigger function.
@@ -158,10 +142,10 @@ create trigger projects_materialize_access
   execute function public.projects_materialize_access();
 
 -- ---------------------------------------------------------------------------
--- 3. THE QUESTION THIS FILE DID NOT ANSWER — ANSWERED SINCE, BY 036.
+-- 3. THE QUESTION THIS FILE DELIBERATELY DOES NOT ANSWER.
 --
 -- Whether `projects_insert` should exist at all. Finding 1 above says no client
--- needs it; finding 2 said revoking it safely depends on whether link_project's
+-- needs it; finding 2 says revoking it safely depends on whether link_project's
 -- owner bypasses RLS, which is not readable from this repo. These two queries
 -- settle it, run as a superuser against the live database:
 --
@@ -178,19 +162,7 @@ create trigger projects_materialize_access
 --   select relname, relrowsecurity, relforcerowsecurity
 --     from pg_class where oid = 'public.projects'::regclass;
 --
--- BOTH WERE RUN, AND BOTH CAME BACK THE WAY THAT MADE THE DROP SAFE:
--- link_project is owned by `postgres` with `rolbypassrls = true`
--- (`rolsuper = false`), and public.projects has `relrowsecurity = true` with
--- `relforcerowsecurity = false`. Either result alone is sufficient — BYPASSRLS
--- skips row security unconditionally, and a table owner skips RLS on its own
--- table whenever FORCE is off — so this function's insert never evaluated
--- `projects_insert` at all, and project creation could not be broken by
--- removing it. `drop policy if exists projects_insert on public.projects;` was
--- therefore applied, and is written down as 036_drop_projects_insert.sql.
---
--- WHAT THAT MEANS FOR THE TRIGGER ABOVE: keep it. It no longer covers a
--- member-reachable hole, because there is no longer one — but every remaining
--- insert path (link_project's definer insert, a service-role write, an
--- operator's insert in the SQL editor) bypasses RLS and fires it, and it is
--- still what makes 029's invariant a property of the schema rather than a client
--- convention. 036 removed one way in; it did not make this trigger redundant.
+-- If rolbypassrls is true and relforcerowsecurity is false, then
+--   drop policy if exists projects_insert on public.projects;
+-- is safe, and reduces the surface this trigger currently only covers. That is
+-- a one-line follow-up ticket, not a widening of this one.

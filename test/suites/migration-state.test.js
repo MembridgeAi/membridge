@@ -36,6 +36,30 @@ const path = require('path');
 const SUPABASE = path.join(__dirname, '..', '..', 'supabase');
 const MIGRATIONS = path.join(SUPABASE, 'migrations');
 const LEDGER = path.join(SUPABASE, 'MIGRATION-STATE.md');
+const RUNBOOK = path.join(SUPABASE, 'APPLY-RUNBOOK.md');
+
+// The number registry in APPLY-RUNBOOK.md — which migration numbers are
+// CLAIMED, including by branches this checkout cannot see. Distinct from the
+// ledger above, which records what is DEPLOYED. A number can be claimed and
+// unwritten (allocated to a lane that has not committed yet), and a file can
+// exist without being registered, which is the collision this catches.
+//
+// Rows look like: `| 041 | project_stats carries archived_at | agent-backend2 | no |`
+// Returns number -> array of rows, so a number claimed TWICE is visible rather
+// than silently overwritten — a map keyed by number would hide the exact defect
+// this table exists to prevent.
+function registryClaims() {
+  const src = fs.readFileSync(RUNBOOK, 'utf8');
+  const claims = new Map();
+  for (const line of src.split('\n')) {
+    const m = line.match(/^\|\s*(\d{3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|/);
+    if (!m) continue;
+    const [, num, what, branch, applied] = m;
+    if (!claims.has(num)) claims.set(num, []);
+    claims.get(num).push({ what: what.trim(), branch: branch.trim(), applied: applied.trim() });
+  }
+  return claims;
+}
 
 const migrationFiles = () => fs.readdirSync(MIGRATIONS)
   .filter(f => /^\d+_.*\.sql$/.test(f))
@@ -83,7 +107,15 @@ async function main() {
   // leaves a row describing nothing while the real file goes unrecorded.
   await check('the ledger names no migration that is not on disk', () => {
     const onDisk = new Set(files.map(f => f.match(/^(\d{3})/)[1]));
-    const ghosts = [...ledger.keys()].filter(num => !onDisk.has(num));
+    // A row may declare `applied (other branch)`: the migration is real and its
+    // effect is live, but the FILE is on a sibling lane's branch and has not
+    // merged yet. Deleting such a row to make this check pass would delete a
+    // true fact about production — 035's delete policy IS live — so the state
+    // carries the qualifier instead. The annotation is deliberately ugly: it
+    // should be removed the moment that branch merges, and it is visible in the
+    // ledger until someone does.
+    const ghosts = [...ledger.keys()].filter(num => !onDisk.has(num)
+      && ![...(ledger.get(num) || [])].some(s => s.includes('other branch')));
     assert.deepStrictEqual(ghosts, [],
       `the ledger has rows for migrations that do not exist: ${ghosts.join(', ')}`);
   });
@@ -166,6 +198,181 @@ async function main() {
       'the 031 row must keep its "diff before applying" warning: the live ' +
       'rls_auto_enable predates the repo, so create-or-replace would overwrite ' +
       'production with a reconstruction');
+  });
+
+  // SEC-9. A migration that claims to RECONSTRUCT a live object is making the
+  // strongest possible claim about production — "this file is what is already
+  // running" — and it is the one claim nothing here can verify. 031 is the
+  // worked example: it carried the verification query from the day it was
+  // written, and the gap survived anyway, because nobody had run it and written
+  // down what came back. The query alone proves nothing; a query plus a DATED
+  // answer is falsifiable by the next reader in one paste.
+  //
+  // Deliberately narrow, and it fires on the CLAIM rather than on every
+  // migration. Most files here create new objects and have nothing to
+  // reconstruct; demanding evidence from all of them would be noise, and a
+  // noisy gate gets muted, which costs more than the drift it was meant to
+  // catch. The trigger is a file saying "reconstruction" / "reconstructs" /
+  // "mirrors the LIVE" of itself.
+  await check('a migration claiming to reconstruct a live object shows dated evidence', () => {
+    const CLAIM = /\b(reconstructions?|reconstructs?|mirrors the live|verbatim from the\s+(?:--\s*)?live)\b/i;
+    // The evidence: something that reads the live catalog, and a date next to
+    // it. `pg_get_functiondef`, `pg_policy`, `pg_proc`, `information_schema` —
+    // any of them is a query whose answer settles the claim.
+    const QUERY = /(pg_get_functiondef|pg_proc|pg_policy|pg_policies|pg_class|pg_trigger|information_schema)/i;
+    const DATE = /\d{4}-\d{2}-\d{2}/;
+    const missing = [];
+    for (const f of files) {
+      const src = fs.readFileSync(path.join(MIGRATIONS, f), 'utf8');
+      if (!CLAIM.test(src)) continue;
+      // TWO dated markers, by name, and one of them must be present. Prose was
+      // tried first and rejected: "was the live object actually read?" matched
+      // on any file containing the word "read", which is nearly all of them —
+      // a check that cannot fail. A named marker cannot be satisfied by
+      // accident and states which of the two honest positions the file is in.
+      //
+      //   LIVE SHAPE VERIFIED <date>          someone ran the query and the
+      //                                       file matches what came back
+      //   LIVE SHAPE UNVERIFIED AS OF <date>  nobody has run it yet
+      //
+      // The second is not a way out. It is dated, it names what is outstanding,
+      // and it reads as stale on sight — exactly what the undated "AS OF THIS
+      // COMMIT" stamp banned above does not do. The query has to be present
+      // either way, so whoever picks it up has the paste in front of them.
+      const VERIFIED = /LIVE SHAPE VERIFIED\s+\d{4}-\d{2}-\d{2}/i;
+      const UNVERIFIED = /LIVE SHAPE UNVERIFIED AS OF\s+\d{4}-\d{2}-\d{2}/i;
+      const gaps = [];
+      if (!QUERY.test(src)) gaps.push('no query against the live catalog');
+      if (!VERIFIED.test(src) && !UNVERIFIED.test(src)) {
+        gaps.push('no dated "LIVE SHAPE VERIFIED <date>" or '
+          + '"LIVE SHAPE UNVERIFIED AS OF <date>" marker');
+      }
+      if (gaps.length) missing.push(`${f}: ${gaps.join('; ')}`);
+    }
+    assert.deepStrictEqual(missing, [],
+      'these files claim to reconstruct or mirror a live object without leaving evidence '
+      + 'that anyone looked:\n  ' + missing.join('\n  ')
+      + '\nA reconstruction is a claim about production that create-or-replace will act on. '
+      + 'Carry BOTH the query that reads the live object AND the dated result of running it. '
+      + '031 is why: it had the query from day one and still shipped a filter that differed '
+      + 'from live, because the query had never been run and answered in the file.');
+  });
+
+  // --- the number registry (SEC-12) ----------------------------------------
+  //
+  // Three migration-number collisions happened in one day. Every one had the
+  // same cause: numbers allocated by hand, in conversation, across parallel
+  // branches that cannot see each other's files. `ls supabase/migrations` on
+  // one branch is not evidence a number is free, and it was trusted as evidence
+  // three times.
+  //
+  // The registry in APPLY-RUNBOOK.md is the allocation record. These two checks
+  // are what stop it becoming the hand-maintained list that already failed —
+  // a registry nobody is forced to update is worth less than no registry,
+  // because it looks authoritative while being stale.
+  const claims = registryClaims();
+
+  await check('every migration number is claimed exactly once in the registry', () => {
+    const doubled = [...claims.entries()]
+      .filter(([, rows]) => rows.length > 1)
+      .map(([num, rows]) => `  ${num}: claimed ${rows.length}x — `
+        + rows.map(r => `${r.branch || '(no branch)'} "${r.what}"`).join(' AND '));
+    assert.deepStrictEqual(doubled, [],
+      'these migration numbers are claimed more than once in the APPLY-RUNBOOK registry, '
+      + 'which is the collision the registry exists to prevent:\n' + doubled.join('\n'));
+  });
+
+  // THE BLIND SPOT, found by a real collision DURING the SEC-14 dry run and
+  // fixed here. The two checks either side of this one both passed while
+  // 048_ops_audit_via_role.sql and 048_audit_member_left.sql sat in the same
+  // directory: the registry had exactly one row for 048, and every file's
+  // number had a row, so nothing was violated. The registry records that a
+  // NUMBER is claimed; it did not record that only ONE FILE may claim it.
+  //
+  // That is the same defect shape this whole session has been closing — a
+  // check that looks like it covers a case and does not — and it was invisible
+  // until two branches with different filenames under the same number were
+  // merged. git will not conflict on that: different paths, no overlap, both
+  // files simply coexist and the second one to be applied is a surprise.
+  await check('no two migration files share a number', () => {
+    const byNumber = new Map();
+    for (const f of files) {
+      const num = f.match(/^(\d{3})/)[1];
+      if (!byNumber.has(num)) byNumber.set(num, []);
+      byNumber.get(num).push(f);
+    }
+    const collisions = [...byNumber.entries()]
+      .filter(([, list]) => list.length > 1)
+      .map(([num, list]) => `  ${num}: ${list.join('  AND  ')}`);
+    assert.deepStrictEqual(collisions, [],
+      'two migration files claim the same number:\n' + collisions.join('\n')
+      + '\n\nGit does not conflict on this — different filenames, different paths, both '
+      + 'files just coexist — so it survives a merge silently and only shows up when '
+      + 'someone applies them. Renumber the one whose claim is NOT in the '
+      + 'APPLY-RUNBOOK registry, and add its row in the same commit.');
+  });
+
+  await check('every migration file at or above the registry floor is registered', () => {
+    // The floor is the lowest number the registry tracks, read from the table
+    // rather than hardcoded: everything below it predates concurrent allocation
+    // and is settled history covered by the ledger alone. Deriving it means the
+    // check follows the registry if its range ever changes.
+    const numbers = [...claims.keys()].map(Number);
+    assert.ok(numbers.length, 'the APPLY-RUNBOOK registry table could not be parsed at all');
+    const floor = Math.min(...numbers);
+    const unregistered = files
+      .map(f => f.match(/^(\d{3})/)[1])
+      .filter(num => Number(num) >= floor && !claims.has(num));
+    assert.deepStrictEqual(unregistered, [],
+      `these migrations exist on disk but claim no number in the registry: ${unregistered.join(', ')}. `
+      + 'Add a row to the table in supabase/APPLY-RUNBOOK.md — number, what it does, which branch '
+      + 'holds it, whether it is applied — in the SAME commit as the migration. A number is not '
+      + 'free because this branch cannot see a file using it.');
+  });
+
+  // THE REGISTRY AND THE APPLY ORDER MUST AGREE.
+  //
+  // This is the SECOND time the runbook silently lost migrations. The first was
+  // four of them, found by the SEC-14 merge; the fix was to add them. That fix
+  // did not stop it recurring, because the runbook holds TWO lists — a registry
+  // of every number, and an apply order telling Marco what to paste — and
+  // nothing made them agree. Migrations arriving from a later merge landed in
+  // the registry (which the gate checks) and not in the order (which it did
+  // not), so the artifact he actually follows was short by three.
+  //
+  // Adding the missing rows again would have been the same fix a second time.
+  // These two checks are the thing that stops a third.
+  const applyOrderNames = () => {
+    const src = fs.readFileSync(RUNBOOK, 'utf8');
+    // Every `NNN_name.sql` the runbook names ANYWHERE outside the registry
+    // table. Deliberately loose about WHERE: a migration described in prose, in
+    // a grouped table or in its own section is all equally "told to apply". The
+    // failure being caught is silence, not formatting.
+    return new Set([...src.matchAll(/`(\d{3})_[a-z0-9_]+\.sql`/g)].map(m => m[1]));
+  };
+
+  await check('every migration the registry calls unapplied appears in the apply order', () => {
+    const named = applyOrderNames();
+    const missing = [...claims.entries()]
+      .filter(([, rows]) => rows.some(r => /^\s*no\b/i.test(r.applied || '')))
+      .map(([num]) => num)
+      .filter(num => !named.has(num));
+    assert.deepStrictEqual(missing, [],
+      `the registry marks these unapplied, and the apply instructions never mention them: ${missing.join(', ')}. `
+      + 'Marco follows the apply order, not the registry — a migration missing from it is one he will '
+      + 'not apply and will get no signal about. Either add it with its check, or say explicitly that '
+      + 'it belongs to a later batch and why. "Absent" is not an answer, because absence is '
+      + 'indistinguishable from an oversight, which is exactly what it was both times.');
+  });
+
+  await check('every migration in the apply order has a registry row', () => {
+    const numbers = [...claims.keys()].map(Number);
+    const floor = Math.min(...numbers);
+    const orphans = [...applyOrderNames()]
+      .filter(num => Number(num) >= floor && !claims.has(num));
+    assert.deepStrictEqual(orphans, [],
+      `the apply order tells someone to paste these, and the registry does not claim them: ${orphans.join(', ')}. `
+      + 'The two lists are the same fact written twice; either both know about a migration or neither does.');
   });
 
   h.finish();

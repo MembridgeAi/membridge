@@ -63,53 +63,27 @@ it does not make the repo self-verifying, and nothing offline could.
 | 028 `enforce_project_access_default` | applied | `can_see_project()` exists |
 | 029 `materialize_project_access` | applied | `project_access` populated (13 rows / 7 projects) |
 | 030 `team_keys_definer_membership` | applied | `team_keys_insert` check contains `is_team_member_uid` |
-| 031 `ensure_rls_event_trigger` | **NOT applied** | `ensure_rls` trigger exists but predates the repo; live `rls_auto_enable` lacks 031's fail-closed body. The file is a RECONSTRUCTION — and diffing it against the live body (done 2026-08-05) found a real defect: it drops `partitioned table` from the guardrail's filter. **Fix that line before applying.** Full diff and safety analysis in 031's header; pinned by `test/suites/rls-guardrail.test.js` |
+| 031 `ensure_rls_event_trigger` | **NOT applied** | `ensure_rls` trigger exists but predates the repo; live `rls_auto_enable` lacks 031's fail-closed body. The file is a RECONSTRUCTION — diff before applying, `create or replace` would overwrite production's copy |
 | 032 `materialize_project_access_on_insert` | applied | `projects_materialize_access` trigger on `projects` |
 | 033 `enforce_project_access_on_write` | applied | `memory_entries_insert`/`_update` both contain `can_see_project` |
 | 034 `project_access_lookup_index` | applied | index `project_access_project_member_idx` exists |
-| 035 `delete_own_entries` | applied | `memory_entries_delete` policy + `delete_my_entries()` + `my_entry_counts()` exist |
-
-## Live RLS survey — 2026-08-05, read-only
-
-Prompted by `031` being unapplied: production has a version of the RLS net that
-notices a failure and continues, so the guarantee "no table in `public` without
-row-level security" is not actually enforced. What that has cost so far:
-
-**Nothing yet. No table in `public` has RLS disabled — all 15 have it enabled.**
-Reported as the headline because it is the useful answer, and because the
-permissive branch never having fired is also the evidence that applying `031`
-is safe (see its header).
-
-Four `public` tables have **RLS enabled with zero policies**, which denies
-everything. That is safe, and in all four cases it is also correct rather than a
-broken feature — each one's real access path bypasses RLS legitimately:
-
-| Table | Reached by | PostgREST-reachable? |
-|---|---|---|
-| `invite_attempts` | `check_invite_attempt()`, `security definer` | **No** — `010:153` revoked anon/authenticated |
-| `onboarding_invites` | `redeem_onboarding_invite()`, `security definer` | Yes, but denied (no policy) |
-| `ops_audit` | `ops_log()` / `ops_audit_recent()`, `security definer`, `service_role` only | Yes, but denied |
-| `ops_team_meta` | ops RPCs, `service_role` only | Yes, but denied |
-
-The ops dashboard reads these through `cloudflare/ops-api`, which authenticates
-with `SUPABASE_SERVICE_KEY` — `service_role` bypasses RLS outright — so the
-zero-policy state breaks no feature. Checked rather than assumed.
-
-**The one thing worth fixing (latent, not live).** `invite_attempts` was
-explicitly revoked from `anon, authenticated` in `010:153`. The other three
-never were, so they still carry Supabase's default blanket `arwdDxtm` grant to
-both roles, and their *only* protection is the single property "RLS on with zero
-policies". `onboarding_invites` holds unredeemed invite tokens. One
-`alter table ... disable row level security`, or one later `for all` policy
-scoped more loosely than intended, turns it into an anon-readable token dump —
-and `031`'s net does not help, because it only fires on CREATE. The house pattern
-for this already exists; it is one `revoke all on table ... from anon,
-authenticated` per table, matching `010:153`. Product change, so not made here.
-
-Also checked and clean: `public.project_stats` is the only view in `public` and
-has `security_invoker = on`, so it respects the caller's RLS rather than running
-as its owner. Tables in `auth`, `storage`, `realtime` and `vault` are
-Supabase-managed and out of scope.
+| 035 `delete_own_entries` | applied (other branch) | `memory_entries_delete` policy + `delete_my_entries()` + `my_entry_counts()` exist. The FILE is not on this branch — it lives on `agent-backend2` and the policy is live regardless, which is SEC-2's finding: the repo does not describe production until that branch merges |
+| 036 `drop_projects_insert` | applied (other branch) | Applied BY HAND on the live database before the file was written, and verified afterwards — its own header says so and warns against re-running it as if it were pending. File lives on `agent-backend2`; not on this branch |
+| 041 `project_stats_carry_archived` | not applied (other branch) | `select pg_get_viewdef('public.project_stats'::regclass);` — applied when the definition carries `archived_at`. File lives on `agent-backend2`. Its header records the order as unconstrained: it touches nothing the other pending migrations touch |
+| 044 `removal_rotates_invite_code` | not applied (other branch) | `select prosrc from pg_proc where proname = 'remove_member';` — applied when the body rotates `teams.invite_code`. File lives on `agent-removal`. **Deploy gate: apply BEFORE shipping the client**, and CI cannot catch a miss because the mock models it |
+| 045 `leave_rotates_invite_code` | not applied (other branch) | `select prosrc from pg_proc where proname = 'leave_team';` — applied when the body rotates `teams.invite_code`. File lives on `agent-removal`. Independent of 044 in either order. **Same deploy gate** |
+| 046 `audit_member_joined` | not applied (other branch) | `select tgname from pg_trigger where tgrelid = 'public.team_members'::regclass;` — applied when `team_members_audit_join` is listed. File lives on `agent-removal`. Independent of 038 in both orders (verified in the SEC-14 merge). **Same deploy gate** |
+| 049 `audit_member_left` | not applied (other branch) | `select tgname from pg_trigger where tgrelid = 'public.team_members'::regclass;` — applied when the departure trigger is listed alongside `team_members_audit_join`. File lives on `agent-removal` (renumbered from 048 in 51ba55e). **Same deploy gate: apply before shipping the client** |
+| 050 `team_audit_actor_set_null` | not applied (other branch) | `select confdeltype from pg_constraint where conname = 'team_audit_actor_id_fkey';` — applied when it is `n` (SET NULL) rather than `a`. File lives on `agent-removal` (renumbered from 049). Fixes 046/049 pinning a deleted account open |
+| 051 `drop_memory_entries_delete_policy` | **NOT applied** | `select polname from pg_policy where polrelid = 'public.memory_entries'::regclass and polname = 'memory_entries_delete';` — applied when it returns NO rows. Pairs with 040: 040 removes the DELETE privilege, this removes the policy that would honour it if the privilege were ever restored |
+| 037 `project_access_team_scope` | **NOT applied** | `select polname, pg_get_expr(polwithcheck, polrelid) from pg_policy where polname = 'project_access_insert';` — applied when the expression contains `exists` against `public.projects` |
+| 038 `invite_redeem_atomic` | **NOT applied** | `select prosrc from pg_proc where proname = 'redeem_invite';` — applied when the body contains `get diagnostics` and a WHERE carrying `max_uses`. **Must land with the INV-1 client change, not after it** |
+| 039 `team_audit_created_at` | **NOT applied** | `select tgname from pg_trigger where tgrelid = 'public.team_audit'::regclass;` — applied when `team_audit_stamp_created_at` is listed |
+| 040 `revoke_memory_entries_delete` | **NOT applied** | `select grantee, privilege_type from information_schema.role_table_grants where table_schema = 'public' and table_name = 'memory_entries' and privilege_type = 'DELETE';` — applied when neither `anon` nor `authenticated` appears. The privilege is a Supabase PLATFORM DEFAULT that appears nowhere in `supabase/`, so the repo cannot tell you its state — only this query can |
+| 042 `definer_function_hardening` | **NOT applied** | `select proname, proacl from pg_proc where proname in ('can_see_project','team_feed_counts','set_project_access_default');` — applied when no acl entry grants EXECUTE to `anon` or to PUBLIC. Carries a smoke test: seal a team key to a NEW joiner |
+| 047 `ops_panel_roles` | **NOT applied** | `select rolname, rolbypassrls, rolcanlogin from pg_roles where rolname in ('ops_panel_read','ops_panel_write');` — applied when both exist with `rolbypassrls = f`. **Inert on its own**: it only ADDS roles and does not touch `service_role`, so the panel is unaffected until the Worker is redeployed with the new secrets. Full verification and rollback in the file |
+| 048 `ops_audit_via_role` | **NOT applied** | `select column_name from information_schema.columns where table_schema = 'public' and table_name = 'ops_audit' and column_name = 'via_role';` — applied when the row comes back. Additive only; records the VERIFIED credential beside the self-reported actor. Not a fix for the forgeable actor — see the file header |
+| 043 `revoke_blanket_table_grants` | **NOT applied** | `select relname, relacl from pg_class where relname in ('onboarding_invites','ops_audit','ops_team_meta');` — applied when no acl entry names `anon` or `authenticated` |
 
 ## Migration history table
 

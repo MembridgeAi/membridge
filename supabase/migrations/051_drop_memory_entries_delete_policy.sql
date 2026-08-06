@@ -1,0 +1,99 @@
+-- 051_drop_memory_entries_delete_policy.sql — remove the now-vestigial
+-- memory_entries_delete policy, in a NEW file rather than by editing 035.
+--
+-- WHY THIS FILE EXISTS AT ALL. 040 revoked the DELETE privilege on
+-- public.memory_entries from public, anon and authenticated, closing the
+-- unaudited path where a signed-in user could delete their own rows straight
+-- through PostgREST and leave no team_audit trace. That left 035's policy
+--
+--     memory_entries_delete  for delete using (author_id = auth.uid())
+--
+-- with no caller: no ordinary role holds the privilege any more, and
+-- delete_my_entries is `security definer` so it bypasses RLS entirely.
+--
+-- AND DROPPING IT IS THE STRONGER PROTECTION, which is the non-obvious part and
+-- the reason this is worth a migration rather than being left as tidying. A
+-- DELETE needs BOTH a table grant AND a permissive policy. RLS on
+-- memory_entries is enabled (schema.sql:94), and under RLS a table with NO
+-- policy for a command DENIES that command outright. So:
+--
+--     policy kept + grant re-applied later  ->  deletes work again
+--     policy dropped + grant re-applied     ->  RLS still denies
+--
+-- The realistic regression is someone running `grant all on all tables in
+-- schema public to authenticated` — which is precisely how the privilege 040
+-- removed came to exist. Keeping the policy is not a second layer of defence;
+-- it is the thing that would let a restored grant through.
+--
+-- ===========================================================================
+-- WHY THIS IS NOT AN EDIT TO 035, WHICH IS WHAT WAS FIRST PROPOSED — MINE.
+--
+-- I originally said the drop belonged INSIDE 035, so the file could not
+-- disagree with itself: whoever applied 035 afterwards would otherwise
+-- recreate the policy while 040 did not re-fire. That reasoning has one
+-- premise, and the premise is false.
+--
+-- IT ASSUMED 035 WAS PENDING. supabase/MIGRATION-STATE.md records 035 as
+-- applied, with the evidence that the policy and both RPCs already exist in
+-- production. If nobody re-runs 035 — and the ledger says nobody will — then
+-- an edit to 035 never executes: the policy stays live, and the repo's
+-- description of production silently diverges from it. That is the exact drift
+-- the ledger was built to catch, and the same shape 036's header already warns
+-- about, being the one file in this directory that was applied by hand before
+-- it was written.
+--
+-- The backend lane got the BEHAVIOUR right and said so plainly — "the live
+-- backend has the policy right now, so re-applying 035 is what removes it."
+-- That is true. The open question was never what happens if 035 is re-applied;
+-- it is whether anything will. The ledger's answer is no.
+--
+-- FOUR REASONS THE OTHER SHAPE LOSES, in order of weight:
+--
+--   1. A FIX NOBODY EXECUTES IS WORSE THAN NO FIX, because the repo then claims
+--      a protection that is not there. Editing 035 makes the drop conditional
+--      on an event the ledger says will not happen.
+--
+--   2. 011:52-53 states the rule outright: "an applied migration is a
+--      historical record, not a live source of truth. Do not edit it; change
+--      the policy in a new migration." I have enforced that all session,
+--      including declining twice to edit 035 from outside its lane.
+--
+--   3. IT WOULD MAKE 035'S OWN LEDGER EVIDENCE SELF-CONTRADICTORY. The row for
+--      035 says it is applied BECAUSE the policy exists. Edit 035 to drop the
+--      policy and a verifier checking whether 035 is applied would find the
+--      policy gone and conclude it never was. The file and its ledger row would
+--      then disagree about what "applied" even means for that number.
+--
+--   4. Re-applying 035 does more than the one statement wanted: it also drops
+--      and recreates delete_my_entries (035:236-238). Harmless today, since
+--      nothing else defines that function — but it is a strictly wider blast
+--      radius for no benefit, and it is the re-run hazard this session has
+--      spent its length closing.
+--
+-- CONSEQUENCE FOR THE OTHER LANE, and it is theirs to action, not mine: 035
+-- should go back to CREATING the policy, so it stays the historical record of
+-- what was actually applied. I have not touched their file.
+--
+-- ===========================================================================
+-- WHAT DOES NOT BREAK. Self-serve deletion keeps working. delete_my_entries is
+-- `security definer` (035:238-242), so it runs as the table owner, whom neither
+-- RLS nor this policy binds. Verified before writing: nothing in lib/, bin/,
+-- test/ or ui/ references memory_entries_delete, and nothing issues an HTTP
+-- DELETE against /rest/v1/ at all.
+--
+-- ORDER: independent. It may be applied before or after 040 and needs nothing
+-- else. Applying it WITHOUT 040 would still leave the grant in place, and with
+-- no policy RLS denies — so either order is safe and both together are the
+-- intent.
+--
+-- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` in this project, for
+-- the reason 031, 032 and 033 all give. `drop policy if exists` is idempotent.
+--
+-- UNAPPLIED AS OF 2026-08-05. Nothing here has been run against any database.
+-- State is recorded in supabase/MIGRATION-STATE.md; settle it with:
+--   select polname from pg_policy
+--    where polrelid = 'public.memory_entries'::regclass and polname = 'memory_entries_delete';
+--   -- applied when the query returns NO rows
+-- ---------------------------------------------------------------------------
+
+drop policy if exists memory_entries_delete on public.memory_entries;
