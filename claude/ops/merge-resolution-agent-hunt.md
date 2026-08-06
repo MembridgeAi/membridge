@@ -22,6 +22,18 @@ Consequence worth noting: the imported copies are **frozen at import time**.
 
 ## Conflict inventory
 
+> **Status correction, 2026-08-05 (late).** An earlier version of this round's
+> handoff listed the `files` / `changes[].file` wire leak as the one finding no
+> lane had closed. That was wrong: `agent-backend2` closed it in `340647d`, and
+> the branch had moved since the ref this lane read. Verified after the fact by
+> substituting that branch's `lib/teamsync.js` and running the suite — 18/18,
+> all five pinned checks green. See the header of
+> `test/suites/wire-redaction.test.js` for the mechanism and the correction.
+>
+> Only ONE finding from this lane remains genuinely open: the `project_access`
+> read side (`can_see_project` has no team scope), plus the existing-rows check
+> beside it.
+
 | Target | Conflicts |
 |---|---|
 | `master` | **none** — `agent-hunt` merges to master clean |

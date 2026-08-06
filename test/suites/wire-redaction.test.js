@@ -16,16 +16,34 @@
 // redactText, and this suite is find-only. Do not "fix" them by relaxing the
 // assertions; the fix is a scrub() call in lib/teamsync.js entryToRow.
 //
-// STILL OPEN AS OF 2026-08-05, and re-checked rather than assumed. Every other
-// branch carrying fixes this evening was read directly:
-//   agent-backend2 — lib/teamsync.js entryToRow still reads
-//                    `files: Array.isArray(e.files) ? e.files.map(wire) : e.files`
-//                    and `file: wire(c.file)`, both unchanged
-//   agent-revoke   — entryToRow untouched
-//   agent-sec, agent-removal — do not touch lib/teamsync.js entryToRow at all
-// So this is the one finding on this branch that no other lane has closed. It
-// is genuinely live, and the ciphertext check above is the reason it should not
-// wait for a quiet moment.
+// FIXED ELSEWHERE — `agent-backend2`, commit 340647d ("fix(wire): protect every
+// outbound field by default, exemptions written down"). Verified by execution:
+// substituting that branch's lib/teamsync.js (then reverting) runs this suite
+// 18/18, with all five of the checks below green, including the ciphertext one
+// and the end-to-end one.
+//
+// The fix inverts the default rather than adding two scrub() calls, which is
+// the better answer and not the one this suite asked for. protectWireRow()
+// walks the row and redacts EVERY string at every depth — through arrays,
+// nested objects, and spreads whose keys nobody enumerated — so a field added
+// later is protected because it exists, not because someone remembered it. The
+// exemption hatch, unredacted(value, reason), refuses a reason shorter than a
+// sentence, on the reasoning that an exemption costing nothing to write is
+// indistinguishable from forgetting. Ordering is preserved: it runs while the
+// row is still plaintext, and encryptRow seals the result afterwards.
+//
+// A CORRECTION, RECORDED BECAUSE THE WRONG VERSION WAS PUBLISHED. This header
+// previously said the finding was still open on every branch, "re-checked
+// rather than assumed". The re-check was real but it read a ref pinned before
+// 340647d landed, and the conclusion was then repeated as fact in a handoff.
+// Reading a branch is a measurement with a timestamp, not a standing property;
+// a branch that has moved makes a true observation into a false claim without
+// anything failing. Same class as the stale migration headers this suite's
+// sibling audit exists to catch, authored by the lane that was auditing for it.
+//
+// The five checks below are LEFT EXACTLY AS THEY ARE. They stay red on this
+// branch, which does not carry the fix, and go green on merge — that
+// transition is the proof.
 //
 // The failures are EXECUTED, not inferred: each plants a synthetic secret and
 // drives the real code. Three prove it in the row object entryToRow returns.
