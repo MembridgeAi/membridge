@@ -63,10 +63,21 @@ function tsCmp(a, b) {
   return String(a).localeCompare(String(b));
 }
 
+// The service-role key this stand-in recognises. In real Supabase this key
+// authenticates as `service_role`, which is BYPASSRLS — row security is not
+// applied to it on any table. Only the POST /rest/v1/projects route consults it,
+// and only so the suite can reach an RLS-bypassing insert (see that route).
+// Nothing in lib/ has or should have a service-role key: the client uses the
+// anon key plus a user bearer token, and every check that matters depends on
+// that. Exported as `serviceKey` on the returned mock.
+const SERVICE_ROLE_KEY = 'service-role-test';
+
 function createMockSupabase() {
   const users = new Map();          // email -> { id, email, password }
   const sessions = new Map();       // accessToken -> userId
   const refreshTokens = new Map();  // refreshToken -> userId
+  const tokenSession = new Map();   // access OR refresh token -> sessionId (see newSession)
+  const tokenExpiry = new Map();    // accessToken -> ms epoch (see authedUser)
   // PKCE auth codes: authCode -> { userId, challenge }. GoTrue hands one of
   // these to the redirect target when the authorize request carried a
   // code_challenge, and only trades it for a session against the matching
@@ -129,6 +140,19 @@ function createMockSupabase() {
     // that a corroboration which cannot answer refuses to authorize destroying
     // local data, rather than falling through to "revoked".
     failProjectsList: false,
+    // Stands in for a backend that refuses PostgREST's logical `or=` filter
+    // (an older PostgREST, a proxy that rejects it): every or= page 400s, so
+    // the forward pull's documented degrade-to-the-timestamp-cursor path is
+    // reachable from a test instead of being taken on faith.
+    rejectOr: false,
+    // A backend that refuses to end the session (outage, proxy, an auth
+    // service that is down while the network is up). Sign-out must still
+    // clear this machine AND must not claim the session was revoked.
+    failLogout: false,
+    // "041_project_stats_carry_archived.sql has been applied": project_stats
+    // stops filtering archived projects out and carries archived_at as a
+    // column instead. Default false = the live backend as it stands today.
+    projectStatsCarriesArchived: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -185,8 +209,13 @@ function createMockSupabase() {
   };
   // 032_materialize_project_access_on_insert.sql: the AFTER INSERT trigger on
   // public.projects. Same materialization as 029 §3, but reached from the INSERT
-  // itself rather than from the RPC, so it also covers the direct
-  // POST /rest/v1/projects that `projects_insert` permits and no client uses.
+  // itself rather than from the RPC, so it covers every other way a row can land
+  // in public.projects. Since 036 dropped `projects_insert` there is no
+  // member-reachable direct POST left; what remains is the set of RLS-bypassing
+  // writers (link_project's definer insert, a service-role write, an operator's
+  // insert in the SQL editor), and the trigger fires on all of them. The POST
+  // route below models the service-role case, which is the only one of the three
+  // an offline JS mock can reach.
   //
   // A SEPARATE FUNCTION, not a call to materializeForProject inlined at the
   // route, so the trigger can be disabled on its own to prove the checks that
@@ -288,11 +317,24 @@ function createMockSupabase() {
     }
   };
 
-  function newSession(user) {
+  // GoTrue issues tokens that belong to a SESSION, not to each other: a
+  // refresh ROTATES the pair within the same session (see the refresh grant
+  // below, which carries the session id across), and /auth/v1/logout revokes
+  // the session — every token ever minted under it, not just the one
+  // presented. Modelling the session id is what makes the sign-out test mean
+  // anything: a machine whose token was refreshed on its way out must still
+  // kill the older refresh token sitting in a COPY of credentials.json, and a
+  // mock that revoked one pair would show that copy still working (or, worse,
+  // show it dying for the wrong reason).
+  function newSession(user, sessionId) {
     const access = `at-${uuid()}`;
     const refresh = `rt-${uuid()}`;
+    const sid = sessionId || uuid();
     sessions.set(access, user.id);
     refreshTokens.set(refresh, user.id);
+    tokenExpiry.set(access, Date.now() + 3600_000); // matches the expires_in below
+    tokenSession.set(access, sid);
+    tokenSession.set(refresh, sid);
     return {
       access_token: access,
       refresh_token: refresh,
@@ -301,9 +343,21 @@ function createMockSupabase() {
     };
   }
 
+  // An access token is a JWT with an `exp`, and a real backend rejects an
+  // expired one with 401 — including at /auth/v1/logout, which is why signing
+  // out has to refresh BEFORE it revokes. Without an expiry here that ordering
+  // cannot be tested: a stale token would keep working and the test would pass
+  // for a build that skips the refresh and leaves the session alive.
+  //
+  // Only tokens this mock ISSUED carry an expiry. A test that seeds
+  // `mock.sessions` directly (several do, to stand in for an OAuth round trip)
+  // gets a token with no expiry entry, which never expires — unchanged.
   function authedUser(req) {
     const m = String(req.headers.authorization || '').match(/^Bearer (.+)$/);
-    return m ? sessions.get(m[1]) || null : null;
+    if (!m) return null;
+    const exp = tokenExpiry.get(m[1]);
+    if (exp != null && Date.now() > exp) return null;
+    return sessions.get(m[1]) || null;
   }
 
   const json = (res, code, data) => {
@@ -758,15 +812,47 @@ function createMockSupabase() {
     const idRaw = p.get('id') || '';
     const isIdLt = /^lt\./.test(idRaw);
     const idBound = isIdLt ? Number(decodeURIComponent(idRaw.replace(/^lt\./, ''))) : null;
+    // The forward pull's KEYSET page (lib/teamsync.js fetchPullPage), the one
+    // shape of PostgREST's logical `or=` this stand-in understands:
+    //
+    //   or=(created_at.gt.<C>,and(created_at.eq.<C>,id.gt.<I>))
+    //
+    // Both legs are modelled with tsCmp, not a string compare, and that is the
+    // point of modelling it at all: the client sends back a cursor it READ, so
+    // `created_at.eq.` arrives spelled '...55+00:00' against a stored
+    // '...550Z'. Postgres casts both to timestamptz and finds them equal; a
+    // mock comparing the two spellings as text would find the tie group empty
+    // and quietly pass a pull that skips rows in production.
+    //
+    // An `or=` in any OTHER shape is a 400, deliberately: PostgREST parses
+    // this filter, and a stand-in that silently ignored a shape it did not
+    // understand would return a full unfiltered page and call a malformed
+    // query green. flags.rejectOr forces that 400 for every shape, standing in
+    // for a backend too old to accept the filter at all.
+    const orRaw = p.get('or') || '';
+    const orM = /^\(created_at\.gt\.([^,]+),and\(created_at\.eq\.([^,]+),id\.gt\.(\d+)\)\)$/.exec(orRaw);
+    if (orRaw && (flags.rejectOr || !orM)) {
+      return json(res, 400, { message: `"failed to parse logical tree ((${orRaw}))" (line 1, column 1)` });
+    }
     const order = p.get('order') || '';
     const descById = order === 'id.desc';
     const descByCreatedAt = order === 'created_at.desc';
+    // Ties on created_at are broken by id when the caller asked for that sort
+    // key — the forward pull's whole boundary fix depends on the page coming
+    // back in a total order, and without the secondary key the tie group's
+    // order is whatever the storage array happens to hold.
+    const tieById = /(^|,)id\.asc$/.test(order);
     // 025 §2: memory_entries_select ANDs can_see_project onto the membership
     // check — a revoked member's direct pull sees nothing for this project.
     if (!isMember(projectTeam(eq), userId) || !canSeeProject(eq, userId)) return json(res, 200, []);
     let rows = entries.filter(e => e.project_id === eq && e.author_id !== neq);
     if (isGt) rows = rows.filter(e => tsCmp(e.created_at, createdAtBound) > 0);
     if (isIdLt) rows = rows.filter(e => Number(e.id) < idBound);
+    if (orM) {
+      const [, gtBound, eqBound, idGt] = orM;
+      rows = rows.filter(e => tsCmp(e.created_at, gtBound) > 0 ||
+        (tsCmp(e.created_at, eqBound) === 0 && Number(e.id) > Number(idGt)));
+    }
     // Order THEN limit — a descending page must return the NEWEST rows below
     // the bound (the tail closest to the cursor), not just the first `limit`
     // rows encountered in storage order before sorting.
@@ -774,7 +860,11 @@ function createMockSupabase() {
       .slice()
       .sort((a, b) => {
         if (descById) return b.id - a.id;
-        return descByCreatedAt ? b.created_at.localeCompare(a.created_at) : a.created_at.localeCompare(b.created_at);
+        const byTime = descByCreatedAt
+          ? tsCmp(b.created_at, a.created_at)
+          : tsCmp(a.created_at, b.created_at);
+        if (byTime !== 0 || !tieById) return byTime;
+        return Number(a.id) - Number(b.id);
       })
       .slice(0, parseInt(p.get('limit') || '200', 10));
     // Real PostgREST only returns the requested columns — project to
@@ -855,7 +945,34 @@ function createMockSupabase() {
         if (!userId) return json(res, 400, { error_description: 'Invalid refresh token' });
         stats.refreshCalls++;
         const user = [...users.values()].find(u => u.id === userId);
-        return json(res, 200, newSession(user));
+        // Rotation stays INSIDE the session it came from, exactly as GoTrue
+        // does — otherwise a refresh would quietly launder a token out of the
+        // session a later logout is meant to kill.
+        return json(res, 200, newSession(user, tokenSession.get(body.refresh_token)));
+      }
+      // POST /auth/v1/logout: 204, no body, authenticated by the USER's bearer
+      // token rather than the anon key. `scope=local` ends the presented
+      // session; anything else (GoTrue's default) ends every session the user
+      // has. flags.failLogout stands in for a backend that refuses — the case
+      // where sign-out must NOT report a revocation it did not get.
+      if (url.pathname === '/auth/v1/logout') {
+        if (flags.failLogout) return json(res, 500, { msg: 'logout unavailable' });
+        const userId = authedUser(req);
+        if (!userId) return json(res, 401, { msg: 'invalid JWT' });
+        const bearer = String(req.headers.authorization || '').replace(/^Bearer /, '');
+        const scope = url.searchParams.get('scope') || 'global';
+        const sid = tokenSession.get(bearer);
+        const killsToken = tok => (scope === 'local'
+          ? tokenSession.get(tok) === sid
+          : true);
+        for (const [tok, uid] of [...sessions]) {
+          if (uid === userId && killsToken(tok)) { sessions.delete(tok); tokenSession.delete(tok); }
+        }
+        for (const [tok, uid] of [...refreshTokens]) {
+          if (uid === userId && killsToken(tok)) { refreshTokens.delete(tok); tokenSession.delete(tok); }
+        }
+        res.writeHead(204);
+        return res.end();
       }
       const rpcMatch = url.pathname.match(/^\/rest\/v1\/rpc\/(\w+)$/);
       if (rpcMatch) return handleRpc(res, rpcMatch[1], body, authedUser(req));
@@ -870,9 +987,23 @@ function createMockSupabase() {
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { message: 'not authenticated' });
         const teamEq = (url.searchParams.get('team_id') || '').replace(/^eq\./, '');
+        // Two backend shapes, because both exist in the wild and the client has
+        // to be right against each:
+        //
+        //   pre-041  — `where archived_at is null and can_see_project(...)`.
+        //              An archived project and a revoked one are both simply
+        //              ABSENT, which is the conflation 041 exists to end.
+        //   post-041 — `where can_see_project(...)`, with archived_at carried
+        //              as a COLUMN. Presence now means exactly "you may see
+        //              this"; archived is read off the row.
+        //
+        // flags.projectStatsCarriesArchived selects the post-041 shape. It
+        // defaults to the shape the LIVE backend has today, so every existing
+        // caller and suite keeps seeing what it saw.
+        const carriesArchived = flags.projectStatsCarriesArchived;
         const rows = projects
-          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) && !p.archivedAt &&
-            canSeeProject(p.id, userId))
+          .filter(p => (!teamEq || p.teamId === teamEq) && isMember(p.teamId, userId) &&
+            (carriesArchived || !p.archivedAt) && canSeeProject(p.id, userId))
           .map(p => {
             const es = entries.filter(e => e.project_id === p.id);
             return {
@@ -880,30 +1011,56 @@ function createMockSupabase() {
               last_activity: es.length ? es.map(e => e.ts).sort().pop() : null,
               contributors: new Set(es.map(e => e.author_id)).size,
               entries: es.length,
+              // Appended, never inserted: `create or replace view` can only add
+              // columns at the end, and a pre-041 backend has no such column at
+              // all — absent, which is not the same as null.
+              ...(carriesArchived ? { archived_at: p.archivedAt || null } : {}),
             };
           });
         return json(res, 200, rows);
       }
-      // POST /rest/v1/projects — the capability schema.sql:118's `projects_insert`
-      // policy grants and NO CLIENT USES. It is routed here purely so the suite
-      // can exercise the path a member could take with the anon key and a bearer
-      // token, which is what 029 §3 flagged and 032 closes. Do not reach for this
-      // from lib/ — the only supported way to create a project is link_project.
+      // POST /rest/v1/projects — public.projects has NO INSERT POLICY since
+      // 036_drop_projects_insert.sql, so this route exists to model that refusal
+      // and the one insert path that survives it.
+      //
+      //   * With a member's bearer token the caller is the `authenticated` role.
+      //     RLS is on (`relrowsecurity = true`) and no permissive INSERT policy
+      //     exists, so the INSERT raises 42501 and PostgREST returns 403. That is
+      //     unconditional: it does not depend on team membership or on the value
+      //     of created_by, because there is no predicate left to satisfy. Before
+      //     036 this same request succeeded under `projects_insert`
+      //     (`is_team_member(team_id) and created_by = auth.uid()`) — its exact
+      //     body is at supabase/rollback/pre-036-projects-insert.sql.
+      //   * With the SERVICE-ROLE key the caller is a BYPASSRLS role, so row
+      //     security is not applied at all and the insert lands. This is the
+      //     offline stand-in for the writers that remain in production —
+      //     link_project's `security definer` insert (owner `postgres`,
+      //     `rolbypassrls = true`, on a table that is not FORCE-RLS) and an
+      //     operator's insert in the SQL editor. It is what keeps the 032 trigger
+      //     checks below testing the trigger rather than testing a policy.
+      //
+      // NO CLIENT USES EITHER PATH. `grep -rn "v1/projects"` over the repo
+      // matches only this file and the suite; the only writer of public.projects
+      // in lib/ is the link_project RPC (lib/teamsync.js:1206). Do not reach for
+      // this route from lib/, and do not give lib/ a service-role key.
       if (url.pathname === '/rest/v1/projects' && req.method === 'POST') {
+        const bypassRls = String(req.headers.apikey || '') === SERVICE_ROLE_KEY;
         const userId = authedUser(req);
-        if (!userId) return json(res, 401, { message: 'not authenticated' });
+        if (!bypassRls && !userId) return json(res, 401, { message: 'not authenticated' });
+        // The whole of 036: no INSERT policy, so an `authenticated` caller is
+        // refused whatever the row says — before the row is even looked at. The
+        // membership and created_by checks that used to live here are gone on
+        // purpose; reinstating either would make the mock model a policy that no
+        // longer exists.
+        if (!bypassRls) {
+          return json(res, 403, { message: 'new row violates row-level security policy for table "projects"' });
+        }
         const rows = Array.isArray(body) ? body : [body];
         const created = [];
         for (const r of rows) {
-          // projects_insert: `is_team_member(team_id) and created_by = auth.uid()`.
-          // Both halves, or the mock would be more permissive than the policy.
-          if (!isMember(r.team_id, userId)) return json(res, 403, { message: 'not a member of this team' });
-          if (r.created_by && r.created_by !== userId) {
-            return json(res, 403, { message: 'new row violates row-level security policy for table "projects"' });
-          }
-          // `unique (team_id, name)` (schema.sql:33) is a table constraint, so it
-          // binds this path too — unlike link_project's repo_url dedup, which is
-          // RPC logic and is genuinely bypassed here.
+          // `unique (team_id, name)` (schema.sql:33) is a table CONSTRAINT, not a
+          // policy, so it binds even the bypassing path — unlike link_project's
+          // repo_url dedup, which is RPC logic and is genuinely bypassed here.
           if (projects.some(p => p.teamId === r.team_id && p.name === r.name)) {
             return json(res, 409, { message: 'duplicate key value violates unique constraint "projects_team_id_name_key"' });
           }
@@ -1273,7 +1430,10 @@ function createMockSupabase() {
       if (teamAudit[i].team_id === teamId) teamAudit.splice(i, 1);
     }
   };
-  return { server, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, deleteTeamCascade, deleteUserCascade };
+  // Age an issued access token past its expiry, without sleeping an hour.
+  const expireToken = accessToken => tokenExpiry.set(accessToken, Date.now() - 1000);
+
+  return { server, expireToken, users, sessions, authCodes, teams, members, projects, entries, invites, pubkeys, teamKeys, projectAccess, teamAudit, stats, flags, backfillProjectAccess, deleteTeamCascade, deleteUserCascade, serviceKey: SERVICE_ROLE_KEY };
 }
 
 module.exports = { createMockSupabase, pgTimestamptz };
