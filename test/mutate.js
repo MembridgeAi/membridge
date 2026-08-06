@@ -55,7 +55,7 @@ const { spawnSync } = require('child_process');
 const REPO = path.join(__dirname, '..');
 
 function parseArgs(argv) {
-  const out = { mode: 'ops', suites: [], target: null, list: false, limit: Infinity, filter: null };
+  const out = { mode: 'ops', suites: [], target: null, list: false, limit: Infinity, filter: null, lines: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--target') out.target = argv[++i];
@@ -66,6 +66,15 @@ function parseArgs(argv) {
     // monolith is the normal second pass, and one filter per invocation meant
     // paying the ~110s core run once per mutant instead of once per batch.
     else if (a === '--filter') out.filter = argv[++i].split(',').map(s => s.trim()).filter(Boolean);
+    // `--lines 1317-1420`: sample a REGION of a large file. lib/server.js is
+    // 3228 lines and 873 mutants; a full pass is not a development loop, and
+    // "which handlers did you actually measure" has to be answerable precisely
+    // rather than as a filter-string guess.
+    else if (a === '--lines') {
+      const m = String(argv[++i]).match(/^(\d+)-(\d+)$/);
+      if (!m) { console.error('--lines wants a range like 1317-1420'); process.exit(1); }
+      out.lines = [Number(m[1]), Number(m[2])];
+    }
     else if (a === '--list') out.list = true;
   }
   return out;
@@ -244,9 +253,10 @@ function main() {
   // summary describes the set actually being run. Counting it over the whole
   // file made the footer report exclusions that had nothing to do with the
   // mutants on screen.
+  if (args.lines) mutants = mutants.filter(m => m.line >= args.lines[0] && m.line <= args.lines[1]);
   if (args.filter) mutants = mutants.filter(m => args.filter.some(f => m.id.includes(f) || m.context.includes(f)));
   if (!mutants.length) {
-    console.error(`--filter ${JSON.stringify(args.filter)} matched no mutants`);
+    console.error(`--filter ${JSON.stringify(args.filter)}${args.lines ? ` / --lines ${args.lines.join('-')}` : ''} matched no mutants`);
     process.exit(1);
   }
   // Drop mutants that do not compile: they fail everything without any test
