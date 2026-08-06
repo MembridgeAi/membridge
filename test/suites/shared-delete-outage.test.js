@@ -299,9 +299,78 @@ async function main() {
           'the foreign-team case still argues about permissions in a team the user cannot see');
       });
     }
+    // ---- 7. the two branches BEFORE any of the above ----
+    //
+    // Sections 1-6 all enter archiveSharedProject with a tracked, linked
+    // project and argue about what happens after listTeams. The two guards
+    // that decide whether execution ever GETS there had no coverage at all:
+    //
+    //   lib/server.js:1734  if (!key) return { error: 'unknown project' };
+    //   lib/server.js:1736  if (!link || !link.projectId) { ...local delete... }
+    //
+    // Both were found by GUARD-DELETION mutation (`node test/mutate.js
+    // --target lib/server.js --mode guard`), and both survived the full suite
+    // including the monolith. Operator mutation is structurally blind to them
+    // — an `if (!x) return y;` has no operator to flip — which is why a clean
+    // operator-mode sample over this same region said nothing about them.
+    {
+      const untracked = path.join(ROOT, 'projects', 'never-tracked-app');
+      fs.mkdirSync(untracked, { recursive: true });
+      const stBefore = util.loadState();
+      const trackedBefore = Object.keys(stBefore.projects || {});
+
+      const { status, body } = await deleteProjectOverRoute(untracked);
+      check('unknown project: refused as unknown, with a 404 and nothing touched', () => {
+        assert.strictEqual(body && body.error, 'unknown project',
+          `an untracked path was not refused: ${JSON.stringify(body)}`);
+        assert.strictEqual(status, 404, `an unknown project must 404, got ${status}`);
+        const after = Object.keys(util.loadState().projects || {});
+        assert.deepStrictEqual(after.sort(), trackedBefore.sort(),
+          'a delete for an UNTRACKED path changed the set of tracked projects');
+        // The discriminating assertion, and the reason this guard is not
+        // merely redundant with deleteProject's identical one. Delete it and
+        // execution falls through to `{ ...deleteProject(null), scope: 'local' }`
+        // — deleteProject refuses the same way, so the error and the 404 are
+        // unchanged, but the refusal now carries `scope: 'local'`. That is a
+        // response claiming a local deletion happened when nothing was
+        // deleted: this repo's signature defect, a field asserting a success
+        // the code never achieved. A refusal states no scope.
+        assert.ok(!('scope' in body),
+          `an "unknown project" refusal claimed a deletion scope, so it reads as though something was deleted: ${JSON.stringify(body)}`);
+      });
+    }
+
+    {
+      // Tracked, but never linked to a team: the local-only path. This is the
+      // ordinary "delete a personal project" case, and deleting its guard sends
+      // it into the team machinery instead — listTeams, role checks, refusal
+      // payloads — for a project that has no team at all.
+      const local = path.join(ROOT, 'projects', 'purely-local-app');
+      fs.mkdirSync(path.join(local, memorydb.DIR_NAME), { recursive: true });
+      const st = util.loadState();
+      st.projects = { ...(st.projects || {}), [local]: { events: [] } };
+      util.saveState(st);
+      assert.ok(!fs.existsSync(path.join(local, memorydb.DIR_NAME, 'team.json')),
+        'fixture: this project must have NO team link, or it tests the wrong branch');
+
+      const { status, body } = await deleteProjectOverRoute(local);
+      check('unlinked project: deleted locally, scoped local, and never treated as shared', () => {
+        assert.strictEqual(status, 200, `a local delete must succeed, got ${status}: ${JSON.stringify(body)}`);
+        assert.strictEqual(body.scope, 'local',
+          `an unlinked project was not scoped local: ${JSON.stringify(body)}`);
+        // A project with no team cannot produce a TEAM refusal. If the guard is
+        // gone, this is where the fall-through shows: the code reaches the
+        // role logic and answers with a permissions verdict about a team that
+        // does not exist.
+        assert.strictEqual(body.refusal, undefined,
+          `a project with no team link came back with a team refusal: ${JSON.stringify(body)}`);
+        assert.ok(!('archived' in body) || body.archived === false,
+          `an unlinked project reported a TEAM archive: ${JSON.stringify(body)}`);
+        assert.ok(!util.loadState().projects[local], 'the local project was not actually deleted');
+      });
+    }
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    h.noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock.server.close(r));
   }
 

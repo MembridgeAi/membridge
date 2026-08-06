@@ -15,6 +15,27 @@
 // contention they are trying to rule out), waits for system load to settle,
 // re-runs the target in isolation N times, and prints a verdict.
 //
+// THE ONE CASE THE VERDICT CANNOT SEE (#77). A PHANTOM verdict means "the
+// test passed N times in isolation on a quiet machine, so the failure was
+// load contention". That inference holds when the test's failure mode is
+// scheduler starvation. It does NOT hold when the test READS A FILE THE OS
+// KEEPS REWRITING ON ITS OWN CADENCE (mcp-wiring's snapshot of the
+// developer's real ~/.claude.json is the observed case): those failures
+// cluster under load because that is when live sessions run, not because of
+// scheduler contention, and in 3 quiet-machine runs the external writer may
+// simply not have fired.
+//
+// Widening this script to detect that case was considered and rejected. Two
+// reasons: the script does not know which files a test might read, and
+// speculatively snapshotting the whole home dir is expensive and imprecise.
+// Instead the responsibility sits with the TEST AUTHOR:
+// test/suites/tests-own-their-state.test.js audits every test file that
+// mentions os.homedir() and forces an in-file marker declaring intent -- so
+// an author writing "this test reads a real user file" is forced to write
+// down "who else writes to it, and why owning it is not an option" before
+// the check goes green. The gate stays narrow; the ownership question moves
+// to authoring time.
+//
 //   node scripts/verify-finding.js --ui <testFile> [--name "<test name>"]
 //   node scripts/verify-finding.js --suite <suiteName>
 //   (optional: --runs <n>, default 3)

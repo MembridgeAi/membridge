@@ -7,7 +7,7 @@
 // test/harness.js; run this file directly, or via `node test/run.js redaction`.
 // --- 12. built-in secret redaction (lib/redact.js) ---
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check, ROOT, P, BIN, jsonl, read, readSource, count, notRoot, realCanon,
+const { check, skip, ROOT, P, BIN, jsonl, read, readSource, count, notRoot, realCanon,
   startJsonMock, waitForHttp, post, httpGet, httpPost } = h;
 const assert = require('assert');
 const fs = require('fs');
@@ -154,21 +154,52 @@ async function main() {
   // so the secret must travel to `security` on stdin, never as an argument.
   // Runner-injected so the assertion is about command construction, not the
   // real keychain; the darwin round-trip check below exercises the real path.
-  check('keychain: store passes the secret via stdin, never argv', () => {
-    if (process.platform !== 'darwin') return; // store() fails closed off-darwin by design
-    const calls = [];
-    const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
-    try {
-      const secret = 'U0VDUkVULXZh+bHVl/wow==';
-      assert.ok(keychain.store('membridge.test.stdin', secret), 'store failed');
-      assert.ok(calls.every(c => !c.args.join(' ').includes(secret)), 'secret leaked into argv');
-      const store = calls.find(c => c.args[0] === '-i');
-      assert.ok(store, 'store must run security in -i (stdin command) mode');
-      assert.ok(store.input.includes(secret), 'secret travels on stdin');
-      assert.ok(/add-generic-password/.test(store.input), 'stdin carries the add command');
-      assert.ok(/-U/.test(store.input), 'idempotent update flag preserved');
-    } finally { keychain._setRunner(prev); }
-  });
+  //
+  // THREE platforms, three different things to prove — because this check used
+  // to open with `if (process.platform !== 'darwin') return;`, which made it a
+  // passing check that asserted nothing on the ubuntu and windows CI legs (4
+  // of the 6 matrix legs). That is the same silent pass the win32 family forty
+  // lines below carries a comment condemning; the fix was applied there and
+  // not here.
+  if (process.platform === 'darwin') {
+    check('keychain: store passes the secret via stdin, never argv', () => {
+      const calls = [];
+      const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
+      try {
+        const secret = 'U0VDUkVULXZh+bHVl/wow==';
+        assert.ok(keychain.store('membridge.test.stdin', secret), 'store failed');
+        assert.ok(calls.every(c => !c.args.join(' ').includes(secret)), 'secret leaked into argv');
+        const store = calls.find(c => c.args[0] === '-i');
+        assert.ok(store, 'store must run security in -i (stdin command) mode');
+        assert.ok(store.input.includes(secret), 'secret travels on stdin');
+        assert.ok(/add-generic-password/.test(store.input), 'stdin carries the add command');
+        assert.ok(/-U/.test(store.input), 'idempotent update flag preserved');
+      } finally { keychain._setRunner(prev); }
+    });
+  } else if (process.platform === 'win32') {
+    // available() routes to winAvailable() here, which probes the REAL DPAPI
+    // store and can return true — so calling store() would write a live secret
+    // rather than exercise the injected runner. The win32 argv contract has
+    // its own check below, on the leg that can actually run it.
+    skip('keychain: store passes the secret via stdin, never argv',
+      'win32 uses the DPAPI backend, not `security`; its argv contract is checked by keychain(win) below');
+  } else {
+    // Linux and friends: macAvailable() is false before it ever reaches the
+    // runner, so the provable claim is the fail-closed one — the secret never
+    // reaches a subprocess at all. Weaker than the darwin claim, but it is an
+    // assertion that can fail, which is the entire difference.
+    check('keychain: off-darwin, store fails closed and the secret reaches no subprocess', () => {
+      const calls = [];
+      const prev = keychain._setRunner((args, input) => { calls.push({ args, input: input || '' }); return { status: 0, stdout: '' }; });
+      try {
+        const secret = 'U0VDUkVULXZh+bHVl/wow==';
+        assert.strictEqual(keychain.store('membridge.test.stdin', secret), false,
+          'store must fail closed where there is no keychain, not report success');
+        assert.deepStrictEqual(calls, [],
+          'store reached a subprocess on a platform with no keychain');
+      } finally { keychain._setRunner(prev); }
+    });
+  }
   check('keychain: store/load/remove round trip on macOS; fails closed elsewhere', () => {
     if (!keychain.available()) {
       assert.strictEqual(keychain.load('anything'), null, 'unavailable load must be null');
@@ -1313,6 +1344,99 @@ async function main() {
     assert.strictEqual(redactLib.redactDefault(url), url, `URL path token was redacted -> ${redactLib.redactDefault(url)}`);
     assert.ok(redactLib.entropy(ENTROPY_TOKEN) > 4.5, 'test token is not actually high-entropy');
   });
+  // Both checks below were written from MUTATION survivors: `node test/mutate.js
+  // --target lib/redact.js --mode ops --suites redaction,core` broke
+  // redactHighEntropy and the whole 1857-check suite stayed green. Neither
+  // behaviour had an assertion anywhere; ENTROPY_TOKEN above contains no '/'
+  // and appears once, so it cannot tell either mutant from the real code.
+  //
+  // A base64 alphabet INCLUDES '/', so a real credential routinely contains
+  // one. The path guard is `m.includes('/') && <looks like a filename>`;
+  // relaxing that && to || returns every slash-bearing token unredacted —
+  // i.e. it switches the entropy backstop off for exactly the tokens most
+  // likely to be secrets, silently.
+  const SLASH_TOKEN = 'kJ8sQ2/vLpZ4wXn7RtY9bGcH3mAdEfUi'; // 32 chars, entropy 5.00, contains '/'
+  check('redact: a high-entropy token containing "/" is still redacted (it is not a path)', () => {
+    assert.ok(redactLib.entropy(SLASH_TOKEN) > 4.5, 'fixture token is not actually high-entropy');
+    assert.ok(SLASH_TOKEN.includes('/'), 'fixture token must contain a slash or it tests nothing');
+    const out = redactLib.redactDefault(`the token is ${SLASH_TOKEN} end`);
+    assert.ok(out.includes('[redacted:high-entropy]'),
+      `a slash-bearing secret escaped the entropy backstop -> ${out}`);
+    assert.ok(!out.includes(SLASH_TOKEN), `the raw token survived -> ${out}`);
+    // The adjacent case that must NOT change: a genuine path with an extension
+    // is still left alone. Without this the obvious "fix" is to drop the path
+    // guard entirely, which would start eating source filenames.
+    const p = 'src/components/VeryLongComponentNameHere.tsx';
+    assert.strictEqual(redactLib.redactDefault(`see ${p} now`), `see ${p} now`,
+      'a real path with an extension must not be redacted');
+  });
+
+  // REPLACES a check that pinned the OPPOSITE behaviour. I originally wrote
+  // this to assert a recurring token is left alone, because that is what
+  // looksLikeSecret did and nothing had pinned it. The redaction audit showed
+  // the rule was the defect, not the contract: repeating a secret made it MORE
+  // likely to ship, so "here is the key: X, now use X" leaked while the terser
+  // sentence did not. Pinning existing behaviour is only worth doing once you
+  // know the behaviour is right.
+  check('redact: repeating a secret does not make it safe — a token is judged on shape, not frequency', () => {
+    const once = `here is the key ${SLASH_TOKEN} end`;
+    const twice = `here is the key ${SLASH_TOKEN}, now use ${SLASH_TOKEN} end`;
+    for (const [label, text] of [['once', once], ['twice', twice]]) {
+      const out = redactLib.redactDefault(text);
+      assert.ok(!out.includes(SLASH_TOKEN),
+        `a high-entropy secret mentioned ${label} survived redaction -> ${out}`);
+      assert.ok(out.includes('[redacted:high-entropy]'), `no marker emitted for the ${label} case -> ${out}`);
+    }
+    // The identifier shapes the old recurrence rule claimed to protect are
+    // exempt BY SHAPE, which is why dropping it was affordable. A repeated
+    // UUID (a session id — the case its comment actually named) and a repeated
+    // git SHA must both still survive.
+    const uuid = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+    const sha = 'a'.repeat(39) + 'f';
+    for (const [label, id] of [['UUID session id', uuid], ['40-char hex SHA', sha]]) {
+      const text = `${label} ${id} and again ${id}`;
+      assert.strictEqual(redactLib.redactDefault(text), text, `a repeated ${label} was redacted -> ${redactLib.redactDefault(text)}`);
+    }
+  });
+
+  check('redact: credentials in a URL are redacted for ANY scheme, not a database allowlist', () => {
+    // Routed from the redaction audit. The scheme list named six database
+    // protocols; http, https, ftp and the git transports were absent, so a CI
+    // bot's password in a git remote shipped verbatim. The case that hid it:
+    // `x-token:PW@` IS caught, but only because the USERNAME ends in "token"
+    // and the secret-assignment pattern fires -- so any realistic-looking
+    // example passes while the general case leaks. Hence a username with no
+    // credential-ish word in it.
+    for (const url of [
+      'git+https://ci-bot:s3cretPassw0rd@github.com/acme/app.git',
+      'curl https://admin:hunter2hunter2@api.example.com/v1/x',
+      'ftp://deploy:Pa55word123@files.example.com/drop',
+      'postgres://user:hunter2hunter2@db.example.com:5432/app',
+    ]) {
+      const out = redactLib.redactDefault(url);
+      assert.ok(out.includes('[redacted:credentials]'), `no credentials marker -> ${out}`);
+      assert.ok(!/:(?:s3cretPassw0rd|hunter2hunter2|Pa55word123)@/.test(out), `the password survived -> ${out}`);
+      // scheme and host are deliberately kept: the point is a readable record
+      // of what was contacted, minus the secret.
+      assert.ok(/(github\.com|api\.example\.com|files\.example\.com|db\.example\.com)/.test(out),
+        `the host was destroyed along with the credential -> ${out}`);
+    }
+    // A URL with no userinfo must be untouched, or this pattern is just eating
+    // links.
+    const clean = 'https://github.com/acme/app.git';
+    assert.strictEqual(redactLib.redactDefault(clean), clean, 'a credential-free URL was altered');
+  });
+
+  check('redact: an npmrc _auth line is redacted; the word "auth" in prose is not', () => {
+    const out = redactLib.redactDefault('//registry.npmjs.org/:_auth=aGVsbG86c2VjcmV0cGFzcw==');
+    assert.ok(!out.includes('aGVsbG86c2VjcmV0cGFzcw=='), `npmrc _auth credential survived -> ${out}`);
+    // The reason this is its own narrow pattern rather than adding "auth" to
+    // the secret-assignment word list: that would eat ordinary config and prose.
+    for (const benign of ['auth: true', 'set oauth_url = https://example.com/cb', 'the auth flow is documented']) {
+      assert.strictEqual(redactLib.redactDefault(benign), benign, `benign text was redacted -> ${redactLib.redactDefault(benign)}`);
+    }
+  });
+
   check('redact: redactDefaults:false opts out; redactExtra is additive', () => {
     const off = digest.redactText(`key ${AWS_KEY}`, digest.compileRedactions({ redactDefaults: false }));
     assert.ok(off.includes(AWS_KEY), 'defaults not disabled by redactDefaults:false');
@@ -1466,8 +1590,7 @@ async function main() {
       assert.ok(row.summary.includes('[redacted:anthropic-key]'), `pushed summary not redacted -> ${row.summary}`);
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    h.noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock5.server.close(r));
   }
 

@@ -2,6 +2,8 @@
 // Extracted verbatim from test/run-tests.js. Shared plumbing lives in
 // test/harness.js; run this file directly, or via `node test/run.js mcp-agent-discovery`.
 // ---- MCP agent config discovery (mcp spec §4.1) ----
+//
+// NO_UNOWNED_FILE_READS: os.homedir() only appears in an assertion that a resolver's returned path equals path.join(os.homedir(), '.codex'). No fs.<read> uses that path. See test/suites/tests-own-their-state.test.js.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check, ROOT, P, BIN, jsonl, read, readSource, count, notRoot, realCanon,
   startJsonMock, waitForHttp, post, httpGet, httpPost } = h;
