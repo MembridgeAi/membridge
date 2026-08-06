@@ -136,11 +136,87 @@ measured on an unusually unfavourable install. That does not make the finding
 wrong; it makes re-running both harnesses on a normal install the highest-value
 next step.
 
+
+---
+
+# REV-6: the funnel after the Tier A fix
+
+**Provenance, because it decides what these numbers mean.** REV-4 (`7e9a6de`)
+landed minutes before this was measured and has not yet run on any session, so
+no session on this machine has a `reads` map. **Nothing below is observed new
+behaviour.** Every figure is *current code's rules replayed over historical
+reads* from the transcripts — a ceiling, not a count of serves that happened.
+The REV-2 funnel above, by contrast, is observed history. Do not read the two
+as the same kind of claim.
+
+## The funnel, with Tier A traced separately
+
+Tier A and Tiers B/C no longer share a bottleneck, so they no longer share a
+funnel. Of 927 in-project `Read` calls:
+
+| | reads | share | |
+|---|---|---|---|
+| first read, nobody had read it | 283 | 30.5% | no tier applies |
+| repeat, same session, unchanged | **257** | 27.7% | **Tier A opportunity** |
+| repeat, same session, written since | 135 | 14.6% | correctly refused |
+| first read this session, another had read it | **252** | 27.2% | **Tier B/C opportunity** |
+
+Cross-check: 257 + 135 + 252 = 644, exactly the repeat-read count measured
+independently in REV-2.
+
+## Answering the three questions
+
+**1. How much did REV-4 lift the Tier A ceiling?** From 207 to 257 replayable
+reads — **about 1.2x, not a transformation.** I flagged in REV-4 that Tier A
+volume would rise and that it should be treated as suspect; the measurement says
+the rise is real but modest.
+
+Two caveats, both pointing the same way: the 207 uses *today's* 27-file store as
+a proxy for what was stored historically, and it does not model the old rule's
+**freshness** requirement at all. Both make 207 an *upper bound* on the old
+ceiling, so the true lift is **≥1.2x and plausibly more**. It is not the
+order-of-magnitude change the ticket hypothesised.
+
+**2. Is Tier A now most of the opportunity?** No. **257 vs 252 — an almost exact
+50/50 split.** Tier A does not make the skeletonizer irrelevant.
+
+What changes is the *cost* of each half. Tier A needs no skeleton, no warm pass,
+no store entry, and no freshness window — it is a pointer proved by a hash the
+hook already computes. Tiers B/C need `warm()` to run, `skeletonize()` to
+accept, the entry to be stored, and the hash to still match at read time. So the
+honest framing is not "the skeletonizer stopped mattering" but **"half the
+opportunity is now reachable at near-zero production cost, and the other half
+still costs everything it did this morning."**
+
+**3. Is the remaining B/C constraint worth attacking?** It still governs 27% of
+reads, so it cannot be dismissed — but it is no longer the only lever, and it is
+by far the more expensive one. The ordering that follows is: prove Tier A is
+actually serving (it has never run), then re-measure, and only then decide
+whether B/C's acceptance rate is worth engineering. The eligibility cap stays at
+25 regardless; that curve was about which files get *stored*, and storage is now
+irrelevant to half the opportunity.
+
+## What this says about REV-4, quantified
+
+135 same-session repeat reads in this history happened **after the file had been
+written**. Under the pre-REV-4 rule those were candidates to be served a Tier A
+notice saying the file was *"unchanged since"* this session read it — a false
+statement handed to an agent that would then skip the re-read. That is the
+concrete size of the bug: **135 opportunities to mislead an agent, in one
+project's history.** It is also why the 14.6% row is labelled "correctly
+refused" rather than "missed": refusing them is the fix working.
+
+## Not modelled
+
+`MIN_CALL_TOKENS` (400) applies to Tier A as well, so the 257 is an upper bound
+on serves, not a prediction of them. Files under ~1600 bytes are excluded
+regardless of tier.
+
 ## Suggested order
 
-1. **Persist the read-time hash** into `fileReaders` and key Tier A off it.
-   Fixes the latent correctness bug and decouples the cheapest tier from the
-   store. Smallest change with the clearest justification.
+1. ~~**Persist the read-time hash**~~ — done in REV-4 (`7e9a6de`), via
+   per-session state rather than `fileReaders`. See the REV-6 section above for
+   what it changed and what it did not.
 2. **Re-run both harnesses on a normal install** before drawing conclusions
    about the product from either number.
 3. **Only then** consider whether eligibility (top-25) should widen — and note
