@@ -186,10 +186,21 @@ function summarize(results) {
       lines.push(`ok    ${r.suite.name.padEnd(24)} ${String(r.passed).padStart(5)}/${r.total}  ${r.secs}s`);
     } else {
       (r.noTally ? crashed : failed).push(r.suite.name);
+      // A crashed suite's TOTAL is unknown, but its progress is not: every
+      // check prints its own line as it runs, and the monolith prints its
+      // tally only at the very end (run-tests.js:25530). So a crash 14k lines
+      // in means ~1300 checks genuinely ran and reported — evidence the runner
+      // used to throw away, leaving a reader with "0/0" for a run that had
+      // done nearly all of its work. Counted from the captured output and
+      // reported HERE only; it never touches the totals, because a partial
+      // count folded into a total is the original bug this file exists for.
       const why = r.noTally
-        ? `CRASHED before printing a tally, exit ${r.code}; checks run: UNKNOWN`
+        ? `CRASHED after ${reportedChecks(r.out)} checks reported, before its tally; exit ${r.code}; TOTAL UNKNOWN${sigSuffix(r.out)}`
         : `exit ${r.code}`;
-      lines.push(`FAIL  ${r.suite.name.padEnd(24)} ${why}`);
+      // CRASH, not FAIL, in the per-suite column. They are different events
+      // and the reader should not have to parse the rest of the line to tell
+      // them apart.
+      lines.push(`${r.noTally ? 'CRASH' : 'FAIL '} ${r.suite.name.padEnd(24)} ${why}`);
       // Show the tail of a failing suite's output — enough to see the first
       // FAIL line or the crash, without drowning the summary.
       const out = r.out.trimEnd().split('\n');
@@ -213,18 +224,79 @@ function summarize(results) {
   // arrangement: the counts are stated as counts, the verdict is the last
   // line, and the verdict agrees with the exit code. Anything quoted out of
   // this block still reads as a failure.
-  const scope = crashed.length
-    ? `the ${suites(tallied)} that reported a tally (the rest crashed, so the real total is higher)`
-    : `${suites(tallied)}`;
-  lines.push(`counted ${passed} of ${total} checks in ${scope}`);
+  //
+  // ...and when NOTHING reported a tally, say that instead of printing a
+  // count. `counted 0 of 0 checks in the 0 suites that reported a tally` is
+  // arithmetic over an empty set dressed as a measurement: it is the mirror of
+  // the 0/0-reads-as-success bug this file already fixed. An absence reading
+  // as a failure is less dangerous than an absence reading as a pass, and
+  // equally uninformative — nobody learns from it whether the suite is broken,
+  // the tree is bad, or the machine fell over.
+  if (tallied === 0) {
+    // Deliberately NOT "nothing was measured": checks may well have run and
+    // reported individually before the process died. What is missing is a
+    // TALLY, and therefore a denominator — the run cannot say how much of
+    // itself it got through, which is exactly why it cannot judge the tree.
+    const ran = results.reduce((n, r) => n + reportedChecks(r.out), 0);
+    lines.push(`NO SUITE REPORTED A TALLY — ${ran} check(s) reported before the crash, out of an UNKNOWN total, `
+      + 'so this run cannot say whether the tree is good');
+  } else {
+    const scope = crashed.length
+      ? `the ${suites(tallied)} that reported a tally (the rest crashed, so the real total is higher)`
+      : `${suites(tallied)}`;
+    lines.push(`counted ${passed} of ${total} checks in ${scope}`);
+  }
   const why = [];
   if (failed.length) why.push(`failing checks: ${failed.join(', ')}`);
   if (crashed.length) why.push(`CRASHED with an UNKNOWN number of checks: ${crashed.join(', ')}`);
-  lines.push(`RESULT FAILED  ${failed.length + crashed.length} of ${suites(results.length)} did not pass — ${why.join('; ')}`);
+  // THREE verdicts, not two. "a check failed" and "the suite never finished"
+  // are different events with different next actions — read the assertion, vs
+  // find out why the process died — and collapsing them into FAILED sent a
+  // lane hunting for a defect in a tree that was fine. INCOMPLETE is used only
+  // when nothing actually failed a check: a genuine failure alongside a crash
+  // is still a failure, because that is the finding you must act on.
+  const verdict = failed.length ? 'FAILED' : 'INCOMPLETE';
+  const gloss = failed.length
+    ? ''
+    : ' — no check failed; the run did not finish, so the tree is UNJUDGED (re-run before believing anything about it)';
+  lines.push(`RESULT ${verdict}  ${failed.length + crashed.length} of ${suites(results.length)} did not pass — ${why.join('; ')}${gloss}`);
   return { lines, exitCode: 1 };
 }
 
-module.exports = { summarize };
+// A one-line "what killed it" for a suite that never reported a tally, pulled
+// from the child's own output. Without it the per-suite line says only "exit
+// 1", and the reader has to scroll the quoted tail to learn whether it was an
+// assertion, a missing module, or a pipe closing under load. Prefers the most
+// specific evidence available: a node errno code (EPIPE, ECONNREFUSED,
+// ENOENT), then an `Error:` line, then a bare signal.
+// How many checks a suite printed before it stopped. The harness prints one
+// `  ok  ` or `  FAIL  ` line per check as it runs, so this is a real floor on
+// the work done — never a total, and never added to one.
+function reportedChecks(out) {
+  return (String(out || '').match(/^ {2}(?:ok|FAIL) {2}/gm) || []).length;
+}
+
+const ERRNO_RX = /\b(EPIPE|ECONNREFUSED|ECONNRESET|ENOENT|EADDRINUSE|EACCES|ETIMEDOUT|ERR_[A-Z_]+)\b/;
+function crashSignature(out) {
+  const text = String(out || '');
+  const errno = text.match(ERRNO_RX);
+  if (errno) {
+    // Name the frame too when the stack has one: "EPIPE at stdio.js:78" says
+    // considerably more than "EPIPE".
+    const frame = text.match(/at\s+[^\n]*?([\w.-]+\.js):(\d+)/);
+    return frame ? `${errno[1]} at ${frame[1]}:${frame[2]}` : errno[1];
+  }
+  const err = text.match(/^\s*((?:[A-Za-z]*Error|Assertion\w*)[^\n]{0,120})/m);
+  if (err) return err[1].trim();
+  const sig = text.match(/\b(SIG[A-Z]+)\b/);
+  return sig ? sig[1] : '';
+}
+const sigSuffix = out => {
+  const s = crashSignature(out);
+  return s ? ` (${s})` : '';
+};
+
+module.exports = { summarize, crashSignature, reportedChecks };
 
 if (require.main === module) {
   main().catch(err => {

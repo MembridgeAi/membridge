@@ -73,7 +73,12 @@ async function main() {
     assert.match(text, /core/, 'the crashed suite must be named in the footer');
   });
 
-  check('summarize: the final line and the exit status agree on failure', () => {
+  check('summarize: the final line and the exit status agree that the run did not pass', () => {
+    // The verdict word is FAILED or INCOMPLETE — never absent, never a pass.
+    // INCOMPLETE was split out of FAILED because "a check failed" and "the
+    // suite never finished" need different next actions (read the assertion
+    // vs find out why the process died), and collapsing them sent a lane
+    // hunting for a defect in a tree that was fine.
     for (const results of [
       [tallied('a', 3, 3), crashed('core')],
       [tallied('a', 3, 3), tallied('b', 1, 2, 1)],
@@ -82,8 +87,73 @@ async function main() {
       const { lines, exitCode } = summarize(results);
       const footer = footerOf(lines);
       assert.strictEqual(exitCode, 1);
-      assert.match(footer, /FAILED/, `exit 1 but the footer never says FAILED:\n${footer}`);
+      assert.match(footer, /RESULT (FAILED|INCOMPLETE)/,
+        `exit 1 but the footer states no verdict:\n${footer}`);
+      assert.ok(!readsAsAllPassed(footer), `a non-passing run read as a pass:\n${footer}`);
     }
+  });
+
+  check('summarize: INCOMPLETE is reserved for runs where NO check failed — a real failure still says FAILED', () => {
+    // The distinction has to be load-bearing or it is decoration. A crash
+    // alongside a genuine failure is still FAILED: the failing assertion is
+    // the finding to act on, and calling that run "incomplete" would bury it.
+    const crashOnly = footerOf(summarize([tallied('a', 3, 3), crashed('core')]).lines);
+    assert.match(crashOnly, /RESULT INCOMPLETE/, `a crash-only run must be INCOMPLETE:\n${crashOnly}`);
+    assert.match(crashOnly, /UNJUDGED/, 'an incomplete run must say the tree is unjudged');
+
+    const both = footerOf(summarize([tallied('b', 1, 2, 1), crashed('core')]).lines);
+    assert.match(both, /RESULT FAILED/, `a failure alongside a crash must still be FAILED:\n${both}`);
+    assert.ok(!/INCOMPLETE/.test(both), `a real failure was downgraded to INCOMPLETE:\n${both}`);
+  });
+
+  check('summarize: when NOTHING reported a tally, it says so instead of printing a count', () => {
+    // `counted 0 of 0 checks in the 0 suites that reported a tally` is
+    // arithmetic over an empty set dressed as a measurement — the mirror of
+    // the 0/0-reads-as-success bug this suite exists for. Observed live: a
+    // core run died on an EPIPE in the MCP stdio transport and reported
+    // exactly that, and nobody reading it could tell whether the suite was
+    // broken, the tree was bad, or the machine had fallen over.
+    // Shaped like the real incident: the monolith prints its tally ONLY at the
+    // very end (run-tests.js:25530), so a crash partway through means many
+    // checks genuinely ran and reported. The runner used to discard that and
+    // say 0/0 for a run that had done nearly all its work.
+    const body = Array.from({ length: 1300 }, (_, i) => `  ok    check number ${i}`).join('\n')
+      + '\nError: write EPIPE\n    at StdioServerTransport.send (/x/sdk/server/stdio.js:78:11)\n';
+    const { lines, exitCode } = summarize([crashed('core', body)]);
+    const text = lines.join('\n');
+    assert.strictEqual(exitCode, 1);
+    assert.match(text, /NO SUITE REPORTED A TALLY/, `an empty run printed a count instead of an absence:\n${text}`);
+    assert.ok(!/counted 0 of 0/.test(text), `still printing 0-of-0 arithmetic:\n${text}`);
+    // The progress that DID happen is reported, because "0/0" for a run that
+    // completed 1300 checks is as misleading as a green total for one that
+    // completed none.
+    assert.match(text, /1300 check\(s\) reported before the crash/, `progress was discarded:\n${text}`);
+    assert.match(text, /CRASHED after 1300 checks reported/, `the suite line hid its progress:\n${text}`);
+    // ...but it must NEVER become a denominator.
+    assert.ok(!/1300\/1300/.test(text), `a partial count was folded into a total:\n${text}`);
+    assert.ok(!readsAsAllPassed(text), `a crashed run read as a pass:\n${text}`);
+    // ...and the crash signature is on the suite's own line, so the reader
+    // learns WHAT killed it without scrolling the quoted tail.
+    assert.match(text, /EPIPE at stdio\.js:78/, `the crash signature was not surfaced:\n${text}`);
+    assert.match(text, /^CRASH /m, 'a crashed suite must be labelled CRASH, not FAIL');
+  });
+
+  check('summarize: reportedChecks counts printed check lines, and is never mistaken for a total', () => {
+    const { reportedChecks } = require('../run.js');
+    assert.strictEqual(reportedChecks('  ok    a\n  FAIL  b\n        why\n  ok    c\n'), 3);
+    assert.strictEqual(reportedChecks('Error: boom\n'), 0, 'no check lines means no progress to claim');
+    assert.strictEqual(reportedChecks(''), 0);
+    // Indented-but-not-a-check lines (assertion detail, quoted output) must not
+    // inflate it.
+    assert.strictEqual(reportedChecks('  ok    a\n      | ok  quoted from a child\n'), 1);
+  });
+
+  check('summarize: crashSignature prefers an errno, then an Error line, and is silent when there is nothing to say', () => {
+    const { crashSignature } = require('../run.js');
+    assert.match(crashSignature('Error: write EPIPE\n    at Foo.send (/x/server/stdio.js:78:11)\n'), /^EPIPE at stdio\.js:78$/);
+    assert.strictEqual(crashSignature('boom\nTypeError: x is not a function\n  at y'), 'TypeError: x is not a function');
+    assert.strictEqual(crashSignature('  ok  a check\n  ok  another\n'), '',
+      'clean output must not be mined for a fake signature');
   });
 
   check('summarize: a partial tally is never folded into a total that looks complete', () => {
@@ -131,7 +201,7 @@ async function main() {
     assert.strictEqual(withCrash.status, 1, withCrash.out);
     const footer = footerOf(withCrash.out.trimEnd().split('\n'));
     assert.ok(!readsAsAllPassed(footer), `crashed run still reads as a pass:\n${footer}`);
-    assert.match(footer, /FAILED/);
+    assert.match(footer, /RESULT (FAILED|INCOMPLETE)/);
     assert.match(footer, /UNKNOWN/);
     assert.match(footer, /boom/, 'the crashed suite must be named');
   });

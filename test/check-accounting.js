@@ -56,6 +56,13 @@
 //   • It sees the platform it runs on. A body that vanishes only on Windows
 //     is caught only by the Windows CI leg. The static half reads every
 //     platform's path at once, from any platform.
+//   • The counting copy reaches files under test/ ONLY, by design (product
+//     code must get the real module). A check file living anywhere ELSE gets
+//     the real assert, so its assertions are not counted and every check in it
+//     reads as vacuous. Hit live while building a throwaway fixture suite in a
+//     temp dir: two genuine checks failed as "made no assertion". That is the
+//     correct trade — scoping by requiring-file is what keeps the wrapper out
+//     of lib/ — but a fixture suite outside test/ must not use this harness.
 const path = require('path');
 
 const ASSERTION_FNS = ['ok', 'equal', 'notEqual', 'strictEqual', 'notStrictEqual',
