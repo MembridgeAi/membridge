@@ -37,6 +37,28 @@
 // quiet. It cannot catch this one, because it never rebuilds state.
 //
 // Run directly, or via `node test/run.js revocation-state-reset`.
+// STATUS (2026-08-05): ALL SEVEN FAILING CHECKS ARE FIXED ELSEWHERE — on
+// `agent-revoke`, which was not on the list this audit started from and is the
+// reason the list is not the authority. The relevant commits are 4618d75
+// ("fix(security): make revocation survive a state.json rebuild (SEC-3)") and
+// 1c7ce9f ("fix(security): detect revocation from a member's only shared
+// project (SEC-4)"), which add lib/revocation-ledger.js and thread it through
+// lib/util.js, lib/teamsync.js and lib/hooks-recall.js.
+//
+// Verified by execution: substituting that branch's lib/util.js, teamsync.js,
+// hooks-recall.js, hooks-search.js, recall.js, server.js and revocation-ledger.js
+// (then reverting) runs this suite 13/13 — every one of the seven goes green.
+//
+// The checks are LEFT EXACTLY AS THEY ARE. They stay red here because this
+// branch does not carry the fix; they go green on merge, and that transition is
+// the proof. Editing them green would delete the evidence.
+//
+// NOTE FOR WHOEVER MERGES: this file is BYTE-IDENTICAL on `agent-revoke`, so it
+// merges cleanly — agent-revoke forked from an earlier agent-hunt state, took
+// these checks with it, and fixed the product code underneath them without
+// touching the assertions. That is the ideal shape for a finding handoff, and
+// it is worth naming because the other lanes did not all do it: see
+// claude/ops/merge-collisions.md for the four suites that DO collide.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check } = h;
 const assert = require('assert');

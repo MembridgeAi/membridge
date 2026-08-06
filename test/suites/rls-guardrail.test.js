@@ -22,6 +22,15 @@
 //
 // Runs offline against the migration text. It cannot check the live function —
 // that needs credentials, and supabase/AUDIT-live-state.sql is the tool for it.
+// STATUS (2026-08-05): THE 031 GUARDRAIL FINDING IS FIXED ELSEWHERE — not here.
+// The fix is on `agent-sec`, commit 8cd3f6f ("fix(security): close the
+// guardrail's own filter gap and the blanket table grants (SEC-6, SEC-7)"),
+// which rewrites supabase/migrations/031_ensure_rls_event_trigger.sql.
+//
+// The failing check below is LEFT EXACTLY AS IT IS. It was run against that
+// branch's 031 (substituted in, run, reverted) and PASSES: 6/6. It stays red
+// here because this branch does not carry the fix, and it goes green when the
+// branches merge — that transition is the proof. Do not edit it green.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check } = h;
 const assert = require('assert');

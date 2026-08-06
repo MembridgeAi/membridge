@@ -16,6 +16,17 @@
 // redactText, and this suite is find-only. Do not "fix" them by relaxing the
 // assertions; the fix is a scrub() call in lib/teamsync.js entryToRow.
 //
+// STILL OPEN AS OF 2026-08-05, and re-checked rather than assumed. Every other
+// branch carrying fixes this evening was read directly:
+//   agent-backend2 — lib/teamsync.js entryToRow still reads
+//                    `files: Array.isArray(e.files) ? e.files.map(wire) : e.files`
+//                    and `file: wire(c.file)`, both unchanged
+//   agent-revoke   — entryToRow untouched
+//   agent-sec, agent-removal — do not touch lib/teamsync.js entryToRow at all
+// So this is the one finding on this branch that no other lane has closed. It
+// is genuinely live, and the ciphertext check above is the reason it should not
+// wait for a quiet moment.
+//
 // The failures are EXECUTED, not inferred: each plants a synthetic secret and
 // drives the real code. Three prove it in the row object entryToRow returns.
 // The other two close the two objections that survive that, because "somebody

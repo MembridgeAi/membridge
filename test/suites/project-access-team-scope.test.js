@@ -60,6 +60,49 @@
 // suite asserts the invariant rather than one implementation of it.
 //
 // Run directly, or via `node test/run.js project-access-team-scope`.
+// STATUS (2026-08-05): HALF FIXED, AND THE HALF THAT IS FIXED DESERVES A
+// SECOND LOOK. Read this before concluding anything from the tally.
+//
+// `agent-sec` added supabase/migrations/037_project_access_team_scope.sql.
+// Running THIS suite against that branch's full migration set (substituted in,
+// run, reverted) gives 4/5:
+//   - "a project_access write cannot name a project outside its own team" PASSES
+//   - "can_see_project resolves ... within the project's own team" STILL FAILS
+//
+// THE READ SIDE IS GENUINELY STILL OPEN. The newest can_see_project on
+// agent-sec is still the one in 028_enforce_project_access_default.sql, and it
+// resolves the row on `a.project_key = p_project::text and a.member_id =
+// auth.uid()` — no team_id, unchanged. That is a live finding, not a stale one.
+//
+// AND THE PASSING HALF IS WEAKER THAN THE GREEN SUGGESTS — flagged loudly
+// because it is the failure mode this audit exists to catch, not a nitpick.
+// These two checks are written as ALTERNATIVES: the failing one's own message
+// says "Either add the team scope here ... or constrain project_key on the
+// write side". A reader seeing one green and one red will reasonably conclude
+// "they took the other route, the hole is closed". That conclusion is only
+// safe if the write side is a real boundary, and here it is narrower than that:
+//
+//   037 adds ONLY two RLS policies. Verified across every migration on
+//   agent-sec: there is no constraint, no trigger, and no reference from
+//   project_access.project_key to public.projects anywhere on that branch.
+//
+// An RLS policy validates WRITES BY PRINCIPALS SUBJECT TO RLS. It is not a
+// constraint, so it says nothing about rows already in the table: any
+// mis-scoped project_access row written before 037 survives it untouched, and
+// can_see_project still honours that row. Nothing on that branch backfills or
+// validates the existing set.
+//
+// Credit where due, so this is not read as broader than it is: agent-sec ALSO
+// moved the ops panel off service_role onto two least-privilege roles
+// (047_ops_panel_roles.sql, with no SUPABASE_SERVICE_KEY fallback), and none of
+// the functions granted to those roles touch project_access. So the "an
+// RLS-bypassing principal writes a bad row" path is materially narrower than it
+// was. The pre-existing-rows gap is the one that does not depend on any of that.
+//
+// My second check accepting "both policies mention project_key" as sufficient
+// is therefore a weaker acceptance criterion than the threat warrants. Left as
+// written rather than tightened, because tightening it here would silently
+// change what this branch claims to have found; the honest move is to say so.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check } = h;
 const assert = require('assert');

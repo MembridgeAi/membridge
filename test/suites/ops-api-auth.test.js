@@ -24,6 +24,16 @@
 // need the Cloudflare API. The edge behaviour was checked separately by an
 // unauthenticated request to the live hostname (302 to the Access login, with
 // an aud matching wrangler.toml) — see the audit notes in that file.
+// STATUS (2026-08-05): THE ALLOWLIST FINDING IS FIXED ELSEWHERE — not here.
+// The fix is on `agent-sec`, commit e538edf ("fix(security): scope the function
+// re-run class, enforce reconstruction evidence, fail the ops allowlist closed
+// (SEC-8..10)"), in cloudflare/ops-api/src/index.js.
+//
+// The two failing checks below are LEFT EXACTLY AS THEY ARE. They were run
+// against that branch's Worker (substituted in, run, reverted) and both PASS:
+// 12/12. They stay red on this branch because this branch does not carry the
+// fix, and they will go green when the branches merge — that transition is the
+// proof, which editing them to pass would destroy. Do not "fix" them here.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check } = h;
 const assert = require('assert');

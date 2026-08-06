@@ -419,6 +419,17 @@ async function main() {
   // elsewhere, because the defect is the shape of the returned object, and a
   // source read of the return expression would keep passing if the field were
   // reintroduced by any other line.
+  //
+  // STATUS (2026-08-05): FIXED ELSEWHERE — `agent-backend2`, commit c49c9cc
+  // ("fix(mcp): name the search count for what it is, and frame results as
+  // evidence"). searchMemory there returns `totalKnownHere` plus a
+  // `totalIsFloor: true` sibling instead of a bare `total`, which is the first
+  // of the three fixes this check's message offered.
+  //
+  // Verified by execution: substituting that branch's lib/activity.js (then
+  // reverting) runs this suite 18/18 — this check goes green under the real
+  // fix, and the predicate below accepts it without modification. Left exactly
+  // as written; it goes green on merge and that transition is the proof.
   await check('the search result does not present a local floor as a total', () => {
     const keys = Object.keys(localHit);
     const hasBare = keys.includes('total');

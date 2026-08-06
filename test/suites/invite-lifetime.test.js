@@ -12,6 +12,42 @@
 // A new file rather than a run-tests.js section: this needs its own backend
 // fixture (an owner in TWO teams, a plain member who then gets removed), and
 // the legacy suite is one sequential story whose sections share state.
+// STATUS (2026-08-05): ALL EIGHT FAILING CHECKS ARE FIXED ELSEWHERE, on two
+// different branches, and one of them is fixed in a way this suite CANNOT
+// demonstrate. Details, because "fixed" means three different things here.
+//
+// 1. THE AUDIT TRAIL (3 checks: join recorded, invite revoke scoped to its own
+//    team, no cross-team write) — FIXED on `agent-removal`, e5a9ec3 ("fix(team):
+//    make a join auditable, from the insert itself (REM-6)"), landing
+//    046_audit_member_joined.sql. Verified: substituting that branch's
+//    test/mock-supabase.js + lib/api-access.js + lib/server.js turns all three
+//    green.
+//
+// 2. SIGN-OUT (2 checks: logout reaches the backend, a pre-sign-out credentials
+//    copy stops working) — FIXED on `agent-backend2`, eb00efc ("fix(auth): sign
+//    out on the backend, and never claim a revocation that failed"), which adds
+//    authLogout() posting to /auth/v1/logout. Verified: substituting that
+//    branch's lib/teamsync.js + lib/server.js turns both green.
+//
+// 3. THE REMOVED-MEMBER RE-JOIN (3 checks) — FIXED on `agent-removal`,
+//    044_removal_rotates_invite_code.sql, AND THIS SUITE CAN NO LONGER REACH
+//    IT. Do not read the red as "still open", and do not edit the checks.
+//
+//    044 closes it twice over. remove_member() now rotates the code
+//    (`update public.teams set invite_code = gen_random_uuid()`), and my_teams()
+//    now returns the code as NULL for anyone who is not owner/admin
+//    (`case when m.role in ('owner','admin') then t.invite_code else null end`).
+//    The second half removes the premise these three checks are built on: they
+//    plant a plain member, have them READ the code, then try to reuse it after
+//    removal. A plain member can no longer read it at all.
+//
+//    Run against that branch, this suite therefore ABORTS at its own fixture
+//    precondition — "fixture: a plain member must be able to read the code, or
+//    this test proves nothing" — with actual: null. That is the precondition
+//    doing exactly its job across a branch boundary: refusing to report a pass
+//    it did not earn. Rewriting the fixture to the new model is a real piece of
+//    work and it belongs to whoever merges these branches, not to this audit —
+//    doing it here would mean asserting a behaviour this branch cannot run.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check, ROOT, P, waitForHttp, post } = h;
 const assert = require('assert');
