@@ -1,4 +1,10 @@
 'use strict';
+// NOT_RUN_BY_CI: not run as a test and not require()d by one — it is injected
+// with --require into CHILD processes spawned by test/run-tests.js's
+// mcp-wiring block (see the HOMEDIR_PRELOAD constant there). It therefore DOES
+// execute under CI, inside those children, but no walk of require() edges from
+// a suite can see that, which is why it declares itself here.
+//
 // Test-only preload: on every child launched by test/run-tests.js's
 // mcp-wiring block, record what `os.homedir()` resolves to.
 //

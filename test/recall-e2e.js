@@ -1,4 +1,10 @@
 'use strict';
+// NOT_RUN_BY_CI: a manual demonstration harness. CI runs `node test/run.js`,
+// which discovers test/suites/*.test.js and test/run-tests.js only. Run by
+// hand: `node test/recall-e2e.js`. Its value is watching the real pipeline
+// work before dogfooding, not gating anything — it has NOT been measured for
+// discriminating power the way test/teammate-notes-e2e.js has.
+//
 // Task 10: end-to-end proof. Drives the REAL adapter -> ledger -> recall
 // store -> PreToolUse hook -> fold pipeline against a throwaway fixture
 // repo, so the whole recall-saving-layer feature (docs/superpowers/specs/

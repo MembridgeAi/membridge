@@ -66,41 +66,13 @@ function testFilesInScope() {
   return files;
 }
 
-// Replace comments and string bodies with spaces, preserving offsets and line
-// breaks. Without this, `return` inside a comment or a message string reads as
-// control flow — and this repo's tests are heavily commented.
-function blankNonCode(src) {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') { out += ' '; i++; } continue; }
-    if (c === '/' && d === '*') {
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { out += src[i] === '\n' ? '\n' : ' '; i++; }
-      out += '  '; i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const q = c; out += q; i++;
-      while (i < n && src[i] !== q) {
-        if (src[i] === '\\') { out += ' '; i++; if (i >= n) break; }
-        out += src[i] === '\n' ? '\n' : ' '; i++;
-      }
-      out += q; i++; continue;
-    }
-    out += c; i++;
-  }
-  return out;
-}
-
-function matchingBrace(src, openIdx) {
-  let depth = 0;
-  for (let i = openIdx; i < src.length; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') { depth--; if (depth === 0) return i; }
-  }
-  return -1;
-}
+// Source text scanning is SHARED with test/mutate.js (test/js-scan.js). It used
+// to be a private copy here, and that copy still had the regex-literal bug the
+// mutate.js copy had already been fixed for — so the first suite to contain a
+// regex with a quote in it parsed to ZERO checks. The "finds every check"
+// assertion below is what caught it; one implementation is what stops it
+// happening a third time.
+const { blankNonCode, matchingBrace } = require('../js-scan');
 
 const CHECK_CALL = /(?:^|[^\w.$])(?:h\.)?(check|checkNeedsUnreadable|checkNoThrow)\s*\(/g;
 
@@ -250,6 +222,36 @@ async function main() {
     const suites = scanned.filter(s => s.file.startsWith('test/suites/'));
     assert.ok(suites.every(s => s.file === 'test/suites/checks-can-fail.test.js' || s.checks.length > 0),
       `a suite parsed to zero checks: ${suites.filter(s => !s.checks.length).map(s => s.file).join(', ')}`);
+  });
+
+  check('scanner: blankNonCode preserves LENGTH — the invariant both desyncs violated', () => {
+    // Both failures of this helper presented identically: output one character
+    // longer than input, and everything after the mis-read quote blanked. That
+    // is cheap to assert directly, and it is the assertion that would have
+    // caught the second instance without waiting for a suite to parse to zero.
+    const fixtures = [
+      // lib/redact.js:109 — apostrophe and double quote inside a character class.
+      String.raw`const rx = /([?&])(?![0-9]+(?:[&#\s'"]|$))[^&#\s'"<>]{8,}/gi;` + '\nconst after = 1;\n',
+      // test/suites/test-files-declare-themselves.test.js — the same shape.
+      String.raw`for (const m of src.matchAll(/require\(\s*(['"])(\.[^'"]+)\1\s*\)/g)) {}` + '\nconst after = 2;\n',
+      // division must NOT be read as a regex
+      'const ratio = total / count; const x = 1;\n',
+      // an escaped quote inside a string
+      "const s = 'it\\'s fine'; const y = 2;\n",
+      // template literal containing a nested quote and an interpolation
+      'const t = `${\'// filler\'.repeat(3)} tail`; const z = 3;\n',
+    ];
+    for (const src of fixtures) {
+      const out = blankNonCode(src);
+      assert.strictEqual(out.length, src.length,
+        `blankNonCode changed the length, so every offset after it is wrong:\n  in : ${JSON.stringify(src)}\n  out: ${JSON.stringify(out)}`);
+      assert.strictEqual(out.split('\n').length, src.split('\n').length,
+        `line count changed, so reported line numbers would be wrong:\n${JSON.stringify(out)}`);
+    }
+    // ...and the code AFTER a quote-bearing regex must survive, not be blanked.
+    const live = blankNonCode(String.raw`const rx = /(['"])x\1/g;` + '\nconst after = 1;\n');
+    assert.ok(/const after = 1;/.test(live),
+      `code following a regex-with-quotes was swallowed: ${JSON.stringify(live)}`);
   });
 
   check('scanner: shape A fires on an early return that reaches no assertion', () => {

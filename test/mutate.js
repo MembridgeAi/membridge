@@ -1,4 +1,11 @@
 'use strict';
+// NOT_RUN_BY_CI: a manual development tool, not a test. Driven by hand (see
+// the invocations below); test/run.js discovers only suites/*.test.js, so this
+// never runs itself. Its own behaviour IS gated — the guard/ops/stub
+// generators and the crash-vs-assertion labelling are exercised by nothing,
+// which is worth knowing: a finding produced by this tool is only as good as
+// the hand-verification behind it.
+//
 // Mutation runner: break the product on purpose and see whether the suite
 // notices. NOT a test suite — test/run.js discovers only suites/*.test.js, so
 // this never runs itself. Drive it by hand:
@@ -55,12 +62,17 @@ const { spawnSync } = require('child_process');
 const REPO = path.join(__dirname, '..');
 
 function parseArgs(argv) {
-  const out = { mode: 'ops', suites: [], target: null, list: false, limit: Infinity, filter: null, lines: null };
+  const out = { mode: 'ops', suites: [], target: null, list: false, limit: Infinity, filter: null, lines: null, cmd: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--target') out.target = argv[++i];
     else if (a === '--suites') out.suites = argv[++i].split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--mode') out.mode = argv[++i];
+    // `--cmd "node test/foo.js"`: score an arbitrary command instead of
+    // test/run.js suites. Needed to answer "does this standalone script catch
+    // anything the discovered suites do not?" — which is the only honest way to
+    // decide whether an undiscovered file is coverage or decoration.
+    else if (a === '--cmd') out.cmd = argv[++i];
     else if (a === '--limit') out.limit = Number(argv[++i]);
     // Comma-separated: re-running a handful of named survivors against the
     // monolith is the normal second pass, and one filter per invocation meant
@@ -80,71 +92,10 @@ function parseArgs(argv) {
   return out;
 }
 
-// Comment-, string- AND REGEX-blanked view, offsets preserved, so a `===`
-// inside a comment, a message string or a character class is never mutated.
-// Mutating a string literal produces a mutant that only changes an error
-// message: it survives everything and buries the real survivors in noise.
-//
-// The regex arm is not optional decoration. Without it, lib/redact.js line 109
-// —
-//   rx: /([?&])(...)(?![0-9]+(?:[&#\s'"]|$))[^&#\s'"<>]{8,}/gi
-// — starts a "string" at the apostrophe inside the character class and
-// swallows the remaining 9k characters of the file. That yielded ZERO mutants
-// and a run that printed `0 killed, 0 SURVIVED` over a green baseline, which
-// reads exactly like a clean result. A mutation tool that silently generates
-// nothing is the same defect class it exists to find, so `assertMutable` below
-// refuses a zero-mutant run outright.
-//
-// Regex-vs-division is decided by the previous significant character, the
-// standard heuristic: a `/` that opens a regex follows an operator, an opening
-// bracket, a comma, a semicolon, a colon, or the start of input — never an
-// identifier, a literal, or a closing bracket (those mean division).
-const REGEX_CAN_FOLLOW = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^', '\n']);
-function blankNonCode(src) {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  let lastSignificant = '\n';
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') { out += ' '; i++; } continue; }
-    if (c === '/' && d === '*') {
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { out += src[i] === '\n' ? '\n' : ' '; i++; }
-      out += '  '; i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const q = c; out += q; i++;
-      while (i < n && src[i] !== q) {
-        if (src[i] === '\\') { out += ' '; i++; if (i >= n) break; }
-        out += src[i] === '\n' ? '\n' : ' '; i++;
-      }
-      out += q; i++; lastSignificant = q; continue;
-    }
-    if (c === '/' && REGEX_CAN_FOLLOW.has(lastSignificant)) {
-      // Regex literal: consume to the unescaped closing '/', respecting
-      // character classes (a '/' inside [...] does not close the literal).
-      out += ' '; i++;
-      let inClass = false;
-      while (i < n) {
-        const ch = src[i];
-        if (ch === '\\') { out += '  '; i += 2; continue; }
-        if (ch === '\n') break; // unterminated: bail rather than swallow the file
-        if (ch === '[') inClass = true;
-        else if (ch === ']') inClass = false;
-        else if (ch === '/' && !inClass) { out += ' '; i++; break; }
-        out += ' '; i++;
-      }
-      while (i < n && /[gimsuyd]/.test(src[i])) { out += ' '; i++; } // flags
-      lastSignificant = '/';
-      continue;
-    }
-    out += c;
-    if (!/\s/.test(c)) lastSignificant = c;
-    else if (c === '\n') lastSignificant = '\n';
-    i++;
-  }
-  return out;
-}
+// Source text scanning is SHARED with test/suites/checks-can-fail.test.js
+// (test/js-scan.js). See that module's header for why it is shared: the
+// regex-literal bug fixed here once recurred verbatim in the other copy.
+const { blankNonCode, matchingBrace } = require('./js-scan');
 
 // A mutant that does not PARSE is not a mutant. It fails every suite for a
 // reason no test looked at, and counting it as "killed" inflates the kill rate
@@ -210,16 +161,6 @@ const STUB_VALUES = ['null', 'true', 'false', '[]', "''", '0', '{}'];
 // Deleted whitespace-for-whitespace, newlines preserved, so every reported line
 // number still points at the original source.
 const GUARD_STARTERS = ['return', 'continue', 'break', 'throw'];
-
-// Index of the `}` closing the `{` at openIdx, or -1.
-function matchingBrace(src, openIdx) {
-  let depth = 0;
-  for (let i = openIdx; i < src.length; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') { depth--; if (depth === 0) return i; }
-  }
-  return -1;
-}
 
 // Populated by guardMutants: `if` statements that REFUSE (their body reaches a
 // return/continue/break/throw) but that this operator would not touch. These
@@ -372,9 +313,11 @@ function killKind(out) {
   return 'unknown';
 }
 
-function runSuites(suites) {
-  const r = spawnSync(process.execPath, [path.join(__dirname, 'run.js'), ...suites],
-    { cwd: REPO, encoding: 'utf8', timeout: 15 * 60 * 1000 });
+function runSuites(suites, cmd) {
+  const r = cmd
+    ? spawnSync(cmd, { cwd: REPO, encoding: 'utf8', shell: true, timeout: 15 * 60 * 1000 })
+    : spawnSync(process.execPath, [path.join(__dirname, 'run.js'), ...suites],
+      { cwd: REPO, encoding: 'utf8', timeout: 15 * 60 * 1000 });
   return { ok: r.status === 0, out: (r.stdout || '') + (r.stderr || '') };
 }
 
@@ -439,13 +382,13 @@ function main() {
     reportDeclined(args);
     return;
   }
-  if (!args.suites.length) { console.error('need --suites <a,b,c>'); process.exit(1); }
+  if (!args.suites.length && !args.cmd) { console.error('need --suites <a,b,c> or --cmd "<command>"'); process.exit(1); }
 
   // Baseline. A suite set that is already red cannot kill anything, and every
   // mutant would read as "killed" — the failure mode that makes a mutation run
   // report perfect coverage over a broken tree.
   process.stdout.write('baseline (unmutated): ');
-  const base = runSuites(args.suites);
+  const base = runSuites(args.suites, args.cmd);
   if (!base.ok) {
     console.log('FAILED');
     console.log(base.out.split('\n').slice(-25).join('\n'));
@@ -465,7 +408,7 @@ function main() {
       // trivial values for that function add nothing.
       if (args.mode === 'stub' && seenSurvivingFn.has(m.fn)) continue;
       fs.writeFileSync(targetPath, m.src);
-      const r = runSuites(args.suites);
+      const r = runSuites(args.suites, args.cmd);
       if (r.ok) {
         survived.push(m);
         if (m.fn) seenSurvivingFn.add(m.fn);
