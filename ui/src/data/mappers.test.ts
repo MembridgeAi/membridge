@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf, mapDayDigests,
-  latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
+  latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapSession, mapStreamEntry,
   memberActivity, recentAuthorIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
@@ -483,6 +483,41 @@ describe('memberActivity', () => {
   })
 })
 
+// Both written against mutation survivors -- the suite could not tell these
+// two lines from broken ones.
+describe('mapper normalization the suite previously could not see', () => {
+  // `c.status === 'new' || c.status === 'deleted' ? c.status : 'edited'`
+  // survived `||` -> `&&`, which pins status to 'edited' for every row. Every
+  // fixture in the codebase happened to use 'edited', so nothing noticed. The
+  // three statuses render as three different things in the changes list.
+  it('keeps new and deleted statuses instead of flattening everything to edited', () => {
+    const changes = mapSession({
+      changes: [
+        { file: 'a.ts', status: 'new' },
+        { file: 'b.ts', status: 'deleted' },
+        { file: 'c.ts', status: 'edited' },
+        // Anything unrecognized falls back to 'edited', matching lib/changes.js.
+        { file: 'd.ts', status: 'wat' },
+        { file: 'e.ts' },
+      ],
+    }).changes
+    expect(changes.map(c => c.status)).toEqual(['new', 'deleted', 'edited', 'edited', 'edited'])
+  })
+
+  // `authorId: e.authorId || ''` survived `||` -> `&&`, which empties the id on
+  // every row. It is what the Avatar keys on and what "Hide mine" negates, so
+  // an always-empty id is not cosmetic.
+  it('carries a stream entry author id through, and empties only a missing one', () => {
+    const base = {
+      ts: '2026-07-29T19:00:00Z', author: 'Andrew', source: 'Codex', session: 's1',
+      project: 'p', projectPath: '/p', projectId: null, ask: '', summary: null,
+      distilled: false, files: [], goal: null, headline: null, live: false,
+    }
+    expect(mapStreamEntry({ ...base, authorId: 'andrew' }).authorId).toBe('andrew')
+    expect(mapStreamEntry({ ...base, authorId: null }).authorId).toBe('')
+  })
+})
+
 describe('mapMember', () => {
   it('maps a member row to only what this machine can observe, never a fabricated diagnosis', () => {
     const m = mapMember(
@@ -490,9 +525,62 @@ describe('mapMember', () => {
       { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
     )
     expect(m).toEqual({
-      id: 'andrew', name: 'Andrew', email: '', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
-      projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false,
+      // No `email` key at all. It used to be here as '' -- a field the members
+      // RPC never returns -- and that empty string is what MemberRow painted
+      // as a blank address line under every name.
+      // keyStatus FAILS CLOSED to 'unknown' when the row carries none: this
+      // raw row has no keyStatus, and a daemon too old to send it has checked
+      // nobody's key. 'ok' would assert a verification that never happened --
+      // the exact false assurance the string type exists to prevent, and what
+      // the old hardcoded `keyAlert: false` did.
+      keyStatus: 'unknown',
+      id: 'andrew', name: 'Andrew', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
+      projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z',
+      // #59. A daemon too old to report the field degrades to an explicit
+      // zero, not undefined: zero means "no gap", which keeps the UI quiet.
+      // Failing the other way would put a repull hint under every empty
+      // search run against an older daemon.
+      preFixLocal: { entries: 0, projects: 0 },
     })
+  })
+
+  // #59, and the reason this test exists at all: mapMember builds an explicit
+  // object literal, so a wire field it does not name is dropped here -- with
+  // no error, no type complaint at the boundary, and nothing visible until a
+  // component reads undefined. That is precisely how this field would have
+  // gone missing, so the carry-through is pinned rather than assumed.
+  // Each of the three values survives the mapper unchanged. A mapper that
+  // collapsed 'ok' and 'unknown' together would be indistinguishable from the
+  // boolean this replaced.
+  it('carries all three keyStatus values through distinctly', () => {
+    const map = (keyStatus: 'alert' | 'ok' | 'unknown') => mapMember(
+      { user_id: 'a', display_name: 'A', role: 'member', joined_at: null, keyStatus },
+      { projectCount: 0, lastSharedAt: null },
+    ).keyStatus
+    expect(map('alert')).toBe('alert')
+    expect(map('ok')).toBe('ok')
+    expect(map('unknown')).toBe('unknown')
+  })
+
+  // A value the daemon should never send must not be trusted into 'ok'.
+  it('treats an unrecognized keyStatus as unknown, not as ok', () => {
+    const m = mapMember(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { user_id: 'a', display_name: 'A', role: 'member', joined_at: null, keyStatus: 'verified' as any },
+      { projectCount: 0, lastSharedAt: null },
+    )
+    expect(m.keyStatus).toBe('unknown')
+  })
+
+  it('carries preFixLocal through instead of dropping it at the object literal', () => {
+    const m = mapMember(
+      {
+        user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-22T18:58:00Z',
+        preFixLocal: { entries: 7, projects: 2 },
+      },
+      { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
+    )
+    expect(m.preFixLocal).toEqual({ entries: 7, projects: 2 })
   })
   it('falls back joinedAt to an empty string when the row carries no timestamp, rather than asserting one', () => {
     const m = mapMember(

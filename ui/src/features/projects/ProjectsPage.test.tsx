@@ -174,3 +174,76 @@ describe('ProjectsPage', () => {
     expect(await screen.findByText(/not a directory/i)).toBeInTheDocument()
   })
 })
+
+// T-72. Measured per animation frame in a visible Chrome, 10 watched / 1 shared:
+// the header read "0 watched · 0 shared" from 99ms to 1389ms, and the table body
+// was a bare "Loading…" cell until 1464ms. The count is the misinforming half —
+// a zero in a header is read as a measurement, and this one said the machine was
+// watching nothing.
+describe('ProjectsPage while its data is still in flight', () => {
+  const forever = () => new Promise<never>(() => {})
+
+  it('does not report zero watched or zero shared before the projects arrive', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjects').mockReturnValue(forever())
+    const { container } = renderWith(client, <ProjectsPage />)
+
+    const count = container.querySelector('.projects-count')
+    expect(count).not.toBeNull()
+    expect(count?.querySelector('.loading-block')).not.toBeNull()
+    expect(count?.textContent).not.toMatch(/\d/)
+    expect(screen.queryByText(/watched · /)).toBeNull()
+  })
+
+  it('holds the table open with placeholder rows instead of a bare Loading line', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjects').mockReturnValue(forever())
+    const { container } = renderWith(client, <ProjectsPage />)
+
+    expect(container.querySelectorAll('.projects-table tbody .loading-block').length).toBeGreaterThan(1)
+    expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('reports the real counts once the projects arrive', async () => {
+    renderWith(new FakeDataClient(), <ProjectsPage />)
+    expect(await screen.findByText(/watched · /)).toBeInTheDocument()
+  })
+})
+
+// T-78 items 2 and 3: solo installs drop the "· N shared" clause (the count
+// is derived from `project.shared`, which is a stray-team.json artefact for a
+// solo user) and the SHARED/PRIVATE tag on each row (SHARED names a team the
+// user is not on, and PRIVATE is only meaningful as the counterpart of
+// SHARED). Neither is disabled: the surface goes away entirely, matching the
+// ticket's rule.
+describe('ProjectsPage on a solo install', () => {
+  it('drops the shared count from the header entirely', async () => {
+    renderApp({ solo: true, authenticated: false }, <ProjectsPage />)
+    // Waited for a row so the header count has landed too.
+    await screen.findByTestId('project-row-sublease')
+    const header = document.querySelector('.projects-count')
+    expect(header?.textContent).toMatch(/watched/)
+    expect(header?.textContent).not.toMatch(/shared/)
+  })
+
+  it('drops the Shared/Private tag from every row', async () => {
+    renderApp({ solo: true, authenticated: false }, <ProjectsPage />)
+    // membridge is the fixture's team-linked project; the tag would say
+    // "Shared" if a stray team.json were being treated as authoritative.
+    const sharedRow = await screen.findByTestId('project-row-membridge')
+    expect(within(sharedRow).queryByText('Shared')).toBeNull()
+    expect(within(sharedRow).queryByText('Private')).toBeNull()
+    // A truly private row loses the tag too: PRIVATE is only meaningful as
+    // the counterpart of SHARED, so once one is gone the other has to be.
+    const privateRow = screen.getByTestId('project-row-sublease')
+    expect(within(privateRow).queryByText('Private')).toBeNull()
+  })
+
+  it('keeps the Shared/Private tag on a team install', async () => {
+    renderApp({}, <ProjectsPage />)
+    const sharedRow = await screen.findByTestId('project-row-membridge')
+    expect(within(sharedRow).getByText('Shared')).toBeInTheDocument()
+    const privateRow = screen.getByTestId('project-row-sublease')
+    expect(within(privateRow).getByText('Private')).toBeInTheDocument()
+  })
+})

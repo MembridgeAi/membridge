@@ -178,6 +178,106 @@ describe('MembersSection (the People section of the Team page)', () => {
     expect(screen.queryByText(/token expired|hook not installed/i)).toBeNull()
   })
 
+  // Found by routing FakeDataClient through the real mapMember. The fixture
+  // used to author Member literals with plausible addresses
+  // ('andrew@acme.dev'), so every screenshot and every test saw a populated
+  // email -- while mapMember hardcodes `email: ''`, because the members RPC
+  // has never returned one. Production rendered a permanently blank 10.5px
+  // line under every name and nothing could catch it, because the only data
+  // the tests ever saw came from the fixture rather than the mapper.
+  //
+  // Exactly the defect InviteRow already documents and fixed for
+  // `invite.email`. Same remedy: the field is gone from the type, so no
+  // future row can render it either.
+  it('shows no address line under a name, because no endpoint supplies one', async () => {
+    renderApp({}, <MembersSection />)
+    const andrewRow = await screen.findByTestId('member-row-andrew')
+    expect(within(andrewRow).getByText('Andrew')).toBeInTheDocument()
+    // The blank line itself is the bug: an empty element still occupies its
+    // row and reads as a field that failed to load.
+    expect(andrewRow.querySelector('.member-email')).toBeNull()
+    // Nothing in the row is an empty text slot waiting for data that will
+    // never arrive.
+    const blanks = [...andrewRow.querySelectorAll('div, span')]
+      .filter(el => el.children.length === 0 && el.textContent === '')
+    expect(blanks).toHaveLength(0)
+  })
+
+  // Second instance of the mapMember(email) shape, found by sweeping the
+  // mappers for fields assigned a literal rather than read from the raw row.
+  //
+  // mapMember set `keyAlert: false` on every member -- RawMemberRow has no such
+  // field, and /api/team/members is a bare RPC passthrough returning four
+  // columns -- while MemberRow rendered a "key changed" warning chip gated on
+  // it. So the chip could not fire for any member, ever.
+  //
+  // Worse than the blank email line: this is a SECURITY warning, and its
+  // silence read as "these keys are fine". The daemon does track it per member
+  // (state.keyAlerts is a list of { user_id }), it just never exposes the list
+  // -- statusPayload sends only a COUNT. The count is what the app can honestly
+  // show today, and it was reaching the UI's Status type and being rendered
+  // nowhere at all.
+  describe('key-substitution alerts', () => {
+    const withAlerts = async (keyAlerts: number) => {
+      const client = new FakeDataClient()
+      const status = await client.getStatus()
+      vi.spyOn(client, 'getStatus').mockResolvedValue({
+        ...status,
+        encryption: { ...status.encryption, keyAlerts },
+      })
+      return client
+    }
+
+    it('warns when the daemon is holding key alerts, naming how many', async () => {
+      renderWith(await withAlerts(2), <MembersSection />)
+      const warning = await screen.findByTestId('member-key-alerts')
+      expect(warning).toHaveTextContent(/2/)
+      // Says what to DO about it -- a warning nobody can act on is the same
+      // dead end as one that never fires.
+      expect(warning).toHaveTextContent(/verif/i)
+    })
+
+    it('says nothing when there are no alerts', async () => {
+      renderApp({}, <MembersSection />)
+      await screen.findByText('Sarah')
+      expect(screen.queryByTestId('member-key-alerts')).toBeNull()
+    })
+
+    // The per-member chip is back, keyed on real data now (agent-backend2
+    // cc55235): GET /api/team/members carries keyStatus per row.
+    //
+    // A COUNT can say somebody's key changed but never whose, and whose is the
+    // one thing you need in order to go and check. The banner stays as the
+    // aggregate; this names the person.
+    it('flags the member whose key disagrees with our pin, by name', async () => {
+      renderWith(await withAlerts(1), <MembersSection />)
+      const sarah = await screen.findByTestId('member-row-sarah')
+      expect(within(sarah).getByText(/key changed/i)).toBeInTheDocument()
+    })
+
+    // THE TRAP, and the one edit that would silently reintroduce the original
+    // bug: `if (m.keyStatus)` is truthy for ALL THREE values, so it would light
+    // the chip on every member. The read is `=== 'alert'`.
+    //
+    // 'ok' and 'unknown' both render nothing, but they are NOT the same fact --
+    // 'ok' means we hold a pin and the gate agreed, 'unknown' means we cannot
+    // say. Neither may ever render as "verified": an assurance nobody made is
+    // exactly the shape this whole line of work has been removing.
+    it('shows no chip for ok or unknown, and never says verified', async () => {
+      renderWith(await withAlerts(1), <MembersSection />)
+      await screen.findByTestId('member-row-sarah')
+
+      // Marco is 'ok' (a pin we hold, agreed). Andrew is 'unknown' (no pin --
+      // he has published no key, so TOFU never happened).
+      expect(within(screen.getByTestId('member-row-me')).queryByText(/key changed/i)).toBeNull()
+      expect(within(screen.getByTestId('member-row-andrew')).queryByText(/key changed/i)).toBeNull()
+      // The word that must never appear for either.
+      expect(screen.queryByText(/verified/i)).toBeNull()
+      // Exactly one chip on the whole roster -- a truthiness read would give three.
+      expect(screen.getAllByText(/key changed/i)).toHaveLength(1)
+    })
+  })
+
   it('does not offer role changes on the owner row', async () => {
     renderApp({}, <MembersSection />)
     const ownerRow = await screen.findByTestId('member-row-me')
@@ -361,5 +461,49 @@ describe('MembersSection (the People section of the Team page)', () => {
     renderWith(client, <MembersSection />)
     await userEvent.click(await screen.findByRole('button', { name: /revoke invite i1/i }))
     expect(await screen.findByText(/revoke rejected/i)).toBeInTheDocument()
+  })
+})
+
+// T-72. Measured on a two-member team: the People heading read "0 members" from
+// 750ms to 1974ms, and the audit heading "Team activity · last 0 events" from
+// 750ms to 1708ms on a trail holding six. Both are counts derived from a
+// `?? []` fallback and presented as measurements.
+describe('Team counts while their data is still in flight', () => {
+  const forever = () => new Promise<never>(() => {})
+
+  it('does not report zero members before the roster arrives', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getMembers').mockReturnValue(forever())
+    const { container } = renderWith(client, <MembersSection />)
+
+    const count = container.querySelector('.team-members-count')
+    expect(count).not.toBeNull()
+    expect(count?.querySelector('.loading-block')).not.toBeNull()
+    expect(count?.textContent).not.toMatch(/\d/)
+    expect(screen.queryByText('0 members')).toBeNull()
+  })
+
+  it('holds the roster open with placeholder rows, not a bare Loading line', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getMembers').mockReturnValue(forever())
+    renderWith(client, <MembersSection />)
+
+    expect(await screen.findByTestId('members-loading')).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('does not report an event count before the audit trail arrives', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getAudit').mockReturnValue(forever())
+    renderWith(client, <MembersSection />)
+
+    // The clause is dropped, not zeroed: the shorter sentence is still true.
+    expect(await screen.findByText('Team activity')).toBeInTheDocument()
+    expect(screen.queryByText(/last 0 events/)).toBeNull()
+  })
+
+  it('reports the real member count once the roster arrives', async () => {
+    renderWith(new FakeDataClient(), <MembersSection />)
+    expect(await screen.findByText(/\d+ members?$/)).toBeInTheDocument()
   })
 })

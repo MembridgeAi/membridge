@@ -1,11 +1,60 @@
 import type { DataClient, Capabilities } from './DataClient'
+// The real mapper, deliberately imported by the FAKE client. A fixture that
+// hands back domain objects it authored itself can never fail the way the app
+// fails -- see teamMembers() below and fixtureBoundary.test.ts.
+import {
+  mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapSession, mapStreamEntry,
+  type MemberActivity, type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSessionPayload,
+} from './mappers'
+
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SkeletonStats, Status, StreamEntry,
+  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SignOutResult, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
+/** A wire feed row with everything optional defaulted, so a fixture states only
+ *  the fields it is actually about. Feed rows are what mapProjectRow derives
+ *  `latestSummary` and `recentAuthorIds` from, so authoring them raw is how the
+ *  project fixture gets those two fields from the real mapper instead of
+ *  asserting them into existence. */
+/** What a fixture states about one wire row: the project it belongs to, plus
+ *  whatever else that row is actually about. Everything else is defaulted. */
+type RawEntrySpec = Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project' | 'projectPath'>
+
+function rawFeedEntry(over: Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project' | 'projectPath'>): RawFeedEntry {
+  return {
+    ts: '2026-07-28T10:00:00Z',
+    author: 'Someone',
+    // Null by default, and that is the REALISTIC default, not a shortcut:
+    // measured against the live daemon, authorId is null on every row (see
+    // RawFeedEntry.self in mappers.ts). A fixture where every row has an id
+    // would make recentAuthorIds look more reliable than it is.
+    authorId: null,
+    source: 'Claude Code',
+    session: null,
+    projectId: null,
+    ask: '',
+    summary: null,
+    distilled: false,
+    files: [],
+    goal: null,
+    headline: null,
+    live: false,
+    ...over,
+  }
+}
+
 export interface FakeOptions {
+  /** Models an older daemon whose team row carries no member_count, so
+   *  TeamSummary.memberCount is null. That state was UNREACHABLE from this
+   *  fixture (it typed the field `number`), which is why nothing caught the
+   *  null branch of memberCountLabel -- "unknown" and "empty" are different
+   *  facts and only one of them may be printed. */
+  memberCountUnknown?: boolean
+  /** Models a sign-out whose BACKEND revocation failed, carrying the daemon's
+   *  wording. Null/absent = the backend confirmed the session was ended. */
+  signOutRevokeError?: string | null
   solo?: boolean
   role?: Role
   // The daemon's sync-loop health (Status.health). Omitted => the healthy 'ok'
@@ -74,12 +123,6 @@ export interface FakeOptions {
   withArchived?: boolean
 }
 
-// The brief fields every StreamEntry now carries (session detail page, Task
-// 2). The fixtures predate them; absence means null / [], never undefined.
-function emptyBrief(): Pick<StreamEntry, 'summaryFull' | 'decisions' | 'gotchas' | 'changes'> {
-  return { summaryFull: null, decisions: null, gotchas: null, changes: [] }
-}
-
 // A 60-prompt session's chain, newest-first (one prompt a minute counting
 // back from the base) -- exercises the 5-then-25 paging without a live
 // daemon or a hand-written 60-row literal.
@@ -127,7 +170,12 @@ function longPromptChain(count: number): SessionPrompt[] {
 // fixture rows carry so a row's link resolves in fake mode: one live
 // (s-f1), one finished with a full brief (s-f2), one with empty
 // decisions/gotchas (s-f3), and one 60-prompt session (s-f4).
-const SESSION_FIXTURES: Record<string, Session> = {
+// Authored as WIRE payloads and mapped on read (see getSession below), not as
+// Session objects. mapSession is pure normalization -- every field is
+// `raw.x || default` -- which is exactly the kind of mapper a fixture can drift
+// away from without anything failing: author a Session directly and you get to
+// skip every default the app actually depends on.
+const SESSION_FIXTURES: Record<string, RawSessionPayload> = {
   's-f1': {
     session: 's-f1', project: 'membridge', projectPath: '/Users/x/membridge',
     author: 'Andrew', authorId: 'andrew', source: 'Codex',
@@ -213,7 +261,27 @@ const SESSION_FIXTURES: Record<string, Session> = {
 
 export class FakeDataClient implements DataClient {
   readonly capabilities: Capabilities
+  /**
+   * Whether this machine is currently signed in. MUTABLE, and seeded from
+   * `opts.authenticated` rather than read from it on every call.
+   *
+   * It used to be read straight off `opts`, which made signing out
+   * unrepresentable: signOut() resolved, the app re-rendered, and
+   * getTeamAccount() still said `authenticated: true`, so the SIGNED-OUT VIEW
+   * never appeared in any test. A whole application state the fixtures could
+   * not express is a hole the same shape as a mapper they route around -- and
+   * this is the state a user is in at the moment they are trying to establish
+   * whether their session is over, which is now also the screen carrying the
+   * revocation warning.
+   *
+   * The real client is stateful here too (the daemon deletes credentials.json),
+   * so modelling it as state rather than as a constructor constant is the
+   * faithful shape, not a convenience.
+   */
+  private signedIn: boolean
+
   constructor(private opts: FakeOptions = {}) {
+    this.signedIn = opts.authenticated ?? true
     // Transport support only — the viewer's role decides authorization.
     this.capabilities = {
       daemonControl: true,
@@ -259,17 +327,54 @@ export class FakeDataClient implements DataClient {
   // memberCount, the shared project's roster) reads THIS so a scaled fixture
   // cannot drift into different answers per surface.
   private teamMembers(): Member[] {
-    const base: Member[] = [
-      { id: this.viewerId, name: 'Marco', email: 'marco@melika.com', role: this.opts.role ?? 'owner', joinedAt: '2026-07-22T18:58:00Z', projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z', keyAlert: false },
-      { id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin', joinedAt: '2026-07-20T09:00:00Z', projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z', keyAlert: false },
-      { id: 'sarah', name: 'Sarah', email: 'sarah@acme.dev', role: 'member', joinedAt: '2026-07-27T16:31:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false },
+    // AUTHORED AS WIRE ROWS, THEN PUT THROUGH THE REAL MAPPER. This fixture
+    // used to return `Member` literals directly, which meant no component test
+    // could ever see what mapMember does to a row -- a field the mapper drops
+    // stayed visible here and the app was the only place it went missing. That
+    // is not hypothetical: it is exactly how #59's `preFixLocal` would have
+    // vanished, and it is why `member.email` looked populated on every screen
+    // while production rendered a blank (mapMember hardcodes email: '',
+    // because the members RPC has never returned one).
+    //
+    // The rule for this file: if a mapper exists for a type, the fixture
+    // authors the RAW shape and maps it. See fixtureBoundary.test.ts for which
+    // types are covered and which are still outstanding.
+    //
+    // #59: `preFixLocal` splits this roster into the two cases the person
+    // filter cannot otherwise tell apart, so a fixture that gave everyone the
+    // same value would let the UI hardcode either answer and stay green.
+    //   Andrew -- has unattributable local history (the gap case): filtering
+    //             by him can return zero over rows that exist.
+    //   Marco, Sarah, and the scaled-out members -- an explicit zero, the
+    //             case where a zero result really does mean nothing found.
+    //
+    // keyStatus covers ALL THREE values on purpose: Sarah 'alert', Marco 'ok',
+    // Andrew 'unknown'. A roster where every row shared one value would let a
+    // truthiness read (`if (m.keyStatus)`) pass -- and that read is the one
+    // edit that silently restores the always-on chip.
+    const base: Array<{ row: RawMemberRow; activity: MemberActivity }> = [
+      {
+        row: { user_id: this.viewerId, display_name: 'Marco', role: this.opts.role ?? 'owner', joined_at: '2026-07-22T18:58:00Z', preFixLocal: { entries: 0, projects: 0 }, keyStatus: 'ok' },
+        activity: { projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z' },
+      },
+      {
+        row: { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-20T09:00:00Z', preFixLocal: { entries: 7, projects: 2 }, keyStatus: 'unknown' },
+        activity: { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
+      },
+      {
+        row: { user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z', preFixLocal: { entries: 0, projects: 0 }, keyStatus: 'alert' },
+        activity: { projectCount: 1, lastSharedAt: null },
+      },
     ]
     const size = this.opts.teamSize ?? base.length
     const out = base.slice(0, Math.min(size, base.length))
     for (let i = base.length + 1; i <= size; i++) {
-      out.push({ id: `m${i}`, name: `Member ${i}`, email: `member${i}@acme.dev`, role: 'member', joinedAt: '2026-07-25T12:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false })
+      out.push({
+        row: { user_id: `m${i}`, display_name: `Member ${i}`, role: 'member', joined_at: '2026-07-25T12:00:00Z', preFixLocal: { entries: 0, projects: 0 }, keyStatus: 'ok' },
+        activity: { projectCount: 1, lastSharedAt: null },
+      })
     }
-    return out
+    return out.map(({ row, activity }) => mapMember(row, activity))
   }
   // The shared project's ACCESS roster: a strict subset (6 of N) once the team
   // is bigger than 6, so the Access cell's "+N chip and count label" case is a
@@ -284,81 +389,186 @@ export class FakeDataClient implements DataClient {
     if (this.opts.solo) return [this.viewerId]
     return this.teamMembers().slice(0, 6).map(m => m.id)
   }
+  /**
+   * Projects, authored as wire rows + a wire feed page and put through the real
+   * mapProjectRow — same as teamMembers() and for the same reason.
+   *
+   * Four of Project's fields are DERIVED rather than copied, and this fixture
+   * used to assert all four into existence:
+   *   shared           <- !!row.team
+   *   recentAuthorIds  <- distinct authorIds on this project's feed rows
+   *   latestSummary    <- newest feed row carrying a headline or summary
+   *   sync             <- syncStateOf(row, intervalSec)
+   *
+   * The `sync` one was why this conversion looked blocked. It is not:
+   * syncStateOf never reads the wall clock — it compares the row's OWN
+   * lastActivity against its OWN lastSync against a grace of
+   * intervalSec * SYNC_GRACE_INTERVALS. So the states below are produced by the
+   * same timestamps the fixture already carried, not simulated:
+   *   membridge      lastActivity == lastSync            -> lag 0        -> up-to-date
+   *   sublease       2026-07-29T08 vs 2026-07-23T10      -> ~6 days      -> behind
+   *   old-prototype  paused: true                        -> paused (wins outright)
+   * Nothing here fakes a timing outcome; change a timestamp and the state
+   * changes with it, exactly as it would against the daemon.
+   *
+   * ONE FEED ARRAY FOR ALL PROJECTS, passed whole to every mapProjectRow call,
+   * because that is what the real client does: entriesForProject filters one
+   * shared page per project. Passing each project a pre-filtered array would
+   * hide the filter, which is itself part of what the mapper does.
+   */
   getProjects() {
     if (this.opts.empty) return this.guard<Project[]>([])
-    const projects: Project[] = [
+
+    // Only ONE entry per project carries text, so latestSummaryFor picks it
+    // regardless of position and the fixture does not depend on array order to
+    // stay correct.
+    const feed: RawFeedEntry[] = [
+      // membridge's summary row. authorId null on purpose: it keeps Andrew as
+      // the summary's AUTHOR NAME without adding him to recentAuthorIds, which
+      // is what lets the solo fixture keep this summary while its author list
+      // collapses to just the viewer.
+      rawFeedEntry({
+        project: 'membridge', projectPath: '/Users/x/membridge',
+        author: 'Andrew', authorId: null, ts: '2026-07-29T19:00:00Z',
+        headline: 'Hook ownership now decided by durability, not who ran last',
+      }),
+      // The people seen on membridge lately. Textless, so they cannot displace
+      // the summary above; present only to be counted as authors.
+      ...this.sharedMemberIds().map(id => rawFeedEntry({
+        project: 'membridge', projectPath: '/Users/x/membridge', authorId: id,
+      })),
+      rawFeedEntry({
+        project: 'sublease', projectPath: '/Users/x/sublease',
+        author: 'You', authorId: this.viewerId, ts: '2026-07-23T10:00:00Z',
+        headline: 'Listing flow validates addresses before payment',
+      }),
+      // Archived pair: an author but no text, so latestSummary comes back null
+      // from the mapper rather than being written as null here.
+      rawFeedEntry({ project: 'old-prototype', projectPath: '/Users/x/old-prototype', authorId: this.viewerId }),
+      rawFeedEntry({ project: 'deleted-folder', projectPath: '/Users/x/deleted-folder', authorId: this.viewerId }),
+    ]
+
+    const rows: RawProjectRow[] = [
       {
         path: '/Users/x/membridge', name: 'membridge', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-29T19:00:00Z', lastActivity: '2026-07-29T19:00:00Z',
         sessionsTotal: 184, tools: ['Claude Code', 'Codex'],
-        shared: !this.opts.solo, recentAuthorIds: this.sharedMemberIds(),
+        // `shared` is derived from this, not stated: a team link present means
+        // shared. Solo installs have no link at all.
+        team: this.opts.solo ? null : { projectId: 'tp-membridge', teamId: 'team-1' },
         sessionsThisWeek: 31, dailyCounts: [3, 5, 2, 6, 4, 5, 6], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
-        latestSummary: { text: 'Hook ownership now decided by durability, not who ran last', author: 'Andrew', at: '2026-07-29T19:00:00Z' },
-        sync: { state: 'up-to-date' },
       },
       {
         path: '/Users/x/sublease', name: 'sublease', exists: true, archived: false, missing: false, paused: false,
         lastSync: '2026-07-23T10:00:00Z', lastActivity: '2026-07-29T08:00:00Z',
         sessionsTotal: 40, tools: ['Claude Code'],
-        shared: false, recentAuthorIds: [this.viewerId],
+        team: null,
         sessionsThisWeek: 4, dailyCounts: [1, 0, 1, 0, 1, 1, 0], // must sum to sessionsThisWeek (server.js dailySessionBuckets partition invariant)
-        latestSummary: { text: 'Listing flow validates addresses before payment', author: 'You', at: '2026-07-23T10:00:00Z' },
-        sync: { state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' },
       },
     ]
     if (this.opts.withArchived) {
-      projects.push(
+      rows.push(
         {
           path: '/Users/x/old-prototype', name: 'old-prototype', exists: true, archived: true, missing: false, paused: true,
           lastSync: '2026-06-30T10:00:00Z', lastActivity: '2026-06-30T10:00:00Z',
-          sessionsTotal: 12, tools: ['Claude Code'],
-          shared: false, recentAuthorIds: [this.viewerId],
+          sessionsTotal: 12, tools: ['Claude Code'], team: null,
           sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
-          latestSummary: null,
-          sync: { state: 'paused' },
         },
         {
           path: '/Users/x/deleted-folder', name: 'deleted-folder', exists: false, archived: true, missing: true, paused: true,
           lastSync: '2026-06-01T10:00:00Z', lastActivity: '2026-06-01T10:00:00Z',
-          sessionsTotal: 3, tools: ['Codex'],
-          shared: false, recentAuthorIds: [this.viewerId],
+          sessionsTotal: 3, tools: ['Codex'], team: null,
           sessionsThisWeek: 0, dailyCounts: [0, 0, 0, 0, 0, 0, 0],
-          latestSummary: null,
-          sync: { state: 'paused' },
         },
       )
     }
-    return this.guard<Project[]>(projects)
+    return this.guard<Project[]>(rows.map(row => mapProjectRow(row, feed)))
   }
   getLiveSessions() {
-    return this.guard<LiveSession[]>(this.opts.empty ? [] : [
-      { id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:36:00Z', intent: 'make the summary hook fire on session boundaries, not only on stop', outcome: null },
-      { id: 's2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up', outcome: null },
-    ])
+    // mapLiveSession derives the id from `session`, the tool from `source`,
+    // and `outcome` from outcomeOf(...) || null -- so a live session with no
+    // headline yet comes back with a null outcome because the mapper says so.
+    const rows: RawEntrySpec[] = [
+      { session: 's1', ts: '2026-07-29T20:36:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
+        goal: 'make the summary hook fire on session boundaries, not only on stop',
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      { session: 's2', ts: '2026-07-29T21:00:00Z', author: 'You', authorId: this.viewerId, source: 'Claude Code', live: true,
+        goal: 'rebuild the apps interface from the ground up',
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+    ]
+    return this.guard<LiveSession[]>(this.opts.empty ? [] : rows.map(e => mapLiveSession(rawFeedEntry(e))))
   }
   // null for an unknown id -- FakeDataClient must model the real client's
   // "evicted session" resolution, not throw, so the not-in-memory page state
   // is exercisable in tests.
   getSession(sessionId: string) {
-    return this.guard<Session | null>(SESSION_FIXTURES[sessionId] ?? null)
+    const raw = SESSION_FIXTURES[sessionId]
+    // Mapped here rather than stored mapped, so a change to mapSession's
+    // normalization reaches every test that opens a session page.
+    return this.guard<Session | null>(raw ? mapSession(raw) : null)
   }
-  getProjectStream() {
-    return this.guard<StreamEntry[]>([
-      { id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z', live: true, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], session: 's-e1', ...emptyBrief() },
-    ])
+  /**
+   * Honours BOTH the project asked for and `empty`. It used to ignore its
+   * argument and return the same row for every project, which meant
+   * `{ empty: true }` produced a combination the daemon cannot: no projects at
+   * all, yet a populated project stream. Reaching the no-sessions state
+   * required stubbing the method per test, so the state existed only where
+   * someone had already thought to fake it.
+   */
+  getProjectStream(projectPath: string) {
+    if (this.opts.empty) return this.guard<StreamEntry[]>([])
+    const rows: RawEntrySpec[] = [
+      // distilled: true so the `!!e.distilled` passthrough is OBSERVABLE. With
+      // every boolean left at the default, a mapper that inverted them looked
+      // identical -- which is how those three survived mutation.
+      { session: 's-e1', ts: '2026-07-29T19:00:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
+        headline: 'Hook ownership now decided by durability, not who ran last.',
+        goal: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'],
+        distilled: true,
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+    ]
+    return this.guard<StreamEntry[]>(
+      rows.filter(e => !projectPath || e.projectPath === projectPath).map(e => mapStreamEntry(rawFeedEntry(e))),
+    )
   }
   // Feed fixture: 5 entries across 2 projects, 2 named authors + "you", 2
   // tools, spanning 2 UTC calendar days -- enough to exercise day-grouping,
   // every filter, and (via a caller-supplied `before`) backward paging
   // without a live daemon.
   private feedFixture(): FeedEntry[] {
-    return [
-      { id: 'f1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:36:00Z', live: true, outcome: '', intent: 'make the summary hook fire on session boundaries, not only on stop', files: [], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f1', ...emptyBrief() },
-      { id: 'f2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-29T19:00:00Z', live: false, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f2', ...emptyBrief() },
-      { id: 'f3', author: 'Sarah', authorId: 'sarah', tool: 'Claude Code', at: '2026-07-29T10:00:00Z', live: false, outcome: 'Listing flow validates addresses before payment.', intent: 'validate the address before charging the card', files: ['lib/listing.js'], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f3', ...emptyBrief() },
-      { id: 'f4', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-28T22:00:00Z', live: false, outcome: 'Ports fixed and pushed.', intent: 'fix the port collision in the test suite', files: ['test/run-tests.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f4', ...emptyBrief() },
-      { id: 'f5', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-28T18:00:00Z', live: false, outcome: 'Landing page deployed.', intent: null, files: [], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f5', ...emptyBrief() },
+    // Wire rows, mapped. `outcome` and `intent` are DERIVED here, not stated:
+    // outcomeOf prefers a headline and otherwise clips the summary's first
+    // sentence to OUTCOME_MAX, and intentOf prefers `goal` over `ask`. Stating
+    // them as literals meant no test ever exercised either rule -- including
+    // the clipping, which is the one most likely to change.
+    //
+    // `id` is now the mapper's composite (session|ts) rather than 'f1'..'f5'.
+    // It is an internal key -- FeedPage dedupes on it and DayCard uses it as a
+    // React key -- and no test asserts it. Session links read `session`, which
+    // is unchanged.
+    const rows: RawEntrySpec[] = [
+      { session: 's-f1', ts: '2026-07-29T20:36:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
+        goal: 'make the summary hook fire on session boundaries, not only on stop',
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      { session: 's-f2', ts: '2026-07-29T19:00:00Z', author: 'You', authorId: this.viewerId, source: 'Claude Code',
+        headline: 'Hook ownership now decided by durability, not who ran last.',
+        goal: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'],
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      { session: 's-f3', ts: '2026-07-29T10:00:00Z', author: 'Sarah', authorId: 'sarah', source: 'Claude Code',
+        headline: 'Listing flow validates addresses before payment.',
+        goal: 'validate the address before charging the card', files: ['lib/listing.js'],
+        project: 'sublease', projectPath: '/Users/x/sublease' },
+      { session: 's-f4', ts: '2026-07-28T22:00:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex',
+        headline: 'Ports fixed and pushed.',
+        goal: 'fix the port collision in the test suite', files: ['test/run-tests.js'],
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      // No goal and no ask, so intentOf yields null -- the "nothing to show"
+      // case, derived rather than written as `intent: null`.
+      { session: 's-f5', ts: '2026-07-28T18:00:00Z', author: 'You', authorId: this.viewerId, source: 'Claude Code',
+        headline: 'Landing page deployed.',
+        project: 'sublease', projectPath: '/Users/x/sublease' },
     ]
+    return rows.map(e => mapFeedEntry(rawFeedEntry(e)))
   }
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }) {
     if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null, dayDigests: [] })
@@ -447,7 +657,7 @@ export class FakeDataClient implements DataClient {
   // disagree about whether this machine is on a team; `authenticated` is the
   // one fact only this payload carries.
   getTeamAccount() {
-    const authenticated = this.opts.authenticated ?? true
+    const authenticated = this.signedIn
     const onTeam = authenticated && !this.opts.solo
     return this.guard<TeamAccount>({
       configured: true,
@@ -465,6 +675,9 @@ export class FakeDataClient implements DataClient {
   // given -- the fixture models the real contract, where the password exists
   // only for the duration of the request.
   signIn(credentials: { email: string; password: string }) {
+    // Round-trips: a fixture that can only go one way cannot cover sign-in
+    // FROM the signed-out view, which is the other half of this screen.
+    this.signedIn = true
     return this.guard<{ email: string; displayName: string | null }>({ email: credentials.email, displayName: 'Andrew' })
   }
   // needsConfirmation: true is the DEFAULT fixture answer on purpose -- it is
@@ -473,7 +686,20 @@ export class FakeDataClient implements DataClient {
   signUp(credentials: { displayName: string; email: string; password: string }) {
     return this.guard<{ needsConfirmation: boolean; email: string }>({ needsConfirmation: true, email: credentials.email })
   }
-  signOut() { return this.guard<void>(undefined) }
+  // Default is the good path: the backend confirmed the revocation. The
+  // failure is opt-in via `signOutRevokeError` rather than the default,
+  // because a fixture that failed revocation by default would make every
+  // unrelated sign-out test render the warning.
+  signOut() {
+    const err = this.opts.signOutRevokeError ?? null
+    // The local credential delete is UNCONDITIONAL in the daemon -- a user
+    // offline must still be able to sign out of their own laptop -- so this
+    // flips regardless of whether the backend revocation succeeded. That is
+    // exactly why a failed revocation still lands the user on the signed-out
+    // view, and why that view has to carry the warning.
+    this.signedIn = false
+    return this.guard<SignOutResult>({ revoked: !err, revokeError: err })
+  }
   createTeam(name: string) {
     return this.guard<{ id: string; inviteCode: string | null }>({ id: 'team-new', inviteCode: `INV-${name.slice(0, 3).toUpperCase()}` })
   }
@@ -496,16 +722,16 @@ export class FakeDataClient implements DataClient {
   selectedTeamId() { return this.teamId }
   selectTeam(teamId: string | null) { this.teamId = teamId }
   /** The team fixture the current selection points at (first, by default). */
-  private selectedTeam(): { id: string; name: string; role: Role; memberCount: number } | null {
+  private selectedTeam(): { id: string; name: string; role: Role; memberCount: number | null } | null {
     const teams = this.teamFixtures()
     if (!teams.length) return null
     return teams.find(t => t.id === this.teamId) ?? teams[0]
   }
-  private teamFixtures(): { id: string; name: string; role: Role; memberCount: number }[] {
-    const authenticated = this.opts.authenticated ?? true
+  private teamFixtures(): { id: string; name: string; role: Role; memberCount: number | null }[] {
+    const authenticated = this.signedIn
     if (!(authenticated && !this.opts.solo)) return []
     return [
-      { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length },
+      { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.opts.memberCountUnknown ? null : this.teamMembers().length },
       ...(this.opts.secondTeam ? [{ id: 'team-2', name: 'Weekend Side Project', role: 'member' as Role, memberCount: 2 }] : []),
     ]
   }
@@ -520,7 +746,10 @@ export class FakeDataClient implements DataClient {
       { id: 'i2', createdAt: '2026-07-20T09:00:00Z', expiresAt: null, maxUses: null, useCount: 0, revoked: false },
     ])
   }
-  createInviteLink(_teamId?: string, _opts?: { expiresDays?: number; maxUses?: number }) {
+  // Takes the options so a test can assert what the SCREEN decided, not just
+  // that something was minted. The token is fixed; the interesting assertion
+  // is the bounds the caller asked for.
+  createInviteLink(_teamId: string, _options: InviteOptions) {
     return this.guard<{ token: string }>({ token: 'tok_9f2aQ7' })
   }
   revokeInvite() { return this.guard<void>(undefined) }
@@ -584,6 +813,12 @@ export class FakeDataClient implements DataClient {
       window,
       exact: true,
       truncated: false,
+      // T-71: the daemon fetches priorStart..now (2 * window). On an
+      // untruncated fetch both fields hold `window * 2` -- the "reached"
+      // number equals the daemon's requested span. Truncated tests override
+      // both, exactly like the sessions/entries counts above.
+      lookbackDays: window * 2,
+      coveredDays: window * 2,
       sessions: { count: 412, deltaPct: 18 },
       membersSyncing: { ok: 2, total: 3 },
       entriesShared: { count: 187, delta: 31 },
@@ -628,7 +863,12 @@ export class FakeDataClient implements DataClient {
       // observable here or the switcher is only pretending.
       team: (() => {
         const t = this.selectedTeam()
-        return t ? { ...t, inviteCode: 'INV-7F3K9Q' } : null
+        // Settings.team.memberCount is `number`, NOT `number | null` -- the two
+        // payloads model different things and only TeamSummary (the account's
+        // team list) carries the older-daemon unknown. Falling back to the real
+        // roster length here keeps memberCountUnknown scoped to the surface it
+        // is about instead of quietly widening a second type.
+        return t ? { ...t, memberCount: t.memberCount ?? this.teamMembers().length, inviteCode: 'INV-7F3K9Q' } : null
       })(),
       viewerId: this.viewerId,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',

@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { syncStateOf, LocalDaemonClient } from './LocalDaemonClient'
 
-// Finding 1: the Today screen mounts useProjects() + useLiveSessions()
-// together, and useLiveSessions() re-polls every 10s -- both used to fire
-// their own independent /api/feed request. These tests drive the real
-// fetch-counting behavior a browser would see, not the cache's internals.
+// The Today screen mounts useProjects() + useLiveSessions() together, and
+// useLiveSessions() re-polls every 10s. Both used to fire their own
+// independent /api/feed request; then both were coalesced onto one; and now
+// the live read is off that endpoint entirely (T-61). These tests drive the
+// real fetch-counting behavior a browser would see, not the cache's internals.
 describe('LocalDaemonClient feed coalescing', () => {
   const emptyFeed = { entries: [] }
 
@@ -21,24 +22,53 @@ describe('LocalDaemonClient feed coalescing', () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => ({
       ok: true,
       status: 200,
-      json: async () => (String(url).startsWith('/api/projects') ? [] : emptyFeed),
+      json: async () => {
+        const u = String(url)
+        if (u.startsWith('/api/projects')) return []
+        if (u.startsWith('/api/live-sessions')) return { sessions: [] }
+        return emptyFeed
+      },
     }))
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
   }
 
-  const feedCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
-    fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/feed')).length
+  const callsTo = (fetchMock: ReturnType<typeof vi.fn>, prefix: string) =>
+    fetchMock.mock.calls.filter(([url]) => String(url).startsWith(prefix)).length
+  const feedCalls = (fetchMock: ReturnType<typeof vi.fn>) => callsTo(fetchMock, '/api/feed')
+  const liveCalls = (fetchMock: ReturnType<typeof vi.fn>) => callsTo(fetchMock, '/api/live-sessions')
 
-  it('fires exactly one /api/feed request when getProjects() and getLiveSessions() run concurrently', async () => {
+  // THE invariant of T-61, and the reason any of this got faster. The strip
+  // that says who is working right now is mounted by the LANDING route and
+  // polled every 10s; while it read /api/feed it put a 850ms, 185kB, two-
+  // backend-round-trip request on first paint and then repeated it forever.
+  // Asserting zero -- not "fewer" -- because the whole property being bought
+  // is that no polled read can reach the network at all, and a single
+  // surviving call would quietly restore the old cost.
+  it('reads /api/live-sessions and never /api/feed', async () => {
+    const fetchMock = stubFetch()
+    const client = new LocalDaemonClient()
+
+    await client.getLiveSessions()
+
+    expect(liveCalls(fetchMock)).toBe(1)
+    expect(feedCalls(fetchMock)).toBe(0)
+  })
+
+  // Pinned deliberately, and it is NOT the coalescing test it used to be:
+  // getProjects() still awaits the merged feed page because mapProjectRow
+  // genuinely needs feed entries for latestSummary/recentAuthorIds. That is a
+  // known, separately-ticketed cost -- this asserts it is exactly one request
+  // and that the live read adds none to it, so the next person to read the
+  // number knows it is deliberate rather than a regression.
+  it('fires exactly one /api/feed request for getProjects(), with getLiveSessions() adding none', async () => {
     const fetchMock = stubFetch()
     const client = new LocalDaemonClient()
 
     await Promise.all([client.getProjects(), client.getLiveSessions()])
 
-    // getProjects() also hits /api/projects, so the /api/feed count -- not
-    // the total call count -- is what proves the coalescing.
     expect(feedCalls(fetchMock)).toBe(1)
+    expect(liveCalls(fetchMock)).toBe(1)
   })
 
   it('refetches once the TTL has elapsed', async () => {
@@ -46,14 +76,14 @@ describe('LocalDaemonClient feed coalescing', () => {
     const client = new LocalDaemonClient()
 
     await client.getLiveSessions()
-    expect(feedCalls(fetchMock)).toBe(1)
+    expect(liveCalls(fetchMock)).toBe(1)
 
     await client.getLiveSessions()
-    expect(feedCalls(fetchMock)).toBe(1) // still within TTL -- cached
+    expect(liveCalls(fetchMock)).toBe(1) // still within TTL -- cached
 
-    vi.advanceTimersByTime(5001) // just past FEED_CACHE_TTL_MS
+    vi.advanceTimersByTime(5001) // just past REQUEST_CACHE_TTL_MS
     await client.getLiveSessions()
-    expect(feedCalls(fetchMock)).toBe(2)
+    expect(liveCalls(fetchMock)).toBe(2)
   })
 
   it('invalidates the cache on syncProject so the next read is fresh', async () => {
@@ -61,11 +91,40 @@ describe('LocalDaemonClient feed coalescing', () => {
     const client = new LocalDaemonClient()
 
     await client.getLiveSessions()
-    expect(feedCalls(fetchMock)).toBe(1)
+    expect(liveCalls(fetchMock)).toBe(1)
 
     await client.syncProject('/Users/x/membridge')
     await client.getLiveSessions()
-    expect(feedCalls(fetchMock)).toBe(2) // invalidated, not waiting out the TTL
+    expect(liveCalls(fetchMock)).toBe(2) // invalidated, not waiting out the TTL
+  })
+
+  // A sync can also bring a teammate's row into the live window, so the feed
+  // page and the live read have to be invalidated together. They live under
+  // different cache keys now, which is exactly how one of them gets forgotten.
+  it('invalidates BOTH the feed page and the live read on syncAll', async () => {
+    const fetchMock = stubFetch()
+    const client = new LocalDaemonClient()
+
+    await Promise.all([client.getProjects(), client.getLiveSessions()])
+    expect(feedCalls(fetchMock)).toBe(1)
+    expect(liveCalls(fetchMock)).toBe(1)
+
+    await client.syncAll()
+    await Promise.all([client.getProjects(), client.getLiveSessions()])
+
+    expect(feedCalls(fetchMock)).toBe(2)
+    expect(liveCalls(fetchMock)).toBe(2)
+  })
+
+  // The boundary rule every other payload in this client follows: a body
+  // without the field must read as "nobody is working right now", never throw
+  // over the landing route the strip lives on.
+  it('treats a payload with no sessions array as nobody working', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new LocalDaemonClient()
+
+    await expect(client.getLiveSessions()).resolves.toEqual([])
   })
 })
 

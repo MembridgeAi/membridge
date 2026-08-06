@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'wouter'
 import { Avatar } from '../../components/Avatar'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { FROM_PARAM, backLink, useRawSearch } from '../../app/routes'
 import { relativeAgo } from '../../data/relativeTime'
 import { useSession } from '../../data/queries'
@@ -157,7 +158,19 @@ export function SessionPage({ sessionId }: SessionPageProps) {
     )
   }
 
-  if (query.isLoading) return <div className="session-page" />
+  // Was `<div className="session-page" />` — an empty element, so the page was
+  // blank from 49ms to 175ms (measured; GET /api/session is a fast 67ms local
+  // read, so this is the shortest blank in the app). Fixed anyway: the back
+  // link is the one control a reader might want DURING the wait, and it is
+  // known from the URL without waiting for anything.
+  if (query.isLoading) {
+    return (
+      <div className="session-page">
+        <Link href={back.href} className="session-back">‹ {back.label}</Link>
+        <LoadingRows rows={3} label="Loading this session" testId="session-loading" />
+      </div>
+    )
+  }
 
   const s = query.data
   // null is the daemon's honest 404: evicted from memory or never existed.

@@ -95,9 +95,27 @@ export function FirstRun() {
       <p className="first-run-body">{watchingBody(status.tools)}</p>
 
       <div className="settings-group-label">Session summaries</div>
+      {/* T-80: the description names what "Get started" will actually save,
+       *  based on the current toggle position. Before this, the caption read
+       *  "You can turn this off any time from Settings" -- a fine description
+       *  of the setting, but it did not tell the user what leaving the switch
+       *  alone meant. A fresh install shows the daemon default (enabled:true),
+       *  and the ONLY write finish() makes is the DISPLAYED value (see
+       *  finish() below), so "proceed with the default I just read" is
+       *  exactly the sentence to state here. The regex-shaped tokens ("on",
+       *  "off") mirror the toggle state so the two cannot drift apart.
+       *
+       *  Option (b) from the ticket: state the default in the caption based
+       *  on the toggle state, rather than gating "Get started" until the
+       *  toggle is touched. The daemon has a real default and the code
+       *  already writes exactly that default, so requiring the click would
+       *  demand explicit consent for a choice the system was going to make
+       *  anyway. */}
       <SettingRow
         label="Let a session write its own summary when it ends"
-        description="You can turn this off any time from Settings."
+        description={summariesOn
+          ? 'Get started will save this as on. You can change it any time from Settings.'
+          : 'Get started will save this as off. You can change it any time from Settings.'}
       >
         <Toggle
           label="Session summaries"

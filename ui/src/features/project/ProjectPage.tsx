@@ -6,7 +6,7 @@ import { weekdayMonthDay } from '../../data/localTime'
 import { collapseSessionCheckpoints } from '../../data/mappers'
 import {
   useCopyForAI, useMembers, useOpenMemoryFile, useProjectAccess, useProjects, useProjectStream,
-  useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useStatus, useSyncProject,
+  useSetProjectAccess, useSetProjectAccessDefault, useSetProjectPaused, useSettings, useSoloView, useStatus, useSyncProject,
 } from '../../data/queries'
 import type { StreamEntry as StreamEntryData } from '../../data/types'
 import { Avatar } from '../../components/Avatar'
@@ -14,6 +14,7 @@ import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { EntryRow } from '../../components/EntryRow'
 import { SyncStateView } from '../../components/SyncState'
 import { AccessPanel, type AccessRow } from './AccessPanel'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { MemoryPanel, SyncPanel } from './SidePanels'
 import './project.css'
 
@@ -89,6 +90,13 @@ export function ProjectPage({ slug }: ProjectPageProps) {
   const streamQuery = useProjectStream(project?.path ?? null)
 
   const solo = statusQuery.data?.solo ?? true
+  // T-78: the surface-level team-language gate for this page. `solo` above
+  // stays the tightest gate for the access panel (there is no matrix on a
+  // solo daemon); `soloView` governs the affirmative team claims -- the
+  // Shared/Private tag in the header, the "Team sync" label and Encryption
+  // row in the Sync side panel -- which must ALSO fall to solo language on a
+  // signed-out install sitting next to a stray team.json.
+  const soloView = useSoloView()
   const role = settingsQuery.data?.team?.role ?? null
   const isTeamAdmin = role === 'owner' || role === 'admin'
   // Reading access for a project that isn't shared 404s on the real daemon
@@ -176,7 +184,20 @@ export function ProjectPage({ slug }: ProjectPageProps) {
   }
 
   if (!project) {
-    if (projectsQuery.isLoading) return null
+    // Was `return null` — a blank main region for as long as useProjects()
+    // took, measured at 1,580ms on a real install, because getProjects()
+    // awaits /api/feed alongside /api/projects. The route was chosen by the
+    // user, so the page can name itself and hold its shape while it resolves;
+    // it just must not claim the project is missing yet, which is what the
+    // branch below says.
+    if (projectsQuery.isLoading) {
+      return (
+        <div className="project-page">
+          <Link href={ROUTES.projects} className="project-back" aria-label="Back to projects">←</Link>
+          <LoadingRows rows={4} label="Loading this project" testId="project-loading" />
+        </div>
+      )
+    }
     return (
       <div className="project-page">
         <Link href={ROUTES.projects} className="project-back">← Back to projects</Link>
@@ -193,9 +214,11 @@ export function ProjectPage({ slug }: ProjectPageProps) {
       <div className="project-header">
         <Link href={ROUTES.projects} className="project-back" aria-label="Back to projects">←</Link>
         <h1 className="mono project-title">{project.name}</h1>
-        <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
-          {project.shared ? 'Shared' : 'Private'}
-        </span>
+        {!soloView && (
+          <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
+            {project.shared ? 'Shared' : 'Private'}
+          </span>
+        )}
         {/* Faces of who has SHOWN UP here lately, not who the project is
             shared with -- recentAuthorIds cannot answer the second question
             (see its doc in types.ts). Unlabelled, sitting immediately right of
@@ -238,7 +261,14 @@ export function ProjectPage({ slug }: ProjectPageProps) {
 
       <div className="project-cols">
         <div className="project-stream">
-          {dayGroups.length === 0 && <p className="project-empty-note">No activity captured yet.</p>}
+          {/* "No activity captured yet." is an ANSWER about a codebase's whole
+              history, and it was being given before the question had been
+              asked: the stream comes from GET /api/feed?project=… (850ms-1.1s
+              measured), so a project with 28 captured sessions said it had
+              none for 846ms every single time this page was opened. */}
+          {streamQuery.isPending
+            ? <LoadingRows rows={3} label="Loading this project's activity" testId="project-stream-loading" />
+            : dayGroups.length === 0 && <p className="project-empty-note">No activity captured yet.</p>}
           {dayGroups.map(group => (
             <div key={group.day}>
               <div className="project-day">{group.day}</div>
@@ -275,6 +305,7 @@ export function ProjectPage({ slug }: ProjectPageProps) {
           <MemoryPanel
             project={project}
             latestEntry={latestEntry}
+            streamPending={streamQuery.isPending}
             onOpenMemory={() => openMemory.mutate(project.path)}
             openPending={openMemory.isPending}
           />
@@ -290,6 +321,7 @@ export function ProjectPage({ slug }: ProjectPageProps) {
             encryptionEnabled={statusQuery.data?.encryption.enabled ?? false}
             plaintextOff={statusQuery.data?.encryption.plaintextOff ?? false}
             sessionsThisWeek={project.sessionsThisWeek}
+            soloView={soloView}
           />
         </div>
       </div>
