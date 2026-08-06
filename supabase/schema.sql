@@ -112,6 +112,29 @@ create policy teams_select on public.teams
 create policy team_members_select on public.team_members
   for select using (public.is_team_member(team_id));
 
+-- READ THIS BEFORE TIGHTENING projects_select.
+--
+-- This policy is membership-scoped and NOT access-scoped, and a client now
+-- DEPENDS on that. 025_enforce_project_access.sql §3 put can_see_project into
+-- the project_stats view and deliberately left this base policy alone; its own
+-- note weighs the "leaks project existence" cost and accepts it. That decision
+-- is now load-bearing.
+--
+-- lib/teamsync.js visibleProjectIds distinguishes "you have been revoked from
+-- every project in this team" from "this query returned nothing for some other
+-- reason" by asking two questions that differ by EXACTLY can_see_project: the
+-- access-filtered project_stats view, and this access-unfiltered table. Add
+-- can_see_project (or a project_access join) here and the two queries stop
+-- differing — the corroboration returns the same empty answer as the thing it
+-- is corroborating, every empty result becomes permanently inconclusive, and
+-- revocation detection silently stops working for a member revoked from their
+-- only shared project. Nothing would go red on the client.
+--
+-- If this policy must be tightened, land the backend replacement FIRST: an
+-- explicit per-project visibility RPC that returns a positive row per project
+-- with `can_see` and `archived` as separate columns, so absence stops carrying
+-- meaning. test/suites/revocation-empty-visibility.test.js fails loudly if this
+-- policy changes shape before that exists.
 create policy projects_select on public.projects
   for select using (public.is_team_member(team_id));
 

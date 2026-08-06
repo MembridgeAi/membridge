@@ -7141,8 +7141,15 @@ async function main() {
     assert.strictEqual(holdoutStillHeldOutRegardlessOfAge.reason, 'holdout');
 
     // 3. Tier A: same session already read it, hash matches -> pointer serve.
+    // Since REV-4 that takes BOTH halves of the evidence: the ledger proving
+    // the read happened, and the hash this session recorded AT that read
+    // (sessionState.reads). The store's contentHash proves a different
+    // interval and no longer stands in for either. REV-12 adds the third:
+    // WHICH LINES were delivered -- `ranges` -- because the ledger records
+    // that a session read a PATH and has never recorded a window.
     const tierA = recall.decide(base({
       limit: 100,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7170,6 +7177,7 @@ async function main() {
     const rangedTierA = recall.decide(base({
       offset: 23510,
       limit: 42,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7193,6 +7201,7 @@ async function main() {
     const offsetZeroStillServed = recall.decide(base({
       offset: 0,
       limit: 100,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7201,8 +7210,12 @@ async function main() {
     assert.strictEqual(offsetZeroStillServed.tier, 'A');
 
     // 4. Tier A refused: same session read it, but the file changed since.
+    // The session recorded HASH-OLD at its read and the file is HASH-NEW now,
+    // which is exactly the interval Tier A's wording claims and REV-4 made it
+    // prove.
     const tierAMismatch = recall.decide(base({
       limit: 100,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH-OLD', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH-OLD', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH-NEW' },
@@ -7238,9 +7251,12 @@ async function main() {
     assert.strictEqual(tierBBelowFloor.serve, false);
     assert.strictEqual(tierBBelowFloor.reason, 'below-compression-floor');
 
-    // 7. Refused: the call itself is under the 400-token floor.
+    // 7. Refused: the call itself is under the 400-token floor. The tier has
+    // to APPLY for the floor to be what refuses it -- decide() checks the tier
+    // first -- so this fixture carries the read-time hash Tier A needs.
     const underFloor = recall.decide(base({
       limit: 10, // 10 * 12 = 120 tokens
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7383,7 +7399,7 @@ async function main() {
     const wellFormed = {
       projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
       sessionId: 'session-x', toolName: 'Read', offset: null, limit: 100,
-      sessionState: { served: {}, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7563,6 +7579,22 @@ async function main() {
         [relA2]: { sessions: [sessB], reads: 1, lastTs: 't', firstTs: 't', firstSession: sessB },
       },
     });
+    // Two reads, because Tier A now proves its own interval (REV-4/REV-8): the
+    // FIRST read of a path is what records the hash this session saw, and the
+    // second is the one that can be answered from it. The store entry above is
+    // irrelevant to Tier A and left in place only because it was already here.
+    const outA2First = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 }));
+    check('recall hook: the first read of a path bootstraps Tier A instead of serving it', () => {
+      assert.strictEqual(outA2First.status, 0, outA2First.stderr);
+      assert.strictEqual(outA2First.stdout, '', 'nothing may be served before there is evidence to serve it on');
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
+      // A read record is { hash, ranges } since REV-12 -- the content AND the
+      // window it was handed, because "you already read this" is a claim about
+      // both. A record with a hash and no window fails closed at serve time.
+      assert.strictEqual(raw.reads[relA2].hash, hashA2, 'the read-time hash was not recorded, so Tier A can never fire here');
+      assert.deepStrictEqual(raw.reads[relA2].ranges, [[1, 34]], 'the delivered window (limit 34) was not recorded');
+      assert.strictEqual(raw.interceptions, 1, 'a bootstrap read must not burn an interception');
+    });
     const outA2 = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 })); // 34*12 = 408 tokens, just clears the 400 floor
 
     check('recall hook: tier A serve past the first interception, with a modest saving, omits the terminal line', () => {
@@ -7639,7 +7671,16 @@ async function main() {
     check('recall hook: a stale store entry (file changed since) is never served, even though the tier would otherwise apply', () => {
       assert.strictEqual(outF.status, 0, outF.stderr);
       assert.strictEqual(outF.stdout, '', 'a hash mismatch must never serve stale content');
-      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(recallProj, sessF)), 'no session state written for a refused serve');
+      // A refused serve must leave no trace of a serve -- no `served` entry,
+      // no interception burned. It DOES record the read-time hash (REV-4):
+      // that is the evidence a later Tier A needs, and the read that cannot be
+      // served is precisely the one that has to record it. Asserting the file
+      // is absent would be asserting that the bootstrap does not happen.
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessF), 'utf8'));
+      assert.deepStrictEqual(raw.served, {}, 'a refused serve must never mark the path served');
+      assert.strictEqual(raw.interceptions, 0, 'a refused serve must never burn an interception');
+      assert.strictEqual(raw.reads[relF].hash, recallHash(fs.readFileSync(fileF, 'utf8')),
+        'the read-time hash of what is actually on disk was not recorded');
     });
 
     // An untracked project (no state.projects entry, no .membridge) must
@@ -7728,11 +7769,18 @@ async function main() {
       assert.ok(reason.includes('SKELETON_E2E'), `expected the cached skeleton in the served body: ${reason}`);
     });
 
-    // M5: recallStore.get() must be consulted BEFORE the target file is read
-    // and sha1'd -- on a store miss (the common case) that hash is pure waste
-    // (measured 74ms on a 22MB file). Pinned by making the file's CONTENT
-    // unreadable while stat() still succeeds: hashing it would throw and land
-    // a 'hook recall error' line in the log, returning early never touches it.
+    // M5, rewritten for REV-8. It used to pin "a store miss returns before
+    // hashing", which was correct until Tier A stopped needing a store entry:
+    // that early return was exactly what kept the read-time hash from ever
+    // being recorded, so Tier A could not fire for ~90% of reads. A store miss
+    // now DOES hash (bounded by MAX_HASH_BYTES -- see
+    // test/suites/recall-tier-a-serves.test.js for the cap and the bootstrap).
+    //
+    // What survives, and is pinned here, is the half of M5 that was about the
+    // user rather than the clock: an unreadable file must be a SILENT step
+    // aside. It is an ordinary condition, and filing it as 'hook recall error'
+    // on every read of that file would turn the log into noise. Pinned by
+    // making the CONTENT unreadable while stat() still succeeds.
     // (A root-run test suite cannot enforce chmod, so this pins on any normal
     // developer/CI account and passes vacuously as root.)
     const missRel = 'src/nostore.js';
@@ -7743,11 +7791,11 @@ async function main() {
     const outMiss = runRecallHook({ session_id: nonHoldoutSession(missRel, 'sess-miss'), cwd: missProj, tool_name: 'Read', tool_input: { file_path: missFile, limit: 100 } });
     const logAfterMiss = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
     fs.chmodSync(missFile, 0o644);
-    check('recall hook: M5 -- a store miss returns before hashing the target file', () => {
+    check('recall hook: M5 -- an unreadable file is a silent step-aside, never a logged error', () => {
       assert.strictEqual(outMiss.status, 0, outMiss.stderr);
       assert.strictEqual(outMiss.stdout, '', 'a store miss must never serve');
       assert.ok(!logAfterMiss.slice(logBefore.length).includes('hook recall error'),
-        'the hook hashed the file before checking the store: an unreadable file threw instead of being a cheap miss');
+        'an ordinary unreadable file was filed as an internal hook error, on every read of it');
     });
 
     // L6: a held-out read with NOTHING cached used to append a holdout row
@@ -8134,7 +8182,7 @@ async function main() {
     const led1 = ledgerStoreT6.updateLedger(projPin, [], util.getConfig(), () => tPin + 10);
     requestsBefore.push({ requests: led1.requests, volume: led1.volume, sessions: led1.sessions });
     check('ledger-fold-recall (revisable settlement): a confirmed serve settles on the very FIRST fold pass, no grace wait', () => {
-      assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0);
       assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(projPin)) || fs.readFileSync(ledgerFoldRecall.eventsPath(projPin), 'utf8') === '',
         'the settled serve must be consumed out of the queue on this same pass');
@@ -8149,7 +8197,7 @@ async function main() {
     const led2 = ledgerStoreT6.updateLedger(projPin, [followUpPin1], util.getConfig(), () => tPin + 20);
     requestsBefore.push({ requests: led2.requests, volume: led2.volume, sessions: led2.sessions });
     check('ledger-fold-recall (revisable settlement): a later follow-up CORRECTS a full avoidance down to a partial win', () => {
-      assert.deepStrictEqual(led2.avoided, { tokens: 3230, serves: 1, tierA: 0, tierB: 1, partialWins: 1, netNegatives: 0 });
+      assert.deepStrictEqual(led2.avoided, { tokens: 3230, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 1, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0, 'a positive net must never bump rejections');
       assert.strictEqual(led2.openServes[0].classified, 'partial');
       assert.deepStrictEqual(led2.openServes[0].correctedBy, ['sess-pin|fu-pin-1|' + path.join(projPin, relPin)]);
@@ -8165,7 +8213,7 @@ async function main() {
     const led3 = ledgerStoreT6.updateLedger(projPin, [followUpPin2], util.getConfig(), () => tPin + 30);
     requestsBefore.push({ requests: led3.requests, volume: led3.volume, sessions: led3.sessions });
     check('ledger-fold-recall (revisable settlement): a second follow-up corrects a partial win down to a net negative, bumping rejection exactly once', () => {
-      assert.deepStrictEqual(led3.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 });
+      assert.deepStrictEqual(led3.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 });
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 1);
       assert.strictEqual(led3.openServes[0].classified, 'negative');
     });
@@ -8278,7 +8326,7 @@ async function main() {
       }
       check('ledger-fold-recall (FINDING 3): a failed queue rewrite still folds the settlement into the ledger', () => {
         assert.ok(sawQueueWrite, 'test did not actually exercise the queue rewrite path');
-        assert.deepStrictEqual(ledFailedWrite.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        assert.deepStrictEqual(ledFailedWrite.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'rel3c settles; rel3d (still-young, unconfirmed) contributes nothing yet');
       });
       check('ledger-fold-recall (FINDING 3): the on-disk queue is untouched after a failed rewrite (old rows all still there)', () => {
@@ -8292,7 +8340,7 @@ async function main() {
       check('ledger-fold-recall (FINDINGS 1+2, corrected pin): a subsequent successful rewrite drains the queue WITHOUT re-settling -- idempotent on serveId', () => {
         assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj3cT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8') === '',
           'the retried pass must finally consume the queue (rel3c\'s already-settled row is skipped, not re-settled; rel3d finally ages out as a phantom)');
-        assert.deepStrictEqual(ledRetry.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        assert.deepStrictEqual(ledRetry.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'rel3c must NOT settle a second time just because its confirmed row was still sitting on the queue -- avoided is unchanged by the retry');
         assert.strictEqual(ledRetry.openServes.length, 1, 'exactly one receipt -- serveId dedupe means the retry never creates a duplicate');
       });
@@ -8340,7 +8388,7 @@ async function main() {
         fs.writeFileSync = realWriteFileSyncMulti;
       }
       check('ledger-fold-recall (FINDINGS 1+2): three consecutive failed queue rewrites never re-settle the same physical serve', () => {
-        assert.deepStrictEqual(ledMulti.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        assert.deepStrictEqual(ledMulti.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'still exactly one settle worth of avoided.tokens/serves after 3 failed passes, not 3 (or 4)');
         assert.strictEqual(ledMulti.openServes.length, 1, 'still exactly one receipt -- no duplicate per failed pass');
       });
@@ -8355,7 +8403,7 @@ async function main() {
       const followUpMulti = readEvent('sess-multi', relMulti, new Date(tMulti + 40000).toISOString(), projMulti, { toolUseId: 'fu-multi' });
       const ledMultiFinal = ledgerStoreT6.updateLedger(projMulti, [followUpMulti], util.getConfig(), () => tMulti + 40000 + 100);
       check('ledger-fold-recall (FINDINGS 1+2): once the rewrite succeeds, a net-negative follow-up corrects the single receipt and bumps rejection exactly once', () => {
-        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: -1170, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 },
+        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: -1170, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 },
           'net = 4210 - (380 + 5000); serves/tierB stay at 1 -- one physical serve, one receipt, one correction');
         assert.strictEqual(ledMultiFinal.openServes.length, 1);
         assert.strictEqual(ledMultiFinal.openServes[0].classified, 'negative');
@@ -8901,7 +8949,7 @@ async function main() {
       // idempotency evidence -- see the dedicated MINOR 3 test block below
       // for the failed-rewrite scenario it exists to fix.
       assert.deepStrictEqual(led4Holdout.holdout, { skips: 1, callTokens: 1200, seenKeys: ['2026-07-28T10:00:00.000Z|sess-4|src/d.js'] });
-      assert.deepStrictEqual(led4Holdout.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led4Holdout.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
 
     // An uncommitted pending row (the state-commit write may simply not have
@@ -8920,14 +8968,14 @@ async function main() {
     ]));
     const led5Early = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 1000);
     check('ledger-fold-recall: an unconfirmed pending row is never treated as a phantom while still young', () => {
-      assert.deepStrictEqual(led5Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led5Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5T6), 'utf8').trim().split('\n').filter(Boolean);
       assert.strictEqual(remaining.length, 1, 'the young pending row must stay queued, not be dropped as a phantom');
     });
     fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([{ ts: ts5, sessionId: 'sess-5', relPath: rel5, committed: true }]));
     const led5Confirmed = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 2000);
     check('ledger-fold-recall: a late-arriving confirmation settles IMMEDIATELY, well before the old grace window would have allowed', () => {
-      assert.deepStrictEqual(led5Confirmed.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led5Confirmed.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
 
     // A pending row whose confirmation NEVER arrives (a genuine, permanent
@@ -8946,11 +8994,11 @@ async function main() {
     check('ledger-fold-recall: a young never-confirmed row stays retained, not yet judged a phantom', () => {
       const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8').trim().split('\n').filter(Boolean);
       assert.strictEqual(remaining.length, 1);
-      assert.deepStrictEqual(ledPastGrace.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(ledPastGrace.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
     const led5b = ledgerStoreT6.updateLedger(proj5bT6, [], util.getConfig(), () => t5b + 24 * 60 * 60 * 1000);
     check('ledger-fold-recall: an uncommitted pending row that NEVER confirms is eventually dropped as a phantom', () => {
-      assert.deepStrictEqual(led5b.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led5b.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(proj5bT6, rel5b).rejections, 0);
       assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj5bT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8') === '',
         'the permanently-unconfirmed row must eventually be dropped from the queue, not linger forever');
@@ -8963,7 +9011,7 @@ async function main() {
     writeServeRows(proj6T6, ts6, 'sess-6', rel6, 'A', 500, 20);
     const led6 = ledgerStoreT6.updateLedger(proj6T6, [], util.getConfig(), () => Date.parse(ts6) + 10);
     check('ledger-fold-recall: a tier A serve is tallied under tierA, not tierB', () => {
-      assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
 
     // MAX_OPEN_SERVES: past the cap, the OLDEST open serves are evicted
@@ -9119,13 +9167,13 @@ async function main() {
       // too, tokens only -- the fixture's real numbers must survive the
       // projection (and its sum into totals), never silently drop to zero.
       assert.deepStrictEqual(payload.projects[0].avoided,
-        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.deepStrictEqual(payload.projects[0].holdout, { skips: 2, callTokens: 900 });
       assert.deepStrictEqual(payload.totals.avoided,
-        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.deepStrictEqual(payload.totals.holdout, { skips: 2, callTokens: 900 });
       assert.deepStrictEqual(Object.keys(payload.projects[0].avoided).sort(),
-        ['netNegatives', 'partialWins', 'serves', 'tierA', 'tierB', 'tokens'],
+        ['netNegatives', 'partialWins', 'serves', 'tierA', 'tierB', 'tierUnknown', 'tokens'],
         'avoided must carry tokens only -- no dollar/cost field');
       assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
         'holdout must carry tokens only -- no dollar/cost field');
@@ -21347,7 +21395,7 @@ const repoRoot = require('../lib/repo-root');
       // would need a fabricated avoided figure, so every avoided field stays
       // exactly zero here even though tokens were demonstrably injected.
       assert.deepStrictEqual(led.avoided,
-        { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+        { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       const proj = savingsPayload().projects.find(x => x.path === tp);
       assert.strictEqual(proj.avoided.tokens, 0);
       assert.ok(proj.notesInjectedTokens > 0);
@@ -22483,7 +22531,7 @@ const repoRoot = require('../lib/repo-root');
         util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [tp]: { name: 'assists-outside-net', events: [] } } });
         const payload = savingsPayload();
         assert.deepStrictEqual(payload.totals.avoided,
-          { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+          { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'nine teammate-note injections must not conjure an avoidance figure that was never earned');
         const assists = apiInsights.assistsFrom(payload);
         assert.strictEqual(assists.byKind.teammateNotes, 9, 'but the assist itself is still counted');
@@ -23385,23 +23433,38 @@ const repoRoot = require('../lib/repo-root');
 
       // ===== WHERE 033 IS ACTUALLY LOAD-BEARING =====
       // The client's gate above is positive-confirmation only, and
-      // visibleProjectIds (lib/teamsync.js:1092-1112) returns NULL on three
-      // inputs: a thrown request, a non-array body, and — deliberately — an
-      // EMPTY visible set, because [] is genuinely ambiguous between "revoked
-      // from everything", "backend has no project_stats view" and "deployment
-      // misconfigured", and the caller DELETES local data on absence.
+      // visibleProjectIds returns NULL — "inconclusive, skip the gate" —
+      // whenever it cannot answer, because the caller DELETES local data on a
+      // positive answer.
       //
-      // Its own comment names the cost it accepted: "revocation from a member's
-      // ONLY project is not detected here". What it could not know is that the
-      // undetected case was not merely a stale read — pre-033 the backend
-      // ACCEPTED the push, because memory_entries_insert never checked
-      // can_see_project. So a member revoked from every project they could see
-      // (in practice: their only one) skipped the gate, pushed, and the write
-      // landed. No attacker, no stale client, first-party code path.
+      // WHICH INCONCLUSIVE CASE THIS USES, AND WHY IT CHANGED (REV-13). These
+      // three checks were written against the EMPTY visible set: pre-SEC-4,
+      // `[]` was inconclusive, so a member revoked from their only project
+      // skipped the gate, pushed, and (pre-033) the write landed. SEC-4
+      // (1c7ce9f) settled that case — an empty project_stats corroborated by a
+      // live base-projects row now means REVOKED — so the client stops that
+      // push before the backend ever sees it, and this fixture stopped reaching
+      // the code it exists to test. Three checks went red for a REASON THAT WAS
+      // A FIX, which is the most dangerous shape of red there is: nothing was
+      // broken, and the natural repair (weakening the assertions) would have
+      // deleted the backstop's only coverage.
       //
-      // This is the window 033 closes, and 024's own header says this is where
-      // the backstop belongs: "RLS is the backstop if that check is ever
-      // bypassed or wrong, not the only gate."
+      // So the backstop is now reached through the window SEC-4 deliberately
+      // LEAVES open, named in its own commit message: "base empty / all
+      // archived / errored -> inconclusive -> null, unchanged". flags
+      // .failProjectsList faults the corroborating read, exactly as a network
+      // blip or a permissions change on that one endpoint would, and the gate
+      // correctly declines to act on an answer it could not get. The write is
+      // then attempted and 033 — the RLS check on memory_entries_insert — is
+      // the only thing standing between a revoked member and a landed write.
+      // That is what 024's header describes: "RLS is the backstop if that check
+      // is ever bypassed or wrong, not the only gate."
+      //
+      // FALSIFIABILITY (REV-13, proven not asserted): with
+      // flags.noWriteAccessCheck = true — the mock's stand-in for "033 not
+      // applied" — the first of these three checks fails on
+      // `a revoked write must not land`. The repair did not turn these green by
+      // making them undemanding.
       const HOME_SOLE = path.join(ROOT, 'home-t17-sole');
       homeFor.sole = HOME_SOLE;
       portFor.sole = P(84);
@@ -23439,6 +23502,12 @@ const repoRoot = require('../lib/repo-root');
       };
       util.saveState(stS);
       const soleDeniedBefore = mock17.stats.deniedInserts;
+      // The probe cannot answer -> null -> the client gate is skipped, which is
+      // the only state in which the backend backstop is the thing under test.
+      // Held across all three checks below: the second one re-syncs, and a pass
+      // in which the gate CAN answer would stop the refusal recurring for a
+      // different reason than the one being asserted.
+      mock17.flags.failProjectsList = true;
       const rS = await teamsync.syncTeams();
 
       await check('033: an identity revoked from EVERY project slips the client gate, and the backend is what refuses the write', async () => {
@@ -23493,6 +23562,8 @@ const repoRoot = require('../lib/repo-root');
         assert.ok(/discard a link that may be correct/.test(err),
           `unlink must be described as a hazard, not prescribed: ${err}`);
       });
+
+      mock17.flags.failProjectsList = false;
 
       // ===== readAccess must not invent an access list it cannot read =====
       // GET /api/project/access had NO role gate, while the data it reports is
