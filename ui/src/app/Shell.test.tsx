@@ -241,3 +241,58 @@ describe('Shell', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Focus follows the route.
+//
+// A client-side navigation replaces the page without moving focus, which left
+// a keyboard user on <body> at the destination with the whole rail to tab back
+// through. These cover the move AND the two cases where moving focus would be
+// the wrong thing to do.
+// ---------------------------------------------------------------------------
+describe('Shell: keyboard focus across route changes', () => {
+  const main = () => document.querySelector('main.shell-main') as HTMLElement
+
+  it('moves focus to the main landmark after a client-side navigation', async () => {
+    const user = userEvent.setup()
+    renderApp({ solo: true })
+    await screen.findByRole('link', { name: 'Projects' })
+
+    await user.click(screen.getByRole('link', { name: 'Projects' }))
+
+    expect(document.activeElement).toBe(main())
+  })
+
+  it('leaves focus alone on first mount', async () => {
+    renderApp({ solo: true })
+    await screen.findByRole('link', { name: 'Today' })
+    // A cold load has not navigated anywhere. Grabbing focus here would skip
+    // the rail before the reader has had a chance to see it.
+    expect(document.activeElement).not.toBe(main())
+  })
+
+  it('does not steal focus when the path is unchanged', async () => {
+    const user = userEvent.setup()
+    renderApp({ solo: true })
+    await screen.findByRole('link', { name: 'Projects' })
+
+    await user.click(screen.getByRole('link', { name: 'Projects' }))
+    expect(document.activeElement).toBe(main())
+
+    // Re-activating the link the app is already on is not a navigation. If the
+    // effect keyed on anything looser than the path, this would yank focus off
+    // whatever control the reader had moved to since.
+    const projectsLink = screen.getByRole('link', { name: 'Projects' })
+    projectsLink.focus()
+    await user.click(projectsLink)
+
+    expect(document.activeElement).toBe(projectsLink)
+  })
+
+  it('keeps the landmark out of the tab order', async () => {
+    renderApp({ solo: true })
+    await screen.findByRole('link', { name: 'Today' })
+    // Programmatically focusable, never a tab stop.
+    expect(main().getAttribute('tabindex')).toBe('-1')
+  })
+})

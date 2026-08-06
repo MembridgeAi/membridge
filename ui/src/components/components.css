@@ -65,8 +65,23 @@
 @media (prefers-reduced-motion: no-preference) {
   .ruled-row { transition: background-color var(--dur-fast) var(--ease-out); }
 }
+/* The muted step-up, done by REDECLARING the token rather than by naming the
+ * children. .ruled-row is a generic flex row whose contents come from whichever
+ * feature calls it, so there is no list of descendants to enumerate the way
+ * .day-card can. Rebinding --text3 to --text2 for the subtree covers children
+ * this file has never heard of, which is the only version that stays correct
+ * as callers come and go.
+ *
+ * Without it the flip is a downgrade, not a fix: --text3 on --hover measures
+ * 2.50:1 in dark and 1.96:1 in light, so a bare fill swap would trade an
+ * invisible hover for an unreadable one.
+ *
+ * Custom properties are not interpolated, so muted text snaps to its new colour
+ * while the fill animates. Accepted deliberately; the alternative is
+ * transitioning every descendant of every caller. */
 .ruled-row:hover {
-  background: var(--panel2);
+  background: var(--hover);
+  --text3: var(--text2);
 }
 
 /* StateChip — soft tint, --r-sm radius (small control), glyph + words
@@ -104,8 +119,12 @@
   color: var(--text);
   border: 1px solid var(--line2);
 }
+/* No step-up needed: .btn-warn is var(--text), which is 15:1+ on --hover in
+ * both themes. This rule outranks base.css's global button:hover (0,2,0 beats
+ * 0,1,1), so leaving it on --panel2 would have quietly held this one button
+ * back at the invisible fill after the global default was fixed. */
 .btn-warn:hover {
-  background: var(--panel2);
+  background: var(--hover);
 }
 @media (prefers-reduced-motion: no-preference) {
   .btn-warn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
@@ -253,8 +272,11 @@
   background: transparent;
   color: var(--text2);
 }
+/* .dialog-btn is var(--text2), which clears AA on --hover in both themes only
+ * because --text2 was darkened for light mode alongside this. Same specificity
+ * story as .btn-warn: this rule outranks the global button:hover. */
 .dialog-btn:hover {
-  background: var(--panel2);
+  background: var(--hover);
 }
 @media (prefers-reduced-motion: no-preference) {
   .dialog-btn { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
@@ -334,8 +356,15 @@
   background: var(--panel2);
   box-shadow: inset 3px 0 0 var(--accent);
 }
+/* Same step-up as .ruled-row, and needed here for named reasons: .entry-row-tool,
+ * .entry-row-meta and .entry-row-outcome-empty are all --text3. The rebind
+ * catches those without this rule having to track them.
+ *
+ * .entry-row-targeted above keeps --panel2 on purpose. It is a resting selected
+ * state, not a hover, and its inset accent bar already does the visible work. */
 .entry-row:hover {
-  background: var(--panel2);
+  background: var(--hover);
+  --text3: var(--text2);
 }
 @media (prefers-reduced-motion: no-preference) {
   .entry-row {

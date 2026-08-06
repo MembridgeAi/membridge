@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react'
 import { Link, useLocation, useRoute } from 'wouter'
 import { MembridgeMark } from '../assets/MembridgeMark'
 import { useDataClient } from '../data/DataClientProvider'
@@ -102,7 +102,29 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   const settingsQuery = useSettings()
   const accountQuery = useTeamAccount()
   const client = useDataClient()
-  const [, navigate] = useLocation()
+  const [location, navigate] = useLocation()
+
+  // Focus follows the route. A client-side navigation swaps the document's
+  // contents without moving focus, so activating a day card, an entry row or a
+  // session row left a keyboard user on <body> at the destination -- no anchor,
+  // and a tab back through the whole rail to reach the page they just opened.
+  //
+  // Three things this deliberately does NOT do:
+  //  - Fire on first mount. On a cold load focus belongs where the browser put
+  //    it; moving it would skip the rail before the reader has seen it.
+  //  - Fire when the location object changes but the path does not. wouter
+  //    re-renders on search/hash updates too, and stealing focus mid-typing
+  //    from a filter that only rewrites the query string is worse than the bug.
+  //  - Focus a heading. <main> is a landmark, so a screen reader announces the
+  //    region rather than a fragment of copy, and it exists on every route --
+  //    a per-page heading ref would silently no-op on any page that forgot it.
+  const mainRef = useRef<HTMLElement>(null)
+  const lastPath = useRef(location)
+  useEffect(() => {
+    if (lastPath.current === location) return
+    lastPath.current = location
+    mainRef.current?.focus()
+  }, [location])
 
   const status = statusQuery.data
   const settings = settingsQuery.data
@@ -220,7 +242,10 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
         </div>
       </nav>
 
-      <main className="shell-main">
+      {/* tabIndex -1 makes <main> programmatically focusable without putting it
+          in the tab order: the route effect above can move focus here, but a
+          reader tabbing through the page never lands on the container itself. */}
+      <main className="shell-main" ref={mainRef} tabIndex={-1}>
         {hasError && (
           <p className="shell-error" role="alert">
             Couldn't load your account status. {errorMessage(statusQuery.error ?? settingsQuery.error)}

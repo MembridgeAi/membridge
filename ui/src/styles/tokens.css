@@ -76,7 +76,15 @@
 }
 :root[data-theme="light"] {
   --bg: #FAFAFA; --panel: #FFFFFF; --panel2: #F1F5F9;
-  --text: #0F172A; --text2: #64748B; --text3: #94A3B8;
+  /* --text2 is #55637A, not the slate-500 #64748B it started as, because it
+     has to clear AA on --hover as well as at rest. On --hover it measured
+     3.63:1 at the old value; it is 4.65:1 now. At rest on --panel it was
+     4.76:1 -- passing, but close enough to the 4.5:1 floor that any surface
+     added between it and white would have failed -- and is 6.08:1 now.
+     There is no way to fix this from the hover side: holding #64748B at
+     4.5:1 needs a fill of Y >= 0.943, i.e. #F9F9F9, which is no hover at
+     all. Dark mode already passes (5.28:1 on --hover) and is unchanged. */
+  --text: #0F172A; --text2: #55637A; --text3: #94A3B8;
   --line: #E2E8F0; --line2: #CBD5E1;
   --hover: #D9E2EC;
   --accent: #0052FF; --accent2: #4D7CFF; --accent-dim: rgba(0,82,255,.06);

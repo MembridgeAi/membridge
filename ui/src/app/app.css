@@ -176,6 +176,15 @@
   white-space: nowrap;
 }
 
+/* Shell.tsx moves focus here on every route change so a keyboard user lands on
+ * the new page instead of on <body>. No focus ring for it: this is a landmark
+ * the reader was moved to, not a control they targeted, and a box drawn around
+ * the entire page reads as a rendering fault. The move is still announced --
+ * it is a labelled landmark, which is the part that carries the information.
+ * Real controls inside keep their own :focus-visible rings untouched. */
+.shell-main:focus {
+  outline: none;
+}
 .shell-main {
   flex: 1;
   /* A flex item's default min-width is auto, i.e. "at least as wide as my

@@ -136,6 +136,36 @@ describe('groupByDay', () => {
     expect(groups[0].day).toBe(UNDATED_LABEL)
   })
 
+  // The case the test above CANNOT see: it puts the two undated rows next to
+  // each other, so they land in one run whether or not the grouping handles
+  // them deliberately. Real dates in between is what separates them.
+  it('keeps differently-malformed rows in ONE undated group even when real days sort between them', () => {
+    const groups = groupByDay([
+      // 'not a date' sorts above every ISO string ('n' > '2') and '' sorts
+      // below all of them, so a run-based grouping puts a real day between
+      // these two and mints the key 'undated' twice.
+      entry({ id: 'a', at: 'not a date' }),
+      entry({ id: 'b', at: '2026-07-29T20:00:00Z' }),
+      entry({ id: 'c', at: '' }),
+    ], new Date('2026-07-29T23:00:00Z'))
+
+    const undatedGroups = groups.filter(g => g.key === 'undated')
+    expect(undatedGroups).toHaveLength(1)
+    expect(undatedGroups[0].entries.map(e => e.id).sort()).toEqual(['a', 'c'])
+    expect(new Set(groups.map(g => g.key)).size).toBe(groups.length)
+  })
+
+  it('sorts the undated group to the bottom, never above today', () => {
+    const groups = groupByDay([
+      entry({ id: 'a', at: 'not a date' }),
+      entry({ id: 'b', at: '2026-07-29T20:00:00Z' }),
+    ], new Date('2026-07-29T23:00:00Z'))
+    // Raw string order would have put 'not a date' first, heading the feed
+    // with the rows whose timestamps are the least trustworthy.
+    expect(groups[groups.length - 1].key).toBe('undated')
+    expect(groups[0].key).not.toBe('undated')
+  })
+
   it('keeps one local day together even when the entries straddle UTC midnight', () => {
     // 16:00 and 19:00 on Jul 29 locally -- one afternoon, one group. Keyed
     // on UTC these split across two headings, "JUL 29" and "JUL 30".

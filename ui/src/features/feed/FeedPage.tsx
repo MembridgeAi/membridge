@@ -70,12 +70,29 @@ interface DayGroup<T> {
 export function groupByDay<T extends { at: string }>(items: T[], now: Date = new Date()): DayGroup<T>[] {
   const sorted = [...items].sort((a, b) => b.at.localeCompare(a.at))
   const groups: DayGroup<T>[] = []
+  const undated: T[] = []
   for (const item of sorted) {
     const ms = Date.parse(item.at)
-    const key = Number.isNaN(ms) ? UNDATED_DAY : localDayKey(new Date(ms))
+    // Undated rows are COLLECTED, not bucketed in place. The loop below builds
+    // groups from consecutive runs, which is only sound when a key's rows are
+    // guaranteed adjacent -- and undated rows are not. The sort is a string
+    // compare on the raw `at`, so a literal 'not a date' sorts ABOVE every real
+    // ISO timestamp ('n' > '2') while '' sorts below all of them: two
+    // differently-malformed rows land in two non-adjacent runs, both keyed
+    // UNDATED_DAY, which is the duplicate React key this grouping exists to
+    // prevent. One bucket appended once cannot collide with itself.
+    if (Number.isNaN(ms)) { undated.push(item); continue }
+    const key = localDayKey(new Date(ms))
     const current = groups[groups.length - 1]
     if (current && current.key === key) current.entries.push(item)
     else groups.push({ key, day: dayLabel(item.at, now), entries: [item] })
+  }
+  // Appended last rather than left wherever the sort dropped it. "Undated" is
+  // not a point on the timeline and has no business sorting into one -- and
+  // under the raw string compare a row reading 'not a date' surfaced ABOVE
+  // today, putting the least trustworthy rows in the most prominent position.
+  if (undated.length > 0) {
+    groups.push({ key: UNDATED_DAY, day: dayLabel(undated[0].at, now), entries: undated })
   }
   return groups
 }
