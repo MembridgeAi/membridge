@@ -7144,10 +7144,12 @@ async function main() {
     // Since REV-4 that takes BOTH halves of the evidence: the ledger proving
     // the read happened, and the hash this session recorded AT that read
     // (sessionState.reads). The store's contentHash proves a different
-    // interval and no longer stands in for either.
+    // interval and no longer stands in for either. REV-12 adds the third:
+    // WHICH LINES were delivered -- `ranges` -- because the ledger records
+    // that a session read a PATH and has never recorded a window.
     const tierA = recall.decide(base({
       limit: 100,
-      sessionState: { served: {}, reads: { 'src/file.js': 'HASH1' }, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7175,7 +7177,7 @@ async function main() {
     const rangedTierA = recall.decide(base({
       offset: 23510,
       limit: 42,
-      sessionState: { served: {}, reads: { 'src/file.js': 'HASH1' }, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7199,7 +7201,7 @@ async function main() {
     const offsetZeroStillServed = recall.decide(base({
       offset: 0,
       limit: 100,
-      sessionState: { served: {}, reads: { 'src/file.js': 'HASH1' }, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7213,7 +7215,7 @@ async function main() {
     // prove.
     const tierAMismatch = recall.decide(base({
       limit: 100,
-      sessionState: { served: {}, reads: { 'src/file.js': 'HASH-OLD' }, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH-OLD', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH-OLD', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH-NEW' },
@@ -7254,7 +7256,7 @@ async function main() {
     // first -- so this fixture carries the read-time hash Tier A needs.
     const underFloor = recall.decide(base({
       limit: 10, // 10 * 12 = 120 tokens
-      sessionState: { served: {}, reads: { 'src/file.js': 'HASH1' }, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7397,7 +7399,7 @@ async function main() {
     const wellFormed = {
       projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
       sessionId: 'session-x', toolName: 'Read', offset: null, limit: 100,
-      sessionState: { served: {}, reads: { 'src/file.js': 'HASH1' }, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7586,7 +7588,11 @@ async function main() {
       assert.strictEqual(outA2First.status, 0, outA2First.stderr);
       assert.strictEqual(outA2First.stdout, '', 'nothing may be served before there is evidence to serve it on');
       const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
-      assert.strictEqual(raw.reads[relA2], hashA2, 'the read-time hash was not recorded, so Tier A can never fire here');
+      // A read record is { hash, ranges } since REV-12 -- the content AND the
+      // window it was handed, because "you already read this" is a claim about
+      // both. A record with a hash and no window fails closed at serve time.
+      assert.strictEqual(raw.reads[relA2].hash, hashA2, 'the read-time hash was not recorded, so Tier A can never fire here');
+      assert.deepStrictEqual(raw.reads[relA2].ranges, [[1, 34]], 'the delivered window (limit 34) was not recorded');
       assert.strictEqual(raw.interceptions, 1, 'a bootstrap read must not burn an interception');
     });
     const outA2 = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 })); // 34*12 = 408 tokens, just clears the 400 floor
@@ -7673,7 +7679,7 @@ async function main() {
       const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessF), 'utf8'));
       assert.deepStrictEqual(raw.served, {}, 'a refused serve must never mark the path served');
       assert.strictEqual(raw.interceptions, 0, 'a refused serve must never burn an interception');
-      assert.strictEqual(raw.reads[relF], recallHash(fs.readFileSync(fileF, 'utf8')),
+      assert.strictEqual(raw.reads[relF].hash, recallHash(fs.readFileSync(fileF, 'utf8')),
         'the read-time hash of what is actually on disk was not recorded');
     });
 

@@ -38,6 +38,12 @@ const REL = 'lib/payroll.js';
 const H_OLD = 'aaaa1111';
 const H_NOW = 'bbbb2222';
 
+// One read record, as lib/hooks-recall.js writes it since REV-12: the content
+// hash AND the window of lines that read delivered. `read(h)` is the ordinary
+// case -- an unqualified Read, which Claude Code answers with the first
+// READ_TOOL_MAX_LINES lines, so the session was handed [1, 2000].
+const read = (hash, ranges = [[1, recall.READ_TOOL_MAX_LINES]]) => ({ hash, ranges });
+
 // `input` as lib/hooks-recall.js assembles it. Defaults describe the healthy
 // case; each check overrides only the field it is probing.
 function input(over = {}) {
@@ -47,7 +53,7 @@ function input(over = {}) {
     fileStat: { size: 9000, hash: H_NOW },
     storeEntry: { contentHash: H_NOW, skeleton: 'class Payroll { ... }' },
     ledger: { fileReaders: { [REL]: { sessions: [SESSION], reads: 2 } } },
-    sessionState: { served: {}, reads: { [REL]: H_NOW }, interceptions: 0 },
+    sessionState: { served: {}, reads: { [REL]: read(H_NOW) }, interceptions: 0 },
     config: {},
     ...over,
   };
@@ -58,7 +64,7 @@ function main() {
   check('edited since this session read it: Tier A must NOT fire', () => {
     const tier = recall.tierFor(input({
       // what the session actually saw at its read...
-      sessionState: { served: {}, reads: { [REL]: H_OLD }, interceptions: 0 },
+      sessionState: { served: {}, reads: { [REL]: read(H_OLD) }, interceptions: 0 },
       // ...and the store was warmed AFTER the edit, so `fresh` passes
       storeEntry: { contentHash: H_NOW, skeleton: 'class Payroll { ... }' },
       fileStat: { size: 9000, hash: H_NOW },
@@ -155,7 +161,7 @@ function main() {
   check('COUNTER: the same path, same content, is never served twice in a session', () => {
     const d = recall.decide(dInput({
       storeEntry: null,
-      sessionState: { served: { [REL]: H_NOW }, reads: { [REL]: H_NOW }, interceptions: 1 },
+      sessionState: { served: { [REL]: H_NOW }, reads: { [REL]: read(H_NOW) }, interceptions: 1 },
     }));
     assert.strictEqual(d.serve, false, 'a session was handed the same pointer for the same bytes twice');
     assert.strictEqual(d.reason, 'already-served');
@@ -167,7 +173,7 @@ function main() {
     // about H_NOW, and refusing on it is the same borrowed-fact bug as before.
     const d = recall.decide(dInput({
       storeEntry: null,
-      sessionState: { served: { [REL]: H_OLD }, reads: { [REL]: H_NOW }, interceptions: 1 },
+      sessionState: { served: { [REL]: H_OLD }, reads: { [REL]: read(H_NOW) }, interceptions: 1 },
     }));
     assert.strictEqual(d.serve, true,
       `refused with "${d.reason}" — the only serve this session got was about content that no longer exists on disk`);
@@ -190,6 +196,85 @@ function main() {
     }));
     assert.strictEqual(again.serve, false, 'a Tier B skeleton was served twice for the same content');
     assert.strictEqual(again.reason, 'already-served');
+  });
+
+  // ---- 9. Tier A must prove the session was handed THE LINES ASKED FOR ----
+  // (REV-12.) The hash proves what the file looked like; the ledger proves a
+  // read happened; NEITHER says which lines came back, because the ledger has
+  // never recorded a range. Both fixtures below are real cases lifted from this
+  // machine's transcripts by scripts/measure-ranged-repeats.js -- 2 of the 10
+  // servable Tier A candidates in that history, i.e. a 20% false-claim rate on
+  // the tier REV-8 had just made live.
+  check('CORPUS: handed lines 90-179, now asking for 1-90 — must NOT claim it already read it', () => {
+    const tier = recall.tierFor(input({
+      relPath: 'supabase/schema.sql',
+      limit: 90, // an unranged read of the first 90 lines -> window [1, 90]
+      ledger: { fileReaders: { 'supabase/schema.sql': { sessions: [SESSION], reads: 1 } } },
+      sessionState: { served: {}, reads: { 'supabase/schema.sql': read(H_NOW, [[90, 179]]) }, interceptions: 0 },
+    }));
+    assert.notStrictEqual(tier, 'A',
+      'Tier A told a session it had already read lines 1-90 of a file it was only ever handed lines 90-179 of. '
+      + 'The file really is unchanged and the read really did happen — and the agent still holds none of what it '
+      + 'is asking for, so it skips a read of 89 lines it has never seen.');
+  });
+
+  check('CORPUS: handed [1-45] and [4583-4590], now asking for the whole file — must NOT claim it', () => {
+    const tier = recall.tierFor(input({
+      relPath: 'lib/dashboard.js',
+      limit: null, // unqualified read -> window [1, 2000]
+      ledger: { fileReaders: { 'lib/dashboard.js': { sessions: [SESSION], reads: 2 } } },
+      sessionState: { served: {}, reads: { 'lib/dashboard.js': read(H_NOW, [[1, 45], [4583, 4590]]) }, interceptions: 0 },
+    }));
+    assert.notStrictEqual(tier, 'A', 'a patchwork of two small windows was treated as having delivered the file');
+  });
+
+  check('COUNTER: a genuinely covered repeat still serves — this is not fixable by going silent', () => {
+    assert.strictEqual(recall.tierFor(input({ limit: 500 })), 'A',
+      'the default fixture was handed [1, 2000] and is asking for [1, 500], which is inside it');
+    assert.strictEqual(recall.tierFor(input()), 'A', 'an unqualified re-read of an unqualified read must still serve');
+  });
+
+  check('coverage is the UNION of what the session was handed, not just the last read', () => {
+    // Two reads that between them cover [1, 2000]: adjacency counts, or a
+    // session that walked a file in two halves is refused a serve it earned.
+    assert.strictEqual(recall.tierFor(input({
+      sessionState: { served: {}, reads: { [REL]: read(H_NOW, [[1, 45], [46, 2000]]) }, interceptions: 0 },
+    })), 'A', 'two adjacent windows were not treated as the one span they are');
+    // ...and a hole in the middle is not coverage.
+    assert.notStrictEqual(recall.tierFor(input({
+      sessionState: { served: {}, reads: { [REL]: read(H_NOW, [[1, 45], [47, 2000]]) }, interceptions: 0 },
+    })), 'A', 'a one-line hole was served as though the whole span had been delivered');
+  });
+
+  check('a full-file read after a ranged one covers everything the tool returns', () => {
+    assert.strictEqual(recall.tierFor(input({
+      sessionState: { served: {}, reads: { [REL]: read(H_NOW, [[90, 179], [1, 2000]]) }, interceptions: 0 },
+    })), 'A', 'the later unqualified read delivered [1, 2000] and must cover an unqualified re-read');
+  });
+
+  check('a pre-REV-12 record (bare hash, no window) fails CLOSED', () => {
+    assert.notStrictEqual(recall.tierFor(input({
+      sessionState: { served: {}, reads: { [REL]: H_NOW }, interceptions: 0 }, // the old on-disk shape
+    })), 'A',
+      'a session recorded before windows existed served Tier A on absent window evidence — which reproduces the '
+      + 'bug for every install that upgrades, exactly as reading an absent hash as "unchanged" would have');
+  });
+
+  check('COUNTER: tiers B and C are untouched by the window rule', () => {
+    // B has no window evidence at all and never needs any: its claim is about
+    // the skeleton matching disk, not about what this session was handed.
+    assert.strictEqual(recall.tierFor(input({
+      sessionId: OTHER,
+      sessionState: { served: {}, reads: {}, interceptions: 0 },
+      ledger: { fileReaders: { [REL]: { sessions: [SESSION], reads: 2 } } },
+    })), 'B', 'Tier B was made to depend on window evidence it has no use for');
+    assert.strictEqual(recall.tierFor(input({
+      sessionId: OTHER,
+      offset: 0,
+      sessionState: { served: {}, reads: {}, interceptions: 0 },
+      ledger: { fileReaders: {} },
+      config: { recall: { tierC: true } },
+    })), 'C', 'Tier C was disturbed');
   });
 
   h.finish();

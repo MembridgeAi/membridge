@@ -74,7 +74,14 @@ const t = (name, cond, detail) => { results.push([name, !!cond, detail]); };
 const r1 = runHook(payload());
 const s1 = readSess();
 t('first read does not serve', !/MemBridge/.test(r1.out), r1.out.slice(0, 120));
-t('first read RECORDS the read-time hash', s1 && s1.reads && typeof s1.reads[REL] === 'string',
+// REV-12 widened the record from a bare hash string to { hash, ranges }: the
+// window matters as much as the content, because a session handed lines 90-179
+// has not been handed lines 1-89. Both halves are asserted -- a record carrying
+// a hash and no window fails closed at serve time, so "it recorded something"
+// is not the claim.
+t('first read RECORDS the read-time hash', s1 && s1.reads && s1.reads[REL]
+  && typeof s1.reads[REL].hash === 'string'
+  && Array.isArray(s1.reads[REL].ranges) && s1.reads[REL].ranges.length > 0,
   JSON.stringify(s1));
 
 // ---- 2. SECOND read, file untouched: must serve Tier A ----
@@ -86,7 +93,7 @@ fs.writeFileSync(ABS, `${body}\n// edited\n`);
 const r3 = runHook(payload());
 t('after an edit it does NOT claim unchanged', !/already read/.test(r3.out), r3.out.slice(0, 200));
 const s3 = readSess();
-t('the edit updates the recorded hash', s3 && s3.reads[REL] !== s1.reads[REL], '');
+t('the edit updates the recorded hash', s3 && s3.reads[REL].hash !== s1.reads[REL].hash, '');
 
 // ---- 4. and then serves again once the new content is the read one ----
 const r4 = runHook(payload());

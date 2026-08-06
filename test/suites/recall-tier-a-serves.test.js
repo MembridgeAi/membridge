@@ -74,8 +74,15 @@ function main() {
       assert.strictEqual(first.status, 0, first.stderr);
       assert.strictEqual(first.stdout, '', 'nothing may be served before there is any evidence to serve it on');
       const rec = sessionRecord(proj, SESSION);
-      assert.ok(rec && rec.reads && typeof rec.reads[REL] === 'string',
+      const entry = rec && rec.reads && rec.reads[REL];
+      // Both halves of the evidence, since REV-12: WHAT the file looked like
+      // and WHICH lines this session was handed. A record with a hash and no
+      // window fails closed at serve time, so asserting only the hash would
+      // pass on a record that can never serve.
+      assert.ok(entry && typeof entry.hash === 'string',
         `no read-time hash recorded, so no later read can ever serve Tier A: ${JSON.stringify(rec)}`);
+      assert.ok(entry && Array.isArray(entry.ranges) && entry.ranges.length,
+        `no delivered window recorded: ${JSON.stringify(rec)}`);
     });
 
     const second = readOf(proj, SESSION, REL);
@@ -85,7 +92,7 @@ function main() {
       const out = JSON.parse(second.stdout).hookSpecificOutput;
       assert.strictEqual(out.permissionDecision, 'deny');
       assert.ok(/already read/.test(out.permissionDecisionReason), out.permissionDecisionReason);
-      const hash = sessionRecord(proj, SESSION).reads[REL];
+      const { hash } = sessionRecord(proj, SESSION).reads[REL];
       assert.ok(out.permissionDecisionReason.includes(hash.slice(0, 8)),
         `Tier A must quote the hash it proved: ${out.permissionDecisionReason}`);
     });
@@ -97,13 +104,13 @@ function main() {
     const SESSION = 'bbbbbbbb-1111-2222-3333-444444444444';
     const proj = seed(REL, body('alpha'), SESSION);
     readOf(proj, SESSION, REL);
-    const before = sessionRecord(proj, SESSION).reads[REL];
+    const before = sessionRecord(proj, SESSION).reads[REL].hash;
     fs.writeFileSync(path.join(proj, REL), `${body('alpha')}\n// edited\n`);
     const after = readOf(proj, SESSION, REL);
     check('a file edited between the two reads is never called unchanged', () => {
       assert.strictEqual(after.stdout, '',
         `Tier A claimed "unchanged since" about a file that changed after the read: ${after.stdout}`);
-      assert.notStrictEqual(sessionRecord(proj, SESSION).reads[REL], before,
+      assert.notStrictEqual(sessionRecord(proj, SESSION).reads[REL].hash, before,
         'the recorded hash must follow the file, or the session is stuck proving something about old bytes');
     });
     const third = readOf(proj, SESSION, REL);
@@ -260,6 +267,45 @@ function main() {
         const reason = JSON.parse(out.stdout).hookSpecificOutput.permissionDecisionReason;
         assert.ok(!/\bsaved\b/.test(reason), `"saved" claims the bill fell, which avoidance cannot support: ${reason}`);
       }
+    });
+  }
+
+  // ---- 8. A window the session was never handed is never claimed (REV-12) ----
+  // The corpus case, driven through the real hook: a session reads lines
+  // 90-179, then issues an unranged read. The file is unchanged and the read
+  // really happened, so every check Tier A had before REV-12 passes — and the
+  // session still holds none of lines 1-89.
+  {
+    const REL = 'supabase/schema.sql';
+    const SESSION = '12121212-3434-5656-7878-909090909090';
+    const proj = seed(REL, body('row'), SESSION);
+    const ranged = payload => runHook(payload);
+    const abs = path.join(proj, REL);
+    const call = extra => ranged({
+      session_id: SESSION, cwd: proj, tool_name: 'Read',
+      tool_input: { file_path: abs, ...extra },
+    });
+
+    call({ offset: 90, limit: 90 });  // handed [90, 179]
+    const after = call({});           // now asks for the top of the file
+    check('CORPUS: a session handed lines 90-179 is not told it already read the file', () => {
+      assert.strictEqual(after.status, 0, after.stderr);
+      assert.strictEqual(after.stdout, '',
+        `told the agent it had already read a file it holds lines 90-179 of, so it skips lines 1-89 it has `
+        + `never seen: ${after.stdout}`);
+    });
+
+    check('...and the hook recorded the window, not just the hash', () => {
+      const rec = sessionRecord(proj, SESSION);
+      const entry = rec && rec.reads && rec.reads[REL];
+      assert.ok(entry && Array.isArray(entry.ranges) && entry.ranges.length,
+        `no delivered window recorded, so coverage can never be proved: ${JSON.stringify(rec)}`);
+    });
+
+    const third = call({});
+    check('COUNTER: once the unranged read HAS been delivered, the next one serves', () => {
+      assert.ok(/already read/.test(third.stdout || ''),
+        'the window rule silenced a repeat the session genuinely had — correctness by silence is not correctness');
     });
   }
 

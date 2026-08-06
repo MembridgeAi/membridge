@@ -641,3 +641,72 @@ larger one. Narrowing the gate does not get better elsewhere.
 volume to check any of it — the largest non-MemBridge project has 144 Read
 calls, and 97 of them target MemBridge files. The 3.2% ceiling, like everything
 else on this path, needs a normal install before it is a fact about the product.
+
+# REV-12: Tier A must prove it was handed the lines being asked for
+
+The bug REV-11 measured, fixed. `tierFor` had two conditions and needed three.
+
+| condition | proves | was it there? |
+|---|---|---|
+| recorded hash === current hash | WHAT the file looked like | yes (REV-4) |
+| ledger `fileReaders` names this session | that a read HAPPENED | yes |
+| **call's window ⊆ windows delivered** | **WHICH LINES came back** | **no** |
+
+The ledger has never recorded a range, so the first two can both hold while the
+session holds none of what it is asking for. Both fixtures in the new tests are
+real, from this machine's transcripts:
+
+```
+supabase/schema.sql   call wants [1-90],   session was handed [90-179]
+lib/dashboard.js      call wants [1-2000], session was handed [1-45] [4583-4590]
+```
+
+2 of 10 servable candidates — a **20% false-claim rate** on the tier REV-8 had
+just made live, against a recipient whose response to "you already have this" is
+to not look.
+
+## The shape of the fix
+
+`lib/hooks-recall.js` already writes `sessionState.reads` on every read and
+already sees `offset`/`limit`, so **the window costs no extra I/O** — the record
+widens from `"<hash>"` to `{ hash, ranges }`. Four rules, each of which was a
+way to get this wrong:
+
+- **A call's window is what the tool returns**, not the file: `[offset, offset+limit-1]`,
+  and `[1, 2000]` for an unqualified read. An unqualified read of a 24k-line
+  file delivers 2,000 lines, and treating it as "the file" is the same overclaim
+  in miniature.
+- **Coverage is over the UNION** of everything the session was handed, not the
+  last read — otherwise `[1-45]` + `[46-2000]` is refused a serve it earned.
+  Adjacent spans merge; a one-line hole is not coverage.
+- **A changed hash resets the union.** The recorded windows describe content
+  that no longer exists.
+- **Absent fails closed.** A pre-REV-12 record is a bare hash string with no
+  window; it normalises to an empty union and cannot serve until the session's
+  next read records one. Same rule REV-4 chose for the hash, for the same
+  reason: reading absence as agreement reproduces the bug on every install that
+  upgrades.
+
+The hook pre-filters on the same exported helpers before paying for a ledger
+parse — a strict subset of what `tierFor` requires, so it can only skip work on
+reads that could never have been served. `tierFor` stays the one place that
+decides.
+
+**Residual, stated rather than papered over:** the windows are the hook's own
+PreToolUse record, so a read it recorded and the user then denied still counts as
+delivered. The ledger's proof-of-read covers that only at path granularity. The
+claim narrows from "some read of this path happened" to "these lines were
+requested and a read happened" — not to certainty.
+
+## RED
+
+| revert | result |
+|---|---|
+| `tierFor`'s coverage requirement | **17/21** — both corpus fixtures serve `'A'`, the union and fail-closed checks fail; the "genuinely covered still serves" and "B/C untouched" **counters stay green** |
+| both that *and* the hook's pre-filter | the e2e corpus check fails through the real hook, printing the false claim verbatim: *"this session already read supabase/schema.sql (unchanged since; hash f9784f46)"* |
+| the hook's pre-filter alone | everything stays green — `tierFor` catches it. Defence in depth, and the reason the second row above needs both |
+
+That middle row is why the e2e check is not vacuous: with only the policy
+reverted the suite passed, because the pre-filter caught it. Worth stating,
+because a test that passes for a reason other than the one it names is how a
+suite stops meaning anything.

@@ -241,9 +241,13 @@ console.log(`  tokens across every in-project read measured here      ${allReadT
 console.log(`  avoidable TODAY (redundant, unchanged, not ranged)     ${alreadyServableTokens.toLocaleString()}   ${share(alreadyServableTokens, allReadTokens)}`);
 console.log(`  unlocked by narrowing the ranged gate                  ${unlockableTokens.toLocaleString()}   ${share(unlockableTokens, allReadTokens)}`);
 
-console.log('\nLIVE BUG — Tier A serves these TODAY on evidence that does not cover the call:');
+console.log('\nWINDOW COVERAGE — the pre-REV-12 rule served these on evidence that does not cover the call:');
 console.log(`  unranged repeats whose earlier reads were RANGED and do not cover them   ${falseTodayCount}`);
-console.log(`  tokens the agent is told to skip on that basis                           ${falseTodayTokens.toLocaleString()}`);
+console.log(`  tokens the agent WAS told to skip on that basis                          ${falseTodayTokens.toLocaleString()}`);
+console.log('  (REV-12 refuses these: tierFor now requires the call\'s window to be covered');
+console.log('   by the union of windows the session was actually handed. Left measured here');
+console.log('   because it is the regression test data -- both cases are fixtures in');
+console.log('   test/suites/recall-tier-a-interval.test.js.)');
 for (const ex of falseExamples) console.log(`    ${ex}`);
 
 console.log('\nif proof had to come from the session transcript (tail read), how far back is the earlier read?');
