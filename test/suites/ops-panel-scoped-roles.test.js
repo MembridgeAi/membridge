@@ -3,7 +3,7 @@
 //
 // WHY. cloudflare/ops-api is the sole holder of SUPABASE_SERVICE_KEY, and
 // service_role has rolbypassrls plus read+write on all fifteen public tables.
-// Every protection in this schema is downstream of it. Migration 044 creates
+// Every protection in this schema is downstream of it. Migration 047 creates
 // two roles — ops_panel_read and ops_panel_write — with EXECUTE on eight
 // ops_* RPCs between them, no rolbypassrls, and NO table privileges at all
 // (every ops_* function is SECURITY DEFINER, so the body runs as its owner and
@@ -17,7 +17,7 @@
 // WHAT IT CANNOT COVER. It runs the Worker in Node against a stubbed fetch. It
 // cannot verify the Postgres roles exist, that `authenticator` can assume them,
 // or that the JWTs are minted correctly — those need the live project and are
-// the verification queries at the foot of migration 044. What is checkable
+// the verification queries at the foot of migration 047. What is checkable
 // offline, and what actually decides whether the scoping does anything, is
 // WHICH credential each call site sends.
 //
@@ -177,7 +177,7 @@ async function main() {
       'nothing should have been sent to the database at all');
   });
 
-  // FAILURE MODE (b) from migration 044, and the one that would have made a
+  // FAILURE MODE (b) from migration 047, and the one that would have made a
   // botched rollout invisible: these two reads used to swallow any error as
   // `.catch(() => [])`, so a missing grant rendered an EMPTY LIST — identical
   // on screen to "nothing has happened recently".

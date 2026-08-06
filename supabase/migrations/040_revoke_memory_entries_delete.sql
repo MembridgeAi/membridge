@@ -1,0 +1,105 @@
+-- 040_revoke_memory_entries_delete.sql — take the DELETE privilege on
+-- public.memory_entries away from ordinary clients, so deleting shared memory
+-- has to go through the RPC that audits it.
+--
+-- THE GAP, found by the backend lane and handed over before it was ticketed.
+--
+-- `authenticated` holds DELETE on public.memory_entries by SUPABASE PLATFORM
+-- DEFAULT. Nothing in supabase/ grants it and nothing revokes it, so it does
+-- not appear anywhere in this repo — it is simply there, the same way the
+-- blanket table grants 043 removed were there. 035's policy
+-- `memory_entries_delete using (author_id = auth.uid())` is live. Grant plus
+-- policy is all a DELETE needs, so:
+--
+--   DELETE /rest/v1/memory_entries?author_id=eq.<self>
+--
+-- with an ordinary signed-in user's token removes that user's rows and writes
+-- NOTHING to team_audit. The supported path — the delete_my_entries RPC (035
+-- §3) — writes an audit row in the same transaction as the delete. This path
+-- skips it entirely, which means the audit trail cannot answer "who removed
+-- what" for anyone who used the REST surface directly rather than the app.
+--
+-- ---------------------------------------------------------------------------
+-- WHY A REVOKE AND NOT A TRIGGER. The obvious alternative — a BEFORE DELETE
+-- trigger on memory_entries that writes the audit row itself — is worse, and
+-- specifically it BREAKS TEAM DELETION.
+--
+-- memory_entries.project_id references projects(id) on delete cascade, and
+-- projects.team_id references teams(id) on delete cascade. So deleting a team
+-- cascades into memory_entries. A trigger firing on each cascaded row would
+-- insert into team_audit, whose team_id references teams(id) — the row being
+-- deleted. The insert fails its foreign key and aborts the whole cascade, so
+-- deleting a team stops working, with an error pointing at the audit table
+-- rather than at the trigger. Diagnosed by the backend lane before writing
+-- anything; recorded here so nobody re-derives it by shipping the trigger.
+--
+-- A revoke has none of that: it changes who may issue the statement, not what
+-- happens when one runs, so cascades are untouched.
+--
+-- ---------------------------------------------------------------------------
+-- WHY THIS DOES NOT BREAK SELF-SERVE DELETION. delete_my_entries is
+-- `security definer` (035:191-195), so its body executes as the function's
+-- owner — the table owner, whom neither this revoke nor RLS binds. The feature
+-- keeps working; only the unaudited direct path closes. That is the whole
+-- point: the same capability, reachable only where it leaves a record.
+--
+-- Verified before writing: nothing in lib/ or bin/ issues an HTTP DELETE
+-- against /rest/v1/ at all, and nothing in lib/ references
+-- /rest/v1/memory_entries. The daemon has never used this privilege.
+--
+-- ---------------------------------------------------------------------------
+-- WHAT HAPPENS TO 035'S DELETE POLICY — MY CALL, AND THE REASONING IS NOT THE
+-- ONE THE PHRASE "DEFENCE IN DEPTH" SUGGESTS.
+--
+-- After this revoke, `memory_entries_delete` has no caller: no ordinary role
+-- holds the DELETE privilege, and the definer RPC bypasses RLS anyway. It is
+-- vestigial. The two options are to keep it or drop it, and the intuitive
+-- reading of which is safer is BACKWARDS:
+--
+--   A DELETE needs BOTH a table grant AND a permissive RLS policy. RLS on
+--   memory_entries is enabled (schema.sql:94), and under RLS a table with NO
+--   policy for a command DENIES that command outright. So:
+--
+--     keep the policy + grant re-applied later  ->  deletes work again
+--     drop the policy + grant re-applied later  ->  RLS still denies
+--
+--   Dropping it is therefore the STRICTLY SAFER option against the one
+--   realistic regression: someone running `grant all on all tables in schema
+--   public to authenticated`, which is precisely how the privilege this file
+--   removes came to exist. Keeping the policy is not a second layer; it is the
+--   thing that would let a restored grant through.
+--
+-- I AM KEEPING IT ANYWAY, and the reason is ownership rather than security.
+-- 035_delete_own_entries.sql lives on branch agent-backend2 and has not merged.
+-- Dropping a policy defined in another lane's unmerged file would mean this
+-- migration and that one disagree about whether the policy exists, and whoever
+-- applies 035 afterwards silently recreates it while 040 does not re-fire. Its
+-- §1 also argues at length that the policy is deliberate. Reversing another
+-- lane's documented decision from outside it is the thing I declined to do in
+-- SEC-2 for the same reason.
+--
+-- SO: FLAGGED, NOT DECIDED. Dropping `memory_entries_delete` is a real
+-- improvement and belongs to whoever owns 035 — as a one-line addition to that
+-- file, where it cannot disagree with itself. If that is wanted, the statement
+-- is `drop policy if exists memory_entries_delete on public.memory_entries;`
+-- and it must land in 035, not here.
+--
+-- ---------------------------------------------------------------------------
+-- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` in this project, for
+-- the reason 031, 032 and 033 all give. `revoke` is idempotent.
+--
+-- UNAPPLIED AS OF 2026-08-05. Nothing here has been run against any database.
+-- State is recorded in supabase/MIGRATION-STATE.md; settle it with:
+--   select grantee, privilege_type from information_schema.role_table_grants
+--    where table_schema = 'public' and table_name = 'memory_entries'
+--      and privilege_type = 'DELETE';
+--   -- applied when neither `anon` nor `authenticated` appears
+-- ---------------------------------------------------------------------------
+
+-- `public` is included for the same reason 010:153 included it: the platform
+-- default is granted to anon and authenticated, but a privilege held by PUBLIC
+-- would be inherited by every role including these two, so revoking only the
+-- named pair can leave the capability in place through the back door.
+-- service_role is deliberately NOT named — it bypasses RLS regardless, and the
+-- ops path depends on it.
+revoke delete on table public.memory_entries from public, anon, authenticated;

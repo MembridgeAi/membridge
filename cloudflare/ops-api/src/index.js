@@ -145,7 +145,7 @@ async function authenticate(request, env) {
 
 // --- Supabase --------------------------------------------------------------
 // SEC-11. Reads and writes hold DIFFERENT database credentials, each scoped to
-// its own Postgres role (migration 044). Neither has rolbypassrls and neither
+// its own Postgres role (migration 047). Neither has rolbypassrls and neither
 // has any table privilege at all — every ops_* RPC is SECURITY DEFINER, so the
 // function body runs as its owner and the caller supplies only the right to
 // call. A leaked read credential pointed at /rest/v1/teams gets a permission
@@ -165,7 +165,7 @@ function dbKey(env, mode) {
   const key = env[name];
   if (!key) {
     throw new Error(`${name} is not set on this Worker. The ops panel authenticates with `
-      + 'two scoped database roles (migration 044); set both secrets with `wrangler secret put` '
+      + 'two scoped database roles (migration 047); set both secrets with `wrangler secret put` '
       + 'or roll back to the previous deployment, which uses SUPABASE_SERVICE_KEY.');
   }
   return key;

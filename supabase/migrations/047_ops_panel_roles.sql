@@ -1,4 +1,4 @@
--- 044_ops_panel_roles.sql — two scoped Postgres roles for the ops panel, so it
+-- 047_ops_panel_roles.sql — two scoped Postgres roles for the ops panel, so it
 -- stops authenticating as `service_role`.
 --
 -- THE PROBLEM. cloudflare/ops-api holds SUPABASE_SERVICE_KEY. `service_role`

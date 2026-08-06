@@ -36,6 +36,30 @@ const path = require('path');
 const SUPABASE = path.join(__dirname, '..', '..', 'supabase');
 const MIGRATIONS = path.join(SUPABASE, 'migrations');
 const LEDGER = path.join(SUPABASE, 'MIGRATION-STATE.md');
+const RUNBOOK = path.join(SUPABASE, 'APPLY-RUNBOOK.md');
+
+// The number registry in APPLY-RUNBOOK.md — which migration numbers are
+// CLAIMED, including by branches this checkout cannot see. Distinct from the
+// ledger above, which records what is DEPLOYED. A number can be claimed and
+// unwritten (allocated to a lane that has not committed yet), and a file can
+// exist without being registered, which is the collision this catches.
+//
+// Rows look like: `| 041 | project_stats carries archived_at | agent-backend2 | no |`
+// Returns number -> array of rows, so a number claimed TWICE is visible rather
+// than silently overwritten — a map keyed by number would hide the exact defect
+// this table exists to prevent.
+function registryClaims() {
+  const src = fs.readFileSync(RUNBOOK, 'utf8');
+  const claims = new Map();
+  for (const line of src.split('\n')) {
+    const m = line.match(/^\|\s*(\d{3})\s*\|([^|]*)\|([^|]*)\|/);
+    if (!m) continue;
+    const [, num, what, branch] = m;
+    if (!claims.has(num)) claims.set(num, []);
+    claims.get(num).push({ what: what.trim(), branch: branch.trim() });
+  }
+  return claims;
+}
 
 const migrationFiles = () => fs.readdirSync(MIGRATIONS)
   .filter(f => /^\d+_.*\.sql$/.test(f))
@@ -232,6 +256,48 @@ async function main() {
       + 'Carry BOTH the query that reads the live object AND the dated result of running it. '
       + '031 is why: it had the query from day one and still shipped a filter that differed '
       + 'from live, because the query had never been run and answered in the file.');
+  });
+
+  // --- the number registry (SEC-12) ----------------------------------------
+  //
+  // Three migration-number collisions happened in one day. Every one had the
+  // same cause: numbers allocated by hand, in conversation, across parallel
+  // branches that cannot see each other's files. `ls supabase/migrations` on
+  // one branch is not evidence a number is free, and it was trusted as evidence
+  // three times.
+  //
+  // The registry in APPLY-RUNBOOK.md is the allocation record. These two checks
+  // are what stop it becoming the hand-maintained list that already failed —
+  // a registry nobody is forced to update is worth less than no registry,
+  // because it looks authoritative while being stale.
+  const claims = registryClaims();
+
+  await check('every migration number is claimed exactly once in the registry', () => {
+    const doubled = [...claims.entries()]
+      .filter(([, rows]) => rows.length > 1)
+      .map(([num, rows]) => `  ${num}: claimed ${rows.length}x — `
+        + rows.map(r => `${r.branch || '(no branch)'} "${r.what}"`).join(' AND '));
+    assert.deepStrictEqual(doubled, [],
+      'these migration numbers are claimed more than once in the APPLY-RUNBOOK registry, '
+      + 'which is the collision the registry exists to prevent:\n' + doubled.join('\n'));
+  });
+
+  await check('every migration file at or above the registry floor is registered', () => {
+    // The floor is the lowest number the registry tracks, read from the table
+    // rather than hardcoded: everything below it predates concurrent allocation
+    // and is settled history covered by the ledger alone. Deriving it means the
+    // check follows the registry if its range ever changes.
+    const numbers = [...claims.keys()].map(Number);
+    assert.ok(numbers.length, 'the APPLY-RUNBOOK registry table could not be parsed at all');
+    const floor = Math.min(...numbers);
+    const unregistered = files
+      .map(f => f.match(/^(\d{3})/)[1])
+      .filter(num => Number(num) >= floor && !claims.has(num));
+    assert.deepStrictEqual(unregistered, [],
+      `these migrations exist on disk but claim no number in the registry: ${unregistered.join(', ')}. `
+      + 'Add a row to the table in supabase/APPLY-RUNBOOK.md — number, what it does, which branch '
+      + 'holds it, whether it is applied — in the SAME commit as the migration. A number is not '
+      + 'free because this branch cannot see a file using it.');
   });
 
   h.finish();

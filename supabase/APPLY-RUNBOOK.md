@@ -6,6 +6,34 @@ Status of every migration lives in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md).
 
 ---
 
+## Migration number registry — claim a number here BEFORE writing the file
+
+**This table is the single source for which migration numbers are taken.** Three collisions happened in one day because numbers were allocated by hand, in conversation, across parallel branches that could not see each other's files. A number is not free because `ls supabase/migrations` does not show it — it is free because it is not in this table.
+
+`test/suites/migration-state.test.js` enforces this: a migration file whose number has no row here fails the gate, and a number claimed twice fails it too.
+
+It starts at **037**, the point from which parallel lanes began allocating concurrently. Everything below that is settled history and is tracked in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md) alone.
+
+| Number | What it does | Branch that holds it | Applied |
+|--------|--------------|----------------------|---------|
+| 037 | `project_access` writes scoped to the project's own team | `agent-sec` | no |
+| 038 | Invite redemption claims a use atomically | `agent-sec` | no |
+| 039 | `team_audit.created_at` stamped by the database | `agent-sec` | no |
+| 040 | DELETE on `memory_entries` revoked from ordinary clients | `agent-sec` | no |
+| 041 | `project_stats` carries `archived_at` | `agent-backend2` | no |
+| 042 | Definer-function grants + `is_team_member_uid` caller check | `agent-sec` | no |
+| 043 | Blanket table grants revoked on three internal tables | `agent-sec` | no |
+| 044 | Removal rotates the standing invite code | `agent-removal` | no |
+| 045 | Leaving a team rotates the standing invite code | `agent-removal` | no |
+| 046 | Joining a team writes an audit row | `agent-removal` | no |
+| 047 | Two scoped Postgres roles for the ops panel | `agent-sec` | no |
+
+**Next free number: 048.**
+
+To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
+
+---
+
 ## Before you start
 
 - **Paste into the Supabase SQL editor. Never `supabase db push` in this project.** `supabase_migrations.schema_migrations` holds only two rows, so a push would try to re-run thirty-plus files against a database that already has most of their effects.
@@ -17,16 +45,17 @@ Status of every migration lives in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md).
 
 ## The order
 
-Apply in this order. It is numeric order with **one deliberate exception: `031` goes last.** `044` is a seventh item that should be done separately — see its own section at the end.
+Apply in this order. It is numeric order with **one deliberate exception: `031` goes last.** `047` is a seventh item that should be done separately — see its own section at the end.
 
 | # | File | What it does, in one sentence |
 |---|------|-------------------------------|
 | 1 | `037_project_access_team_scope.sql` | Stops someone using their own team to grant or revoke access to **another** team's project. |
 | 2 | `038_invite_redeem_atomic.sql` | Makes an invite's "max uses" limit actually hold when two people redeem at the same moment. |
 | 3 | `039_team_audit_created_at.sql` | Stops an admin from writing audit-log entries with a false timestamp. |
-| 4 | `042_definer_function_hardening.sql` | Takes three database functions off the public key, and stops one of them answering questions about teams you are not in. |
-| 5 | `043_revoke_blanket_table_grants.sql` | Removes a leftover blanket permission on three internal tables, including the one holding unredeemed invite tokens. |
-| 6 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
+| 4 | `040_revoke_memory_entries_delete.sql` | Stops a signed-in user deleting their own shared memory straight through the API without it being recorded. |
+| 5 | `042_definer_function_hardening.sql` | Takes three database functions off the public key, and stops one of them answering questions about teams you are not in. |
+| 6 | `043_revoke_blanket_table_grants.sql` | Removes a leftover blanket permission on three internal tables, including the one holding unredeemed invite tokens. |
+| 7 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
 
 **Why `031` is last.** It is the only one that changes how the database behaves for *future* work rather than fixing something specific, and it is the only one reconstructed from a live object rather than written from scratch. Do it when the other five are known good, so that if anything odd happens afterwards you know which change to look at.
 
@@ -43,9 +72,9 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 >
 > If you are applying these and the release has not gone out yet, you are fine — just do `038` now.
 
-There are no other ordering constraints between these six. Each one touches a different thing, and none of them depends on another having run first.
+There are no other ordering constraints between these seven. Each one touches a different thing, and none of them depends on another having run first.
 
-`044` is the exception to that and is not in the table above: it changes the credential the ops panel logs in with, so it is a database step **and** a Worker deploy. It has its own section, its own order, and its own rollback.
+`047` is the exception to that and is not in the table above: it changes the credential the ops panel logs in with, so it is a database step **and** a Worker deploy. It has its own section, its own order, and its own rollback.
 
 ---
 
@@ -95,7 +124,17 @@ Most likely it returns nothing. If it returns rows, **read them before deleting 
 
 ---
 
-### 4. `042_definer_function_hardening.sql`
+### 4. `040_revoke_memory_entries_delete.sql`
+
+**Does:** the app offers people a way to delete their own synced memory, and that path records what was deleted. It was also possible to do the same thing by calling the database API directly, which deleted the rows and recorded nothing. This removes that second path.
+
+**After applying, check:** the self-serve deletion in the app still works — delete your own entries for one project and confirm they go, and that the action shows up in the audit trail. The supported path runs with elevated rights and is unaffected by this change; only the direct one closes.
+
+**If deletion stops working entirely,** that is the signal that the app's delete is not going through the intended function. Report it rather than re-granting the permission — re-granting restores the unrecorded path too.
+
+---
+
+### 5. `042_definer_function_hardening.sql`
 
 **Does:** three database functions were callable by anyone holding the public key; they now are not. Separately, a function that answered *"is person X on team Y?"* now refuses unless you are on team Y yourself.
 
@@ -111,7 +150,7 @@ Most likely it returns nothing. If it returns rows, **read them before deleting 
 
 ---
 
-### 5. `043_revoke_blanket_table_grants.sql`
+### 6. `043_revoke_blanket_table_grants.sql`
 
 **Does:** removes a default permission that was never used but was sitting on three internal tables — including the one holding unredeemed invite tokens.
 
@@ -123,7 +162,7 @@ Most likely it returns nothing. If it returns rows, **read them before deleting 
 
 ---
 
-### 6. `031_ensure_rls_event_trigger.sql`
+### 7. `031_ensure_rls_event_trigger.sql`
 
 **Does:** there is a safety net that switches on row-level security whenever a table is created. Today, if it fails, it writes a line to a log nobody reads and lets the table be created anyway. After this, it refuses the creation.
 
@@ -143,7 +182,7 @@ drop table public.rls_smoke_test;
 
 ---
 
-## 7. `044_ops_panel_roles.sql` — do this one separately
+## 8. `047_ops_panel_roles.sql` — do this one separately
 
 **This one is different from the six above and should not be done in the same sitting.** The others fix something and are finished when the SQL is applied. This one changes *which credential the ops panel logs in with*, so it is a database step **and** a Worker deploy, and the two have to happen in the right order.
 
@@ -151,7 +190,7 @@ drop table public.rls_smoke_test;
 
 ### The safe part, which you can do any time
 
-**Applying `044` on its own changes nothing.** It only creates the two new logins; it does not remove the old one, and nothing uses the new ones until the Worker is redeployed. If you apply it and stop there, the panel carries on exactly as before. That is deliberate.
+**Applying `047` on its own changes nothing.** It only creates the two new logins; it does not remove the old one, and nothing uses the new ones until the Worker is redeployed. If you apply it and stop there, the panel carries on exactly as before. That is deliberate.
 
 After applying, check both logins exist and neither can bypass the security rules:
 
@@ -171,7 +210,7 @@ select has_table_privilege('ops_panel_read', 'public.teams', 'SELECT') as should
 
 **Order matters. Do not deploy the Worker first.**
 
-1. Apply `044` (above).
+1. Apply `047` (above).
 2. Mint two access tokens, one per role. They are signed with the project's JWT secret (Supabase dashboard → Project Settings → API). Each is an ordinary Supabase JWT whose `role` claim is `ops_panel_read` or `ops_panel_write` instead of `service_role`.
    > **Check this first:** newer Supabase projects have moved to a different key system. If your project shows "JWT Signing Keys" rather than a single "JWT Secret", the minting step is different and it is worth confirming the approach before going further, rather than discovering it half way.
 3. Set both as Worker secrets — this prompts, so the values never reach your shell history:
@@ -201,7 +240,7 @@ wrangler rollback
 
 The previous version uses the original `SUPABASE_SERVICE_KEY`, which this change **does not touch or remove**. It keeps working the entire time. There is no window where the panel has no valid credential unless you delete that secret — so don't, not until this has been running happily for a while.
 
-You do not need to undo anything in the database to recover. The two new logins sitting unused are harmless. If you want them gone anyway, the exact statements are at the bottom of `044`, commented out — but do the Worker rollback first, or you will pull the credential out from under a running panel.
+You do not need to undo anything in the database to recover. The two new logins sitting unused are harmless. If you want them gone anyway, the exact statements are at the bottom of `047`, commented out — but do the Worker rollback first, or you will pull the credential out from under a running panel.
 
 ### What is deliberately still outstanding
 

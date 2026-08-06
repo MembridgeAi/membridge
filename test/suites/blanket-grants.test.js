@@ -104,6 +104,36 @@ function main() {
       + 'dashboard legitimately reaches these.');
   });
 
+  // ---- the same platform default, on a table that DOES have policies -----
+  //
+  // SEC-12. The checks above are about tables whose only protection is
+  // "RLS on, zero policies". public.memory_entries is not one of those — it has
+  // policies, and they are the design. But it carries the same Supabase
+  // PLATFORM DEFAULT grant, and for DELETE specifically that grant plus 035's
+  // `memory_entries_delete using (author_id = auth.uid())` is everything a
+  // DELETE needs. So
+  //
+  //     DELETE /rest/v1/memory_entries?author_id=eq.<self>
+  //
+  // with an ordinary user's token removes rows and writes NOTHING to
+  // team_audit, bypassing the delete_my_entries RPC that exists to record it.
+  //
+  // Neither of those two facts is visible in this repo on its own: the grant is
+  // a platform default that appears in no file, and 035 lives on another
+  // branch. What CAN be asserted here is the fix — that supabase/ explicitly
+  // revokes the privilege rather than leaving it to the platform.
+  check('DELETE on memory_entries is revoked from ordinary clients', () => {
+    assert.ok(isRevoked('memory_entries'),
+      'public.memory_entries carries Supabase\'s default DELETE grant for anon and '
+      + 'authenticated, and nothing in supabase/ revokes it. Combined with 035\'s delete '
+      + 'policy, a signed-in user can DELETE their own rows straight through PostgREST and '
+      + 'leave no team_audit row — the supported path (delete_my_entries) writes one in the '
+      + 'same transaction. Fix with `revoke delete on table public.memory_entries from '
+      + 'public, anon, authenticated;`. NOT with a trigger: memory_entries cascades from '
+      + 'projects from teams, so a trigger inserting into team_audit during a team deletion '
+      + 'would fail its FK against the team being deleted and abort the cascade.');
+  });
+
   // ---- counter-check (green today, must KEEP passing) -------------------
   // The precedent this whole ticket is built on. If this ever goes red, the
   // pattern above has been undone at its source and the class check is
