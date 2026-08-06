@@ -682,9 +682,13 @@ export interface DeliveryChannel {
 // 'current' -- the registered hook is stamped with today's build.
 // 'outdated' -- registered, but stamped with an older build (or never
 //   stamped at all, i.e. it predates this feature) -- an update is real.
+// 'newer' -- registered by a NEWER build than the daemon answering this
+//   request (a dev checkout next to an installed app, most often). The right
+//   action is to do nothing: "update" here would be a downgrade, which is
+//   exactly what this state was previously mislabelled 'outdated' to invite.
 // 'unknown' -- nothing owned is registered to compare, or settings.json
 //   could not be read. Never guessed as either of the other two.
-export type HookVintage = 'current' | 'outdated' | 'unknown'
+export type HookVintage = 'current' | 'outdated' | 'newer' | 'unknown'
 export interface HooksVersionStatus {
   stop: HookVintage
   recall: HookVintage
