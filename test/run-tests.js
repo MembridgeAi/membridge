@@ -796,6 +796,14 @@ async function main() {
         'app/vendor/grammars missing — the packaged app cannot load any tree-sitter grammar');
       const vendoredWasm = fs.readdirSync(path.join(appRoot, 'app', 'vendor', 'grammars')).filter(f => f.endsWith('.wasm'));
       assert.ok(vendoredWasm.length >= 4, `expected at least 4 vendored grammar wasm files, found ${vendoredWasm.length}`);
+      // The BPE vocabulary is the same class of asset as the grammars -- not
+      // an npm dependency, resolved relative to lib/ at runtime, so
+      // prepare-app.js has to copy it explicitly. Its absence is quieter than
+      // a missing grammar and therefore worse: lib/bpe.js falls back to
+      // chars/4 without throwing, so the packaged app would report the old
+      // estimator's numbers with nothing anywhere saying so.
+      assert.ok(fs.existsSync(path.join(appRoot, 'app', 'vendor', 'tokenizer', 'claude-v1.json')),
+        'app/vendor/tokenizer/claude-v1.json missing — the packaged app would silently fall back to chars/4');
     });
   }
 
@@ -1007,6 +1015,15 @@ async function main() {
     const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
     assert.ok(vendoredWasm.length >= 4,
       `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
+    // The same class of omission, for the BPE vocabulary (measured-savings
+    // spec, Tier 2). It is MORE dangerous than the grammars case, not less:
+    // lib/bpe.js's missing-vocabulary path is a deliberate, silent fallback to
+    // chars/4 that never throws, so an npm install without the vocabulary
+    // would keep working perfectly while every token figure it reported was
+    // the estimator this release exists to replace.
+    const vendoredVocab = files.filter(f => /^vendor\/tokenizer\/.*\.json$/.test(f.path));
+    assert.ok(vendoredVocab.length >= 1,
+      `expected the BPE vocabulary in the npm tarball, found none: ${JSON.stringify(files.map(f => f.path))}`);
   });
   check('F1: the npm tarball ships ui/dist, so an npm-only install has a dashboard', () => {
     // CRITICAL (alpha readiness, F1): package.json's "files" whitelist omitted
