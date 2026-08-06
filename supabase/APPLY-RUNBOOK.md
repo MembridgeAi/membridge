@@ -33,6 +33,7 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 051 | Drops the now-vestigial `memory_entries_delete` policy | `agent-sec` | no |
 | 052 | Account-deletion FK actions on five uncontested constraints — PARKED, see `docs/ACCOUNT-DELETION.md` §6 | `agent-deletion` | no |
 | 053 | `team_members_list` carries `deleted_at`, so soft-deleted accounts stop receiving team keys | `agent-deletion` | no |
+| 054 | Three definer-surface findings from the jamal audit: `peek_invite` name leak on revoked/expired/exhausted tokens, `can_see_project` latent terminal-`true`, and `projects_materialize_access` PUBLIC grant | `agent-sec-jamal-01` | no |
 
 **Next free number: 054.**
 
@@ -71,6 +72,7 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 13 | `051_drop_memory_entries_delete_policy.sql` | Removes a database rule that no longer does anything, and would quietly start doing something again if a permission were ever restored. |
 | 14 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
 | 15 | `053_team_members_list_deleted_at.sql` | Lets a client tell a soft-deleted account from a live one, so a departed member stops receiving team encryption keys. Independent of everything above — any order, on its own. *(deletion lane)* |
+| 16 | `054_sec_jamal_01.sql` | Closes three definer-surface findings from the jamal audit: `peek_invite` stops returning a team name for revoked/expired/exhausted invites, `can_see_project`'s latent terminal-`true` becomes `false`, and `projects_materialize_access` is revoked from PUBLIC/anon/authenticated. Independent of everything above — any order, on its own. *(sec lane)* |
 
 **`052_account_deletion_fk_actions.sql` is deliberately NOT in this table.** It
 is parked pending a product decision — see `docs/ACCOUNT-DELETION.md` section 6

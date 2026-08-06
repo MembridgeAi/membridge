@@ -183,6 +183,51 @@ function main() {
       + 'cannot break it — it is redundant there and load-bearing for a direct call.');
   });
 
+  // ---- D. projects_materialize_access is not anon-callable --------------
+  //
+  // SEC-jamal-01 finding 3. This function is a TRIGGER function and is
+  // therefore exempt from check B via SYSTEM_INVOKED — a direct call raises
+  // "trigger functions can only be called as triggers" before any body
+  // statement runs, so the default PUBLIC grant confers nothing on a caller
+  // for data-safety purposes. That exemption stays, because unpacking it
+  // would force every trigger function through the check-B revoke plumbing
+  // and that has its own risks (042's header explains).
+  //
+  // But leaving the default PUBLIC grant intact still leaves an anon-callable
+  // definer FINGERPRINT: a probe against the anon key gets a response from
+  // this function, which is exactly the two-layer-defence-reduced-to-one
+  // reduction check B exists to prevent. Closing the fingerprint requires a
+  // revoke — no grant follows, because the trigger executor does not consult
+  // a caller ACL.
+  //
+  // Structural check, like the rest of this suite. Newest revoke wins over
+  // an older grant, and 054_sec_jamal_01.sql is that newest revoke — RED
+  // before 054 lands as a file, GREEN after. This suite cannot verify what
+  // is actually LIVE (that is SEC-2's finding) — only that the repo now
+  // declares the closure.
+  check('projects_materialize_access is revoked from public, anon and authenticated', () => {
+    const grants = executeGrants().filter(g => g.fn === 'projects_materialize_access');
+    // Walk in applied order; last statement per principal wins.
+    const state = { public: null, anon: null, authenticated: null };
+    for (const g of grants) {
+      for (const p of Object.keys(state)) {
+        if (new RegExp(`\\b${p}\\b`, 'i').test(g.roles)) state[p] = g.kind;
+      }
+    }
+    const missing = Object.entries(state)
+      .filter(([, kind]) => kind !== 'revoke')
+      .map(([p, kind]) => `  ${p}: ${kind || 'no revoke or grant ever written'}`);
+    assert.deepStrictEqual(missing, [],
+      'projects_materialize_access is a trigger function, so a direct call cannot cross '
+      + 'into its body — but the default PUBLIC grant still lets an anon probe RECEIVE '
+      + 'a response, which is a fingerprint the audit named as a finding. Newest revoke '
+      + 'over the following principals must be REVOKE, not GRANT (or absent):\n'
+      + missing.join('\n')
+      + '\n\nFix: `revoke execute on function public.projects_materialize_access() '
+      + 'from public, anon, authenticated;` — no grant follows, the trigger executor '
+      + 'does not consult a caller ACL. Reference: SEC-jamal-01, finding 3.');
+  });
+
   // ---- counter-check (green today, must KEEP passing) -------------------
   // Hardening the grants must not revoke a function the product actually calls.
   // These four are reached by the daemon as an ordinary authenticated user, and
