@@ -164,7 +164,11 @@
 --    entry remains undeletable. That is deliberate — see above.
 --
 -- 2. THE LAST OWNER IS UNGUARDED, and this file makes that live rather than
---    theoretical. team_members.user_id is `on delete cascade`, so deleting an
+--    theoretical. THIS IS NOT A FOLLOW-UP: the guard ships with 052 or 052
+--    does not ship, because 052 is the thing that removes the block currently
+--    masking it. Applying this file as a standalone tidy-up is the one way to
+--    turn a latent hazard into a reachable one.
+--    team_members.user_id is `on delete cascade`, so deleting an
 --    owner's account removes their membership row — which is precisely what
 --    leave_team refuses to do:
 --
@@ -208,6 +212,12 @@
 -- hits). The person stays a visible teammate, keeps their name on every entry,
 -- and merely loses the ability to sign in. It is a suspension presented as a
 -- deletion, and it is the one button here that produces a wrong state today.
+-- Worse than cosmetic: the re-seal loop in lib/teamsync.js derives recipients
+-- from team_members_list, whose row survives a soft delete, so EVERY NEW TEAM
+-- KEY EPOCH KEEPS BEING SEALED TO THE DELETED ACCOUNT'S PUBLIC KEY. Use
+-- remove_member ("Remove from team") instead — it is the operation that
+-- actually does the offboarding. Full write-up and the backend fix:
+-- docs/ACCOUNT-DELETION.md §8.
 --
 -- Re-runnable. Drop-then-add is the only way to change a foreign key's
 -- referential action — Postgres has no `alter constraint ... on delete` — and

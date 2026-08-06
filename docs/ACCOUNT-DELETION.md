@@ -6,6 +6,10 @@ proposes (`supabase/migrations/052_account_deletion_fk_actions.sql`) is written
 and committed, and is explicitly *not* applied and *not* cleared to be applied.
 It waits on a decision that belongs to the product owner, laid out in §6.
 
+**§8 is a second investigation, also build-free**: the soft-delete blind spot,
+its surface inventory, the backend change that would close it, and the
+operational guidance that costs nothing and should not wait for any of it.
+
 Every constraint fact below was read from the **live catalog**, read-only, on
 2026-08-05 — not from `supabase/schema.sql`, which describes intent rather than
 production. Where a claim could not be established without writing to the live
@@ -13,10 +17,37 @@ database, it is marked as such and the safe way to settle it is named.
 
 ---
 
+> ## ⚠ Read this first: do not soft-delete a user
+>
+> The blocked-constraint story below is the *safe* half of this investigation.
+> The unsafe half is that the Supabase dashboard offers a **soft delete** beside
+> the delete that correctly refuses — and soft delete **always succeeds**,
+> because it leaves the account row in place and so touches none of the seven
+> constraints.
+>
+> **Nothing in `supabase/`, `lib/` or `ui/src/` reads `auth.users.deleted_at`.
+> Zero hits.** Not one function, policy, view or client. So the account is
+> deleted in the auth system and fully present in the product: still on the
+> roster, still named on every entry, still counted as a contributor, still
+> nagged about in Insights — and, worst, **still receiving a sealed copy of
+> every new team encryption key**.
+>
+> Someone doing the responsible thing — a departing employee, a person
+> exercising a deletion request — gets an operator UI that says *done* and a
+> product in which nothing happened. Nothing in our code will ever go red,
+> because our code is not the thing making the claim.
+>
+> **Full specification: §8.** **Operational answer today: use "Remove from
+> team" (`remove_member`), never soft delete.** §8.6 explains why the operation
+> we already have does what soft delete only appears to do.
+
+---
+
 ## For the product owner, in plain language
 
 **Nobody can delete a MemBridge account today, and nobody has ever been able
-to.** Three separate things are true and they matter in different ways:
+to.** Four things are true and they matter in very different ways. The third is
+the one to act on.
 
 1. **There is no delete-my-account button.** Not in the app, not in the CLI, not
    in the API the app talks to. Deleting an account is something only someone
@@ -33,27 +64,36 @@ to.** Three separate things are true and they matter in different ways:
    rather than a "we have corrupted data" problem. Of our five accounts, three
    are blocked and two (which have never done anything) would delete fine.
 
-3. **There is one way to make a real mess, and it is the button the dashboard
-   offers next to the other one.** Supabase can "soft delete" an account
-   instead. That succeeds — it dodges all seven blocks by leaving the account
-   row in place. But nothing in MemBridge looks at the flag it sets, so the
-   person still appears as a live teammate, their name still sits on every entry
-   they shared, and they simply can no longer sign in. It looks like deletion
-   and it is not. **This is the one thing to tell whoever has dashboard access
-   not to click.**
+3. **The button next to it succeeds, and produces a lie.** Supabase can "soft
+   delete" an account instead. That works every time — it sidesteps all seven
+   blocks by keeping the account row. But **nothing in MemBridge looks at the
+   flag it sets**, so the person stays a visible teammate, their name stays on
+   every entry, Insights keeps telling their manager that nothing has arrived
+   from them, and the team keeps encrypting every new key to them. The only
+   real change is that they can no longer sign in. That is a suspension
+   presented as a deletion, and no test or alert anywhere will ever catch it,
+   because the false claim is made by Supabase's UI and not by our code.
+   **Tell whoever holds the dashboard: never use soft delete — use "Remove from
+   team", which actually does the offboarding.** §8 is the full write-up.
 
-There is also a fourth thing, which is the part that no database change can fix
-and which the decision in §6 has to account for: **MemBridge copies shared
-memory onto every teammate's laptop.** Deleting something from the server does
-not reach those copies, and there is no mechanism today that would. So "we
-deleted your account" can never honestly mean "your work is gone from your
-colleagues' machines" without building something that does not exist yet.
+4. **No server-side change reaches your colleagues' laptops.** MemBridge copies
+   shared memory onto every teammate's machine, and deleting from the server
+   does not reach those copies — there is no mechanism today that would. So "we
+   deleted your account" can never honestly mean "your work is gone from your
+   colleagues' machines" without building something that does not exist yet.
 
-The decision this spec needs from you is in §6. It is a genuine conflict already
+The decision this spec needs from you is in §6, and §8.4 needs that same
+decision applied to a second set of screens. It is a genuine conflict already
 present in the codebase — two migrations say a departed member's contributions
 are never deleted, a third deliberately lets a member delete their own — and
 account deletion sits on top of it. I have laid out what each answer costs. I
 have not picked one.
+
+**One engineering prerequisite that is not a decision and must not be scheduled
+separately: §4.1, the last-owner check.** Deleting an owner's account silently
+does the thing the product explicitly forbids everywhere else, and leaves a team
+that nobody can administer, permanently. It is masked today and stops being
+masked the moment `052` is applied. It ships with `052`, or `052` does not ship.
 
 ---
 
@@ -173,7 +213,8 @@ not a deletion, presented as a deletion.
 
 **This is the highest-value single finding in this investigation**, because it
 is reachable today, it succeeds today, and it is one click away from the
-operation that correctly refuses.
+operation that correctly refuses. It is specified in full in **§8**, which is
+the next ticket; this section states only that it exists.
 
 ### 2.3 The cascade on `team_members` walks around a guard the schema states out loud
 
@@ -259,6 +300,14 @@ This is directly load-bearing for §6: **the "you can already delete your own
 entries" answer is true at the API layer and false at the product layer.** If
 the decision leans on it, that UI has to be built.
 
+> **Routed to the UI lane.** Building the surface is theirs, not this lane's.
+> What they need from here: the endpoint is `POST /api/team/delete-my-data`,
+> it requires `confirm: "DELETE"` verbatim (400 otherwise), the preview to show
+> first is `GET /api/team/my-entry-counts`, and both RPCs behind them are
+> already live in production. `035`'s header specifies the confirmation
+> semantics, including why the preview must count archived projects — a preview
+> that under-reports the blast radius is worse than no preview.
+
 ---
 
 ## 4. Recommended action per constraint
@@ -284,6 +333,10 @@ Two rules run through all of these, and they are the same rule `050` states for
 | 7 | `team_audit.actor_id` | **SET NULL — already specified as `050`, prerequisite, not duplicated here** | `050` argues this correctly and at length. `052` does not restate it; see §7. |
 
 ### 4.1 The prerequisite that is not a constraint: the last owner
+
+> **This is not a follow-up. It ships with `052` or `052` does not ship.**
+> `052` removes the constraint that is currently masking it, so applying `052`
+> without this check is what converts a latent hazard into a live one.
 
 Per §2.3, before *any* of this makes deletion possible, the deletion path needs a
 guard that `leave_team` already has:
@@ -497,3 +550,210 @@ not a bug in this file.
 If both are applied, `050` before `052` is tidier but not required — they touch
 different constraints and neither depends on the other. `052` is re-runnable, per
 the convention every migration in this tree follows.
+
+---
+
+## 8. The soft-delete blind spot — specification
+
+**Investigation and specification only. Nothing was built.** This is the ticket
+§2.2 opened. It is separable from the constraint work: none of it depends on
+`052`, and `052` does not depend on any of it.
+
+### 8.1 Why soft delete always succeeds
+
+Supabase exposes two deletions. The hard one removes the `auth.users` row and
+runs into all seven constraints in §1. The soft one sets
+`auth.users.deleted_at` and **leaves the row**, so no foreign key is ever
+evaluated. There is nothing for it to fail on. It succeeds for every account in
+every state, including the three in §1 that hard delete correctly refuses.
+
+`auth.users.deleted_at` exists on this instance and is currently null for all
+five accounts, so **no account has been soft-deleted yet**. This is a hazard to
+close, not damage to repair.
+
+### 8.2 Can the backend even tell us? No — and the reason is structural
+
+> **`deleted_at` is unreachable from the app today. Surfacing it requires a
+> backend change. There is no client-side fix.**
+
+Three independent confirmations, all from the live catalog:
+
+1. **No role holds any privilege on `auth.users`.** `information_schema.role_table_grants`
+   for `auth.users` returns **zero rows** — not `anon`, not `authenticated`, not
+   `service_role` by table grant. The table belongs to `supabase_auth_admin`.
+2. **PostgREST does not expose the `auth` schema.** Only `public` is exposed, so
+   there is no REST path to the column even with a privilege.
+3. **Not one function or view in `public` reads `auth.users`.** Every identity
+   function was dumped and read: `team_members_list`, `team_role`,
+   `is_team_member`, `is_team_member_uid`, `team_feed`, `create_team`,
+   `redeem_invite`, `remove_member`, `leave_team`, `my_entry_counts`,
+   `delete_my_entries`. All of them read `public.team_members` or
+   `public.memory_entries`. `public` has exactly one view (`project_stats`) and
+   it does not touch `auth` either.
+
+**Identity in this product is fully denormalised into `public`.** `auth.users`
+is referenced by seven foreign keys and read by nothing. That is why the flag
+cannot leak through by accident — and equally why it can never arrive without
+someone deliberately plumbing it.
+
+### 8.3 Surface inventory — what renders identity, and what a soft-deleted account does at each
+
+| Surface | Where identity comes from | What a soft-deleted account does today |
+|---|---|---|
+| Team roster (Settings → Team) | `team_members_list` → `public.team_members` | listed as a current member, with role |
+| Access matrix | `lib/api-access.js:150` `display_name` | still a grantable/revocable row |
+| Insights, silent-teammate cards | `lib/api-insights.js:247` | **"Nothing has arrived from *X*"** — nags a manager about a person who does not exist, and inflates `otherCount`, skewing every other card's severity |
+| E2E key sealing | `lib/teamsync.js:720` `fetchMemberPubkeys` → `team_members_list` + `member_pubkeys` | **every new key epoch is sealed to their public key** |
+| Key trust pins | `lib/teampins.js:63` | pin retained; no alert, no change |
+| Feed / activity cards | `memory_entries.author_name` via `team_feed`, `lib/feed.js:153` | their name on every entry |
+| MCP `search_memory`, `get_recent_activity` | `lib/mcp.js:131` `author` | attributed to them |
+| MCP `why` / provenance | `lib/provenance.js:110,116` `who` | attributed to them |
+| Day digest | `lib/digest.js:664,903,1152` | grouped under their name and id |
+| Teammate-notes injection | `lib/teammate-notes.js:69` `author_name` | their decisions injected into every agent session, indefinitely |
+| Ops panel | `ops_snapshot` `count(distinct author_id)` | counted as a contributor |
+
+**The inventory splits cleanly in two, and the split is the whole design.**
+
+- **Rows 1–5 are present-tense claims** — "this person is on your team", "this
+  person owes you activity", "encrypt the next key to this person". Every one of
+  them is *wrong* about a deleted account, and no reasonable reading makes them
+  right. **All five derive from `team_members_list`.**
+- **Rows 6–11 are historical attribution** — "this person did this work". None
+  of them is factually wrong. Whether they *should* change is the §6 question.
+
+### 8.4 What "honouring `deleted_at`" should mean, per surface
+
+**Not one rule. Two, and the boundary between them is the point.**
+
+#### The present-tense set — unambiguous, and one of them is urgent
+
+| Surface | Should be | Why |
+|---|---|---|
+| **E2E key sealing** | **exclude — urgent** | Not a display question. The re-seal loop iterates `allowed`, derived from `team_members_list`, and seals the team key to every member's pubkey. A soft-deleted account keeps receiving a sealed copy of **every future epoch**. Offboarding someone this way keeps handing them the keys. |
+| Team roster | hide | A deleted account is not a teammate. Nothing else is defensible. |
+| Access matrix | hide the row | It is a control surface. Granting project access to a deleted account is meaningless, and the row invites an admin to try. |
+| Insights silent-teammate | exclude from the population | Today it generates a problem card naming a nonexistent person, with an action of `null` because nothing can fix it. It also counts toward `otherCount`, so it distorts the severity of every other card. |
+| Key trust pins | drop the pin, stop alerting | The pin exists to detect key *changes* for a live member. |
+
+The key sealing row is the reason this ticket is worth doing ahead of the rest
+of account deletion: it is the one place where the blind spot has a **security**
+consequence rather than a cosmetic one.
+
+#### The attribution set — the same decision as §6, and it must be answered once
+
+Rows 6–11 attribute work. Erasing a name from work someone did is **not
+obviously better** than leaving it: an entry that suddenly has no author is a
+different kind of wrong, and the team loses the ability to ask who to talk to.
+This collides head-on with the conflict in §6 — `029`/`033` say a departed
+member's contributions are never deleted; `035` says the person may erase their
+own.
+
+The options are the same three, and **they should be resolved once for §6 and
+§8.4 together, not separately**, or the product will say two different things
+about the same person:
+
+- **Leave attribution intact.** Consistent with `029`/`033`. Weakest erasure.
+- **Replace the name with a neutral label** (e.g. "a former teammate"). Requires
+  an `UPDATE` to `memory_entries.author_name` — no foreign key reaches a text
+  column — on tables `024`/`025` designed to be append-only.
+- **Remove the rows.** Strongest erasure, destroys team knowledge, and per §5
+  writes no audit record of the loss.
+
+**Not resolved here.** Deliberately.
+
+#### One that is neither
+
+**Ops-panel contributor counts** are historical aggregates describing a window
+when the person *was* active. Recomputing them to exclude a since-deleted
+account would retroactively falsify a past period. Recommend leaving them, and
+flagging it rather than deciding it silently.
+
+### 8.5 What surfacing it would require — the backend spec
+
+**The leverage is that all five present-tense surfaces go through one
+function.** Roster, access matrix, Insights, key sealing and trust pins every
+one of them calls `team_members_list`. Teaching that single RPC about deleted
+accounts reaches all five.
+
+```
+-- SHAPE ONLY. Not written as a migration, because the number should be
+-- claimed when the work is scheduled, not now.
+create or replace function public.team_members_list(p_team uuid)
+returns table (user_id uuid, display_name text, role text,
+               joined_at timestamptz, account_deleted boolean)
+...
+  select m.user_id, m.display_name, m.role, m.joined_at,
+         (u.deleted_at is not null) as account_deleted
+    from public.team_members m
+    left join auth.users u on u.id = m.user_id
+   where m.team_id = p_team and public.is_team_member(p_team)
+```
+
+Four constraints on that change, each of which is a way to get it wrong:
+
+1. **It must be `security definer`.** It already is. That is what lets the body
+   read `auth.users` when the caller has no privilege on it (§8.2). The existing
+   `is_team_member(p_team)` predicate in the body must stay — definer means RLS
+   does not apply automatically, which is the trap `035` §2 documents.
+2. **Return a boolean, not the timestamp.** `account_deleted` answers the only
+   question any caller asks. `deleted_at` additionally discloses *when*, to
+   every member of the team, for no gain.
+3. **`left join`, not `join`.** An inner join would silently drop any member
+   whose `auth.users` row is genuinely gone once `052` and a real deletion path
+   exist — turning a display bug into a member vanishing from the roster.
+4. **Adding a column to a function's return type requires `drop function`
+   first**, and every client reading the old shape keeps working (extra columns
+   are ignored), so the migration is safe to apply before the client ships —
+   the opposite of the `038`/`044`/`045`/`046` ordering gate.
+
+The attribution surfaces (rows 6–11) are **not** reachable this way: they read
+`author_name` off `memory_entries`, which never joins `auth.users`. They need
+whatever §8.4 decides, applied to the data rather than to a lookup.
+
+### 8.6 Should soft delete be used at all? No — and there is a better button
+
+> **Recommendation, plainly: do not soft-delete any account, for any reason,
+> until §8.4 and §8.5 are closed. There is no case today where it is the right
+> action.**
+
+The argument is short. Hard delete refuses — loudly, safely, recoverably. Soft
+delete succeeds and leaves the product asserting five things that are false,
+with no error, no log line and no test anywhere that could catch it. Choosing
+the one that silently produces a wrong state over the one that safely produces
+no state is never the better trade.
+
+**And the operation people actually want already exists.** If someone must be
+offboarded now, the supported path is **remove them from the team** —
+`remove_member`, exposed in the app — which does what soft delete only appears
+to do:
+
+| | Soft delete | `remove_member` |
+|---|---|---|
+| Roster | still listed | **gone** |
+| Access matrix | still a row | **gone** (`project_access` cascades from `team_members`) |
+| Insights nags their manager | **yes** | no |
+| Receives future team keys | **yes** | **no** — the re-seal loop reads `team_members_list` |
+| Invite code rotated behind them | no | yes, once `044` is applied |
+| Can sign in | no | yes, to their own account |
+
+The only thing soft delete adds is blocking sign-in, and it buys that by making
+five other things wrong. If blocking sign-in is genuinely required as well, do
+**both** — remove from the team first, then soft delete — so the product state
+is correct regardless of what the auth flag does.
+
+Two caveats on `remove_member`, both pre-existing and neither introduced here:
+
+- **It refuses to remove an owner** (`'the team owner cannot be removed'`).
+  Same shape as §4.1, and the same answer: transfer ownership first.
+- **It does not delete their `team_keys` rows**, so they retain the ability to
+  open *past* epochs they were already sealed into. That is expected and is why
+  `044`/`045` rotate the invite code and why `membridge team rekey` exists. The
+  property that matters is the forward one: they receive no new epoch.
+
+### 8.7 What this does not fix
+
+Nothing in §8 reaches teammates' local caches — see §2.4. A soft-deleted or
+removed member's already-pulled entries stay in every teammate's `state.json`
+and `teammate-notes.json`, and keep being injected and searched with no network
+call. §8 makes the *backend's* answer honest. The local caches are a separate
+and larger piece of work.
