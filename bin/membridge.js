@@ -947,18 +947,31 @@ async function cmdTeam() {
     return;
   }
 
-  // Privacy gate: verbatim prompts upload with team sync only when this is on
-  // (summaries and file lists always sync). Local config only, so it works
-  // before login and on unconfigured builds.
+  // Privacy gate. Three modes plus two legacy aliases (`on` → verbatim, `off`
+  // → off) so a script or muscle memory keeps working. Local config only, so
+  // it works before login and on unconfigured builds.
+  //   off        summaries and file lists only, no ask, no goal
+  //   distilled  agent-written goal ships; raw ask does not (fresh-install default)
+  //   verbatim   full ask + goal upload, redacted through the standard pipeline
   if (sub === 'share-prompts') {
-    const v = args[2];
-    if (!['on', 'off'].includes(v)) die('Usage: membridge team share-prompts <on|off>');
+    const rawArg = args[2];
+    // Aliases: keep the historical on/off working, translate to modes.
+    const alias = rawArg === 'on' ? 'verbatim' : rawArg;
+    if (!['off', 'distilled', 'verbatim'].includes(alias)) {
+      die('Usage: membridge team share-prompts <off|distilled|verbatim>\n' +
+          '  off        summaries and file lists only\n' +
+          '  distilled  also share the agent-written goal (default for new installs)\n' +
+          '  verbatim   also share your raw prompts (redacted through the same pipeline)');
+    }
     const raw = util.loadUserConfig();
-    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: v === 'on' };
+    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: alias };
     util.saveUserConfig(raw);
-    console.log(v === 'on'
-      ? 'Prompt sharing ON: future pushes include your (redacted) asks.'
-      : 'Prompt sharing OFF: future pushes upload summaries and file lists only.');
+    const msg = alias === 'off'
+      ? 'Prompt sharing OFF: future pushes upload summaries and file lists only.'
+      : alias === 'distilled'
+      ? 'Prompt sharing DISTILLED: future pushes upload the agent-written goal (no raw prompts).'
+      : 'Prompt sharing VERBATIM: future pushes include your (redacted) raw prompts.';
+    console.log(msg);
     return;
   }
 
@@ -1352,7 +1365,11 @@ Team sync (share project memory with your team, see README):
                            Opt-in and one-shot; safe to interrupt and re-run. If you do
                            interrupt it, a running daemon keeps walking the rest one page
                            per tick.
-  team share-prompts <on|off>  also upload your (redacted) prompts; off = summaries/files only
+  team share-prompts <off|distilled|verbatim>
+                            off        summaries and file lists only
+                            distilled  also share the agent-written goal (default for new installs)
+                            verbatim   also share your raw prompts (redacted through the same pipeline)
+                            legacy: "on" is an alias for verbatim
   team setup ...           advanced: point at your own self-hosted backend
 
 Config: ${util.configPath()}
