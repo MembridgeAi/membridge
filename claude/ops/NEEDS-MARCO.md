@@ -211,9 +211,15 @@ change either way.
 
 The database's access rules were audited end to end today and **no table is
 missing row-level security**. The daemon's local web surface was audited and **no
-vulnerability was found** — it is the best-defended part of the product. Both
-results are recorded as passing tests so they stay true. Neither needs anything
-from you.
+vulnerability was found** — it is the best-defended part of the product. The
+desktop app was audited last and is also **clean**: the window cannot reach Node,
+it can only ever load the local dashboard, every outside link goes to the system
+browser, and the bridge between the page and the machine is a single native
+file-picker that returns paths the user chose and never file contents. Sign-in
+renders at GitHub in your real browser, not inside the app.
+
+All three results are recorded as passing tests that fail if the property is
+removed, so they stay true. None of them needs anything from you.
 
 ---
 
