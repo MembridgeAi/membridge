@@ -4,7 +4,7 @@
 // team -- the app never said "you are signed out", and Settings' only team
 // control was "Leave team", so anyone wanting to start a team dead-ended.
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { screen, cleanup, waitFor } from '@testing-library/react'
+import { screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
@@ -223,14 +223,16 @@ describe('TeamPage, signed in on a team', () => {
 // nothing supported, and the same shape as the keyAlert chip that could never
 // fire.
 describe('TeamPage sign-out reports whether the session was really ended', () => {
-  const signOutReturning = (revoked: boolean, revokeError: string | null) => {
-    const client = new FakeDataClient()
-    vi.spyOn(client, 'signOut').mockResolvedValue({ revoked, revokeError })
-    return client
-  }
+  // Drives the FIXTURE's own signOut rather than stubbing the method. A
+  // vi.spyOn(...).mockResolvedValue here replaces the implementation, so the
+  // fixture never records that the machine signed out and the signed-out view
+  // never renders -- which is precisely the hole this ticket closed. Going
+  // through the real method is what makes the transition observable.
+  const signOutReturning = (revokeError: string | null) =>
+    new FakeDataClient(revokeError ? { signOutRevokeError: revokeError } : {})
 
   it('says the session may still be usable, and names the certain remedy, when revocation failed', async () => {
-    renderWith(signOutReturning(false, 'network unreachable'), <TeamPage />)
+    renderWith(signOutReturning('network unreachable'), <TeamPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
 
     const notice = await screen.findByTestId('signout-not-revoked')
@@ -250,7 +252,7 @@ describe('TeamPage sign-out reports whether the session was really ended', () =>
   // from this machine, so there is nothing left to revoke WITH. "Try again"
   // would be a remedy that cannot work.
   it('never offers a retry, which could not revoke anything', async () => {
-    renderWith(signOutReturning(false, 'network unreachable'), <TeamPage />)
+    renderWith(signOutReturning('network unreachable'), <TeamPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
     const notice = await screen.findByTestId('signout-not-revoked')
     expect(notice.textContent).not.toMatch(/try again|retry|later/i)
@@ -259,18 +261,31 @@ describe('TeamPage sign-out reports whether the session was really ended', () =>
 
   // THE COUNTER-CHECK. A confirmed revocation must stay quiet -- warning on
   // every sign-out would be the same false alarm in the other direction.
-  it('says nothing extra when the backend confirmed the revocation', async () => {
-    const client = signOutReturning(true, null)
-    const spy = vi.spyOn(client, 'signOut')
-    renderWith(client, <TeamPage />)
+  // THE COUNTER-CHECK, now asserting what it should have all along. It used to
+  // wait on the signOut mutation resolving, because FakeDataClient reported
+  // `authenticated: true` forever and the signed-out view could not be reached
+  // from a test at all. The fixture models the transition now, so this asserts
+  // the thing that actually matters: the user lands on the signed-out screen
+  // and it says nothing alarming.
+  it('lands on the signed-out view with nothing extra when the revocation was confirmed', async () => {
+    renderWith(signOutReturning(null), <TeamPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
-    // Anchored on the call having RESOLVED, not on the page flipping to the
-    // sign-in card: FakeDataClient.getTeamAccount keeps reporting
-    // `authenticated: true`, so the signed-out view never renders here and
-    // waiting for it would time out on a build that is behaving correctly.
-    await waitFor(() => expect(spy).toHaveBeenCalled())
+
+    // The state the user is actually in afterwards.
+    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument()
     expect(screen.queryByTestId('signout-not-revoked')).toBeNull()
     expect(screen.queryByText(/until it expires/i)).toBeNull()
+  })
+
+  // The warning has to survive the transition, not just render before it. This
+  // is the pairing that was untestable: a failed revocation AND the signed-out
+  // view on screen at the same time.
+  it('keeps the warning on screen after the view flips to signed-out', async () => {
+    renderWith(signOutReturning('network unreachable'), <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^sign out$/i }))
+
+    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument()
+    expect(screen.getByTestId('signout-not-revoked')).toHaveTextContent(/until it expires/i)
   })
 })
 

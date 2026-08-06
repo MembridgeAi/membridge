@@ -255,7 +255,27 @@ const SESSION_FIXTURES: Record<string, RawSessionPayload> = {
 
 export class FakeDataClient implements DataClient {
   readonly capabilities: Capabilities
+  /**
+   * Whether this machine is currently signed in. MUTABLE, and seeded from
+   * `opts.authenticated` rather than read from it on every call.
+   *
+   * It used to be read straight off `opts`, which made signing out
+   * unrepresentable: signOut() resolved, the app re-rendered, and
+   * getTeamAccount() still said `authenticated: true`, so the SIGNED-OUT VIEW
+   * never appeared in any test. A whole application state the fixtures could
+   * not express is a hole the same shape as a mapper they route around -- and
+   * this is the state a user is in at the moment they are trying to establish
+   * whether their session is over, which is now also the screen carrying the
+   * revocation warning.
+   *
+   * The real client is stateful here too (the daemon deletes credentials.json),
+   * so modelling it as state rather than as a constructor constant is the
+   * faithful shape, not a convenience.
+   */
+  private signedIn: boolean
+
   constructor(private opts: FakeOptions = {}) {
+    this.signedIn = opts.authenticated ?? true
     // Transport support only — the viewer's role decides authorization.
     this.capabilities = {
       daemonControl: true,
@@ -476,14 +496,25 @@ export class FakeDataClient implements DataClient {
     // normalization reaches every test that opens a session page.
     return this.guard<Session | null>(raw ? mapSession(raw) : null)
   }
-  getProjectStream() {
+  /**
+   * Honours BOTH the project asked for and `empty`. It used to ignore its
+   * argument and return the same row for every project, which meant
+   * `{ empty: true }` produced a combination the daemon cannot: no projects at
+   * all, yet a populated project stream. Reaching the no-sessions state
+   * required stubbing the method per test, so the state existed only where
+   * someone had already thought to fake it.
+   */
+  getProjectStream(projectPath: string) {
+    if (this.opts.empty) return this.guard<StreamEntry[]>([])
     const rows: RawEntrySpec[] = [
       { session: 's-e1', ts: '2026-07-29T19:00:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
         headline: 'Hook ownership now decided by durability, not who ran last.',
         goal: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'],
         project: 'membridge', projectPath: '/Users/x/membridge' },
     ]
-    return this.guard<StreamEntry[]>(rows.map(e => mapStreamEntry(rawFeedEntry(e))))
+    return this.guard<StreamEntry[]>(
+      rows.filter(e => !projectPath || e.projectPath === projectPath).map(e => mapStreamEntry(rawFeedEntry(e))),
+    )
   }
   // Feed fixture: 5 entries across 2 projects, 2 named authors + "you", 2
   // tools, spanning 2 UTC calendar days -- enough to exercise day-grouping,
@@ -608,7 +639,7 @@ export class FakeDataClient implements DataClient {
   // disagree about whether this machine is on a team; `authenticated` is the
   // one fact only this payload carries.
   getTeamAccount() {
-    const authenticated = this.opts.authenticated ?? true
+    const authenticated = this.signedIn
     const onTeam = authenticated && !this.opts.solo
     return this.guard<TeamAccount>({
       configured: true,
@@ -626,6 +657,9 @@ export class FakeDataClient implements DataClient {
   // given -- the fixture models the real contract, where the password exists
   // only for the duration of the request.
   signIn(credentials: { email: string; password: string }) {
+    // Round-trips: a fixture that can only go one way cannot cover sign-in
+    // FROM the signed-out view, which is the other half of this screen.
+    this.signedIn = true
     return this.guard<{ email: string; displayName: string | null }>({ email: credentials.email, displayName: 'Andrew' })
   }
   // needsConfirmation: true is the DEFAULT fixture answer on purpose -- it is
@@ -640,6 +674,12 @@ export class FakeDataClient implements DataClient {
   // unrelated sign-out test render the warning.
   signOut() {
     const err = this.opts.signOutRevokeError ?? null
+    // The local credential delete is UNCONDITIONAL in the daemon -- a user
+    // offline must still be able to sign out of their own laptop -- so this
+    // flips regardless of whether the backend revocation succeeded. That is
+    // exactly why a failed revocation still lands the user on the signed-out
+    // view, and why that view has to carry the warning.
+    this.signedIn = false
     return this.guard<SignOutResult>({ revoked: !err, revokeError: err })
   }
   createTeam(name: string) {
@@ -670,7 +710,7 @@ export class FakeDataClient implements DataClient {
     return teams.find(t => t.id === this.teamId) ?? teams[0]
   }
   private teamFixtures(): { id: string; name: string; role: Role; memberCount: number }[] {
-    const authenticated = this.opts.authenticated ?? true
+    const authenticated = this.signedIn
     if (!(authenticated && !this.opts.solo)) return []
     return [
       { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length },

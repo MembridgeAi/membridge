@@ -189,7 +189,7 @@ describe('the FakeDataClient/mapper boundary', () => {
     })
 
     it('normalizes the brief fields the fixture no longer states', async () => {
-      const stream = await new FakeDataClient().getProjectStream()
+      const stream = await new FakeDataClient().getProjectStream('/Users/x/membridge')
       // These used to come from an emptyBrief() spread in the fixture. They now
       // come from the mapper, which is where they come from in the app.
       expect(stream[0].decisions).toBeNull()
@@ -203,6 +203,69 @@ describe('the FakeDataClient/mapper boundary', () => {
       // outcomeOf(...) || null -- a session still working has no outcome yet.
       expect(live[0].outcome).toBeNull()
       expect(live[0].tool).toBe('Codex')
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // APPLICATION STATES THE FIXTURES CAN PRODUCE.
+  //
+  // Same class of hole as a mapper the fixtures route around: a state they
+  // cannot express is a screen no test protects. Signed-out was one of these
+  // -- FakeDataClient reported `authenticated: true` forever, so the view a
+  // user sees at the moment they are trying to establish whether their session
+  // is over could not be rendered in a test at all, and that view now carries a
+  // security warning.
+  //
+  // These assertions are the inventory. Each one is a state a screen exists
+  // for; if one starts failing, a screen has quietly become untestable.
+  // ---------------------------------------------------------------------
+  describe('the fixtures can express the states screens are written for', () => {
+    it('signed out, reached by signing out rather than only by construction', async () => {
+      const c = new FakeDataClient()
+      expect((await c.getTeamAccount()).authenticated).toBe(true)
+      await c.signOut()
+      // The TRANSITION, not just the constructor option. This is what makes
+      // the signed-out view reachable from a test that starts signed in.
+      expect((await c.getTeamAccount()).authenticated).toBe(false)
+      expect((await c.getTeamAccount()).teams).toEqual([])
+    })
+
+    it('signed back in again, so the round trip is coverable', async () => {
+      const c = new FakeDataClient({ authenticated: false })
+      expect((await c.getTeamAccount()).authenticated).toBe(false)
+      await c.signIn({ email: 'a@b.dev', password: 'pw' })
+      expect((await c.getTeamAccount()).authenticated).toBe(true)
+    })
+
+    it('signed in but on no team', async () => {
+      const account = await new FakeDataClient({ solo: true }).getTeamAccount()
+      expect(account.authenticated).toBe(true)
+      expect(account.teams).toEqual([])
+    })
+
+    it('no projects at all, coherently -- including an empty project stream', async () => {
+      const c = new FakeDataClient({ empty: true })
+      expect(await c.getProjects()).toEqual([])
+      // The incoherent combination this used to produce: zero projects, yet a
+      // populated stream, because getProjectStream ignored both its argument
+      // and `empty`.
+      expect(await c.getProjectStream('/Users/x/membridge')).toEqual([])
+    })
+
+    it('a project that exists but has no sessions of its own', async () => {
+      // Reachable from the fixture now rather than only by stubbing the
+      // method: sublease carries no stream rows.
+      expect(await new FakeDataClient().getProjectStream('/Users/x/sublease')).toEqual([])
+      expect((await new FakeDataClient().getProjectStream('/Users/x/membridge')).length).toBe(1)
+    })
+
+    it('a daemon that is not running', async () => {
+      const status = await new FakeDataClient({ health: { state: 'stalled', lastTickAt: null, lastTickError: null, staleForSec: 900 } }).getStatus()
+      expect(status.running).toBe(false)
+    })
+
+    it('a daemon that cannot be reached at all', async () => {
+      await expect(new FakeDataClient({ failWith: 'daemon unreachable' }).getStatus()).rejects.toThrow(/daemon unreachable/)
     })
   })
 
