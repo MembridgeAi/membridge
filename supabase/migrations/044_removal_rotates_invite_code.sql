@@ -1,15 +1,30 @@
--- 041_removal_rotates_invite_code.sql: make removing a member actually remove
+-- 044_removal_rotates_invite_code.sql: make removing a member actually remove
 -- them, and stop handing every member a permanent join credential.
 --
--- NUMBERING: written as 039 and renumbered to 041 before merge — 039 had been
--- allocated to two lanes at once. The security lane holds 037, 038 and 039
--- (037_project_access_team_scope, 038_invite_redeem_atomic,
--- 039_team_audit_created_at) and 040 is a privilege revoke on memory_entries.
+-- NUMBERING: written as 039, renumbered to 041, and renumbered again to 044.
+-- Both moves were collisions with lanes running in parallel — 039 had been
+-- allocated twice, and 041 turned out to belong to the backend lane's
+-- project_stats change, which landed on the same number. Number allocation is
+-- now owned by the security lane's migration runbook rather than by hand.
+--
+-- The map this file was renumbered against:
+--   037/038/039  security lane (project access scope, invite atomicity,
+--                audit timestamp)
+--   040          reserved — memory_entries delete privilege revoke
+--   041          backend lane — project_stats carrying archived_at
+--   042/043      security lane (definer grants + is_team_member_uid,
+--                blanket table revokes)
+--   044          THIS FILE
+--   045          045_leave_rotates_invite_code.sql, same lane
+--
 -- Every internal self-reference below (§1/§2/§3) and every mention in lib/,
--- test/ and docs/ was renumbered with it. A comment anywhere pointing at "039"
--- for invite-code rotation is stale and means THIS file. If an earlier cut was
--- applied anywhere as 039, it is byte-identical apart from these comments —
--- re-applying this file is a no-op, not a second migration.
+-- test/ and docs/ moved with it, on word boundaries so the other migration
+-- numbers these files cite (002, 006, 009, 010, 011, 013, 024, 025, 029, 035)
+-- were left alone. A comment anywhere pointing at "039" or "041" for
+-- invite-code rotation is stale and means THIS file. Nothing was ever applied
+-- under any of the three numbers, so there is no live state to reconcile; if
+-- an earlier cut was applied somewhere regardless, it is byte-identical apart
+-- from these comments and re-applying this file is a no-op.
 --
 -- THE FINDING (pinned as failing checks in test/suites/invite-lifetime.test.js
 -- on branch agent-hunt, commit fcab31a). teams.invite_code never expires, has
@@ -63,8 +78,8 @@
 -- second. The live DB has no migration history (migrations are applied by
 -- hand), so every statement here is re-runnable.
 --
--- Rollback: supabase/rollback/pre-041-removal-rotates-invite.sql restores both
--- functions to their pre-041 bodies verbatim.
+-- Rollback: supabase/rollback/pre-044-removal-rotates-invite.sql restores both
+-- functions to their pre-044 bodies verbatim.
 
 -- ---------------------------------------------------------------------------
 -- §1. remove_member rotates the team's standing invite code.
@@ -112,7 +127,7 @@ begin
     raise exception 'the team owner cannot be removed';
   end if;
   delete from public.team_members where team_id = p_team and user_id = p_user;
-  -- 041: the removed member may be holding the team's standing invite code or
+  -- 044: the removed member may be holding the team's standing invite code or
   -- an invite link. Both are now dead -- for everyone. See the CONSEQUENCE
   -- block at the top of this file: this rotation is unconditional on purpose.
   update public.teams set invite_code = gen_random_uuid() where id = p_team;
@@ -169,7 +184,7 @@ as $$
     t.id,
     t.name,
     m.role,
-    -- 041: managers only. A member row carries null here.
+    -- 044: managers only. A member row carries null here.
     case when m.role in ('owner', 'admin') then t.invite_code else null end,
     (select count(*) from public.team_members mc where mc.team_id = t.id),
     t.created_at
@@ -196,11 +211,11 @@ grant execute on function public.remove_member(uuid, uuid) to authenticated, ser
 -- DELIBERATELY NOT HERE
 --
 -- * leave_team (002:252) is not changed HERE. It is the identical hole with a
---   different door and it is closed by 042_leave_rotates_invite_code.sql, in
---   its own file so it can be applied, held or reverted on its own. 042's
+--   different door and it is closed by 045_leave_rotates_invite_code.sql, in
+--   its own file so it can be applied, held or reverted on its own. 045's
 --   header carries the argument for why the same remedy fits a voluntary
 --   departure, including why the narrower "revoke only their own invites"
---   closes nothing. Applying 041 without 042 leaves that door open.
+--   closes nothing. Applying 044 without 045 leaves that door open.
 --
 -- * team_keys is NOT touched and the team key is NOT rotated. A removed member
 --   keeps every sealed key they were ever given and can still decrypt every

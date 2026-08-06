@@ -2,13 +2,13 @@
 
 Status: **open — Marco decides.** Nothing in this note is implemented.
 Raised by ticket REM-3 (agent-removal lane, 2026-08-05). Related work that
-IS implemented on `agent-removal`: migration 041 closes the re-join half of
+IS implemented on `agent-removal`: migration 044 closes the re-join half of
 this problem.
 
 ## What is true today
 
 `remove_member` (`supabase/migrations/002_team_v2.sql:179`, restated in
-`041_removal_rotates_invite_code.sql` §1) deletes one `team_members` row.
+`044_removal_rotates_invite_code.sql` §1) deletes one `team_members` row.
 It does not touch `public.team_keys`, and there is no path that does:
 
 * `team_keys` rows are immutable by design — 009 gives the table no UPDATE
@@ -33,12 +33,12 @@ It does not touch `public.team_keys`, and there is no path that does:
   run it after a removal.
 
 Net: a removed member keeps decrypting **everything they ever synced**, and
-until 041 they could also re-join and be sealed into the new epoch by the
-join-seal path. 041 closes the re-join half, and 042 closes it for a
+until 044 they could also re-join and be sealed into the new epoch by the
+join-seal path. 044 closes the re-join half, and 045 closes it for a
 voluntary departure too. This note is about the other half.
 
 Read "removed" below as "departed": everything here applies identically to
-someone who leaves of their own accord, and after 041 §2 an admin who
+someone who leaves of their own accord, and after 044 §2 an admin who
 resigns is the role most certain to be holding team credentials. The
 resignation case is arguably the more likely one — nobody schedules it, and
 it produces no `member-removed` row for anyone to notice.
@@ -57,7 +57,7 @@ reads as a revocation it is not.
 
 ## Options
 
-### A. Leave it (status quo + 041)
+### A. Leave it (status quo + 044)
 
 Rotation stays lazy; removal only kills the join credential.
 

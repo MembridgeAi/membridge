@@ -246,7 +246,7 @@ function createMockSupabase() {
           team_id: m.teamId,
           team_name: t.name,
           role: m.role,
-          // 041 §2: the standing invite code goes to MANAGERS only. A plain
+          // 044 §2: the standing invite code goes to MANAGERS only. A plain
           // member's row keeps the column and carries null in it — the
           // RETURNS TABLE signature is fixed, so this is a null value rather
           // than an absent key, and clients that read it positionally are
@@ -306,7 +306,7 @@ function createMockSupabase() {
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === body.p_user);
       if (i !== -1) members.splice(i, 1);
       cascadeAccessRows(body.p_team, body.p_user); // 024's FK cascade (see 029 §5)
-      // 041 §1: removal rotates the team's standing invite code AND revokes
+      // 044 §1: removal rotates the team's standing invite code AND revokes
       // every outstanding invite link, unconditionally. Both halves matter: a
       // departing member may hold either credential, and create_invite
       // defaults to no expiry and no use cap, so the link they joined with
@@ -344,11 +344,11 @@ function createMockSupabase() {
       const i = members.findIndex(m => m.teamId === body.p_team && m.userId === userId);
       if (i !== -1) members.splice(i, 1);
       cascadeAccessRows(body.p_team, userId); // 024's FK cascade (see 029 §5)
-      // 042: a voluntary departure rotates the standing invite code and
+      // 045: a voluntary departure rotates the standing invite code and
       // revokes outstanding invite links, exactly as a removal does. Same two
-      // statements as 041 §1 -- see 042's header for why the same remedy fits
+      // statements as 044 §1 -- see 045's header for why the same remedy fits
       // a departure nobody else chose: leaving is one-shot per membership, and
-      // after 041 §2 an admin who resigns is the role most certain to be
+      // after 044 §2 an admin who resigns is the role most certain to be
       // holding the code.
       const leftFrom = teams.get(body.p_team);
       if (leftFrom) leftFrom.inviteCode = uuid();

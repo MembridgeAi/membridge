@@ -23113,7 +23113,7 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(mock17.projectAccess.filter(r => r.member_id === lateCreds.userId).length, 0,
           "a departed member's access rows must not survive them");
         await setDefault(false);
-        // 041: the removal above ROTATED teams.invite_code, so the value
+        // 044: the removal above ROTATED teams.invite_code, so the value
         // captured from create_team at the top of this fixture is now dead —
         // that is the whole point of the migration, and it is pinned in
         // test/suites/removal-durability.test.js. This section is about access

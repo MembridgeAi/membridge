@@ -1,5 +1,5 @@
 'use strict';
-// Removal durability — 041_removal_rotates_invite_code.sql, and the daemon
+// Removal durability — 044_removal_rotates_invite_code.sql, and the daemon
 // side of it.
 //
 // The findings themselves are pinned in test/suites/invite-lifetime.test.js
@@ -103,8 +103,8 @@ async function main() {
     // its own. A plain member can neither mint an invite (create_invite is
     // is_team_manager-gated) nor revoke one, so there is no operation they
     // have that needs it — it is a credential they can spend but not manage.
-    // 041 §2 returns null in that column for a non-manager row, and
-    // teamPayload restates the rule daemon-side so a backend without 041 does
+    // 044 §2 returns null in that column for a non-manager row, and
+    // teamPayload restates the rule daemon-side so a backend without 044 does
     // not leak through the client either.
     await check('an ordinary member is not handed the team\'s standing invite code', async () => {
       const row = await teamRowFor('member', alpha.team_id);
@@ -122,7 +122,7 @@ async function main() {
         `the flattened inviteCode is a second copy of the same credential, got ${JSON.stringify(res.body.inviteCode)}`);
     });
 
-    // COUNTER-CHECK — passes before AND after 041. The cheapest wrong fix is
+    // COUNTER-CHECK — passes before AND after 044. The cheapest wrong fix is
     // to null invite_code for everyone, which closes every leak and also
     // removes the only way to invite anybody.
     await check('a manager still reads the standing invite code', async () => {
@@ -166,7 +166,7 @@ async function main() {
       const rejoin = await apiAs('bystander', 'POST', '/api/team/join', { inviteCode: alphaCodeBefore });
       assert.notStrictEqual(rejoin.status, 200,
         'the old standing code must be dead for EVERYONE after a removal, not only for the ' +
-        'person removed — see the CONSEQUENCE block in migration 041');
+        'person removed — see the CONSEQUENCE block in migration 044');
     });
 
     await check('removing a member revokes the team\'s outstanding invite links', async () => {
@@ -178,7 +178,7 @@ async function main() {
         'an invite link minted before the removal must not still redeem afterwards');
     });
 
-    // COUNTER-CHECKS — pass before AND after 041. A rotation scoped to "every
+    // COUNTER-CHECKS — pass before AND after 044. A rotation scoped to "every
     // team the actor manages", or to the whole invites table, would satisfy
     // every check above and quietly lock a second team out.
     await check('a removal in one team does not rotate another team\'s invite code', async () => {
@@ -278,11 +278,11 @@ async function main() {
     });
 
     // -----------------------------------------------------------------------
-    // 5. REM-4: leaving is the same door (042).
+    // 5. REM-4: leaving is the same door (045).
     // -----------------------------------------------------------------------
     // leave_team (002:252) deleted the caller's own row and nothing else, so a
-    // voluntary departure walked around everything 041 closed. The leaver here
-    // is an ADMIN, which is the case that decides it: after 041 §2 the standing
+    // voluntary departure walked around everything 044 closed. The leaver here
+    // is an ADMIN, which is the case that decides it: after 044 §2 the standing
     // code reaches managers only, so an admin who resigns is the person most
     // certain to be holding it, and they are never "removed" — they leave. If
     // only removal rotated, the highest-risk departure would be the one that
@@ -318,21 +318,21 @@ async function main() {
         'defaults to no expiry and no use cap, so the link they joined with outlives them');
     });
 
-    // COUNTER-CHECKS — pass before AND after 042.
+    // COUNTER-CHECKS — pass before AND after 045.
     await check('a departure from one team does not rotate another team\'s invite code', async () => {
       const after = (await teamRowFor('owner', beta.team_id)).invite_code;
       assert.strictEqual(after, betaCodeBeforeLeave,
         'nobody left Beta; its standing code must be byte-identical');
     });
 
-    // 042 restates leave_team's body verbatim and adds two statements. The
+    // 045 restates leave_team's body verbatim and adds two statements. The
     // owner guard lives inside that body, so a transcription slip would drop
     // it silently and hand every team an unrecoverable state (no owner, and
     // set_role cannot mint one). Cheap to assert, catastrophic to lose.
     await check('the owner still cannot leave their own team', async () => {
       const res = await apiAs('owner', 'POST', '/api/team/leave', { teamId: alpha.team_id });
       assert.notStrictEqual(res.status, 200,
-        'leave_team must still refuse the owner; 042 restates its body and must not drop the guard');
+        'leave_team must still refuse the owner; 045 restates its body and must not drop the guard');
       assert.ok(mock.members.some(m => m.teamId === alpha.team_id && m.displayName === 'Owner'),
         'the owner is off their own roster — the team now has nobody who can manage it');
     });
