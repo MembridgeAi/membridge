@@ -22,7 +22,12 @@ const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib r
 const { check } = h;
 const assert = require('assert');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
+const util = require('../../lib/util');
+const ledgerStore = require('../../lib/ledger-store');
+const foldRecall = require('../../lib/ledger-fold-recall');
 const recall = require('../../lib/recall');
 const roi = require('../../lib/roi');
 const { HOLDOUT_EPOCH } = require('../../lib/holdout-epoch');
@@ -109,7 +114,7 @@ check('holdout: the withheld side is the RECALL SERVE only', () => {
   // decide() is the only thing the holdout gate lives in, and it answers about
   // recall serves and nothing else -- it has no notion of note injection or of
   // the injected CLAUDE.md block, so it cannot withhold either.
-  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'lib', 'recall.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', 'recall.js'), 'utf8');
   assert.ok(!/notes|injection/i.test(src.split('function decide(')[1] || ''),
     'decide() must not have grown any notion of notes -- teammate note injection is never withheld');
 });
@@ -341,6 +346,40 @@ check('fold: a correction raises the served arm cost by exactly the follow-up re
   const oldCost = 300;
   const newCost = 300 + followCost;
   assert.strictEqual(out.comparisonDelta.served.tokensSq, (newCost * newCost) - (oldCost * oldCost));
+});
+
+check('fold: a real updateLedger pass writes the epoch-stamped comparison block to disk', () => {
+  // End to end through the production path, not just the pure helpers above:
+  // a queued serve and a queued holdout row, one real fold, and the block must
+  // land ON DISK with the current epoch. Everything else in this suite is
+  // arithmetic; this is the wiring, and wiring is what silently does not run.
+  const proj = path.join(h.ROOT, 'roi-e2e-proj');
+  fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+  util.saveState({ ...util.loadState(), projects: { [proj]: { events: [] } } });
+  const ts = '2026-08-06T10:00:00.000Z';
+  fs.mkdirSync(path.dirname(foldRecall.eventsPath(proj)), { recursive: true });
+  fs.appendFileSync(foldRecall.eventsPath(proj), `${[
+    JSON.stringify({ ts, sessionId: 's1', relPath: 'src/a.js', tier: 'B', callTokens: 4000, skeletonTokens: 300, holdout: false, committed: false }),
+    JSON.stringify({ ts, sessionId: 's1', relPath: 'src/a.js', committed: true }),
+    JSON.stringify({ ts, sessionId: 's2', relPath: 'src/b.js', holdout: true, wouldServe: 'B', callTokens: 3500 }),
+  ].join('\n')}\n`);
+
+  const led = ledgerStore.updateLedger(proj, [], util.getConfig(), () => Date.parse(ts) + 10);
+  const onDisk = JSON.parse(fs.readFileSync(path.join(proj, '.membridge', 'ledger.json'), 'utf8'));
+  const expected = {
+    epoch: HOLDOUT_EPOCH,
+    served: { reads: 1, tokens: 300, tokensSq: 300 * 300 },
+    withheld: { reads: 1, tokens: 3500, tokensSq: 3500 * 3500 },
+  };
+  assert.deepStrictEqual(led.comparison, expected, 'the fold result must carry the comparison block');
+  assert.deepStrictEqual(onDisk.comparison, expected, 'and it must survive to disk, or nothing ever accumulates');
+  // Two eligible reads is nowhere near either threshold, so the payload this
+  // feeds still reports null -- the point being that the accumulation is real
+  // and the gate is what withholds the figure, not an absence of plumbing.
+  const m = roi.poolMeasurement([onDisk.comparison]);
+  assert.strictEqual(m.servedReads, 1);
+  assert.strictEqual(m.withheldReads, 1);
+  assert.strictEqual(m.effect, null);
 });
 
 check('fold: both arms are priced by the same estimator, so their difference means something', () => {
