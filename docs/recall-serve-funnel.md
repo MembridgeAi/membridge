@@ -212,6 +212,50 @@ refused" rather than "missed": refusing them is the fix working.
 on serves, not a prediction of them. Files under ~1600 bytes are excluded
 regardless of tier.
 
+# REV-7: Tier A does not serve in the real path
+
+**`node scripts/prove-tier-a-serves.js` — 3/9.** A real PreToolUse payload
+through the real hook binary, isolated scratch project, never touches a live
+install. The first read does not record a hash and no session file is created
+at all, so no second read can ever serve Tier A.
+
+**Cause.** `lib/hooks-recall.js` returns early on a store miss, and its own
+comment states the assumption:
+
+> Nothing downstream can serve without a cache entry — recall.js's tierFor()
+> requires one for every tier — so on a miss (the common case, in front of
+> every read) return before parsing the ledger and, above all, before hashing
+> the target file
+
+That was true when it was written. **REV-4 made it false**: Tier A no longer
+requires a store entry. But the early return still fires before the hash is
+computed, so the read-time hash is never recorded for a file outside the store,
+and Tier A can never bootstrap for exactly the ~90% of files the store does not
+hold. REV-4 is inert in the real path.
+
+`test/suites/recall-tier-a-interval.test.js` passes because it calls `tierFor`
+directly and never crosses the early return. The unit test proves the policy;
+this script proves the path — and only the second one was ever a claim about
+the product working.
+
+**This is not a one-line fix.** The early return exists for a measured reason:
+the content hash is the most expensive thing the hook does (74ms on a 22MB
+file), on the critical path of every single `Read`. Removing the guard puts a
+file read plus sha1 in front of every read in every session. The fix has to
+record a read-time hash for Tier A's candidates without paying that cost on
+every miss — e.g. gating on "the ledger says this session already read this
+file" (cheap, already parsed for other reasons) before deciding to hash, or
+hashing only on the second read of a path. That is a design decision, not a
+patch, and it is unmade.
+
+**Both entry points are fine.** `bin/membridge.js:144` and `app/main.js:619`
+both call `hooks.ensureInstalled()`, which calls `reconcileRecallHook()`. This
+is not the CLI-vs-tray divergence that has shipped twice before.
+
+**Upgrade path is fine in principle.** A pre-REV-4 session file (no `reads`
+map) fails closed and does not serve, which is correct. It would start
+recording on its next read — once the early return no longer prevents it.
+
 ## Suggested order
 
 1. ~~**Persist the read-time hash**~~ — done in REV-4 (`7e9a6de`), via
