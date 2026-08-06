@@ -24,6 +24,21 @@ function detailField(event: AuditEvent, key: string): string | null {
   }
 }
 
+/** A numeric field off the event's detail. Separate from detailField because
+ *  that one requires a string and would reject a JSON number — which is what
+ *  `deleted` is (035 builds it with jsonb_build_object from an integer). */
+function detailNumber(event: AuditEvent, key: string): number | null {
+  if (!event.detail) return null
+  try {
+    const parsed: unknown = JSON.parse(event.detail)
+    if (!parsed || typeof parsed !== 'object') return null
+    const value = (parsed as Record<string, unknown>)[key]
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
 /** The project a row is about: its folder path, or the raw key when the
  *  daemon sent no friendly name (an older daemon, or an event type that
  *  carries none). Never an empty string — "that project" beats a gap. */
@@ -70,8 +85,35 @@ export function auditSentence(event: AuditEvent): string {
       const name = detailField(event, 'name')
       return name ? `renamed the team to ${name}` : 'renamed the team'
     }
-    default:
-      // Deliberately still shows everything it has, in the old shape.
-      return `${event.action} ${event.objectType} ${event.objectName || event.objectLabel}`.trim()
+    // Written by delete_my_entries (035 §3) from inside the RPC, not by the
+    // daemon — which is why it was missed here: nothing in lib/ names it, so
+    // grepping the client for audit actions does not find it. Without this
+    // case it fell through and rendered "own-data-deleted member 8f21c0de-…",
+    // naming neither the action nor the person, on the one row that records
+    // somebody erasing their own history.
+    //
+    // objectPhrase is NOT used: this event's object_key is the actor's own
+    // user id, not a project, so it would print a uuid. The count comes off
+    // detail.deleted, and detail.projectKey says whether it was scoped to one
+    // project or the whole team.
+    case 'own-data-deleted': {
+      const scope = detailField(event, 'projectKey') ? ' from one project' : ''
+      const n = detailNumber(event, 'deleted')
+      if (n === null) return `deleted their own entries${scope}`
+      return `deleted ${n} of their own ${n === 1 ? 'entry' : 'entries'}${scope}`
+    }
+    default: {
+      // Deliberately still shows everything it has, in the old shape — an
+      // unrecognised event rendered awkwardly beats one silently dropped.
+      // The one change: when the row is about a PERSON and the daemon resolved
+      // their name, use it instead of their user id. The raw shape was
+      // printing a uuid where a name was already sitting on the event, which
+      // is the defect this whole function exists to end; a future action
+      // reaching this branch should not reintroduce it by default.
+      const label = event.objectType === 'member' && event.targetName
+        ? event.targetName
+        : (event.objectName || event.objectLabel)
+      return `${event.action} ${event.objectType} ${label}`.trim()
+    }
   }
 }

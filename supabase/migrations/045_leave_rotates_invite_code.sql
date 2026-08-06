@@ -69,6 +69,15 @@
 -- silence, which is the whole finding. Re-runnable; `create or replace`
 -- preserves the EXECUTE grants 010:405-406 installed.
 --
+-- ⚠ DO NOT RE-APPLY 002_team_v2.sql AFTER THIS FILE. This file redefines
+-- public.leave_team, whose original body lives in 002:252. Both files are
+-- individually re-runnable, which is exactly what makes this easy to get
+-- wrong: paste 002 again after this one and leave_team silently reverts to the
+-- version that deletes a membership row and rotates nothing -- no error, no
+-- failing test, and a departing member walks back in with the code they kept.
+-- If you are re-pasting anything from earlier in the sequence, finish by
+-- re-pasting this file. Same rule for 044 and public.remove_member.
+--
 -- Rollback: supabase/rollback/pre-045-leave-rotates-invite.sql.
 -- ===========================================================================
 

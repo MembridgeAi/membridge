@@ -78,6 +78,16 @@
 -- second. The live DB has no migration history (migrations are applied by
 -- hand), so every statement here is re-runnable.
 --
+-- ⚠ DO NOT RE-APPLY 002_team_v2.sql AFTER THIS FILE. This file redefines
+-- public.remove_member, whose original body lives in 002:179. Both files are
+-- individually re-runnable, which is what makes this easy to get wrong: paste
+-- 002 again after this one and remove_member silently reverts to the version
+-- that deletes a membership row and nothing else -- no error, no failing test,
+-- and the hole this file closes is open again. The same applies to
+-- public.my_teams (006). If you are re-pasting anything from earlier in the
+-- sequence, finish by re-pasting this file. Same rule for 045 and
+-- public.leave_team.
+--
 -- Rollback: supabase/rollback/pre-044-removal-rotates-invite.sql restores both
 -- functions to their pre-044 bodies verbatim.
 
