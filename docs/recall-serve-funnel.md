@@ -265,3 +265,143 @@ recording on its next read — once the early return no longer prevents it.
    about the product from either number.
 3. **Only then** consider whether eligibility (top-25) should widen — and note
    the coverage curve says it should not.
+
+# REV-8: Tier A bootstraps, and the hook's cost for it
+
+**`node scripts/prove-tier-a-serves.js` — 9/9.** Same script, same real hook
+binary, unchanged assertions. Tier A now serves end to end.
+
+That script lives in `scripts/`, and **CI runs `node test/run.js`, not
+`scripts/`** — so the same end-to-end path is also pinned by
+`test/suites/recall-tier-a-serves.test.js`, which drives the hook binary with
+real PreToolUse payloads. Without it, the next time Tier A goes inert the split
+suites would stay green exactly as they did through REV-4.
+
+## What was actually blocking it — three faults, not one
+
+REV-7 named the early return. It was the load-bearing one, but the path had two
+more, and each would have made the fix look like it had not worked:
+
+1. **The early return** (`lib/hooks-recall.js`). On a store miss the hook
+   returned before hashing, so no file outside the top-25 warm set ever
+   recorded a read-time hash and Tier A could not bootstrap.
+2. **`decide()` built Tier A's body from `storeEntry.contentHash`**
+   (`lib/recall.js`). With no store entry that is a `TypeError`, which
+   `runRecall`'s fail-open swallows — so the first store-less Tier A serve in
+   history would have been silence, indistinguishable from "no tier applied".
+   It now quotes `fileStat.hash`, which is the hash Tier A actually proved.
+3. **"Already served" was keyed on the path alone.** `served` is
+   `relPath -> contentHash` and the hash was ignored, so a session's first
+   serve silenced that path for the rest of the session — including reads of
+   content that no serve had ever covered. Same shape as the REV-4 bug: a fact
+   about one moment answering a question about another.
+
+Faults 2 and 3 were invisible to `test/suites/recall-tier-a-interval.test.js`
+because it called `tierFor` directly. Both were caught by the end-to-end script.
+
+## The shape chosen, and what the alternatives cost
+
+REV-7 left two candidates. Measured with `process.cpuUsage()` (never
+wall-clock — this machine runs several agents at once):
+
+| operation, on this install | CPU |
+|---|---|
+| `contentHashOf`, this repo's median read file (10KB) | **0.03ms** |
+| `contentHashOf`, mean over all 173 files this project actually reads | **0.13ms** |
+| `contentHashOf`, weighted by real read counts (762 reads) | **0.67ms** |
+| `contentHashOf`, this repo's largest read file (`test/run-tests.js`, 1.5MB) | 2.7ms |
+| `contentHashOf`, synthetic 22MB | 30ms |
+| `readLedger` (`ledger.json`, 604KB) | **0.48ms** |
+| `loadSessionState` (live file / at the 400-entry bound) | 0.01ms / 0.14ms |
+| `saveSessionState` (1 entry / 400 entries) | 0.25ms / 0.37ms |
+| `loadState` (`state.json`, 6.4MB) — **already paid on every read today** | **13.1ms** |
+
+**Candidate 1 (gate on the ledger before hashing) loses on its own numbers:**
+the ledger parse costs 0.48ms to avoid a hash that costs 0.13ms on average.
+The guard would be more expensive than the thing it guards. It is also
+*unsound* for bootstrapping: `fileReaders` is written by the daemon's sync pass
+folding transcripts, not by the hook, so at a path's first read the ledger does
+not yet know this session read it — the gate would refuse to hash exactly when
+the hash needs recording, and Tier A would first serve on the third read, and
+only if a sync tick happened to land in between.
+
+**Candidate 2 (hash only on the second read of a path) also delays to the third
+read**, and needs its own per-session "seen" marker written on every first read
+— trading the hash for a write of comparable cost.
+
+**Chosen: record the read-time hash on every read, with the tail bounded.**
+The hash is evidence about a moment that has already passed; no later work can
+reconstruct it, so "hash only when it will pay off" is not available — at a
+path's first read, whether it will be re-read is unknowable. What *is*
+available is bounding the worst case: `MAX_HASH_BYTES = 4MiB` (~5ms), above
+which nothing is recorded and Tier A silently never fires for that file — the
+same fail-closed outcome as a pre-REV-4 session. The hash is skipped entirely
+when recall is off or the project is untracked/paused, and the 0.48ms ledger
+parse now happens **only** on reads that can actually reach a Tier A serve
+(repeat reads of unchanged content — 27.7% of reads per the REV-6 funnel),
+which is cheaper than the old code was on a store *hit*.
+
+One consequence worth naming: a file whose `stat()` succeeds but whose
+*content* cannot be read (a permissions bit, a race with a delete) now reaches
+the hash. Left to the outer fail-open that would file an ordinary condition as
+`hook recall error` in the user's log on every read of that file, so the hash is
+caught where it happens and the hook steps aside silently.
+
+## Measured cost against the 150ms budget
+
+`node scripts/bench-recall-hook.js 7` — one full hook invocation, the child's
+own user+system CPU, 16 files spanning 4KB–1.5MB (mean 187KB, about twice this
+repo's real mean read, so the figure is conservative), 7 passes, run
+back-to-back on the same machine:
+
+| | before (`1d7e599`) | after | delta |
+|---|---|---|---|
+| first read of a path | p50 30.97ms | p50 32.30ms | **+1.3ms** |
+| repeat reads | p50 31.15ms | p50 32.97ms | **+1.8ms** |
+| all, p90 | 33.45ms | 34.79ms | +1.3ms |
+| **Tier A serves** | **0 / 112** | **16 / 112** | — |
+
+**+1.8ms on a 150ms budget: 1.2%.** Repeated four times with the order
+alternated; the delta held between +1.0 and +1.8ms p50. (16 serves is one per
+path — passes 3-7 are correctly refused as already-served, since nothing edits
+the files in between.)
+
+For scale, the same invocation already spends ~31ms on node startup and the
+require graph before reaching any of this, and on a real install another 13ms
+parsing `state.json`. The hash was never the expensive thing on this path; it
+was simply the only thing that had been measured.
+
+## Test debt this branch was carrying
+
+`node test/run-tests.js` at `1d7e599` — this branch's head before REV-8, with
+none of REV-8's changes present — **fails 25 checks**. The monolith is a ship
+gate, and neither REV-4 nor REV-5 ran it (their own commit messages report only
+the split suites). Measured, not inferred: the baseline run is a clean
+`git archive` of `1d7e599` into a scratch directory.
+
+| failures | cause | fixed here |
+|---|---|---|
+| 5 | **REV-4**: `sessionState.reads` became mandatory for Tier A, but the monolith's Tier A fixtures pass `{ served: {}, interceptions: 0 }` with no `reads` map, and one hook test asserts no session-state file is written on a refused serve — which is exactly the write REV-4 added | yes |
+| 17 | **REV-5**: `avoided` gained a `tierUnknown` field; every `deepStrictEqual` on a folded or API-projected `avoided` still pins the six-field shape | yes |
+| 3 | **SEC-3/SEC-4** (`033: …`, revocation/teamsync) | **no** — different subsystem, different ticket; left for whoever owns it |
+| 1 | `C1: the npm tarball ships vendor/grammars` (packaging, flaky under load) | no |
+
+Attribution was checked rather than assumed: the failing Tier A fixture,
+replayed against `016486b` (pre-REV-4), `1d7e599` and REV-8's `lib/recall.js`,
+serves at the first and refuses at the other two — REV-4 broke it and REV-8 is
+neutral on it. REV-8 introduced exactly **one** new failure of its own, the M5
+check, which pinned the early return by name; it is rewritten to pin the half
+of its intent that survives (an unreadable file is a *silent* step-aside, never
+a `hook recall error` line on every read of it).
+
+## What this does not fix
+
+`fileReaders` is still the ledger's, and the ledger is still written by the
+sync pass rather than the hook. Tier A requires it (the hash proves *what* the
+file looked like; only the ledger proves the read *happened* — the hook runs on
+PreToolUse, before the read, so a hash alone would also cover a read that was
+denied). So a session's second read serves only once a sync tick has folded its
+transcript. The 257-read Tier A ceiling in REV-6 assumes that fold has landed;
+the observed rate will be lower until someone measures the lag. **Nothing here
+should be treated as an observed serve count** — the honest next step is still
+to re-run both harnesses on a normal install and count real serves.
