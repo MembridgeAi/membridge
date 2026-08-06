@@ -38,6 +38,19 @@ AGENTS.md
 .claude/settings.local.json
 node_modules
 
-# Local agent-team config (Agent Teams AI import folder). Personal harness
-# setup, not project source -- shared between machines over Slack, not git.
-docs/agent-team/
+# NOT ignored: docs/agent-team/ is project source.
+#
+# It was a personal scratch folder when this rule was written (an import folder
+# shared between machines over Slack), and it stopped being one the moment the
+# five-role kit was committed there. Leaving the rule in place left the directory
+# ignored AND tracked at once, which has no upside: the seven existing files were
+# already on master, so nothing was private, edits to them still committed -- but
+# a NEW file, a sixth role, would never appear in `git diff`, would never be
+# committed, and `git clean` would delete it without a word.
+#
+# It also has to stay tracked to work at all: the /team skill has every agent
+# read docs/agent-team/agents/<role>.md by path, so untracked means the role
+# files exist on one laptop only and a fresh clone or a new worktree has no team.
+#
+# The `!docs/agent-team/CLAUDE.md` negation further up is still required -- the
+# bare `CLAUDE.md` pattern matches at any depth.

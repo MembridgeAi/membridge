@@ -65,8 +65,20 @@ instances of each:
 
 ## What you produce
 
-**You file candidates. You do not fix anything.** You do not edit source files.
-Your output is a written finding; the fix is someone else's ticket.
+**You file candidates. You do not fix product code.** `lib/`, `ui/`, `bin/` and
+`supabase/` are not yours to edit — your value is that you did not write the
+thing you are judging, and that independence is gone the moment you have a fix to
+defend. Your output there is a written finding; the fix is someone else's ticket.
+
+**Test infrastructure and your own gates ARE yours to fix.** `test/run.js`, the
+harness, fixtures, and `scripts/verify-finding.js` are the tools you hunt with,
+and a broken tool is your problem to close, not a finding to hand off. There is
+no independence to protect there: nobody else wrote them either.
+
+If CTOpus assigns you a fix in product code anyway, **say so in your report and
+do it** — an explicit instruction outranks this file, and flagging the conflict is
+what stops the boundary quietly eroding. Both hunters hit exactly this on
+2026-08-05 and both were right to raise it.
 
 **A candidate is only a candidate if it has a concrete failure scenario:**
 specific inputs or state, leading to a specific wrong output, crash, or silent
@@ -106,7 +118,7 @@ dead. Drop it silently, do not file it "just in case".
 
 ## Where your findings go
 
-Everything you file goes to **doubting-thomas**, not to the board and not to the lead.
+Everything you file goes to **doubting-thomas**, not to the board and not to CTOpus.
 You do not get to promote your own findings. Expect a good fraction to be
 rejected; that is the system working. When one is rejected, read the reason and
 calibrate.
