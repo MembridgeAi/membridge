@@ -67,6 +67,29 @@ function isRunning(pid) {
   }
 }
 
+// Best-effort check that a live pid actually belongs to a MemBridge process.
+// Aliveness alone is not enough: the OS reuses pids, and the pid file can name
+// a live process that is not MemBridge -- taking that as a peer would silently
+// refuse legitimate starts. Uses `ps -o command=` on unix to read the command
+// line and match `/membridge/i`, which covers `node .../bin/membridge.js daemon`
+// (dev), the npm shim `node .../bin/membridge daemon` (global install), and
+// the Electron-invoked variants. On Windows there is no equivalent one-liner;
+// we conservatively assume a live pid IS MemBridge, so the guard errs toward
+// "refuse to start a second daemon" -- the alternative (two daemons racing
+// state.json, which has no locking) is worse than a rare false-positive
+// refusal that a user can resolve with `membridge stop`.
+function isMembridgeProcess(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') return true;
+  try {
+    const r = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    if (r.status !== 0) return false;
+    return /membridge/i.test(r.stdout || '');
+  } catch {
+    return false;
+  }
+}
+
 function printChanges(result) {
   for (const c of result.changes) console.log(`  ${c.action}: ${c.file}`);
   for (const s of result.skipped || []) console.log(`  skipped ${s.project} (${s.reason})`);
@@ -135,6 +158,37 @@ function cmdDaemon() {
   util.ensureConfig();
   const config = util.getConfig();
   fs.mkdirSync(util.homeDir(), { recursive: true });
+
+  // Refuse to start a second daemon on top of a running one. Without this
+  // guard, the unconditional pid write below silently overwrites the running
+  // daemon's marker; both keep running, both scribble state.json (which has
+  // NO locking -- see the state-json-cross-process-clobber landmine), and
+  // only one is ever cleaned up by SIGTERM. Classic "flag recording a success
+  // the code never achieved" (state-claiming-unearned-success) -- claiming to
+  // be the daemon without checking whether one already exists.
+  //
+  // Aliveness alone is not enough; pids get reused. isMembridgeProcess()
+  // reads the process command line to distinguish a real peer from a random
+  // program that happened to inherit the pid. A stale pid file (dead process
+  // or live-but-not-MemBridge) falls through to the normal takeover path.
+  //
+  // Deliberately NOT a real lockfile: the plan (locked decision #4) calls for
+  // a liveness check at this scope; a lockfile is a bigger surface.
+  const existingPid = readPid();
+  if (existingPid && isRunning(existingPid)) {
+    if (isMembridgeProcess(existingPid)) {
+      const port = config.dashboardPort;
+      console.error(
+        `MemBridge is already running (pid ${existingPid}, dashboard http://127.0.0.1:${port}). ` +
+        `Refusing to start a second daemon -- run \`membridge stop\` first if you meant to restart.`
+      );
+      process.exit(1);
+    }
+    util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
+  } else if (existingPid) {
+    util.log(`pid file names dead process ${existingPid}; taking over (stale)`);
+  }
+
   fs.writeFileSync(util.pidPath(), String(process.pid));
   util.log(`daemon started (pid ${process.pid}, interval ${config.intervalSec}s, v${pkg.version})`);
 
