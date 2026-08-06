@@ -900,17 +900,6 @@ function createMockSupabase() {
       // credentials file cannot be replayed into a fresh access token. Modelled
       // faithfully (the token really is dropped) so a test can tell "the daemon
       // called this" apart from "the daemon deleted a local file and stopped".
-      if (url.pathname === '/auth/v1/logout') {
-        stats.logoutCalls++;
-        const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-        const userId = sessions.get(token);
-        if (userId) {
-          for (const [rt, uid] of refreshTokens) if (uid === userId) refreshTokens.delete(rt);
-          sessions.delete(token);
-        }
-        res.writeHead(204);
-        return res.end();
-      }
       if (url.pathname === '/auth/v1/user') {
         // What loginWithTokens calls to verify an OAuth access token. Only
         // tokens this mock issued (or a test seeded into `sessions`) resolve.
@@ -955,7 +944,10 @@ function createMockSupabase() {
       // session; anything else (GoTrue's default) ends every session the user
       // has. flags.failLogout stands in for a backend that refuses — the case
       // where sign-out must NOT report a revocation it did not get.
+      // stats.logoutCalls is bumped on every attempt (including refused ones)
+      // so a test can distinguish "we called this" from "we skipped it".
       if (url.pathname === '/auth/v1/logout') {
+        stats.logoutCalls++;
         if (flags.failLogout) return json(res, 500, { msg: 'logout unavailable' });
         const userId = authedUser(req);
         if (!userId) return json(res, 401, { msg: 'invalid JWT' });
