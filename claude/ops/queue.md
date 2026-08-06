@@ -52,6 +52,17 @@ seconds from install to visible memory. Merges cleanly into `master`.
 4. **Task 7**, the installer SHA reconciliation. The repo copy and the deployed
    copy have drifted; fetch the live script before touching either.
 5. **Task 8**, the Windows asset.
+6. **Git clean filter + UI toggle for the injected block** (scheduled
+   2026-08-05, agents not yet dispatched). Full scope is under "Logged, not
+   scheduled" below — read the entry there for the decision, the four pieces
+   of work, and the constraints. Assigned to Marco.
+7. **Invite links default to single-use, 24-hour expiry** (scheduled
+   2026-08-05, agents not yet dispatched). Two edits: `lib/server.js:2660`
+   synthesizes a 24h `expiresAt` and `maxUses: 1` when the request omits
+   them, and the invite dialog gains an explicit "generate a shareable link"
+   toggle producing the unlimited-use version. Full reasoning in
+   `decisions.md`. Migration 038 is live, so the atomic-claim plumbing this
+   default relies on already works. Assigned to Marco.
 
 ## Waiting on a human (2026-08-05)
 
@@ -95,6 +106,39 @@ something that was asked for, and neither is being fixed yet.
   re-add that withholds history can say why, and the CLI prints it, but nothing
   in the dashboard reads it. Whatever calls that route is not the React app.
   Worth resolving before anyone is told the dashboard surfaces this.
+
+- **The injected block churns tracked `CLAUDE.md` / `AGENTS.md`, so every
+  MemBridge rewrite shows up as a git edit and the block region conflicts on
+  merge — is there a way to hide it from git while keeping it on disk?**
+  Decided 2026-08-05: yes, via a git `clean` filter that strips the block
+  region between MemBridge's two delimiters before git sees the file. The
+  block stays on disk exactly as today (daemon writes to the working tree, not
+  through git), so cross-tool coverage — including Codex reading `AGENTS.md` —
+  is unchanged. `git diff` reports nothing when MemBridge rewrites; merges
+  stop conflicting on the region because it never enters the index.
+
+  **Scheduled 2026-08-05 as item 6 under "Next, in order". Agents not yet
+  dispatched — Marco to say when to start.**
+
+  Scope, ~50 lines total:
+  1. `lib/git-block-strip.js` — reads stdin, removes the block region, writes
+     stdout.
+  2. `membridge install-git-filter` subcommand — runs
+     `git config --global filter.membridge.{clean,smudge}` and writes the
+     `.gitattributes` line for `CLAUDE.md` and `AGENTS.md` in the linked
+     project.
+  3. **UI toggle in project settings** that runs the install command and
+     reports whether it took. Off by default (opt-in per user).
+  4. One-line pointer inside the injected block itself, one time only, so
+     someone seeing the churn learns the toggle exists.
+
+  Must be opt-in per machine, not per repo — git deliberately does not run
+  arbitrary code from a freshly cloned repo, so `.gitattributes` alone cannot
+  enable a filter. The UI toggle is the "once per machine" mechanism on the
+  app side; the CLI subcommand covers non-app users. What NOT to do: don't
+  gitignore the whole file (the surrounding content is legitimately tracked);
+  don't use `--skip-worktree` (hides all edits, and doesn't survive a fresh
+  clone).
 
 ## Fixed 2026-08-03, in the working tree, not yet committed
 
