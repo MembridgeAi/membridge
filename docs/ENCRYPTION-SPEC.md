@@ -4,8 +4,77 @@ _For Marco (and his Claude). Written after a working crypto spike proved the rou
 trip. Goal: agree on the model before either of us touches real code, because this
 breaks the server-rendered feed and can't be shipped one-sided._
 
-_Status: proposal. "Decided" items are Andrew's recommendation; "Open" items we settle
-together. Last updated: 2026-07-16._
+_Status: **this document is the original design proposal, written 2026-07-16, before any
+of it was built.** Encryption shipped in 0.1.0. Sections 1–10 are preserved as written —
+they record what was agreed, not what exists — so several of their "open questions" have
+since been settled and a few of their statements are now out of date. **§0 below is the
+correction layer: it states what actually shipped and, more importantly, what it does not
+protect.** Read §0 before quoting anything from §1–10._
+
+---
+
+## 0. What shipped, and what it does not protect
+
+Encryption is on by default and fail-closed. Content is `secretbox`-encrypted with a
+per-team key sealed to each member's public key; private keys stay in the OS keychain and
+are never uploaded. The eight content fields sealed into the ciphertext are exactly
+`ask`, `summary`, `goal`, `decisions`, `gotchas`, `files`, `changes`, `headline`
+(`encryptRow`, `lib/teamsync.js`). File paths ARE encrypted — §3's open question was
+settled in favour of encrypting them.
+
+The three limitations below are not hypothetical and not scheduled fixes. They are the
+current, shipped behaviour, and any public security claim has to be written around them.
+
+### 0.1 A routing envelope travels OUTSIDE the ciphertext, in clear
+
+Every synced row carries, in plaintext, at rest and on the wire:
+
+`project_id`, `author_id`, **`author_name`**, `ts`, `source` (which AI tool), `session`,
+plus the `nonce` and `key_epoch`.
+
+These are the fields upserts and threading need, so they cannot be sealed without a
+different schema. `author_name` is a **human display name**, and it is the one that
+matters: the server holds a real person's name against every session timestamp, every tool
+they used, and every project they touched. That is a social graph of who worked on what,
+when, and with which tool — readable by anyone with database access, including us as the
+operators.
+
+So the accurate claim is **"the server cannot read your content"**, not "the server stores
+ciphertext only" and not "nothing readable is stored on the server". The content is sealed.
+The envelope is not.
+
+### 0.2 Project-level revocation is enforced by the server, not by cryptography
+
+**One team key spans every project in the team.** A member removed from a single project
+while remaining on the team still legitimately needs that key for the projects they kept,
+so there is no rotation that expresses "you may read Q but no longer P".
+
+What stops them reading the revoked project is **Postgres row-level security alone**:
+`team_keys` SELECT is gated on `is_team_member` and never on `can_see_project`, and
+`reconcileTeamKeys` takes its seal targets from team membership with no project filter — so
+a member revoked from one project is still sealed into every future key epoch. Project
+access is a server-side check inside a product that otherwise sells end-to-end encryption,
+and it is the weaker of the two guarantees by a wide margin. A revoked member who kept a
+copy of the team key and could bypass RLS — an operator, a leaked service-role key, a
+future policy bug — could decrypt that project's rows.
+
+Fixing this properly needs project-scoped keys and a schema change. It is flagged, not
+built. Do not describe project revocation as cryptographic, key-based, or end-to-end.
+
+### 0.3 Team-level REMOVAL is cryptographic — do not confuse it with 0.2
+
+Removing someone from the **team** is a genuinely different and genuinely stronger
+operation. `removeMember` calls `rekeyTeam`, which mints a new team-key epoch sealed only
+to the remaining members, so the removed device cannot read anything written afterwards.
+When rotation cannot run (the `team.encrypt=false` hatch, or a failure) it reports that
+plainly rather than claiming a success it did not achieve.
+
+Two honest bounds on it, both by design:
+
+- **Forward-only.** Old epochs are not re-encrypted, so history the removed member already
+  pulled stays readable to them. No rotation can undo a copy someone already holds.
+- **TOFU applies.** A member whose public key changed is withheld from the new epoch until
+  verified, which is surfaced rather than silently applied.
 
 ---
 
@@ -53,6 +122,7 @@ round trip verified both directions, ~48-byte fixed overhead per blob (negligibl
 - `key_epoch` (int) — which team-key version encrypted this row
 - `files` — **open question:** encrypt these too, or keep as metadata? File paths can leak
   intent/structure. Recommend encrypting them into the same payload for v1.
+  _(Settled: they ARE encrypted, inside the same payload. See §0.)_
 
 New tables:
 
@@ -64,6 +134,11 @@ New tables:
 **What the server can see:** ciphertext blobs, nonces, which member a sealed key is for,
 timestamps, epochs, and (unless we encrypt them) file paths. **What it cannot see:** any
 summary/prompt text, any private key, or the raw team key.
+
+> **Correction (this list is incomplete as written — see §0.1).** File paths ended up
+> encrypted, but the shipped rows also carry `project_id`, `author_id`, **`author_name`**,
+> `ts`, `source` and `session` in clear. The display name in particular is readable server
+> side against every timestamp, tool and project. §0.1 has the full envelope.
 
 ---
 
@@ -118,6 +193,9 @@ man-in-the-middle the whole thing.** Authenticity, not scrambling, is the real r
 - **Rotation:** on member removal, mint a new team-key epoch sealed only to remaining
   members; new data uses the new epoch (decide: re-encrypt old data, or leave old epochs
   readable to those who had them).
+  _(Settled and shipped: `removeMember` calls `rekeyTeam`, and old epochs are NOT
+  re-encrypted — rotation is forward-only. This covers removal from the TEAM only;
+  per-project revocation has no cryptographic equivalent. See §0.2 and §0.3.)_
 - **Do not roll your own crypto.** Use libsodium primitives as-is, and get **one
   cryptographer to review the key-management + rotation design before any security claim is
   written publicly.**

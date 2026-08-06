@@ -74,7 +74,13 @@ MemBridge is watching, local-only or shared, with a week of stats per
 project.
 
 Open a project and you get its own merged stream: your sessions and your
-teammates', interleaved, plus an access panel for who can see it.
+teammates', interleaved, plus an access panel for who can see it. That panel is
+enforced by server-side database rules rather than by encryption — one team key
+spans every project, so unticking someone here stops the server serving them the
+project, but does not take a key away from them. Removing someone from the
+**team** is the stronger operation: it rotates the key so they cannot read
+anything written afterwards. The
+[encryption spec](ENCRYPTION-SPEC.md) §0.2–0.3 spells out both.
 
 <img src="screenshots/project-page.png" alt="A project page: your and your teammates' sessions in one stream, each entry leading with what got done" width="100%">
 
@@ -82,9 +88,17 @@ The **Copy for AI** button on a project page puts a trimmed, redacted digest
 on your clipboard, for pasting into ChatGPT, claude.ai, or any web AI that
 can't see your disk.
 
-**Members** handles roles, invites, and the audit trail; **Insights** rolls
-up team-wide savings and severity tiers. Both are team-only; a solo install
-never shows them.
+**Members** handles roles, invites, and the audit trail; **Insights** aggregates
+team *activity* — sessions and summaries per person, which projects are busiest,
+how concentrated knowledge is, and what looks silently broken, in severity
+tiers. Both are team-only; a solo install never shows them.
+
+**Insights does not show team-wide token savings, and cannot.** A teammate's
+token counts live on their machine; the team sync moves ciphertext and carries
+no token figures by design, so no server-side component can compute a team,
+per-seat or per-person savings number. The savings figures anywhere in the app
+are **your own machine's ledger** — including "times memory helped" on the
+Insights page, which is this install's cumulative count, not the team's.
 
 <img src="screenshots/team.png" alt="The Members view: teammates, roles, invites, and the audit trail" width="100%">
 
@@ -137,6 +151,20 @@ local memory alone.
 deletes that project's `.membridge/` folder — its whole local memory history,
 which nothing rebuilds. Use `membridge remove --keep-memory` if you only want
 the blocks gone.
+
+> **These delete local data only.** `membridge remove`, the **Remove block**
+> button, and the project Delete dialog all act on this machine: the
+> `.membridge/` folder, the injected blocks, and the local team-archive cache.
+> **None of them removes entries you have already synced to a team backend.**
+> Archiving a shared project archives it; it does not delete the rows.
+>
+> **There is currently no way for you to delete your own synced team entries.**
+> The daemon has the endpoints and the database has the deletion function, but
+> nothing in the app or the CLI calls them yet, so there is no button and no
+> command to point you at. Until that ships, removing your synced entries means
+> asking a team owner. This is a known gap, stated here rather than glossed —
+> if you need your data gone before it lands, say so and it will be done by
+> hand.
 
 Each project also gets a structured memory database in `.membridge/`:
 `memory.json` (every update as a structured entry, plus an ignore-aware index
