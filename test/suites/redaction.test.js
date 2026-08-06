@@ -1374,6 +1374,70 @@ async function main() {
       assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s}`);
     }
   });
+  // Home directories and usernames. The team boundary is the ONLY place this
+  // may happen: redactText is shared with the local injected block, where the
+  // real path is the product (an agent handed `~/x` cannot open the file), so
+  // a blanket fix in redactDefault would have broken the feature to fix the
+  // leak. Nothing scrubbed these anywhere before — this repo's own injected
+  // block carries `/Users/andrewbrown/...` — while the README claims private
+  // paths are scrubbed.
+  check('redact: scrubHomePaths collapses every home-directory shape to ~, keeping the tail', () => {
+    const cases = [
+      ['/Users/andrewbrown/membridge/lib/redact.js', '~/membridge/lib/redact.js'],
+      ['/home/andrew/src/app.py', '~/src/app.py'],
+      ['C:\\Users\\Andrew Brown\\code\\app.cs', '~\\code\\app.cs'],
+      ['/mnt/c/Users/andrew/proj/x.ts', '~/proj/x.ts'],
+      ['read /Users/marco/.claude/settings.json then /home/marco/.zshrc', 'read ~/.claude/settings.json then ~/.zshrc'],
+      // Bare home with no tail still loses the username.
+      ['cd /Users/andrewbrown', 'cd ~'],
+    ];
+    for (const [input, want] of cases) {
+      assert.strictEqual(redactLib.scrubHomePaths(input), want, `home path not scrubbed: ${input}`);
+      assert.ok(!redactLib.scrubHomePaths(input).toLowerCase().includes('andrew')
+        || /marco/.test(input), `username survived: ${input}`);
+    }
+    // Negatives: nothing that is not a home path may move.
+    for (const s of ['/usr/local/bin/node', 'lib/redact.js', 'the /Users/ directory itself',
+      '/var/folders/xy/T/tmpfile', 'https://example.com/home/index.html']) {
+      assert.strictEqual(redactLib.scrubHomePaths(s), s, `false positive on: ${s}`);
+    }
+  });
+
+  check('redact: scrubHomePaths is NOT part of the default table — the local block keeps its real paths', () => {
+    const p = '/Users/andrewbrown/membridge/lib/redact.js';
+    assert.strictEqual(redactLib.redactDefault(p), p,
+      'the shared default table must not scrub home paths — the local injected block depends on them');
+    assert.strictEqual(digest.redactText(p, digest.compileRedactions({})), p,
+      'digest.redactText feeds the LOCAL block and must stay path-preserving');
+  });
+
+  // The boundary itself: what actually crosses to a teammate and to the server.
+  check('teamsync: entryToRow scrubs home paths out of every field that crosses the wire', () => {
+    const cr = { userId: 'u1', displayName: 'Me' };
+    const rx = digest.compileRedactions({});
+    const row = teamsync.entryToRow({
+      ts: 't1',
+      source: 'Claude Code',
+      session: 's1',
+      ask: 'open /Users/andrewbrown/membridge/lib/redact.js and fix it',
+      goal: 'ship /home/andrew/src/app.py',
+      decisions: '- keep /Users/andrewbrown/notes.md out of git',
+      gotchas: '- C:\\Users\\Andrew\\AppData is read-only',
+      summaryFull: 'edited /Users/andrewbrown/membridge/lib/teamsync.js',
+      headline: 'Fixed /Users/andrewbrown/membridge',
+      files: ['/Users/andrewbrown/elsewhere/notes.md'],
+      changes: [{ file: '/Users/andrewbrown/elsewhere/notes.md', note: 'moved /home/andrew/tmp/x' }],
+    }, 'p1', cr, true, rx);
+    const wire = JSON.stringify(row);
+    assert.ok(!/\/Users\/andrewbrown/.test(wire), `a macOS home path crossed the wire -> ${wire}`);
+    assert.ok(!/\/home\/andrew\b/.test(wire), `a Linux home path crossed the wire -> ${wire}`);
+    assert.ok(!/Users\\Andrew/.test(wire), `a Windows home path crossed the wire -> ${wire}`);
+    // The tail is what a teammate actually needs, and it must survive.
+    assert.ok(/membridge\/lib\/redact\.js/.test(row.ask), `path tail lost -> ${row.ask}`);
+    assert.ok(/src\/app\.py/.test(row.goal), `path tail lost -> ${row.goal}`);
+    assert.ok(/elsewhere\/notes\.md/.test(JSON.stringify(row.files)), `file tail lost -> ${JSON.stringify(row.files)}`);
+  });
+
   check('redact: session-id UUIDs are never redacted (load-bearing for the hook)', () => {
     const uuid = '1f0e5d5d-1603-4ea6-8b41-832bf6d27195';
     assert.strictEqual(redactLib.redactDefault(uuid), uuid);
