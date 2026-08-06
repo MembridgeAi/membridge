@@ -192,6 +192,106 @@ function opMutants(src) {
 
 const STUB_VALUES = ['null', 'true', 'false', '[]', "''", '0', '{}'];
 
+// ---- guard deletion ----
+//
+// `if (!allowed) return nothing;` has NO OPERATOR TO FLIP. Operator mutation is
+// structurally blind to it: there is no ===, no &&, no boolean literal, so the
+// scanner walks straight past the single line that decides whether a revoked
+// teammate's content gets served. That blindness was found the hard way — the
+// mayServeTeammateNotes gate in lib/server.js's projectDetail had to be deleted
+// BY HAND to learn whether anything covered it, and a clean operator-mode
+// result over that region meant nothing about the line that mattered most.
+//
+// Most access control in this codebase has that shape: an early return that
+// refuses, a guard that fails closed, a check whose whole job is to NOT do
+// something. So the mutation is the real-world edit that reintroduces a
+// fail-open bug — remove the guard and let execution fall through.
+//
+// Deleted whitespace-for-whitespace, newlines preserved, so every reported line
+// number still points at the original source.
+const GUARD_STARTERS = ['return', 'continue', 'break', 'throw'];
+
+// Index of the `}` closing the `{` at openIdx, or -1.
+function matchingBrace(src, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+function guardMutants(src) {
+  const code = blankNonCode(src);
+  const mutants = [];
+  for (let i = 0; i < code.length; i++) {
+    if (!code.startsWith('if', i)) continue;
+    if (/[\w$.]/.test(code[i - 1] || ' ')) continue;   // `notify`, `.if`, `elseif`
+    if (/[\w$]/.test(code[i + 2] || ' ')) continue;
+    const openParen = code.indexOf('(', i);
+    if (openParen === -1 || code.slice(i + 2, openParen).trim() !== '') continue;
+    let depth = 0, closeParen = -1;
+    for (let j = openParen; j < code.length; j++) {
+      if (code[j] === '(') depth++;
+      else if (code[j] === ')') { depth--; if (depth === 0) { closeParen = j; break; } }
+    }
+    if (closeParen === -1) continue;
+
+    // What follows the condition: either `{ ...one statement... }` or a bare
+    // statement. Either way it must be a pure refusal — return/continue/break/
+    // throw and nothing else. A guard with side effects is not a guard, and
+    // deleting it would test something other than the access decision.
+    let k = closeParen + 1;
+    while (k < code.length && /\s/.test(code[k])) k++;
+    let end = -1, body = '';
+    if (code[k] === '{') {
+      const close = matchingBrace(code, k);
+      if (close === -1) continue;
+      body = code.slice(k + 1, close).trim();
+      end = close + 1;
+    } else {
+      // Bare statement: to the first `;` at paren/brace depth 0.
+      let d = 0, semi = -1;
+      for (let j = k; j < code.length; j++) {
+        const c = code[j];
+        if (c === '(' || c === '[' || c === '{') d++;
+        else if (c === ')' || c === ']' || c === '}') d--;
+        else if (c === ';' && d === 0) { semi = j; break; }
+        else if (c === '\n' && d === 0 && code.slice(k, j).trim()) {
+          // A guard whose body is on the next line is still a guard, but an
+          // `if` with no `;` before a newline is usually a multi-line block we
+          // already handled — bail rather than guess.
+          if (!/^(?:return|continue|break|throw)\b/.test(code.slice(k, j).trim())) break;
+        }
+      }
+      if (semi === -1) continue;
+      body = code.slice(k, semi).trim();
+      end = semi + 1;
+    }
+    if (!body) continue;
+    if (!GUARD_STARTERS.some(w => new RegExp(`^${w}\\b`).test(body))) continue;
+    // One statement only. A body with an inner `;` is doing work as well as
+    // refusing, and this operator has nothing to say about it.
+    if (body.replace(/;+\s*$/, '').includes(';')) continue;
+    // An `else` means both branches are live; deleting the `if` alone leaves a
+    // dangling else and would not compile anyway.
+    if (code.slice(end).trimStart().startsWith('else')) continue;
+
+    const removed = src.slice(i, end);
+    const line = src.slice(0, i).split('\n').length;
+    mutants.push({
+      id: `guard@${line}`,
+      line,
+      kind: 'guard',
+      desc: `guard deleted: ${removed.replace(/\s+/g, ' ').slice(0, 90)}`,
+      // Whitespace of identical length, newlines kept, so line numbers hold.
+      src: src.slice(0, i) + removed.replace(/[^\n]/g, ' ') + src.slice(end),
+      context: src.split('\n')[line - 1].trim().slice(0, 100),
+    });
+  }
+  return mutants;
+}
+
 // Top-level `function NAME(args) { ... }` declarations. Deliberately only
 // top-level: a nested helper replaced by a constant usually breaks the module
 // at require time, which reads as "killed" without any test having looked.
@@ -228,6 +328,30 @@ function stubMutants(src) {
   return mutants;
 }
 
+// HOW a mutant died, because the two answers are not equally good evidence.
+//
+//   assertion — a check FAILED. A test looked at the behaviour the guard
+//               controls and said it was wrong. This is the evidence you want:
+//               the suite can tell "allowed" from "denied".
+//   crash     — the suite died (no tally). Something broke; nobody established
+//               that the WRONG PERSON WAS SERVED. A deleted guard often makes
+//               the code fall through into a TypeError on the value the guard
+//               was protecting against, and that kills the mutant for a reason
+//               unrelated to access control. Counted as a kill, reported
+//               separately, and worth strictly less.
+//
+// This matters most for guard mode, which is exactly where fall-through
+// crashes are likeliest.
+function killKind(out) {
+  const text = String(out || '');
+  const asserted = /(?:^|\|\s)\s*FAIL {2}/m.test(text) || /failing checks:/.test(text);
+  const crashed = /^CRASH /m.test(text) || /RESULT INCOMPLETE/.test(text) || /CRASHED with an UNKNOWN/.test(text);
+  if (asserted && crashed) return 'assertion+crash';
+  if (asserted) return 'assertion';
+  if (crashed) return 'crash';
+  return 'unknown';
+}
+
 function runSuites(suites) {
   const r = spawnSync(process.execPath, [path.join(__dirname, 'run.js'), ...suites],
     { cwd: REPO, encoding: 'utf8', timeout: 15 * 60 * 1000 });
@@ -240,7 +364,12 @@ function main() {
   const targetPath = path.join(REPO, args.target);
   const original = fs.readFileSync(targetPath, 'utf8');
 
-  let mutants = args.mode === 'stub' ? stubMutants(original) : opMutants(original);
+  const GENERATORS = { ops: opMutants, stub: stubMutants, guard: guardMutants };
+  if (!GENERATORS[args.mode]) {
+    console.error(`unknown --mode ${JSON.stringify(args.mode)}; expected one of ${Object.keys(GENERATORS).join(', ')}`);
+    process.exit(1);
+  }
+  let mutants = GENERATORS[args.mode](original);
   // Zero mutants is a TOOL failure, never a clean bill of health. See the
   // blanker's header: a parse desync produced exactly this, and printed a
   // green-looking `0 killed, 0 SURVIVED`.
@@ -307,16 +436,30 @@ function main() {
         if (m.fn) seenSurvivingFn.add(m.fn);
         console.log(`SURVIVED  ${m.id.padEnd(42)} L${String(m.line).padEnd(5)} ${m.context}`);
       } else {
-        killed.push(m);
-        console.log(`killed    ${m.id.padEnd(42)} L${m.line}`);
+        const kind = killKind(r.out);
+        killed.push({ ...m, kind });
+        console.log(`killed(${kind.padEnd(16)}) ${m.id.padEnd(30)} L${m.line}`);
       }
     }
   } finally {
     restore();
   }
 
+  const byKind = k => killed.filter(m => m.kind === k).length;
+  const byAssertion = killed.filter(m => /assertion/.test(m.kind || '')).length;
   console.log(`\n${killed.length} killed, ${survived.length} SURVIVED, of ${killed.length + survived.length} run`
     + (unparseable ? ` (${unparseable} more did not parse and were not scored)` : ''));
+  if (killed.length) {
+    console.log(`  of the kills: ${byAssertion} by a FAILING ASSERTION (a test judged the behaviour), `
+      + `${byKind('crash')} by CRASH ONLY (something broke; nothing established the behaviour was wrong)`
+      + (byKind('unknown') ? `, ${byKind('unknown')} unclassified` : ''));
+    if (byKind('crash')) {
+      console.log('  A crash-only kill is WEAKER evidence than an assertion kill: a deleted guard often falls');
+      console.log('  through into a TypeError on the very value it was protecting against, which kills the');
+      console.log('  mutant for a reason unrelated to the access decision. Treat those lines as unproven.');
+      for (const m of killed.filter(x => x.kind === 'crash')) console.log(`    ${args.target}:${m.line}  ${m.desc}`);
+    }
+  }
   if (survived.length) {
     console.log('\nSurvivors — the suites run here do not distinguish these from the real code:');
     for (const m of survived) console.log(`  ${args.target}:${m.line}  ${m.desc}\n      ${m.context}`);
