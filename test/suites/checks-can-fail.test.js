@@ -220,7 +220,13 @@ async function main() {
     assert.ok(monolith.checks.length > 800,
       `only ${monolith.checks.length} check(...) calls parsed out of run-tests.js — the scanner stopped early`);
     const suites = scanned.filter(s => s.file.startsWith('test/suites/'));
-    assert.ok(suites.every(s => s.file === 'test/suites/checks-can-fail.test.js' || s.checks.length > 0),
+    // No file is exempt, this one included. The self-exemption that used to sit
+    // here was never load-bearing — this file parses to 16+ checks, and did so
+    // even under the desynced lexer that took migration-state.test.js to zero.
+    // An unnecessary exemption in the zero-check gate is worse than none: it
+    // costs nothing to carry and stands ready to hide the one reading the gate
+    // exists to report.
+    assert.ok(suites.every(s => s.checks.length > 0),
       `a suite parsed to zero checks: ${suites.filter(s => !s.checks.length).map(s => s.file).join(', ')}`);
   });
 
@@ -252,6 +258,36 @@ async function main() {
     const live = blankNonCode(String.raw`const rx = /(['"])x\1/g;` + '\nconst after = 1;\n');
     assert.ok(/const after = 1;/.test(live),
       `code following a regex-with-quotes was swallowed: ${JSON.stringify(live)}`);
+  });
+
+  // SEC-15 addition, and the reason it is a separate check rather than one more
+  // fixture above: a BACKTICK inside a regex character class is the shape that
+  // actually took a suite to zero in the merged tree — migration-state.test.js
+  // parses its ledger rows with one — and **the length invariant cannot see
+  // it**. Measured, not assumed: with the regex arm removed the backtick
+  // fixture still comes back byte-for-byte the same LENGTH, because the
+  // backtick opens a template literal that runs to end of file and an
+  // unterminated string is length-preserving. Everything after it is blanked
+  // all the same. So length preservation is necessary and not sufficient, and
+  // the property worth asserting is the one that broke: a check written after
+  // such a regex is still FOUND.
+  //
+  // Single-quoted fixtures deliberately. Inside a template literal a backtick
+  // has to be written escaped, and the lexer would then take its escape path
+  // rather than the bare-delimiter path this exists to exercise.
+  check('scanner: a regex holding a backtick does not swallow the checks after it', () => {
+    const src = 'const m = line.match(/^\\|\\s*(\\d{3})\\s*[`\\w\\s()]*\\|/);\n'
+      + "check('the check after the regex', () => { assert.ok(thing); });\n";
+    assert.strictEqual(findChecks(src).length, 1,
+      'a regex holding a backtick swallowed the check that followed it');
+    // And the length invariant is satisfied by the very same input, which is
+    // the point: it agrees the output is fine while the code is gone. Asserted
+    // on the CODE around the check name, not the name itself — blanking string
+    // bodies is what this helper is for.
+    const blanked = blankNonCode(src);
+    assert.strictEqual(blanked.length, src.length, 'this fixture is length-preserving either way');
+    assert.ok(/assert\.ok\(thing\)/.test(blanked),
+      `the code after the regex was blanked despite the length being right: ${JSON.stringify(blanked)}`);
   });
 
   check('scanner: shape A fires on an early return that reaches no assertion', () => {
