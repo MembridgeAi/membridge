@@ -11,18 +11,52 @@
 // correct, all of them one edit from gone, none of them obvious from reading
 // the destructive lines alone. That is what this suite pins.
 //
-// RESULT: clean. Source-reading, same caveat as the MCP and Electron suites —
-// it catches a future edit removing a guard, not a misunderstanding of the
-// runtime.
+// RESULT: clean. The first five checks are source-reading, same caveat as the
+// MCP and Electron suites — they catch a future edit removing a guard, not a
+// misunderstanding of the runtime. The SIXTH is executed, and it is the one the
+// scope note under check 4 said would need "an executed test with a failing
+// prune, which needs a live sync fixture this suite does not have". It has one
+// now (test/mock-supabase.js, the same fixture team-access-fallthrough drives),
+// so the partial-failure property is demonstrated rather than inferred.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check } = h;
+const { check, ROOT, P } = h;
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const util = require('../../lib/util');
+const teamsyncLib = require('../../lib/teamsync');
+const teamArchive = require('../../lib/team-archive');
+const activityLib = require('../../lib/activity');
+const { createMockSupabase } = require('../mock-supabase');
 
 const LIB = path.join(__dirname, '..', '..', 'lib');
 const teamsync = fs.readFileSync(path.join(LIB, 'teamsync.js'), 'utf8');
 const archive = fs.readFileSync(path.join(LIB, 'team-archive.js'), 'utf8');
+
+const MOCK_PORT = P(64);
+// The planted teammate content, recognisable in a search result. Nothing
+// sensitive: a made-up word that exists only in this file.
+const BEACON = 'prunefailbeacon';
+
+const teamRow = extra => ({
+  author: 'Teammate', authorId: 'tm-prune', source: 'Claude Code',
+  ask: null, goal: null, summary: null, headline: null, gotchas: null,
+  decisions: `${BEACON} is resolved in the middleware`,
+  distilled: true, files: ['lib/middleware.js'], changes: null,
+  ...extra,
+});
+
+async function linkedProject(name, teamId, teamName) {
+  const key = path.join(ROOT, 'projects', name);
+  fs.mkdirSync(key, { recursive: true });
+  const st = util.loadState();
+  st.projects = { ...(st.projects || {}), [key]: { events: [], teamEntries: [] } };
+  util.saveState(st);
+  const link = await teamsyncLib.linkProject(util.getConfig(), key, teamId, teamName);
+  return { key, link };
+}
+
+const projRecord = key => (util.loadState().projects || {})[key];
 
 async function main() {
   // 1. TRIGGER — POSITIVE CONFIRMATION ONLY. The single most important property
@@ -75,9 +109,15 @@ async function main() {
   // `proj.teamEntries = []` ahead of the stamp leaves the suite green, because
   // the original statement is still there after it and that is what the slice
   // finds. So this is a guard against the calls being MOVED, not against a new
-  // one being ADDED earlier. Catching that properly needs an executed test with
-  // a failing prune, which needs a live sync fixture this suite does not have.
-  // Recorded rather than quietly left as an implied guarantee.
+  // one being ADDED earlier. Recorded rather than quietly left as an implied
+  // guarantee.
+  //
+  // NO LONGER THE WHOLE STORY. Check 6 at the bottom of this file now drives a
+  // real revocation pass with a prune that throws, so the CONSEQUENCE this
+  // check can only describe is demonstrated. This check stays because the two
+  // catch different things: mutation-testing both showed that removing the
+  // try/catch turns this one red on the source, while destroy-then-mark turns
+  // check 6 red on the served data. Neither subsumes the other.
   await check('the destructive calls sit after the marker is stamped', () => {
     // Scoped to the revocation branch, NOT searched across the whole file.
     // The first version used indexOf over the module and failed: the same two
@@ -119,6 +159,130 @@ async function main() {
     assert.match(archive, /function pruneArchive\(projectId\)/,
       'pruneArchive must take a project id, never a team or a wildcard');
   });
+
+  // -------------------------------------------------------------------------
+  // 6. PARTIAL FAILURE, EXECUTED — the case check 4's scope note could not reach.
+  // -------------------------------------------------------------------------
+  // Check 4 confirms the destructive calls appear AFTER the stamp in the source.
+  // It cannot prove the consequence, and it explicitly says so: inserting a new
+  // destructive statement ahead of the stamp leaves it green. The consequence is
+  // what actually matters, and it is only observable at runtime — so this drives
+  // a real revocation pass with a prune that THROWS, and asserts the state it
+  // leaves behind is one every reader refuses.
+  //
+  // WHAT THIS PROVES THAT THE SOURCE READ DID NOT:
+  //   1. A prune failure does not abort the sync pass (the try/catch is real,
+  //      not decorative) — the pass reports no error and the OTHER project in
+  //      the same team still syncs.
+  //   2. When the prune fails, the archive rows are still ON DISK. That is
+  //      asserted, not assumed, because without it the next assertion would be
+  //      trivially true: "nothing is served" is worthless if nothing survived.
+  //   3. With those rows sitting on disk, search_memory serves NONE of them.
+  //      The marker was stamped before the destruction started, so a half-
+  //      deleted archive reads as revoked rather than as authorised.
+  //
+  // The mock is the same one team-access-fallthrough drives. Two linked
+  // projects, not one: visibleProjectIds turns an EMPTY list into null
+  // (inconclusive), so a lone revoked project would take the fall-through
+  // branch and this test would silently exercise nothing. The kept project is
+  // what makes the probe conclusive and the revocation branch actually run.
+  const mock = createMockSupabase();
+  await new Promise(r => mock.server.listen(MOCK_PORT, '127.0.0.1', r));
+  process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${MOCK_PORT}`;
+  process.env.MEMBRIDGE_TEAM_ANON_KEY = 'anon-test';
+  const realPrune = teamArchive.pruneArchive;
+
+  try {
+    util.ensureConfig();
+    // The documented escape hatch every other team suite uses: keeps the mock
+    // round trip off the real macOS keychain.
+    const cfg = util.loadUserConfig();
+    cfg.team = { ...(cfg.team || {}), encrypt: false };
+    util.saveUserConfig(cfg);
+
+    await teamsyncLib.signup(util.getConfig(), 'prune@test.dev', 'pw-prune', 'Pruner');
+    const team = await teamsyncLib.createTeam(util.getConfig(), 'PruneCo');
+    const revoked = await linkedProject('prune-revoked-app', team.team_id, 'PruneCo');
+    const kept = await linkedProject('prune-kept-app', team.team_id, 'PruneCo');
+
+    // Both lanes of teammate data: the working cache on the project record, and
+    // the durable archive behind it. The archive is the half the prune is
+    // supposed to destroy, so it is the half whose survival makes this test
+    // meaningful.
+    {
+      const st = util.loadState();
+      st.projects[revoked.key].teamEntries = [
+        teamRow({ session: 'prune-cache-1', ts: new Date(Date.now() - 3600000).toISOString() }),
+      ];
+      util.saveState(st);
+    }
+    teamArchive.appendRows(revoked.link.projectId, [
+      teamRow({ session: 'prune-archive-1', ts: '2026-06-01T00:00:00.000Z' }),
+    ]);
+
+    // PRECONDITION, loud and named. If the planted rows do not render, every
+    // assertion after the revocation is vacuously true — "no rows served" would
+    // be a statement about an empty fixture, not about the guard.
+    await check('fixture precondition: both teammate lanes are served BEFORE the revocation', () => {
+      const before = activityLib.searchMemory({ query: BEACON });
+      const sessions = before.results.map(r => r.session).sort();
+      assert.deepStrictEqual(sessions, ['prune-archive-1', 'prune-cache-1'],
+        'the planted cache row and archive row did not both come back — the ' +
+        `post-revocation assertions would prove nothing. Got: ${JSON.stringify(sessions)}`);
+    });
+
+    // The synthetic failure. teamsync.js calls teamArchive.pruneArchive through
+    // the module object, so replacing the export is enough — no source edit.
+    teamArchive.pruneArchive = () => {
+      throw new Error('synthetic prune failure planted by test/suites/destructive-paths.test.js');
+    };
+    // Revoke exactly one project. The other stays visible, which is what keeps
+    // the probe conclusive.
+    for (const p of mock.projects) if (p.id === revoked.link.projectId) p.archivedAt = new Date().toISOString();
+
+    const res = await teamsyncLib.syncTeams({});
+
+    await check('a prune that throws does not abort the sync pass', () => {
+      assert.deepStrictEqual(res.errors, [],
+        'the failing prune surfaced as a sync error — it is best-effort by ' +
+        `design and must not abort the pass: ${JSON.stringify(res.errors)}`);
+      assert.ok(res.synced.includes(kept.key),
+        'the unrevoked project in the same team stopped syncing because a ' +
+        `different project's prune threw: ${JSON.stringify(res.synced)}`);
+    });
+
+    await check('the marker is stamped and the cache cleared even though the prune threw', () => {
+      const proj = projRecord(revoked.key);
+      assert.ok(proj.teamAccessLost,
+        'the revocation marker was never stamped, so nothing on this machine ' +
+        'records that the project may not be read — this is the destroy-then-' +
+        'mark ordering the source check cannot rule out');
+      assert.deepStrictEqual(proj.teamEntries, [], 'the cached teammate rows survived the revocation');
+    });
+
+    await check('the archive really did survive the failed prune (so the next check is not vacuous)', () => {
+      const rows = teamArchive.loadArchive(revoked.link.projectId).rows;
+      assert.strictEqual(rows.length, 1,
+        'the archive was emptied after all, which would make "no rows served" ' +
+        'a statement about an empty file rather than about the revocation guard');
+      assert.ok(fs.existsSync(teamArchive.archivePath(revoked.link.projectId)),
+        'the archive file is gone');
+    });
+
+    await check('a half-deleted archive still reads as REVOKED, not as authorised', () => {
+      const after = activityLib.searchMemory({ query: BEACON });
+      assert.deepStrictEqual(after.results, [],
+        'teammate rows the failed prune left on disk were still served. The ' +
+        'marker is stamped BEFORE the destructive calls precisely so that a ' +
+        'failure partway through leaves every reader refusing the data rather ' +
+        'than serving a half-deleted cache as if it were authorised.');
+    });
+  } finally {
+    teamArchive.pruneArchive = realPrune;
+    delete process.env.MEMBRIDGE_TEAM_URL;
+    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    await new Promise(r => mock.server.close(r));
+  }
 
   h.finish();
 }
