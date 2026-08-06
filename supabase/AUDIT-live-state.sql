@@ -19,8 +19,30 @@
 --   branch 016  -> adds device_id to member_pubkeys and team_keys, REWRITES
 --                  both primary keys, and DELETES every row in member_pubkeys
 --
--- Until we know which one production has, applying either is a coin flip, and
--- one of them is destructive. Section 1 settles it.
+-- ANSWERED, 2026-08-05, read-only against mefgbiecvoszjorwzkfz:
+-- **MASTER 016 IS LIVE. BRANCH 016 IS NOT.** Section 1's four checks returned
+--
+--   member_pubkeys.device_id exists          no
+--   team_keys.device_id exists               no
+--   team_keys_delete_own policy exists       YES
+--   team_keys PK                             team_id, epoch, member_user_id
+--   member_pubkeys PK                        user_id
+--   member_pubkeys row count                 3
+--
+-- i.e. neither device_id column exists, both primary keys are the pre-branch
+-- shape, and the rows branch 016 would have wiped are still there. Applying
+-- branch 016 to production is therefore a destructive schema rewrite against a
+-- table with live keys in it, not a no-op — decide it deliberately, and if the
+-- per-device model is wanted, write it as a new numbered migration rather than
+-- applying a file whose number is already spent.
+--
+-- The header used to say "nobody can currently say what is actually applied in
+-- production" and called applying either 016 "a coin flip". That was true when
+-- written and is not true now, and leaving it standing is what kept the 016
+-- reconcile on the open list from launch onward: the file that exists to settle
+-- the question was itself asserting the question could not be settled. RE-RUN
+-- THIS SCRIPT rather than trusting the block above — that is the whole point of
+-- it, and the answer above is a snapshot with a date on it, not a guarantee.
 -- ---------------------------------------------------------------------------
 
 -- 1. WHICH 016 IS LIVE?  (the blocking question)

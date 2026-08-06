@@ -98,7 +98,18 @@
 -- or `or replace` (011 §1's note), so each is dropped then created — the
 -- convention every policy change here follows, and what makes this re-runnable.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- APPLIED — live on project mefgbiecvoszjorwzkfz, verified read-only 2026-08-05.
+-- This line said "UNAPPLIED AS OF THIS COMMIT" while both policies below were
+-- already in force, and claude/ops/queue.md repeated it — so the next session
+-- was told a closed hole was still open and would have budgeted work against
+-- it. Re-check it, do not trust it:
+--
+--   select polname, pg_get_expr(polwithcheck, polrelid) from pg_policy
+--    where polrelid = 'public.memory_entries'::regclass order by polname;
+--
+-- Both memory_entries_insert and memory_entries_update returned
+-- `... AND can_see_project(project_id)` at the time of writing, matching §1 and
+-- §2 below. A member revoked from a project can no longer write into it.
 
 -- ---------------------------------------------------------------------------
 -- 1. INSERT. Adds the third conjunct only; the first two are restated verbatim
@@ -146,9 +157,16 @@ create policy memory_entries_update on public.memory_entries
 -- ---------------------------------------------------------------------------
 -- 3. WHAT THIS DOES NOT TOUCH, ON PURPOSE.
 --
---   * DELETE. memory_entries has no delete policy at all, and RLS defaults
---     closed, so nobody can delete through the API today. Adding one here to
---     "be consistent" would OPEN a capability that does not exist. Left alone.
+--   * DELETE. SUPERSEDED BY 035 — read that, not this. When this file was
+--     written memory_entries had no delete policy and RLS defaults closed, so
+--     nobody could delete through the API and adding one here would have OPENED
+--     a capability that did not exist. 035_delete_own_entries.sql has since
+--     added `memory_entries_delete` (`author_id = auth.uid()`), live and
+--     verified 2026-08-05, so the premise of this bullet is gone. What survives
+--     is the decision: deletion is scoped on authorship alone and is NOT gated
+--     on can_see_project, so revocation from a project does not remove the
+--     author's ability to delete their own rows in it. That is deliberate —
+--     see 035 §1 for the reasoning.
 --   * A member's OWN already-published rows in a project they have since been
 --     revoked from. Those stay in the table and stay visible to everyone who
 --     can see the project. Revocation is forward-looking here, exactly as it is

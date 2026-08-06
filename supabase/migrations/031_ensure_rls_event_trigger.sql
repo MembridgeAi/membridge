@@ -11,6 +11,55 @@
 -- migration, by the dashboard, or by a `create table as` in a one-off script —
 -- ships readable by anyone with the anon key until somebody notices.
 --
+-- UNAPPLIED AS OF 2026-08-05, and the ONLY numbered migration that still is.
+-- Verify: select pg_get_functiondef(oid) from pg_proc where proname =
+-- 'rls_auto_enable'; -- the live body still has the log-and-continue exception
+-- branch this file replaces. State is recorded in supabase/MIGRATION-STATE.md
+-- and nowhere else; do not restate it in claude/ops/ or a handoff.
+--
+-- THE LIVE BODY HAS NOW BEEN READ (read-only, 2026-08-05) AND DIFFED AGAINST
+-- THIS FILE. Three differences, one of which must be fixed before applying:
+--
+--   1. The exception branch. Live logs and continues; this file logs and then
+--      RAISES, rolling back the CREATE. This is the intended change and the
+--      whole reason the file exists.
+--
+--   2. **object_type — A DEFECT IN THIS FILE, FIX BEFORE APPLYING.** Live
+--      filters `object_type IN ('table','partitioned table')`. §1 below filters
+--      `obj.object_type = 'table'`, which drops partitioned tables from the
+--      guardrail entirely: one created in `public` would be skipped before the
+--      begin/exception block is even reached, so it gets no RLS AND no error —
+--      created silently without row-level security, the exact outcome this
+--      migration exists to prevent. A guardrail with a hole in its own filter is
+--      worse than the permissive version it replaces, because it reads as
+--      protection. Pinned as a failing check in test/suites/rls-guardrail.test.js
+--      so it cannot be applied unnoticed. One-line fix.
+--
+--   3. Live also RAISE LOGs on success and on skip; this file logs neither.
+--      Minor, but it means you can no longer see the net firing correctly in the
+--      logs, only failing. Worth restoring while fixing (2).
+--
+-- IS IT SAFE TO APPLY (once (2) is fixed)? Yes, on the evidence:
+--   * All 15 tables in `public` are owned by `postgres`, and rls_auto_enable is
+--     also owned by `postgres`, so its SECURITY DEFINER `alter table` runs as
+--     the owner of every table it touches. The most common failure — "new table
+--     is not owned by the owner of rls_auto_enable" — cannot arise in the
+--     current configuration.
+--   * Every table in `public` currently HAS RLS enabled. That is the evidence
+--     that the alter has never failed in practice, which means the permissive
+--     exception branch has never actually fired. Nothing today relies on it.
+--   * Migrations here are applied through the SQL editor, which runs as
+--     `postgres`, so tables created in future land under the same ownership.
+-- Applying it therefore converts a branch that has never been taken from silent
+-- to loud. That is the entire behavioural change.
+--
+-- WHAT IT STILL DOES NOT COVER. This net only fires on CREATE. It does nothing
+-- about a table that already exists having RLS turned back off, and nothing
+-- about table-level GRANTs — see the note on onboarding_invites in
+-- supabase/MIGRATION-STATE.md, which is protected by RLS alone because its
+-- blanket anon/authenticated grant was never revoked the way 010:153 revoked
+-- invite_attempts.
+--
 -- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` IN THIS PROJECT.
 -- supabase_migrations.schema_migrations holds only TWO rows, so none of the
 -- repo's numbered files is recorded as applied and a push would attempt all

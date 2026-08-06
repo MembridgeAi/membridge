@@ -159,14 +159,41 @@ Two things went out that need stating plainly:
   matching the CI asset. Nothing verifies these agree — publishing to the site
   repo is a required release step, not an optional one.
 
-**Still open from this batch:** migrations 028-034 are committed and UNAPPLIED
-(028 then 029 in order, in the SQL editor, never `db push`; diff 031 against live
-first, it is a reconstruction). Until 033 is applied, revoking a member's access
-still does not cover what they can write. Also open: duplicate `membridge` /
-`Membridge` projects (needs a data write), `--text3` WCAG contrast, the Windows
-daemon-restart flake plus `run.js` folding a crashed suite's partial count into a
-green-looking total, `readAccess` defaulting a missing project row to open, and
-rows left behind by a pre-fix unlink never being pruned.
+**Still open from this batch:** only migration `031` — everything else in the
+028-035 range is LIVE. This paragraph previously said "migrations 028-034 are
+committed and UNAPPLIED" and warned that "until 033 is applied, revoking a
+member's access still does not cover what they can write". Both were false when
+written, and they pointed the next session at work that was already done, so it
+is worth stating what was actually checked (read-only against
+`mefgbiecvoszjorwzkfz`, 2026-08-05):
+
+| Migration | State | What was checked |
+|---|---|---|
+| 028 | live | `can_see_project()` exists in `pg_proc` |
+| 029 | live | `project_access` is populated (13 rows over 7 projects) |
+| 030 | live | `team_keys_insert`'s check contains `is_team_member_uid` |
+| 031 | **NOT applied** | live `rls_auto_enable` lacks 031's fail-closed body |
+| 032 | live | `projects_materialize_access` trigger exists on `projects` |
+| 033 | live | `memory_entries_insert`/`_update` both carry `can_see_project` |
+| 034 | live | index `project_access_project_member_idx` exists |
+| 035 | live | `memory_entries_delete` policy + both RPCs exist |
+
+`031` is the real remainder, and its own caveat still stands: the `ensure_rls`
+event trigger exists in production but predates this repo, so the file is a
+reconstruction of it. Diff it against live before applying — `create or replace`
+would overwrite production's copy with a reconstruction. Nothing else here needs
+the SQL editor.
+
+Also **closed, not open**: `readAccess` no longer defaults a missing project row
+to open — `lib/api-access.js:134` refuses the read outright for a non-manager.
+And `projects_insert` is gone from the live policy set (`projects` now has
+`projects_select` only), so a member can no longer POST straight to
+`/rest/v1/projects` past `link_project`.
+
+Still genuinely open: duplicate `membridge` / `Membridge` projects (needs a data
+write), `--text3` WCAG contrast, the Windows daemon-restart flake plus `run.js`
+folding a crashed suite's partial count into a green-looking total, and rows left
+behind by a pre-fix unlink never being pruned.
 
 Original entry, kept for the detail:
 

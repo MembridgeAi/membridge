@@ -62,12 +62,23 @@
 -- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` IN THIS PROJECT, for
 -- the reason 031, 032 and 033 all give. Re-runnable via `if not exists`.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- APPLIED — live on project mefgbiecvoszjorwzkfz, verified read-only 2026-08-05.
+-- This line said "UNAPPLIED AS OF THIS COMMIT" after the index already existed.
+-- Re-check it, do not trust it:
 --
--- WHAT THIS COMMIT CANNOT DEMONSTRATE. No database was available while writing
--- it, so the improvement is argued from the index/predicate mismatch above, not
--- measured. Nothing in the offline suite can execute a Postgres planner. To
--- settle it, before and after:
+--   select indexdef from pg_indexes
+--    where schemaname = 'public' and indexname = 'project_access_project_member_idx';
+--
+-- Returned, at the time of writing: CREATE INDEX project_access_project_member_idx
+-- ON public.project_access USING btree (project_key, member_id) INCLUDE (can_see)
+-- — matching the statement below exactly, including the INCLUDE column.
+--
+-- WHAT THIS COMMIT COULD NOT DEMONSTRATE, AND STILL HAS NOT. No database was
+-- available while writing it, so the improvement was argued from the
+-- index/predicate mismatch above, not measured. That is still true: the index
+-- is confirmed present, but nobody has run the planner comparison below, so
+-- the speedup remains an argument rather than a measurement. Nothing in the
+-- offline suite can execute a Postgres planner. To settle it, before and after:
 --   explain (analyze, buffers) select public.can_see_project('<a real project id>');
 -- Expect a Seq Scan (or a full index-only scan of the PK) on project_access
 -- before, and an Index Only Scan using project_access_project_member_idx after.

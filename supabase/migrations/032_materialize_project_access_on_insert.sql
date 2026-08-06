@@ -65,7 +65,18 @@
 -- Paste this file into the SQL editor, which runs it in one transaction. Every
 -- statement below is re-runnable.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- APPLIED — live on project mefgbiecvoszjorwzkfz, verified read-only 2026-08-05.
+-- This line said "UNAPPLIED AS OF THIS COMMIT" for four releases after the
+-- statements below had already been run, which is worse than saying nothing:
+-- it invites someone to re-apply a live migration, and it under-reports what
+-- the backend already enforces. Re-check it, do not trust it:
+--
+--   select pg_get_triggerdef(t.oid) from pg_trigger t
+--    where t.tgname = 'projects_materialize_access' and not t.tgisinternal;
+--
+-- Returned, at the time of writing: CREATE TRIGGER projects_materialize_access
+-- AFTER INSERT ON public.projects FOR EACH ROW EXECUTE FUNCTION
+-- projects_materialize_access() — matching §2 below exactly.
 
 -- ---------------------------------------------------------------------------
 -- 1. The trigger function.
