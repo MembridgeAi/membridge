@@ -28,6 +28,31 @@ const src = f => fs.readFileSync(path.join(LIB, f), 'utf8');
 // failure mode being guarded is a future edit dropping a call, not a bad value.
 // Stated plainly because a source-reading test is weaker evidence than an
 // executed one, and the difference matters when reading a green result.
+//
+// CONVERSION ATTEMPTED, AND WHERE IT STOPPED. The redaction checks below are
+// the ones worth executing rather than reading: a source read proves a field is
+// PASSED to the redactor, only an executed test proves a planted secret does not
+// come out the other side — and this session already found two content-bearing
+// fields on the wire that never reached the redactor at all, so the consequence
+// is proven rather than theoretical.
+//
+// The tools are drivable in-process (lib/mcp.js exports getProjectMemory,
+// searchMemory, whyFile and the rest specifically for tests), and a first pass
+// with a planted PEM in a prompt event returned no leak. That pass was NOT
+// trustworthy: the fixture produced `sessions: 0`, so nothing was rendered and
+// the assertion would have been vacuous — the same shape as this session's
+// JSON.stringify defect, caught before it was committed rather than after.
+//
+// WHAT IT WOULD TAKE, for whoever picks this up. The blocker is not the MCP
+// layer, it is building state that memorydb.buildEntries will actually turn into
+// a session: the project must be tracked in config AND on disk, and the event
+// stream needs the shape buildEntries groups on (a prompt plus at least one
+// in-project edit, with the file path resolving under the project root — see
+// the capture-containment suite for why an out-of-root file clears the project
+// and drops the session entirely). Roughly an hour, and it is worth doing
+// because the SAME fixture unlocks the executed version of several checks here
+// and the failing-prune case named in destructive-paths.test.js. Not attempted
+// further here rather than shipping a green test that proves nothing.
 const activity = src('activity.js');
 const mcp = src('mcp.js');
 const feed = src('feed.js');
