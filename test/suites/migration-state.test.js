@@ -52,11 +52,11 @@ function registryClaims() {
   const src = fs.readFileSync(RUNBOOK, 'utf8');
   const claims = new Map();
   for (const line of src.split('\n')) {
-    const m = line.match(/^\|\s*(\d{3})\s*\|([^|]*)\|([^|]*)\|/);
+    const m = line.match(/^\|\s*(\d{3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|/);
     if (!m) continue;
-    const [, num, what, branch] = m;
+    const [, num, what, branch, applied] = m;
     if (!claims.has(num)) claims.set(num, []);
-    claims.get(num).push({ what: what.trim(), branch: branch.trim() });
+    claims.get(num).push({ what: what.trim(), branch: branch.trim(), applied: applied.trim() });
   }
   return claims;
 }
@@ -328,6 +328,51 @@ async function main() {
       + 'Add a row to the table in supabase/APPLY-RUNBOOK.md — number, what it does, which branch '
       + 'holds it, whether it is applied — in the SAME commit as the migration. A number is not '
       + 'free because this branch cannot see a file using it.');
+  });
+
+  // THE REGISTRY AND THE APPLY ORDER MUST AGREE.
+  //
+  // This is the SECOND time the runbook silently lost migrations. The first was
+  // four of them, found by the SEC-14 merge; the fix was to add them. That fix
+  // did not stop it recurring, because the runbook holds TWO lists — a registry
+  // of every number, and an apply order telling Marco what to paste — and
+  // nothing made them agree. Migrations arriving from a later merge landed in
+  // the registry (which the gate checks) and not in the order (which it did
+  // not), so the artifact he actually follows was short by three.
+  //
+  // Adding the missing rows again would have been the same fix a second time.
+  // These two checks are the thing that stops a third.
+  const applyOrderNames = () => {
+    const src = fs.readFileSync(RUNBOOK, 'utf8');
+    // Every `NNN_name.sql` the runbook names ANYWHERE outside the registry
+    // table. Deliberately loose about WHERE: a migration described in prose, in
+    // a grouped table or in its own section is all equally "told to apply". The
+    // failure being caught is silence, not formatting.
+    return new Set([...src.matchAll(/`(\d{3})_[a-z0-9_]+\.sql`/g)].map(m => m[1]));
+  };
+
+  await check('every migration the registry calls unapplied appears in the apply order', () => {
+    const named = applyOrderNames();
+    const missing = [...claims.entries()]
+      .filter(([, rows]) => rows.some(r => /^\s*no\b/i.test(r.applied || '')))
+      .map(([num]) => num)
+      .filter(num => !named.has(num));
+    assert.deepStrictEqual(missing, [],
+      `the registry marks these unapplied, and the apply instructions never mention them: ${missing.join(', ')}. `
+      + 'Marco follows the apply order, not the registry — a migration missing from it is one he will '
+      + 'not apply and will get no signal about. Either add it with its check, or say explicitly that '
+      + 'it belongs to a later batch and why. "Absent" is not an answer, because absence is '
+      + 'indistinguishable from an oversight, which is exactly what it was both times.');
+  });
+
+  await check('every migration in the apply order has a registry row', () => {
+    const numbers = [...claims.keys()].map(Number);
+    const floor = Math.min(...numbers);
+    const orphans = [...applyOrderNames()]
+      .filter(num => Number(num) >= floor && !claims.has(num));
+    assert.deepStrictEqual(orphans, [],
+      `the apply order tells someone to paste these, and the registry does not claim them: ${orphans.join(', ')}. `
+      + 'The two lists are the same fact written twice; either both know about a migration or neither does.');
   });
 
   h.finish();

@@ -63,7 +63,9 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 8 | `044_removal_rotates_invite_code.sql` | Removing someone from a team also changes the team's standing invite code, so they cannot walk back in with it. *(removal lane)* |
 | 9 | `045_leave_rotates_invite_code.sql` | Same, for someone who leaves voluntarily. *(removal lane)* |
 | 10 | `046_audit_member_joined.sql` | Records in the audit trail when somebody joins a team. *(removal lane)* |
-| 11 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
+| 11 | `049_audit_member_left.sql` | Records in the audit trail when somebody leaves a team, as the mirror of 046. *(removal lane)* |
+| 12 | `050_team_audit_actor_set_null.sql` | Stops those audit rows from making a member's account undeletable. **Must not be left behind — see below.** *(removal lane)* |
+| 13 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
 
 **Why `031` is last.** It is the only one that changes how the database behaves for *future* work rather than fixing something specific, and it is the only one reconstructed from a live object rather than written from scratch. Do it when the other five are known good, so that if anything odd happens afterwards you know which change to look at.
 
@@ -86,7 +88,7 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 >
 > So the rule for this whole batch is one line: **apply everything here before the next release goes out.**
 
-There are no other ordering constraints between these eleven — confirmed by merging all three branches together and reading every header, not assumed. `041`, `044`, `045` and `046` each state in their own headers that they are order-independent, and `046` and `038` were checked against each other in both directions. Each one touches a different thing, and none of them depends on another having run first.
+There is ONE ordering constraint among these thirteen, `050` (below), and no others — confirmed by merging all three branches together and reading every header, not assumed. `041`, `044`, `045` and `046` each state in their own headers that they are order-independent, and `046` and `038` were checked against each other in both directions. Each one touches a different thing, and none of them depends on another having run first.
 
 `047` is the exception to that and is not in the table above: it changes the credential the ops panel logs in with, so it is a database step **and** a Worker deploy. It has its own section, its own order, and its own rollback.
 
@@ -176,7 +178,7 @@ Most likely it returns nothing. If it returns rows, **read them before deleting 
 
 ---
 
-### 7-10. The other lanes' four — `041`, `044`, `045`, `046`
+### 7-12. The other lanes' six — `041`, `044`, `045`, `046`, `049`, `050`
 
 These come from the backend and removal lanes rather than the security one. They are grouped because the instruction is the same for all four: **paste, then check the one behaviour each names.** Each file's own header carries the detail.
 
@@ -186,14 +188,24 @@ These come from the backend and removal lanes rather than the security one. They
 | `044_removal_rotates_invite_code.sql` | Remove a member from a test team; the team's invite code should change. Confirm the old code no longer lets them re-join. |
 | `045_leave_rotates_invite_code.sql` | Same, but have the member leave voluntarily rather than being removed. |
 | `046_audit_member_joined.sql` | Have someone join a team; a "member joined" entry should appear in that team's audit trail. It did not before. |
+| `049_audit_member_left.sql` | Have someone leave; a "member left" entry should appear, distinct from a removal. |
+| `050_team_audit_actor_set_null.sql` | See the box below — this one has a real constraint. |
 
-All four are order-independent — of each other and of everything above. `044` and `045` may be applied in either order or one without the other; `046` was checked against `038` in both directions during the merge dry run.
+> ### `050` must go in with `046` and `049` — do not apply those and leave this one
+>
+> `046` and `049` give every member audit rows naming them as the actor. `team_audit.actor_id` references the user with no delete rule, so **an account with any audit row cannot be deleted.** Before `046` a plain member had no audit rows at all, so this never bit. `050` is the fix, written by the lane that caused it.
+>
+> Applying `046`/`049` without `050` therefore makes account deletion *worse than it is today*. If you apply one, apply all three.
+>
+> `050`'s own header is worth reading if you ever handle a deletion request: it records that account deletion is blocked by **six** foreign keys, five of which predate all of this. `050` fixes one. It does not make account deletion work.
+
+`041`, `044`, `045`, `046` and `049` are order-independent — of each other and of everything above. `044` and `045` may be applied in either order or one without the other; `046` was checked against `038` in both directions during the merge dry run.
 
 **All three of the removal lane's migrations carry the same deploy gate as `038`** — apply before the client ships, not after. See the box near the top.
 
 ---
 
-### 11. `031_ensure_rls_event_trigger.sql`
+### 13. `031_ensure_rls_event_trigger.sql`
 
 **Does:** there is a safety net that switches on row-level security whenever a table is created. Today, if it fails, it writes a line to a log nobody reads and lets the table be created anyway. After this, it refuses the creation.
 
@@ -213,7 +225,7 @@ drop table public.rls_smoke_test;
 
 ---
 
-## 12. `047_ops_panel_roles.sql` — do this one separately
+## 14. `047_ops_panel_roles.sql` — do this one separately
 
 **This one is different from the six above and should not be done in the same sitting.** The others fix something and are finished when the SQL is applied. This one changes *which credential the ops panel logs in with*, so it is a database step **and** a Worker deploy, and the two have to happen in the right order.
 
