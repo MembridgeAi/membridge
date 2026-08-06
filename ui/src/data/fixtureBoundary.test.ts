@@ -40,11 +40,25 @@ import { FakeDataClient } from './FakeDataClient'
 // can quietly join.
 const CROSSED = ['mapFeedEntry', 'mapLiveSession', 'mapMember', 'mapProjectRow', 'mapSession', 'mapStreamEntry'] as const
 
-// Mappers the fixture still bypasses, with why. EMPTY, and it should stay that
-// way: adding an entry here is a deliberate statement that a boundary was left
-// open, and it needs a reason good enough to write down. Prefer converting the
-// fixture.
-const OUTSTANDING: Record<string, string> = {}
+// Mappers the fixture still bypasses, with why. Adding an entry here is a
+// deliberate statement that a boundary was left open, and it needs a reason
+// good enough to write down. Prefer converting the fixture.
+const OUTSTANDING: Record<string, string> = {
+  mapDayDigest:
+    'The FakeDataClient.getFeed transport deliberately returns dayDigests: [] '
+    + '(FakeDataClient.ts around the guard<FeedPage> return), exercising the '
+    + 'no-digest daemon shape every client must degrade to. Tests that need a '
+    + 'digest supply it by mocking getFeed with a hand-built object, so this '
+    + 'single-row mapper never sees fixture data. Converting the fixture would '
+    + 'mean either baking canonical digests into every fake feed or having the '
+    + 'fixture stop exercising the empty case, and the empty case is the one '
+    + 'that has actually broken twice.',
+  mapDayDigests:
+    'Same reason as mapDayDigest above -- getFeed returns dayDigests: [] on '
+    + 'the fake path on purpose, so this batch wrapper never runs against '
+    + 'fixture input either. Both entries belong here as long as the fake '
+    + 'transport stays digest-free.',
+}
 
 describe('the FakeDataClient/mapper boundary', () => {
   // The guard that makes the hole non-extensible. A new mapper lands in
