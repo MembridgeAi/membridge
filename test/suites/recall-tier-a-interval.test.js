@@ -127,6 +127,71 @@ function main() {
       'Tier A was suppressed by a STALE store entry — its own proof (the read-time hash) was still valid');
   });
 
+  // ---- 7. decide() must be able to FINISH a store-less Tier A serve (REV-8) ----
+  // tierFor returning 'A' without a store entry is only half a serve: decide()
+  // then has to build the body. It read storeEntry.contentHash to do that,
+  // which throws the moment Tier A is exercised on the path REV-4 opened for
+  // it -- and the hook's outer fail-open swallows the throw into silence, so
+  // the tier looks merely absent rather than broken.
+  const dInput = (over = {}) => ({ ...input(), toolName: 'Read', tracked: true, offset: null, limit: null, ...over });
+
+  check('decide() serves Tier A with NO store entry, and quotes the hash it proved', () => {
+    const d = recall.decide(dInput({ storeEntry: null }));
+    assert.strictEqual(d.serve, true, `Tier A did not serve without a store entry: ${d.reason}`);
+    assert.strictEqual(d.tier, 'A');
+    assert.ok(d.body.includes(H_NOW.slice(0, 8)),
+      `Tier A quoted a hash it did not prove. Its evidence is the content THIS session read (${H_NOW}), which is `
+      + `the only hash it has when there is no store entry at all: ${d.body}`);
+  });
+
+  check('decide() quotes the FILE hash, not a stale store hash, when both exist', () => {
+    const d = recall.decide(dInput({ storeEntry: { contentHash: H_OLD, skeleton: 'stale', skeletonTokens: 10 } }));
+    assert.strictEqual(d.tier, 'A');
+    assert.ok(d.body.includes(H_NOW.slice(0, 8)) && !d.body.includes(H_OLD.slice(0, 8)),
+      `Tier A quoted the store's warm-time hash next to a claim about what this session read: ${d.body}`);
+  });
+
+  // ---- 8. "already served" is a fact about CONTENT, not about a path ----
+  check('COUNTER: the same path, same content, is never served twice in a session', () => {
+    const d = recall.decide(dInput({
+      storeEntry: null,
+      sessionState: { served: { [REL]: H_NOW }, reads: { [REL]: H_NOW }, interceptions: 1 },
+    }));
+    assert.strictEqual(d.serve, false, 'a session was handed the same pointer for the same bytes twice');
+    assert.strictEqual(d.reason, 'already-served');
+  });
+
+  check('a serve for content that has since CHANGED does not silence the new content', () => {
+    // Served the pointer for H_OLD, the file was rewritten, this session read
+    // the new bytes and is now re-reading them. The earlier serve says nothing
+    // about H_NOW, and refusing on it is the same borrowed-fact bug as before.
+    const d = recall.decide(dInput({
+      storeEntry: null,
+      sessionState: { served: { [REL]: H_OLD }, reads: { [REL]: H_NOW }, interceptions: 1 },
+    }));
+    assert.strictEqual(d.serve, true,
+      `refused with "${d.reason}" — the only serve this session got was about content that no longer exists on disk`);
+    assert.strictEqual(d.tier, 'A');
+  });
+
+  check('COUNTER: Tier B is undisturbed by the served-hash rule', () => {
+    // Another session read it, the skeleton is fresh -> B, exactly as before.
+    const served = recall.decide(dInput({
+      sessionId: OTHER,
+      sessionState: { served: {}, reads: {}, interceptions: 0 },
+      storeEntry: { contentHash: H_NOW, skeleton: 'class Payroll { ... }', skeletonTokens: 20 },
+    }));
+    assert.strictEqual(served.tier, 'B', `Tier B stopped serving: ${served.reason}`);
+    // ...and a B serve for these exact bytes still bars a second one.
+    const again = recall.decide(dInput({
+      sessionId: OTHER,
+      sessionState: { served: { [REL]: H_NOW }, reads: {}, interceptions: 1 },
+      storeEntry: { contentHash: H_NOW, skeleton: 'class Payroll { ... }', skeletonTokens: 20 },
+    }));
+    assert.strictEqual(again.serve, false, 'a Tier B skeleton was served twice for the same content');
+    assert.strictEqual(again.reason, 'already-served');
+  });
+
   h.finish();
 }
 

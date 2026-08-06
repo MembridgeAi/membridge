@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 // REV-7: prove a Tier A serve happens end to end through the REAL hook binary.
 //
-// STATUS: currently FAILS 6/9, and that failure is the point. REV-4 made Tier A
-// independent of the recall store, but lib/hooks-recall.js still returns early
-// on a store MISS -- before hashing the file -- so the read-time hash Tier A
-// needs is never recorded for any file outside the store. Tier A therefore
-// cannot fire in the real path, however correct tierFor is in isolation. Its
-// unit test passes because it calls tierFor directly and never crosses the
-// hook's early return. See docs/recall-serve-funnel.md.
+// STATUS: 9/9 since REV-8. It failed 6/9 when it was written, and that failure
+// was the point: REV-4 had made Tier A independent of the recall store, but
+// lib/hooks-recall.js still returned early on a store MISS -- before hashing
+// the file -- so the read-time hash Tier A needs was never recorded for any
+// file outside the store, and the tier could not fire in the real path however
+// correct tierFor was in isolation. Its unit test passed throughout, because it
+// calls tierFor directly and never crosses the hook's early return.
 //
-// Keep this script failing until that is fixed. It is the difference between
-// "correct in a table test" and "works".
+// REV-8 fixed that (see docs/recall-serve-funnel.md): on a store miss the hook
+// now records the read-time hash and, when this session's earlier read of the
+// path saw the same bytes, goes on to decide(). Two smaller faults on the same
+// path came with it -- decide() built Tier A's body from storeEntry.contentHash
+// (a TypeError the moment there is no store entry, swallowed by the outer
+// fail-open into silence), and "already served" was keyed on the path alone, so
+// one serve silenced a path for the rest of the session even after its content
+// changed.
+//
+// Keep this script GREEN. It is the difference between "correct in a table
+// test" and "works", and it is the only check that crosses the hook binary.
 // Fully isolated: its own MEMBRIDGE_HOME and its own scratch project. Never
 // touches the live daemon, the real ~/.membridge, or any real project.
 const fs = require('fs'), os = require('os'), path = require('path'), cp = require('child_process');
