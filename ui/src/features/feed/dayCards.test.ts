@@ -596,7 +596,15 @@ describe('dayBulletGroups', () => {
         decisions: '- Durability beats recency\n- Merged before writing settings.json',
       }),
       entry({ id: 'b', session: 's1', at: '2026-07-29T18:30:00Z', outcome: 'the morning\'s outcome', gotchas: '- state.json has no locking' }),
-      entry({ id: 'c', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'the afternoon\'s outcome' }),
+      // s2 needs a point that is NOT its outcome. Its outcome is the latest of
+      // the day, so pickDayOverview promotes it to the card's overview and the
+      // suppression above drops it as a duplicate -- leaving s2 with nothing
+      // and the day with a single group, which is not the two-group shape this
+      // test needs to say anything about ordering ACROSS sessions.
+      entry({
+        id: 'c', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'the afternoon\'s outcome',
+        decisions: '- Dropped the retry, the daemon already backs off',
+      }),
     ])[0]
     // Guard the guard: an empty list satisfies the equality trivially, so a
     // fixture that stopped producing bullets would make this test green while
