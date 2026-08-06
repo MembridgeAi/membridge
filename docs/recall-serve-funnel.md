@@ -413,3 +413,123 @@ transcript. The 257-read Tier A ceiling in REV-6 assumes that fold has landed;
 the observed rate will be lower until someone measures the lag. **Nothing here
 should be treated as an observed serve count** — the honest next step is still
 to re-run both harnesses on a normal install and count real serves.
+
+# REV-9: the serve text now says what each tier actually returned
+
+`lib/hooks-recall.js`'s terminal line carried one tail for every tier —
+*"structure only, read the file directly for bodies"* — written when Tier B was
+the only tier that could fire in practice. REV-8 made Tier A serve, and Tier A
+returns a pointer and **no file content at all**, so the product started telling
+the agent it was holding a structural summary it had never been sent. On the
+REV-6 split (257 Tier A vs 252 B/C opportunities) that is wrong about half the
+time: the same class of false statement this whole line of work exists to close,
+in the one sentence the user actually reads.
+
+The tail is now per tier, because the tiers hand back different things and one
+sentence covering both is vague in exactly the way that stops people reading it:
+
+| tier | tail |
+|---|---|
+| A | `pointer only, the file is unchanged since you read it earlier this session` |
+| B, C | `structure only, read the file directly for bodies` |
+| anything else | `read the file directly if you need more than this` |
+
+Tier C shares B's tail because it serves `tierBBody`. An unrecognised tier
+claims nothing about what came back — same discipline as REV-5's `tierUnknown`:
+an unknown must never be filed as a known.
+
+Pinned end-to-end in `test/suites/recall-tier-a-serves.test.js`, as a pair: a
+Tier A serve must not say "structure only", and a **counter-check** that a Tier
+B serve still does. RED with the single tail restored: the Tier A check fails
+with the real served text, the Tier B counter stays green.
+
+# REV-10: the ledger lag, measured — and it is not what bounds Tier A
+
+`node scripts/measure-ledger-lag.js` (new, read-only). Every transcript
+directory under this project — main checkout and all 55 linked worktrees —
+keyed with `repo-root`'s own `ledgerKeyFor`, so a read from a worktree and one
+from the main checkout collapse to the same key exactly as `fileReaders` does.
+
+**Cross-check before anything is claimed from it:** 927 in-project reads and
+392 same-session repeat reads. REV-2 measured 927 independently; REV-6's
+257 + 135 = 392. Two independent paths, same numbers.
+
+## The lag itself
+
+`config.intervalSec` is **60s** here (default; floor 15s). The chain is: the
+agent reads → Claude Code appends the tool call to the transcript → the next
+daemon tick scans it, marks the project dirty, and `updateLedger` writes
+`fileReaders`. So a read reaches the ledger at the first tick after it:
+**0–60s, mean 30s**, plus the pass itself (sub-second next to a 60s period).
+
+A repeat read is servable only if a tick boundary fell between the session's
+first read of that path and this one. Tick phase is arbitrary, so for a gap of
+`g` the probability is `min(1, g / interval)`.
+
+## What that costs: nothing, and for an uncomfortable reason
+
+| of 392 same-session repeat reads | |
+|---|---|
+| **ranged** (`offset > 0`) — refused at *every* tier since 2026-08-02 | **380** |
+| written between the two reads — correctly refused (REV-4) | 2 |
+| under the 400-token floor | 0 |
+| **= Tier A candidates** | **10** |
+
+Their gaps: p10 4.5m, **p50 6.1m**, p90 110m. Against a 60s tick, **100% of
+them survive the lag** — not one candidate falls inside a single interval. At a
+5-minute interval it would still be 94%. Position in the session makes no
+difference (both populated quartiles: 100%), which is what the model predicts —
+the gap decides, not the position.
+
+**So the lag is not the constraint. The ranged-read refusal is.** 73.4% of this
+project's in-project reads carry `offset > 0`, and 380 of 392 same-session
+repeats do. REV-6's funnel put "Tier A opportunity" at 257 and explicitly did
+not model that gate; applying it leaves **10 of 927 reads (1.1%)**, not 257
+(27.7%). The 16-of-112 figure from the REV-8 bench predicts nothing about a real
+session, and the honest headline for Tier A on this history is single digits.
+
+That refusal is correct — the ledger records that a session read a *path*, never
+which lines came back, so "you already read this" is unsupportable the moment a
+call names an offset. It is not a bug to fix by loosening.
+
+## The counterfactual, so the first number is not misread
+
+The lag looks free only because the ranged gate has already removed every
+*fast* repeat. Over the 249 repeats that are unchanged since the previous read
+(ranged included — i.e. what Tier A would face if that gate were ever narrowed):
+
+| interval | share surviving the lag | repeats inside one interval |
+|---|---|---|
+| 15s | 88.5% | 49 of 249 |
+| 30s | 82.5% | 68 of 249 |
+| **60s (configured)** | **75.9%** | **85 of 249** |
+| 120s | 68.8% | 108 of 249 |
+
+**A quarter of the opportunity would be lost to the lag the day ranged reads
+become servable.** Not before.
+
+## If it ever needs closing, what each shape costs
+
+Measured with `process.cpuUsage()`, on this machine's real files:
+
+| shape | cost per read | verdict |
+|---|---|---|
+| **hook writes `fileReaders` itself** — read-modify-write of the 591KB `ledger.json` | **1.87ms** (p50), 2.82ms max | **No.** It is not just the milliseconds: the daemon read-modify-writes the same file on its tick, so a hook write races the fold and can erase it. That is the `state.json` cross-process clobber, re-created on the one file whose contents cannot be rebuilt. |
+| **confirm the previous read from the session transcript tail** (last 64KB) | **0.16ms** (p50) — the whole 10.3MB file is 4.67ms | The cheap one, and the shape to reach for. Unverified assumption: that Claude Code has flushed read #1's `tool_result` before read #2's PreToolUse runs. Measure that before building on it. |
+| **a second hook process** (PostToolUse confirmer) | 0.03ms of CPU but **~24ms of wall-clock spawn** the agent waits on, per read | ~13x the entire cost of REV-8, to fix a lag currently costing zero. |
+
+## Recommendation: change nothing here yet
+
+The lag costs 0 of 10 candidates on the measured workload. Every way of closing
+it costs more than that — the cheapest is 0.16ms per read plus an unverified
+flush assumption, and the obvious one re-creates a known data-loss bug on
+`ledger.json`. Revisit only if the ranged gate is narrowed, and then the
+transcript tail is the shape to price properly.
+
+**One caveat, pointing the opposite way to the usual one.** This machine is a
+worst case for *ranged* reads: its hottest files are enormous
+(`test/run-tests.js` at 24k lines), and agents read enormous files in windows.
+A normal repo would have far fewer ranged reads, more true Tier A candidates —
+and therefore a lag that binds much more than it does here. The 1.1% and the
+"lag is free" both need re-measuring on a normal install before either is
+treated as a fact about the product rather than about this machine.

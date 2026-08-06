@@ -197,6 +197,72 @@ function main() {
     });
   }
 
+  // ---- 7. The terminal line must describe the tier it actually served ----
+  // (REV-9.) The line after "avoided N%" says what was handed back. Tier A
+  // hands back a pointer and no file content; B/C hand back a skeleton. One
+  // tail for both made the product describe structure it had not sent on
+  // roughly half of all serves once Tier A started firing.
+  {
+    const recall = require('../../lib/recall');
+    const crypto = require('crypto');
+    const recallStore = require('../../lib/recall-store');
+    // The announce gate only prints the line on a session's FIRST interception
+    // (or a big avoidance), and the holdout drops 3% of (session, path) pairs,
+    // so both ids are chosen to land outside it rather than hoped about.
+    const bucket = (sid, rel) => crypto.createHash('sha1').update(`${sid}${rel}`).digest().readUInt32BE(0) % 100;
+    const servingSession = (rel, base) => {
+      for (let i = 0; i < 1000; i++) {
+        const sid = `${base}-${i}`;
+        if (bucket(sid, rel) >= recall.HOLDOUT_PCT) return sid;
+      }
+      throw new Error(`no non-holdout session id for ${rel}`);
+    };
+
+    const REL_A = 'lib/pointer-line.js';
+    const SESSION_A = servingSession(REL_A, 'tier-a-line');
+    const projA = seed(REL_A, body('ptr'), SESSION_A);
+    readOf(projA, SESSION_A, REL_A); // bootstrap
+    const servedA = readOf(projA, SESSION_A, REL_A);
+
+    // Tier B: ANOTHER session read it (per the ledger) and the skeleton is
+    // fresh, so this session gets structure it has never seen.
+    const REL_B = 'lib/structure-line.js';
+    const SESSION_B = servingSession(REL_B, 'tier-b-line');
+    const contentB = body('beta');
+    const projB = seed(REL_B, contentB, 'some-other-session');
+    recallStore.put(projB, REL_B, {
+      contentHash: crypto.createHash('sha1').update(contentB).digest('hex'),
+      skeleton: 'function betaOne() { ... }', skeletonTokens: 20,
+      fileTokens: 1200, engine: 'strip', rejections: 0,
+    });
+    const servedB = readOf(projB, SESSION_B, REL_B);
+
+    check('a Tier A serve says it returned a POINTER, never structure it did not send', () => {
+      assert.ok(servedA.stdout, 'precondition: Tier A did not serve');
+      const reason = JSON.parse(servedA.stdout).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(reason.startsWith('answered from MemBridge'), `terminal line must lead: ${reason}`);
+      assert.ok(!reason.includes('structure only'),
+        `Tier A told the agent it was handed a structural summary. It was handed a pointer and no file content at `
+        + `all, so the sentence is false about what it is holding: ${reason}`);
+      assert.ok(reason.includes('pointer only'), reason);
+    });
+
+    check('COUNTER: a Tier B serve still says STRUCTURE, because that is what it sent', () => {
+      assert.ok(servedB.stdout, 'precondition: Tier B did not serve');
+      const reason = JSON.parse(servedB.stdout).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(reason.includes('structure only, read the file directly for bodies'),
+        `Tier B's wording is correct for Tier B and must not have been genericised away: ${reason}`);
+      assert.ok(!reason.includes('pointer only'), reason);
+    });
+
+    check('neither tier ever says "saved" (spec §8.2)', () => {
+      for (const out of [servedA, servedB]) {
+        const reason = JSON.parse(out.stdout).hookSpecificOutput.permissionDecisionReason;
+        assert.ok(!/\bsaved\b/.test(reason), `"saved" claims the bill fell, which avoidance cannot support: ${reason}`);
+      }
+    });
+  }
+
   h.finish();
 }
 
