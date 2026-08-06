@@ -305,7 +305,13 @@ function stubMutants(src) {
 // crashes are likeliest.
 function killKind(out) {
   const text = String(out || '');
-  const asserted = /(?:^|\|\s)\s*FAIL {2}/m.test(text) || /failing checks:/.test(text);
+  // A bare script driven by --cmd prints none of run.js's markers; it throws.
+  // Without this arm every kill from a --cmd run came back "unclassified",
+  // which is the same as not knowing whether the suite JUDGED the behaviour or
+  // merely fell over — the distinction this function exists to make.
+  const threwAssertion = /\bAssertionError\b/.test(text)
+    || /^\s*(?:assert|AssertionError)[^\n]*(?:Expected|expected|!==|===)/m.test(text);
+  const asserted = threwAssertion || /(?:^|\|\s)\s*FAIL {2}/m.test(text) || /failing checks:/.test(text);
   const crashed = /^CRASH /m.test(text) || /RESULT INCOMPLETE/.test(text) || /CRASHED with an UNKNOWN/.test(text);
   if (asserted && crashed) return 'assertion+crash';
   if (asserted) return 'assertion';

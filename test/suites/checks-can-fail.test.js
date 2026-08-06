@@ -230,11 +230,19 @@ async function main() {
       `a suite parsed to zero checks: ${suites.filter(s => !s.checks.length).map(s => s.file).join(', ')}`);
   });
 
-  check('scanner: blankNonCode preserves LENGTH — the invariant both desyncs violated', () => {
-    // Both failures of this helper presented identically: output one character
-    // longer than input, and everything after the mis-read quote blanked. That
-    // is cheap to assert directly, and it is the assertion that would have
-    // caught the second instance without waiting for a suite to parse to zero.
+  check('scanner: blankNonCode preserves length and line count (so reported line numbers are real)', () => {
+    // LENGTH IS NOT THE DESYNC DETECTOR, despite being how both failures first
+    // presented (output one character longer than input). Fixing the blanker to
+    // emit a terminator only when one was actually found removed the +1 — so a
+    // mis-read quote OR backtick now blanks the rest of the file at exactly the
+    // same length. Measured with the regex arm removed: both shapes come back
+    // length-preserving and content-destroying.
+    //
+    // This assertion is kept because length- and line-preservation is a real
+    // property worth holding on its own: every caller maps an index back to a
+    // line number, and a drift of one character silently misreports every line
+    // after it. The DESYNC detector is the content-survival check below, and
+    // the meta-suite's own "finds every check" assertion above it.
     const fixtures = [
       // lib/redact.js:109 — apostrophe and double quote inside a character class.
       String.raw`const rx = /([?&])(?![0-9]+(?:[&#\s'"]|$))[^&#\s'"<>]{8,}/gi;` + '\nconst after = 1;\n',
@@ -254,10 +262,18 @@ async function main() {
       assert.strictEqual(out.split('\n').length, src.split('\n').length,
         `line count changed, so reported line numbers would be wrong:\n${JSON.stringify(out)}`);
     }
-    // ...and the code AFTER a quote-bearing regex must survive, not be blanked.
-    const live = blankNonCode(String.raw`const rx = /(['"])x\1/g;` + '\nconst after = 1;\n');
-    assert.ok(/const after = 1;/.test(live),
-      `code following a regex-with-quotes was swallowed: ${JSON.stringify(live)}`);
+    // THE ACTUAL DETECTOR, at the primitive level: code after a regex holding
+    // ANY string delimiter must survive blanking. All three are covered here
+    // rather than the two that happened to break — the backtick case is pinned
+    // at the CONSEQUENCE level by 'a regex holding a backtick does not swallow
+    // the checks after it' below, which is the assertion that matters and is
+    // not restated here.
+    for (const [label, delim] of [['single quote', "'"], ['double quote', '"'], ['backtick', '`']]) {
+      const src = `const rx = /[${delim}]x/g;\nconst after = 1;\n`;
+      const out = blankNonCode(src);
+      assert.ok(/const after = 1;/.test(out),
+        `code following a regex containing a ${label} was swallowed: ${JSON.stringify(out)}`);
+    }
   });
 
   // SEC-15 addition, and the reason it is a separate check rather than one more
