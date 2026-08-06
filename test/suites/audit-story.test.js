@@ -158,7 +158,7 @@ async function main() {
 
     process.env.MEMBRIDGE_HOME = HOME_OWNER;
     util.ensureConfig();
-    await teamsync.signup(util.getConfig(), 'story-owner@test.dev', 'pw-o', 'Owner');
+    const ownerCreds = await teamsync.signup(util.getConfig(), 'story-owner@test.dev', 'pw-o', 'Owner');
     const team = await teamsync.createTeam(util.getConfig(), 'Acme');
 
     process.env.MEMBRIDGE_HOME = HOME_ALICE;
@@ -259,6 +259,92 @@ async function main() {
       assert.ok(revoked,
         'the revocation must be filed against the same token the creation was, not against the ' +
         `URL the admin happened to paste. rows: ${JSON.stringify(rows.filter(e => e.objectType === 'invite'))}`);
+    });
+
+    // -------------------------------------------------------------------
+    // The trail names the PROJECT, not the actor's folder.
+    // -------------------------------------------------------------------
+    // access-granted / access-revoked used to put projectPath -- the actor's
+    // absolute local path -- into detail.path, which readAudit surfaced as
+    // objectName and the panel rendered to every manager. Two faults in one
+    // field: a home directory and a username published into a shared trail,
+    // and a label that means nothing to a reader whose checkout is elsewhere.
+    //
+    // Two backend projects with the SAME folder name, deliberately: the fix
+    // must give them the same human label without merging them, because the
+    // row's identity is the project id and never the name.
+    const projA = { id: require('crypto').randomUUID(), teamId: team.team_id, name: 'billing-poc', repoUrl: null };
+    const projB = { id: require('crypto').randomUUID(), teamId: team.team_id, name: 'billing-poc', repoUrl: null };
+    mock.projects.push(projA, projB);
+    const LOCAL_A = path.join(ROOT, 'checkouts', 'acme', 'billing-poc');
+    const LOCAL_B = path.join(ROOT, 'checkouts', 'other', 'billing-poc');
+    for (const [dir, projectId] of [[LOCAL_A, projA.id], [LOCAL_B, projB.id]]) {
+      fs.mkdirSync(path.join(dir, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.membridge', 'team.json'),
+        JSON.stringify({ projectId, teamId: team.team_id, teamName: 'Acme AI' }));
+    }
+    // A row written the OLD way, planted directly: historical rows already
+    // hold a path and cannot be rewritten, so the renderer has to cope.
+    mock.teamAudit.push({
+      id: require('crypto').randomUUID(),
+      team_id: team.team_id,
+      actor_id: (mock.members.find(m => m.displayName === 'Owner') || {}).userId,
+      action: 'access-revoked',
+      object_type: 'project',
+      object_key: 'a-project-since-deleted',
+      detail: { path: '/Users/marco/secret-skunkworks', memberId: bobCreds.userId, canSee: false },
+      created_at: new Date().toISOString(),
+    });
+    // Through /api/project/access, which is the pair of actions this ticket is
+    // about (access-granted / access-revoked) and the pair that carried the
+    // path. Granting the owner an explicit row also matches what 029's
+    // materialization does at link time, without which project_stats -- which
+    // ANDs can_see_project into the view (024 §3) -- would not return the
+    // project to anyone at all. That coupling is real and is asserted below.
+    process.env.MEMBRIDGE_HOME = HOME_OWNER;
+    await apiAs('owner', 'POST', '/api/project/access', { path: LOCAL_A, memberId: ownerCreds.userId, canSee: true });
+    await apiAs('owner', 'POST', '/api/project/access', { path: LOCAL_B, memberId: ownerCreds.userId, canSee: true });
+    const withProjects = ((await apiAs('owner', 'GET', `/api/team/audit?teamId=${team.team_id}`)).body || {}).events || [];
+
+    await check('no audit row carries the actor\'s local filesystem path', async () => {
+      const leaking = withProjects.filter(e =>
+        (e.objectName && /^([A-Za-z]:)?[\\/]/.test(e.objectName)) ||
+        (e.detail && /"path"\s*:/.test(e.detail)));
+      assert.deepStrictEqual(leaking.map(e => ({ action: e.action, objectName: e.objectName })), [],
+        'these rows publish a home directory and a username to every manager on the team, ' +
+        'and tell a reader whose checkout is elsewhere nothing at all');
+    });
+
+    await check('a project row is labelled with the team\'s shared project name', async () => {
+      const rows = withProjects.filter(e => e.action === 'access-granted');
+      assert.strictEqual(rows.length, 2, `expected both access rows, got ${rows.length}`);
+      for (const row of rows) {
+        assert.strictEqual(row.objectName, 'billing-poc',
+          `the label must be the name every teammate sees, got ${JSON.stringify(row.objectName)}`);
+      }
+    });
+
+    // COUNTER-CHECK, and the one the lead asked for: a shared LABEL must not
+    // become a shared IDENTITY. Green before the fix (the two rows carried two
+    // different absolute paths) and after (they carry two different project
+    // ids); red only if someone keys the row on the name.
+    await check('two projects sharing a folder name stay two distinct rows', async () => {
+      const rows = withProjects.filter(e => e.action === 'access-granted');
+      const ids = rows.map(e => e.objectLabel);
+      assert.strictEqual(new Set(ids).size, 2,
+        `the rows must stay distinguishable by project id, got ${JSON.stringify(ids)}`);
+      assert.ok(ids.includes(projA.id) && ids.includes(projB.id),
+        `the identity must be the backend project id, got ${JSON.stringify(ids)}`);
+    });
+
+    // Historical rows cannot be rewritten -- team_audit is append-only by
+    // design -- so the renderer has to make one readable without leaking it.
+    await check('a row written before the fix keeps its meaning without its path', async () => {
+      const row = withProjects.find(e => e.objectLabel === 'a-project-since-deleted');
+      assert.ok(row, 'fixture: the planted historical row must come back');
+      assert.strictEqual(row.objectName, 'secret-skunkworks',
+        'an old row falls back to the basename: showing the whole path keeps leaking, showing ' +
+        `nothing turns it into "that project" and loses what it was about. got ${JSON.stringify(row.objectName)}`);
     });
 
     // COUNTER-CHECK, green before and after any rendering change: the trail
