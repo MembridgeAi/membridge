@@ -1344,6 +1344,48 @@ async function main() {
     assert.strictEqual(redactLib.redactDefault(url), url, `URL path token was redacted -> ${redactLib.redactDefault(url)}`);
     assert.ok(redactLib.entropy(ENTROPY_TOKEN) > 4.5, 'test token is not actually high-entropy');
   });
+  // Both checks below were written from MUTATION survivors: `node test/mutate.js
+  // --target lib/redact.js --mode ops --suites redaction,core` broke
+  // redactHighEntropy and the whole 1857-check suite stayed green. Neither
+  // behaviour had an assertion anywhere; ENTROPY_TOKEN above contains no '/'
+  // and appears once, so it cannot tell either mutant from the real code.
+  //
+  // A base64 alphabet INCLUDES '/', so a real credential routinely contains
+  // one. The path guard is `m.includes('/') && <looks like a filename>`;
+  // relaxing that && to || returns every slash-bearing token unredacted —
+  // i.e. it switches the entropy backstop off for exactly the tokens most
+  // likely to be secrets, silently.
+  const SLASH_TOKEN = 'kJ8sQ2/vLpZ4wXn7RtY9bGcH3mAdEfUi'; // 32 chars, entropy 5.00, contains '/'
+  check('redact: a high-entropy token containing "/" is still redacted (it is not a path)', () => {
+    assert.ok(redactLib.entropy(SLASH_TOKEN) > 4.5, 'fixture token is not actually high-entropy');
+    assert.ok(SLASH_TOKEN.includes('/'), 'fixture token must contain a slash or it tests nothing');
+    const out = redactLib.redactDefault(`the token is ${SLASH_TOKEN} end`);
+    assert.ok(out.includes('[redacted:high-entropy]'),
+      `a slash-bearing secret escaped the entropy backstop -> ${out}`);
+    assert.ok(!out.includes(SLASH_TOKEN), `the raw token survived -> ${out}`);
+    // The adjacent case that must NOT change: a genuine path with an extension
+    // is still left alone. Without this the obvious "fix" is to drop the path
+    // guard entirely, which would start eating source filenames.
+    const p = 'src/components/VeryLongComponentNameHere.tsx';
+    assert.strictEqual(redactLib.redactDefault(`see ${p} now`), `see ${p} now`,
+      'a real path with an extension must not be redacted');
+  });
+
+  check('redact: a high-entropy token that recurs in the same text is left alone (identifier, not credential)', () => {
+    // looksLikeSecret bails on a token appearing twice or more: a value that
+    // repeats is an identifier being referred to, not a one-off credential.
+    // The comment on that guard says false positives "would eat session ids",
+    // and nothing asserted it -- flipping its `return false` to `return true`
+    // survived the full suite.
+    const twice = `first ${SLASH_TOKEN} and again ${SLASH_TOKEN} end`;
+    assert.strictEqual(redactLib.redactDefault(twice), twice,
+      'a recurring high-entropy identifier was redacted; that guard exists so session ids survive');
+    // ...and the discriminator: the SAME token once IS redacted, so this is
+    // the recurrence rule and not the token simply being unmatchable.
+    assert.ok(redactLib.redactDefault(`once ${SLASH_TOKEN} end`).includes('[redacted:high-entropy]'),
+      'the same token appearing once must still be caught, or the check above proves nothing');
+  });
+
   check('redact: redactDefaults:false opts out; redactExtra is additive', () => {
     const off = digest.redactText(`key ${AWS_KEY}`, digest.compileRedactions({ redactDefaults: false }));
     assert.ok(off.includes(AWS_KEY), 'defaults not disabled by redactDefaults:false');
