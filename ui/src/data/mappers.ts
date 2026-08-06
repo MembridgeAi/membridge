@@ -177,6 +177,10 @@ export interface RawMemberRow {
    *  missing case to an explicit zero, so `Member.preFixLocal` is required and
    *  nothing downstream has to think about it again. */
   preFixLocal?: { entries: number; projects: number }
+  /** #BE-4, from GET /api/team/members. Optional HERE only because this
+   *  interface also describes an older daemon's response; mapMember collapses
+   *  a missing value to 'unknown', never 'ok'. */
+  keyStatus?: 'alert' | 'ok' | 'unknown'
 }
 
 // /api/team/feed row (server.js:1502, team_feed RPC -- 002_team_v2.sql:285) -- raw team stream, not RawFeedEntry's local-merged feed.
@@ -627,9 +631,10 @@ export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
     joinedAt: row.joined_at || '',
     projectCount: activity.projectCount,
     lastSharedAt: activity.lastSharedAt,
-    // No `keyAlert`: statusPayload exposes only a COUNT of state.keyAlerts and
-    // this RPC returns four columns, so there was never a per-member value to
-    // map. Assigning false meant the UI's warning chip could never fire.
+    // FAILS CLOSED TO 'unknown', never 'ok'. A daemon too old to send this has
+    // not checked anybody's key, and 'ok' would assert a verification that
+    // never happened -- the precise false assurance the string exists to stop.
+    keyStatus: row.keyStatus === 'alert' || row.keyStatus === 'ok' ? row.keyStatus : 'unknown',
     // #59. This mapper builds an explicit object, so a field not named here is
     // dropped before any component sees it -- which is exactly how a new wire
     // field goes missing without a single error. Carried through deliberately.

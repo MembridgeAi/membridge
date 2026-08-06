@@ -243,12 +243,38 @@ describe('MembersSection (the People section of the Team page)', () => {
       expect(screen.queryByTestId('member-key-alerts')).toBeNull()
     })
 
-    // The counterpart: no per-member chip, because nothing can populate one.
-    // An always-absent chip is what made the whole feature invisible.
-    it('shows no per-member key chip, which could never fire', async () => {
-      renderWith(await withAlerts(2), <MembersSection />)
-      await screen.findByTestId('member-key-alerts')
-      expect(screen.queryByText(/key changed/i)).toBeNull()
+    // The per-member chip is back, keyed on real data now (agent-backend2
+    // cc55235): GET /api/team/members carries keyStatus per row.
+    //
+    // A COUNT can say somebody's key changed but never whose, and whose is the
+    // one thing you need in order to go and check. The banner stays as the
+    // aggregate; this names the person.
+    it('flags the member whose key disagrees with our pin, by name', async () => {
+      renderWith(await withAlerts(1), <MembersSection />)
+      const sarah = await screen.findByTestId('member-row-sarah')
+      expect(within(sarah).getByText(/key changed/i)).toBeInTheDocument()
+    })
+
+    // THE TRAP, and the one edit that would silently reintroduce the original
+    // bug: `if (m.keyStatus)` is truthy for ALL THREE values, so it would light
+    // the chip on every member. The read is `=== 'alert'`.
+    //
+    // 'ok' and 'unknown' both render nothing, but they are NOT the same fact --
+    // 'ok' means we hold a pin and the gate agreed, 'unknown' means we cannot
+    // say. Neither may ever render as "verified": an assurance nobody made is
+    // exactly the shape this whole line of work has been removing.
+    it('shows no chip for ok or unknown, and never says verified', async () => {
+      renderWith(await withAlerts(1), <MembersSection />)
+      await screen.findByTestId('member-row-sarah')
+
+      // Marco is 'ok' (a pin we hold, agreed). Andrew is 'unknown' (no pin --
+      // he has published no key, so TOFU never happened).
+      expect(within(screen.getByTestId('member-row-me')).queryByText(/key changed/i)).toBeNull()
+      expect(within(screen.getByTestId('member-row-andrew')).queryByText(/key changed/i)).toBeNull()
+      // The word that must never appear for either.
+      expect(screen.queryByText(/verified/i)).toBeNull()
+      // Exactly one chip on the whole roster -- a truthiness read would give three.
+      expect(screen.getAllByText(/key changed/i)).toHaveLength(1)
     })
   })
 

@@ -341,17 +341,22 @@ export class FakeDataClient implements DataClient {
     //             by him can return zero over rows that exist.
     //   Marco, Sarah, and the scaled-out members -- an explicit zero, the
     //             case where a zero result really does mean nothing found.
+    //
+    // keyStatus covers ALL THREE values on purpose: Sarah 'alert', Marco 'ok',
+    // Andrew 'unknown'. A roster where every row shared one value would let a
+    // truthiness read (`if (m.keyStatus)`) pass -- and that read is the one
+    // edit that silently restores the always-on chip.
     const base: Array<{ row: RawMemberRow; activity: MemberActivity }> = [
       {
-        row: { user_id: this.viewerId, display_name: 'Marco', role: this.opts.role ?? 'owner', joined_at: '2026-07-22T18:58:00Z', preFixLocal: { entries: 0, projects: 0 } },
+        row: { user_id: this.viewerId, display_name: 'Marco', role: this.opts.role ?? 'owner', joined_at: '2026-07-22T18:58:00Z', preFixLocal: { entries: 0, projects: 0 }, keyStatus: 'ok' },
         activity: { projectCount: 3, lastSharedAt: '2026-07-29T21:00:00Z' },
       },
       {
-        row: { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-20T09:00:00Z', preFixLocal: { entries: 7, projects: 2 } },
+        row: { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: '2026-07-20T09:00:00Z', preFixLocal: { entries: 7, projects: 2 }, keyStatus: 'unknown' },
         activity: { projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z' },
       },
       {
-        row: { user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z', preFixLocal: { entries: 0, projects: 0 } },
+        row: { user_id: 'sarah', display_name: 'Sarah', role: 'member', joined_at: '2026-07-27T16:31:00Z', preFixLocal: { entries: 0, projects: 0 }, keyStatus: 'alert' },
         activity: { projectCount: 1, lastSharedAt: null },
       },
     ]
@@ -359,7 +364,7 @@ export class FakeDataClient implements DataClient {
     const out = base.slice(0, Math.min(size, base.length))
     for (let i = base.length + 1; i <= size; i++) {
       out.push({
-        row: { user_id: `m${i}`, display_name: `Member ${i}`, role: 'member', joined_at: '2026-07-25T12:00:00Z', preFixLocal: { entries: 0, projects: 0 } },
+        row: { user_id: `m${i}`, display_name: `Member ${i}`, role: 'member', joined_at: '2026-07-25T12:00:00Z', preFixLocal: { entries: 0, projects: 0 }, keyStatus: 'ok' },
         activity: { projectCount: 1, lastSharedAt: null },
       })
     }

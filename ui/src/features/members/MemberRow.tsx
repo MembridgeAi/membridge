@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { StateChip } from '../../components/StateChip'
 import { Avatar } from '../../components/Avatar'
 import { absoluteTime, relativeAgo } from '../../data/relativeTime'
 import type { Member, Role } from '../../data/types'
@@ -115,12 +116,27 @@ export function MemberRow({ member, isSelf, canManage, onSetRole, onRequestRemov
             exact local time, so recency here is as verifiable as the audit
             trail's exact-time rows. undefined when nothing was ever shared. */}
         <span className="kvi" title={absoluteTime(member.lastSharedAt) || undefined}>{sharedLabel(member.lastSharedAt)}</span>
-        {/* The "key changed" chip lived here, gated on member.keyAlert -- a
-            field mapMember hardcoded to false because the members RPC never
-            sent one, so it could not fire for any member. The alert COUNT the
-            daemon does send is shown once at the top of this section instead;
-            see Member's doc in types.ts for what a daemon ticket would need to
-            expose to bring a per-member chip back. */}
+        {/* `=== 'alert'` and never `if (member.keyStatus)`: all three values
+            are truthy, so a truthiness read lights this for everybody -- which
+            is exactly the always-on version of the always-off bug this
+            replaced (mapMember used to hardcode `keyAlert: false`).
+
+            'ok' and 'unknown' both render nothing, but they are not the same
+            fact and neither may ever render as "verified". 'unknown' is common
+            and not actionable -- no pin yet, encryption off, or the gate
+            paused -- so a per-row "unknown" would be noise on every line
+            without telling anyone to do anything. The aggregate banner in
+            MembersSection is where the count lives; this names the person,
+            which is the thing a count can never do. */}
+        {member.keyStatus === 'alert' && (
+          <StateChip
+            tone="warn"
+            glyph="⚠"
+            title="Their encryption key changed since you last verified them. Re-confirm out of band that it's really them before trusting new memory from this account."
+          >
+            key changed
+          </StateChip>
+        )}
 
         {showMenu && (
           <div className="member-menu" ref={menuRef}>

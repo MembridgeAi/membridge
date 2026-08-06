@@ -346,17 +346,34 @@ export interface Member {
   // load-bearing.
   projectCount: number
   lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
-  // There is no `keyAlert`. mapMember set it to false on every row -- the
-  // members RPC returns four columns and none of them is this -- while
-  // MemberRow rendered a "key changed" warning gated on it, so the warning
-  // could not fire for anyone. A security chip that is structurally always
-  // absent is worse than none: its silence reads as "verified".
-  //
-  // The daemon DOES track this per member (state.keyAlerts is a list of
-  // { user_id }), it just never sends the list -- statusPayload exposes only
-  // a count. MembersSection now shows that count. Restoring a per-member chip
-  // is a daemon ticket: expose the user_ids, add them to RawMemberRow, and the
-  // chip can come back keyed on real data.
+  /**
+   * Whether this member's encryption key still matches the one we pinned.
+   *
+   * A STRING, not a boolean, and that is the point. A teammate's box pubkey
+   * comes from the server, so a compromised backend could substitute its own
+   * and read the sealed team key; lib/teampins.js catches that. But a boolean
+   * cannot carry "we don't know", so that state collapses into `false` and
+   * renders identically to "verified" -- the user reads the absence of a
+   * warning as an assurance nobody made. That was the original bug here
+   * (mapMember hardcoded `keyAlert: false` for everyone), and a boolean would
+   * reintroduce it in a new costume.
+   *
+   *   'alert'   -- disagrees with our pin. Show the chip.
+   *   'ok'      -- we hold a pin and the running gate agreed with it.
+   *   'unknown' -- we cannot say. NEVER render this as "verified".
+   *
+   * 'unknown' is the honest answer in three real situations: no pin for the
+   * member (they have published no key, so TOFU never happened and there is
+   * nothing to disagree with), encryption switched off, and the crypto gate
+   * PAUSED, where the pins on disk may be stale and nothing re-checks them.
+   * An 'alert' outranks all three -- a key change that was found stays found,
+   * and turning encryption off must not silence it.
+   *
+   * READ IT AS `=== 'alert'`. All three values are truthy, so `if (keyStatus)`
+   * lights the chip for everybody, which is the one edit that silently puts
+   * the original bug back.
+   */
+  keyStatus: 'alert' | 'ok' | 'unknown'
   /**
    * #59. How much of this member's local history a person filter CANNOT reach.
    *

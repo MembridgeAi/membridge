@@ -493,11 +493,12 @@ describe('mapMember', () => {
       // No `email` key at all. It used to be here as '' -- a field the members
       // RPC never returns -- and that empty string is what MemberRow painted
       // as a blank address line under every name.
-      // No `keyAlert` key either, for the same reason as `email`: the RPC
-      // returns four columns, so a per-member alert flag was never mapped from
-      // anything -- and the `false` it was given meant MemberRow's key-changed
-      // warning could not fire for any member. The alert COUNT the daemon does
-      // send is rendered once in MembersSection instead.
+      // keyStatus FAILS CLOSED to 'unknown' when the row carries none: this
+      // raw row has no keyStatus, and a daemon too old to send it has checked
+      // nobody's key. 'ok' would assert a verification that never happened --
+      // the exact false assurance the string type exists to prevent, and what
+      // the old hardcoded `keyAlert: false` did.
+      keyStatus: 'unknown',
       id: 'andrew', name: 'Andrew', role: 'admin', joinedAt: '2026-07-22T18:58:00Z',
       projectCount: 3, lastSharedAt: '2026-07-29T19:00:00Z',
       // #59. A daemon too old to report the field degrades to an explicit
@@ -513,6 +514,29 @@ describe('mapMember', () => {
   // no error, no type complaint at the boundary, and nothing visible until a
   // component reads undefined. That is precisely how this field would have
   // gone missing, so the carry-through is pinned rather than assumed.
+  // Each of the three values survives the mapper unchanged. A mapper that
+  // collapsed 'ok' and 'unknown' together would be indistinguishable from the
+  // boolean this replaced.
+  it('carries all three keyStatus values through distinctly', () => {
+    const map = (keyStatus: 'alert' | 'ok' | 'unknown') => mapMember(
+      { user_id: 'a', display_name: 'A', role: 'member', joined_at: null, keyStatus },
+      { projectCount: 0, lastSharedAt: null },
+    ).keyStatus
+    expect(map('alert')).toBe('alert')
+    expect(map('ok')).toBe('ok')
+    expect(map('unknown')).toBe('unknown')
+  })
+
+  // A value the daemon should never send must not be trusted into 'ok'.
+  it('treats an unrecognized keyStatus as unknown, not as ok', () => {
+    const m = mapMember(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { user_id: 'a', display_name: 'A', role: 'member', joined_at: null, keyStatus: 'verified' as any },
+      { projectCount: 0, lastSharedAt: null },
+    )
+    expect(m.keyStatus).toBe('unknown')
+  })
+
   it('carries preFixLocal through instead of dropping it at the object literal', () => {
     const m = mapMember(
       {
