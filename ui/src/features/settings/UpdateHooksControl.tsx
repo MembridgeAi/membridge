@@ -6,6 +6,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
 
+// 'newer' is deliberately NOT a warning. It means the registered hook was
+// written by a build ahead of this one, so the hook running on every session
+// is newer than the code answering this page -- nothing is broken and the
+// button above would make it worse. It reads as a neutral fact, not a defect.
 function vintageTone(v: HookVintage): StateTone {
   if (v === 'current') return 'ok'
   if (v === 'outdated') return 'warn'
@@ -15,12 +19,14 @@ function vintageTone(v: HookVintage): StateTone {
 function vintageGlyph(v: HookVintage): string {
   if (v === 'current') return '✓'
   if (v === 'outdated') return '⚠'
+  if (v === 'newer') return '↑'
   return '•'
 }
 
 function vintageLabel(v: HookVintage): string {
   if (v === 'current') return 'up to date'
   if (v === 'outdated') return 'outdated, update available'
+  if (v === 'newer') return 'registered by a newer MemBridge — leave it alone'
   return 'unknown'
 }
 
