@@ -10,15 +10,14 @@
 -- `agent-sec`), which is the single source for migration numbers and must be
 -- read BEFORE writing the file, not after merging it.
 --
--- REGISTRY ROW STILL NEEDED: at the time of writing, the runbook's table lists
--- 037-049 and says "Next free number: 050" -- it has no row for 050 yet. The
--- gate the security lane added (test/suites/migration-state.test.js) fails a
--- migration file whose number has no row, so this file will fail that check
--- until somebody with write access to that branch adds one reading
--- "050 | team_audit.actor_id set null so a deleted account is not pinned open
--- | agent-removal | no". Flagged rather than worked around: writing a rival
--- copy of the registry onto this branch would defeat the point of it being
--- single-source.
+-- REGISTRY: this number is claimed. The runbook's table carries
+-- "050 | Stops the audit trail pinning a deleted account open | agent-removal",
+-- added by the registry owner on `agent-sec` in 2502bc9, and next-free now
+-- reads 052. An earlier draft of this header said the row was still missing;
+-- it was written before that commit and was stale by the time anyone read it,
+-- which is the same one-commit lag the registry exists to absorb. Verified
+-- against the branch rather than assumed -- `git show agent-sec:supabase/
+-- APPLY-RUNBOOK.md` is the check, and it is cheaper than being wrong.
 --
 -- THIS IS A REGRESSION FROM 046, and this file is written by the lane that
 -- caused it. Before 046 a plain member had no audit rows at all -- the trail
