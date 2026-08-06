@@ -512,9 +512,13 @@ export class FakeDataClient implements DataClient {
   getProjectStream(projectPath: string) {
     if (this.opts.empty) return this.guard<StreamEntry[]>([])
     const rows: RawEntrySpec[] = [
+      // distilled: true so the `!!e.distilled` passthrough is OBSERVABLE. With
+      // every boolean left at the default, a mapper that inverted them looked
+      // identical -- which is how those three survived mutation.
       { session: 's-e1', ts: '2026-07-29T19:00:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
         headline: 'Hook ownership now decided by durability, not who ran last.',
         goal: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'],
+        distilled: true,
         project: 'membridge', projectPath: '/Users/x/membridge' },
     ]
     return this.guard<StreamEntry[]>(

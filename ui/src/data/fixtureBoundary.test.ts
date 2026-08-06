@@ -195,6 +195,14 @@ describe('the FakeDataClient/mapper boundary', () => {
       expect(stream[0].decisions).toBeNull()
       expect(stream[0].gotchas).toBeNull()
       expect(stream[0].changes).toEqual([])
+      // Mutation testing killed the version of this test that stopped above.
+      // `!!e.distilled` -> `!e.distilled` survived, because nothing asserted
+      // the boolean passthroughs at all -- and those two are exactly what
+      // tells an UNDECRYPTABLE row apart from an un-summarized one downstream
+      // (both arrive with an empty outcome).
+      expect(stream[0].distilled).toBe(true)
+      expect(stream[0].undecryptable).toBe(false)
+      expect(stream[0].self).toBe(false)
     })
 
     it('derives a live session id from its session, and a null outcome before any headline', async () => {
@@ -281,6 +289,30 @@ describe('the FakeDataClient/mapper boundary', () => {
       // Absent optional text normalizes to null, not undefined.
       expect(s!.decisions).toBeNull()
       expect(s!.gotchas).toBeNull()
+    })
+
+    // WRITTEN AGAINST MUTATION SURVIVORS. The test above asserts the SHAPE of a
+    // sparse payload and nothing else, so every `raw.x || null` and
+    // `Array.isArray(x) ? x : []` in mapSession survived being broken: a
+    // fallback that always fires still produces null and still produces an
+    // array, and `expect(Array.isArray(files)).toBe(true)` cannot tell `[]`
+    // from the real list. Asserting the type where the value is the point is
+    // the subtler cousin of the fixture routing around the mapper.
+    //
+    // This asserts a POPULATED session, where the mutated and unmutated values
+    // differ.
+    it('carries real values through, not merely values of the right shape', async () => {
+      const s = (await new FakeDataClient().getSession('s-f2'))!
+      expect(s.files).toEqual(['lib/hooks.js', 'test/run-tests.js'])
+      expect(s.decisions).toBe('Durability beats recency because a crashed run must not steal the hook.')
+      expect(s.gotchas).toBe('settings.json rewrites drop unknown keys, so merge before writing.')
+      expect(s.summary).toBe('Hook ownership now decided by durability, not who ran last.')
+      expect(s.headline).toBe('Hook ownership now decided by durability, not who ran last.')
+      expect(s.projectPath).toBe('/Users/x/membridge')
+      expect(s.authorId).toBe('andrew')
+      // The prompt chain's own normalization, which had the same hole.
+      expect(s.prompts[0].ts).toBe('2026-07-29T20:00:00Z')
+      expect(s.prompts[0].files).toEqual(['lib/hooks.js'])
     })
 
     it('still resolves an unknown id to null rather than a blank session', async () => {

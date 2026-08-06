@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   collapseSessionCheckpoints, dedupeLiveSessions, feedQueryString, groupLiveSessions, hasSummary, intentOf,
-  latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapStreamEntry,
+  latestSummaryFor, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapSession, mapStreamEntry,
   memberActivity, recentAuthorIdsFor, outcomeOf, streamEntryId, clipWords, OUTCOME_MAX,
   type RawFeedEntry, type RawProjectRow, type RawTeamFeedEntry,
 } from './mappers'
@@ -480,6 +480,41 @@ describe('memberActivity', () => {
     const noisy = memberActivity(noisyRows)
     expect(noisy.projectCount).toBe(2)
     expect(noisy.lastSharedAt).toBe(noisyRows[noisyRows.length - 1].ts)
+  })
+})
+
+// Both written against mutation survivors -- the suite could not tell these
+// two lines from broken ones.
+describe('mapper normalization the suite previously could not see', () => {
+  // `c.status === 'new' || c.status === 'deleted' ? c.status : 'edited'`
+  // survived `||` -> `&&`, which pins status to 'edited' for every row. Every
+  // fixture in the codebase happened to use 'edited', so nothing noticed. The
+  // three statuses render as three different things in the changes list.
+  it('keeps new and deleted statuses instead of flattening everything to edited', () => {
+    const changes = mapSession({
+      changes: [
+        { file: 'a.ts', status: 'new' },
+        { file: 'b.ts', status: 'deleted' },
+        { file: 'c.ts', status: 'edited' },
+        // Anything unrecognized falls back to 'edited', matching lib/changes.js.
+        { file: 'd.ts', status: 'wat' },
+        { file: 'e.ts' },
+      ],
+    }).changes
+    expect(changes.map(c => c.status)).toEqual(['new', 'deleted', 'edited', 'edited', 'edited'])
+  })
+
+  // `authorId: e.authorId || ''` survived `||` -> `&&`, which empties the id on
+  // every row. It is what the Avatar keys on and what "Hide mine" negates, so
+  // an always-empty id is not cosmetic.
+  it('carries a stream entry author id through, and empties only a missing one', () => {
+    const base = {
+      ts: '2026-07-29T19:00:00Z', author: 'Andrew', source: 'Codex', session: 's1',
+      project: 'p', projectPath: '/p', projectId: null, ask: '', summary: null,
+      distilled: false, files: [], goal: null, headline: null, live: false,
+    }
+    expect(mapStreamEntry({ ...base, authorId: 'andrew' }).authorId).toBe('andrew')
+    expect(mapStreamEntry({ ...base, authorId: null }).authorId).toBe('')
   })
 })
 
