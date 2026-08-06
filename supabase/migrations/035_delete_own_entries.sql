@@ -1,7 +1,10 @@
 -- 035_delete_own_entries.sql: self-serve deletion of a member's OWN synced
--- memory entries. Three new objects: a DELETE policy on memory_entries, a
--- preview RPC (my_entry_counts) and the deletion RPC itself
--- (delete_my_entries, which also writes the audit row).
+-- memory entries. Two new objects and one removal: a preview RPC
+-- (my_entry_counts), the deletion RPC itself (delete_my_entries, which also
+-- writes the audit row), and NO DELETE policy on memory_entries — §1 drops it,
+-- so the audited RPC is the only door. An earlier cut of this file created
+-- that policy; §1 records why creating it was wrong and why its absence is
+-- what makes a future restored grant harmless.
 --
 -- NUMBERING: an earlier cut of this file was written as 028 while 028 was
 -- still free. It is not: 028_enforce_project_access_default.sql took that
@@ -12,24 +15,29 @@
 --
 -- WHY THIS EXISTS. public.memory_entries has SELECT (schema.sql:121, narrowed
 -- by 025 §2), INSERT (schema.sql:126, narrowed by 033 §1) and UPDATE (012,
--- narrowed by 033 §2) policies and NO DELETE policy at all. RLS defaults
--- closed, so a DELETE through a user JWT currently affects zero rows and
--- reports success. There has never been a way for a person to remove what they
--- pushed, from any surface.
+-- narrowed by 033 §2) policies and NO DELETE policy. RLS defaults closed, so a
+-- DELETE through a user JWT affects zero rows and reports success. There has
+-- never been a way for a person to remove what they pushed, from any surface.
+--
+-- This file supplies that way as an RPC rather than as a policy, and §1
+-- explains at length why the difference matters: a policy would let a caller
+-- delete rows while skipping the audit row the RPC writes, and — the part that
+-- inverts the obvious reasoning — the policy's ABSENCE is what makes a
+-- carelessly restored table grant (040 revokes the current one) fail closed
+-- instead of silently working again.
 --
 -- Deploy gate, same discipline as 009 and 013: apply this to the LIVE Supabase
 -- BEFORE shipping the client that calls it, and in that order. The offline
--- suite runs against test/mock-supabase.js, which implements these three
--- objects, so a missing live migration will NOT be caught by CI. What a user
+-- suite runs against test/mock-supabase.js, which implements both RPCs, so a
+-- missing live migration will NOT be caught by CI. What a user
 -- would see instead is the worst possible failure for this particular feature:
 -- `delete_my_entries` 404s (PGRST202, "Could not find the function"), the
 -- daemon surfaces an error, and the person who just asked for their data to be
 -- gone is told something went wrong with no idea whether any of it was
 -- removed. Migrate first, ship second. The live DB has no migration history
 -- (migrations are applied by hand), so every statement here is re-runnable:
--- `create or replace` for the functions and drop-then-create for the policy
--- (`create policy` has no `if not exists`/`or replace`, see 011 §1's note, the
--- same convention 012, 024, 025 and 033 already follow). Run in the Supabase
+-- `create or replace` for the functions and `drop policy if exists` for the
+-- policy §1 removes. Run in the Supabase
 -- SQL editor (one transaction) or `supabase db push`; with psql, use
 -- `psql -1 -f`.
 --
@@ -62,29 +70,68 @@
 -- stops being true, this comment is wrong and the delete needs re-examining.
 
 -- ---------------------------------------------------------------------------
--- 1. memory_entries DELETE policy, scoped on author_id ALONE.
+-- 1. NO memory_entries DELETE policy. Dropped, not created.
 --
--- Read that again, because the obvious "improvement" is a bug: this policy
--- deliberately does NOT also require is_team_member(...) or can_see_project(),
--- the way SELECT does (025 §2) and the way INSERT and UPDATE now do (033 §1
--- and §2). It is the ONLY policy on this table that does not, and that is the
--- point rather than an oversight. Both of those predicates are about
--- PARTICIPATING in a project, and ANDing either one in here would strand
--- exactly the person most likely to want their data gone:
+-- THIS SECTION USED TO CREATE ONE, scoped on author_id alone, so that a member
+-- could erase their own rows through PostgREST. That was the wrong shape and
+-- the audit that found it is worth recording, because the reasoning inverts
+-- what "defence in depth" would suggest.
 --
---   * someone who just LEFT the team (their team_members row is gone, so
---     is_team_member is false forever), and
---   * someone whose project access was REVOKED (can_see_project is false),
+-- The problem: a direct `DELETE /rest/v1/memory_entries?author_id=eq.<self>`
+-- satisfied that policy and removed rows while writing NOTHING to team_audit —
+-- the audit row is written INSIDE delete_my_entries (§3), so any caller who
+-- skipped the RPC skipped the record. Self-serve deletion is deliberate and
+-- has a GDPR-shaped rationale; an irreversible removal from a team's shared
+-- memory leaving no trace that it happened is not.
 --
--- both of whom would be told, correctly, that their entries are still on the
--- backend and, incorrectly, that nothing can be done about it. Authorship is
--- the only thing that matters for erasing your own writes, and author_id is
--- pinned to auth.uid() here exactly as it is in the INSERT and UPDATE
--- policies, so this can never reach a row somebody else wrote.
+-- 040 closes that by revoking the DELETE grant from `authenticated` and
+-- `anon`. So why drop the policy too, when the grant is already gone?
+--
+-- Because a DELETE needs BOTH a grant and a permissive policy, and RLS is
+-- enabled on this table (verified against the live catalog: relrowsecurity
+-- true, relforcerowsecurity false). Under RLS, a table with no policy for a
+-- command denies that command outright. Now consider the one realistic
+-- regression — someone running `grant all on all tables in schema public to
+-- authenticated`, which is exactly how the privilege 040 revokes came to exist
+-- in the first place:
+--
+--   policy kept,    grant restored -> deletes work again, unaudited, silently
+--   policy dropped, grant restored -> RLS still denies
+--
+-- Keeping the policy is therefore not a second layer of defence. It is the
+-- thing that would let a restored grant through. Its ABSENCE is what makes
+-- that accident harmless.
+--
+-- delete_my_entries (§3) is unaffected, and this is the load-bearing fact
+-- rather than an assumption: it is `security definer` and owned by `postgres`,
+-- which also owns this table, and the table does not carry FORCE ROW LEVEL
+-- SECURITY. A table owner is not subject to their own table's RLS, so the
+-- function's DELETE consults neither this policy nor the `authenticated`
+-- grant. Checked in the live catalog rather than inferred (prosecdef true,
+-- proowner = relowner = postgres, relforcerowsecurity false), and nothing else
+-- in the tree references `memory_entries_delete` — no lib/, bin/, test/ or ui/
+-- path, and the offline mock has no direct-DELETE route on this table at all.
+--
+-- Order-independent, deliberately: dropping this does not wait on 040. With
+-- the policy gone and the grant still in place, RLS denies every direct
+-- delete anyway, so applying this file before, after, or without 040 only ever
+-- narrows what is reachable. The live backend HAS this policy today, so
+-- re-applying this file is what removes it.
+--
+-- IF A DIRECT DELETE PATH IS EVER WANTED AGAIN, the original argument still
+-- holds and is kept here for whoever writes it: it must be scoped on author_id
+-- ALONE, never ANDed with is_team_member(...) or can_see_project() the way
+-- SELECT (025 §2), INSERT and UPDATE (033 §1, §2) are. Both of those
+-- predicates are about PARTICIPATING in a project, and either one would strand
+-- exactly the person most likely to want their data gone: someone who just
+-- LEFT the team (is_team_member false forever), or someone whose project
+-- access was REVOKED (can_see_project false) — each told, correctly, that
+-- their entries are still on the backend and, incorrectly, that nothing can be
+-- done about it. Authorship is the only thing that matters for erasing your
+-- own writes. And it would need the audit gap answered at the same time, or it
+-- reopens the hole this section closes.
 -- ---------------------------------------------------------------------------
 drop policy if exists memory_entries_delete on public.memory_entries;
-create policy memory_entries_delete on public.memory_entries
-  for delete using (author_id = auth.uid());
 
 -- ---------------------------------------------------------------------------
 -- 2. my_entry_counts(p_team): the preview the confirmation screen shows.

@@ -420,8 +420,11 @@ async function main() {
     });
 
     // The one case a membership-gated predicate would break, and the reason
-    // 035 §1 scopes the DELETE policy on author_id ALONE. Someone who has left
-    // the team is exactly who most wants their data gone.
+    // delete_my_entries (035 §3) scopes on author_id ALONE — no
+    // is_team_member, no can_see_project. Someone who has left the team is
+    // exactly who most wants their data gone. (This used to cite 035 §1's
+    // DELETE policy, which no longer exists: §1 now DROPS it, so the audited
+    // RPC is the only door and its predicate is the one that carries this.)
     await check('someone who has LEFT the team can still delete what they pushed', async () => {
       process.env.MEMBRIDGE_HOME = HOME_MEMBER;
       const leftBehind = mineOnBackend(memberCreds.userId).length;
