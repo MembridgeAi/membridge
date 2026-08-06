@@ -2,6 +2,17 @@
   --bg: #0B1120; --panel: #0E1526; --panel2: #111A2E;
   --text: #F1F5F9; --text2: #94A3B8; --text3: #5B6B84;
   --line: #1E293B; --line2: #334155;
+  /* Hover fill for rows, cards and disclosure headers. NOT a surface tier:
+     --bg/--panel/--panel2 are where things sit, --hover is what a pointer
+     does to them. It exists because --panel2 was doing both jobs and was
+     too close to --bg to do the second one: measured against --bg it is
+     1.09:1 in dark and 1.05:1 in light, i.e. a hover the reader cannot see.
+     These values are chosen for a visible step in BOTH directions
+     (dark +13.8 L*, light -8.9 L*) rather than for a matching contrast
+     ratio, because the same ratio does not read the same near black as it
+     does near white. Both stay inside the existing slate family; neither
+     is a new hue. */
+  --hover: #202E4A;
   --accent: #4D7CFF; --accent2: #7A9DFF; --accent-dim: rgba(77,124,255,.12);
   --green: #22C08F; --amber: #E79A3C; --red: #F0616D;
   --green-dim: rgba(34,192,143,.09); --amber-dim: rgba(231,154,60,.10); --red-dim: rgba(240,97,109,.14);
@@ -67,6 +78,7 @@
   --bg: #FAFAFA; --panel: #FFFFFF; --panel2: #F1F5F9;
   --text: #0F172A; --text2: #64748B; --text3: #94A3B8;
   --line: #E2E8F0; --line2: #CBD5E1;
+  --hover: #D9E2EC;
   --accent: #0052FF; --accent2: #4D7CFF; --accent-dim: rgba(0,82,255,.06);
   --green: #0D9673; --amber: #C77414; --red: #D14350;
   --green-dim: rgba(13,150,115,.08); --amber-dim: rgba(199,116,20,.09); --red-dim: rgba(209,67,80,.08);

@@ -74,7 +74,34 @@
   cursor: pointer;
 }
 .day-card:hover {
-  background: var(--panel2);
+  background: var(--hover);
+}
+/* The step-up: --text3 is unreadable on the hover fill (2.50:1 dark,
+ * 1.96:1 light), so the muted metadata moves one step to --text2 while the
+ * pointer is on the card. --text2 does NOT step to --text: that would flip
+ * the hierarchy mid-scrub and need a second colour transition. */
+.day-card:hover .day-card-sub,
+.day-card:hover .day-card-meta,
+.day-card:hover .day-card-stats,
+.day-card:hover .day-card-touched,
+.day-card:hover .day-card-overview-empty,
+.day-card:hover .day-card-chevron {
+  color: var(--text2);
+}
+/* The step-up has to be transitioned on the CHILDREN, not on .day-card.
+ * `transition` is not an inherited property, so a `color` transition on the
+ * card animates only the card's own colour -- and nothing changes that on
+ * hover. Declared here, the muted text eases to --text2 with the fill instead
+ * of snapping to it a frame early. */
+@media (prefers-reduced-motion: no-preference) {
+  .day-card-sub,
+  .day-card-meta,
+  .day-card-stats,
+  .day-card-touched,
+  .day-card-overview-empty,
+  .day-card-chevron {
+    transition: color var(--dur-fast) var(--ease-out);
+  }
 }
 /* The card holding the session a ?session= deep link named. Accent on the
  * leading edge, not a fill, so "this one" does not read as "selected". */
@@ -84,7 +111,7 @@
 @media (prefers-reduced-motion: no-preference) {
   .day-card {
     animation: settle-in var(--dur-base) var(--ease-out) both;
-    transition: background-color var(--dur-fast) var(--ease-out);
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
   }
 }
 .day-card-avatar-cell {
@@ -348,8 +375,18 @@
   border-radius: var(--r-sm);
   cursor: pointer;
 }
+/* The one bordered-button hover, shared verbatim with .feed-show-more below:
+ * fill goes --hover, border goes accent, text goes full strength. Border and
+ * text follow .session-chain-more:hover, which is where the idiom already
+ * existed; the fill is new because base.css's global button:hover only ever
+ * reached for --panel2, which is invisible against --bg. */
 .day-more:hover {
-  background: var(--panel2);
+  background: var(--hover);
+  border-color: var(--accent);
+  color: var(--text);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .day-more { transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
 }
 
 /* What was done. The page's substance, so it gets a reading size rather than
@@ -482,8 +519,11 @@
   background: transparent;
   color: var(--text2);
 }
+/* Same bordered-button hover as .day-more above. */
 .feed-show-more:hover {
-  background: var(--panel2);
+  background: var(--hover);
+  border-color: var(--accent);
+  color: var(--text);
 }
 .feed-show-more:disabled {
   opacity: 0.6;

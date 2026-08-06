@@ -6,7 +6,13 @@ body {
   scrollbar-gutter: stable;
 }
 button { font: inherit; border-radius: var(--r); cursor: pointer; }
-button:hover { background: var(--panel2); }
+/* --hover, not --panel2. As a hover fill --panel2 measures 1.09:1 against --bg
+   in dark and 1.05:1 in light, which is a step at or below the threshold of
+   human vision -- the defect that read as "the hover is transparent". --hover
+   exists to be seen; see the note on the token in tokens.css. This is the
+   app-wide default, so every button that does not override it gets a hover a
+   reader can actually detect. */
+button:hover { background: var(--hover); }
 input, select { font: inherit; border-radius: var(--r); background: var(--panel2); color: var(--text); border: 1px solid var(--line2); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .scroll-x { overflow-x: auto; scrollbar-gutter: stable; }

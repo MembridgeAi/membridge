@@ -62,10 +62,24 @@ export function localDayRangeMs(day: string): { start: number; end: number } | n
   return { start: start.getTime(), end: end.getTime() }
 }
 
-/** The same range as the UTC ISO instants /api/feed compares against. The
- *  ONLY correct thing to put in a `since`/`before` for "this local day", and
- *  the reason it is derived rather than typed: `end` is EXCLUSIVE here, which
- *  a caller passing it to an inclusive `before` has to know. */
+/** This local day as the UTC ISO instants /api/feed compares against, as a
+ *  HALF-OPEN range: `since` is the first instant of the day, `before` is the
+ *  first instant of the NEXT day and is therefore EXCLUSIVE.
+ *
+ *  DO NOT pass `before` straight into /api/feed. The server's window is fully
+ *  CLOSED on both ends -- lib/server.js tests `String(e.ts) >= String(since)`
+ *  and `String(e.ts) <= String(before)` -- so handing it this exclusive bound
+ *  counts an entry landing exactly at next-day local midnight in BOTH days.
+ *  A caller wanting the server's inclusive bound has to step `before` back by
+ *  the smallest representable amount itself.
+ *
+ *  The half-open shape is kept rather than "fixed" because it is the correct
+ *  one for the range arithmetic this feeds (localDayRangeMs comparisons,
+ *  bucketing), and because there is exactly one place -- the caller talking to
+ *  /api/feed -- where the mismatch matters. Making the boundary inclusive here
+ *  would push an off-by-one into every other use instead. There are no
+ *  production callers today; this note exists so the first one does not
+ *  inherit a silent double-count. */
 export function localDayRangeUtc(day: string): { since: string; before: string } | null {
   const range = localDayRangeMs(day)
   if (!range) return null
