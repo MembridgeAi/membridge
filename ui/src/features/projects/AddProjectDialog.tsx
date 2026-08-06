@@ -16,6 +16,18 @@ interface AddProjectDialogProps {
   onClose: () => void
 }
 
+// What the bulk adopt call reported, kept whole rather than pre-formatted so
+// each row (skipped or history-withheld) is announced as itself instead of a
+// single sentence the user has to parse. A partial failure and a
+// re-adopt-without-history are both non-fatal outcomes: neither closes the
+// dialog, because a dialog that vanishes takes the reason with it.
+interface AdoptReport {
+  requested: number
+  adoptedCount: number
+  skipped: { path: string; reason: string }[]
+  historyWithheld: string[]
+}
+
 /**
  * "Add project" — pick from what is already on this machine, or point a
  * native Finder/Explorer window at a folder. There is deliberately NO path
@@ -31,7 +43,9 @@ interface AddProjectDialogProps {
  *
  * Both routes end in the same bulk POST /api/projects/adopt, which reports
  * per-path outcomes; a partial failure names the folders that failed instead
- * of reporting the whole sweep as success.
+ * of reporting the whole sweep as success, and a re-adopt that would replay a
+ * previously-deleted project comes back with those paths in `historyWithheld`
+ * so the UI can say why the block landed empty (matching the CLI's message).
  */
 export function AddProjectDialog({ onClose }: AddProjectDialogProps) {
   const client = useDataClient()
@@ -42,7 +56,7 @@ export function AddProjectDialog({ onClose }: AddProjectDialogProps) {
   // row that arrives from a later re-scan is selected by default like every
   // other row, instead of silently arriving unchecked.
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
-  const [report, setReport] = useState<string | null>(null)
+  const [report, setReport] = useState<AdoptReport | null>(null)
 
   const candidates: DiscoveredProject[] = useMemo(
     () => (discovery.data ?? [])
@@ -69,9 +83,19 @@ export function AddProjectDialog({ onClose }: AddProjectDialogProps) {
     setReport(null)
     try {
       const result = await adopt.mutateAsync(paths)
-      if (result.skipped.length > 0) {
-        const names = result.skipped.map(s => `${s.path} (${s.reason})`).join(', ')
-        setReport(`Added ${result.adopted.length} of ${paths.length}. Skipped: ${names}.`)
+      const historyWithheld = result.historyWithheld ?? []
+      // Any non-clean outcome keeps the dialog open. Skipped rows are a
+      // partial failure the user needs to see per-path; a re-adopt that
+      // withholds history is a success with a caveat — the block will land
+      // empty for those projects, and if the dialog vanished the user would
+      // have no reason offered for it.
+      if (result.skipped.length > 0 || historyWithheld.length > 0) {
+        setReport({
+          requested: paths.length,
+          adoptedCount: result.adopted.length,
+          skipped: result.skipped,
+          historyWithheld,
+        })
         return
       }
       if (closeOnSuccess) onClose()
@@ -145,7 +169,40 @@ export function AddProjectDialog({ onClose }: AddProjectDialogProps) {
         </>
       )}
 
-      {report && <p className="dialog-error" role="alert">{report}</p>}
+      {report && report.skipped.length > 0 && (
+        <div className="dialog-error" role="alert">
+          <p className="discover-report-line">
+            Added {report.adoptedCount} of {report.requested}. Skipped:
+          </p>
+          <ul className="discover-report-list">
+            {report.skipped.map(s => (
+              <li key={s.path}>
+                <span className="mono discover-report-path">{s.path}</span>
+                {' — '}
+                {s.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {/* history-withheld is a success case (the projects ARE now watched),
+          but the injected memory block will land empty for them because they
+          were removed on purpose before. Mirrors the CLI wording so a user
+          moving between the two surfaces reads the same explanation. */}
+      {report && report.historyWithheld.length > 0 && (
+        <div className="discover-withheld" role="status">
+          <p className="discover-report-line">
+            Added, but earlier memory was not restored — these folders were previously deleted on purpose:
+          </p>
+          <ul className="discover-report-list">
+            {report.historyWithheld.map(p => (
+              <li key={p}>
+                <span className="mono discover-report-path">{p}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {adopt.isError && (
         <p className="dialog-error" role="alert">Couldn't add. {errorMessage(adopt.error)}</p>
       )}
