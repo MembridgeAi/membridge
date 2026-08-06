@@ -23424,23 +23424,38 @@ const repoRoot = require('../lib/repo-root');
 
       // ===== WHERE 033 IS ACTUALLY LOAD-BEARING =====
       // The client's gate above is positive-confirmation only, and
-      // visibleProjectIds (lib/teamsync.js:1092-1112) returns NULL on three
-      // inputs: a thrown request, a non-array body, and — deliberately — an
-      // EMPTY visible set, because [] is genuinely ambiguous between "revoked
-      // from everything", "backend has no project_stats view" and "deployment
-      // misconfigured", and the caller DELETES local data on absence.
+      // visibleProjectIds returns NULL — "inconclusive, skip the gate" —
+      // whenever it cannot answer, because the caller DELETES local data on a
+      // positive answer.
       //
-      // Its own comment names the cost it accepted: "revocation from a member's
-      // ONLY project is not detected here". What it could not know is that the
-      // undetected case was not merely a stale read — pre-033 the backend
-      // ACCEPTED the push, because memory_entries_insert never checked
-      // can_see_project. So a member revoked from every project they could see
-      // (in practice: their only one) skipped the gate, pushed, and the write
-      // landed. No attacker, no stale client, first-party code path.
+      // WHICH INCONCLUSIVE CASE THIS USES, AND WHY IT CHANGED (REV-13). These
+      // three checks were written against the EMPTY visible set: pre-SEC-4,
+      // `[]` was inconclusive, so a member revoked from their only project
+      // skipped the gate, pushed, and (pre-033) the write landed. SEC-4
+      // (1c7ce9f) settled that case — an empty project_stats corroborated by a
+      // live base-projects row now means REVOKED — so the client stops that
+      // push before the backend ever sees it, and this fixture stopped reaching
+      // the code it exists to test. Three checks went red for a REASON THAT WAS
+      // A FIX, which is the most dangerous shape of red there is: nothing was
+      // broken, and the natural repair (weakening the assertions) would have
+      // deleted the backstop's only coverage.
       //
-      // This is the window 033 closes, and 024's own header says this is where
-      // the backstop belongs: "RLS is the backstop if that check is ever
-      // bypassed or wrong, not the only gate."
+      // So the backstop is now reached through the window SEC-4 deliberately
+      // LEAVES open, named in its own commit message: "base empty / all
+      // archived / errored -> inconclusive -> null, unchanged". flags
+      // .failProjectsList faults the corroborating read, exactly as a network
+      // blip or a permissions change on that one endpoint would, and the gate
+      // correctly declines to act on an answer it could not get. The write is
+      // then attempted and 033 — the RLS check on memory_entries_insert — is
+      // the only thing standing between a revoked member and a landed write.
+      // That is what 024's header describes: "RLS is the backstop if that check
+      // is ever bypassed or wrong, not the only gate."
+      //
+      // FALSIFIABILITY (REV-13, proven not asserted): with
+      // flags.noWriteAccessCheck = true — the mock's stand-in for "033 not
+      // applied" — the first of these three checks fails on
+      // `a revoked write must not land`. The repair did not turn these green by
+      // making them undemanding.
       const HOME_SOLE = path.join(ROOT, 'home-t17-sole');
       homeFor.sole = HOME_SOLE;
       portFor.sole = P(84);
@@ -23478,6 +23493,12 @@ const repoRoot = require('../lib/repo-root');
       };
       util.saveState(stS);
       const soleDeniedBefore = mock17.stats.deniedInserts;
+      // The probe cannot answer -> null -> the client gate is skipped, which is
+      // the only state in which the backend backstop is the thing under test.
+      // Held across all three checks below: the second one re-syncs, and a pass
+      // in which the gate CAN answer would stop the refusal recurring for a
+      // different reason than the one being asserted.
+      mock17.flags.failProjectsList = true;
       const rS = await teamsync.syncTeams();
 
       await check('033: an identity revoked from EVERY project slips the client gate, and the backend is what refuses the write', async () => {
@@ -23532,6 +23553,8 @@ const repoRoot = require('../lib/repo-root');
         assert.ok(/discard a link that may be correct/.test(err),
           `unlink must be described as a hazard, not prescribed: ${err}`);
       });
+
+      mock17.flags.failProjectsList = false;
 
       // ===== readAccess must not invent an access list it cannot read =====
       // GET /api/project/access had NO role gate, while the data it reports is

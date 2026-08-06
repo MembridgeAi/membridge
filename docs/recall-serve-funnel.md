@@ -728,3 +728,85 @@ That middle row is why the e2e check is not vacuous: with only the policy
 reverted the suite passed, because the pre-filter caught it. Worth stating,
 because a test that passes for a reason other than the one it names is how a
 suite stops meaning anything.
+
+# REV-13: the three `033:` reds were a fixture superseded by a FIX
+
+Not a finding, not rot. The most dangerous shape of red there is.
+
+## What they assert
+
+Migration 033 put `can_see_project` on `memory_entries_insert`. Before it, a
+member revoked from a project could still **write** into it — write-only access
+to a project they cannot read back, their daemon uploading that project's
+summaries and prompts every pass, with neither the revoked member nor the
+manager who revoked them able to see it. The three checks prove the backend
+refuses that write, that the refusal leaves the local entries **held rather
+than lost** (no cursor advance, no success flag), and that the error names both
+possible causes instead of prescribing a destructive `unlink`.
+
+They are the only coverage of that backstop.
+
+## Why they were red
+
+They were reached through the one window where the client's own gate cannot
+fire. `visibleProjectIds` returns `null` — *inconclusive, skip the gate* —
+whenever it cannot answer, and pre-SEC-4 an **empty** visible set was one of
+those cases. For a member of a team sharing one project, empty is exactly what
+revocation looks like, so their push was attempted and (pre-033) landed.
+
+**SEC-4 (`1c7ce9f`) closed that window** — an empty `project_stats` corroborated
+by a live base-`projects` row now means REVOKED — so the client stops the push
+before the backend ever sees it. The fixture stopped reaching the code it
+exists to test, and its first assertion (*"precondition: the empty-visible-set
+probe is inconclusive, so the gate is skipped"*) started failing on a
+`teamAccessLost` timestamp that is the fix working.
+
+Attributed by mechanism, not by bisect: the failing assertion names the exact
+precondition SEC-4's own commit message says it removed. Three checks went red
+because something was **fixed**, and the natural repair — weakening the
+assertions until they pass — would have deleted the backstop's only coverage
+while looking like housekeeping.
+
+## The repair
+
+Reach the backstop through the window SEC-4 deliberately **leaves** open, named
+in its own commit message: *"base empty / all archived / errored → inconclusive
+→ null, unchanged"*. The mock's `failProjectsList` flag — which SEC-4 itself
+added — faults the corroborating read exactly as a network blip or a
+permissions change on that one endpoint would. The gate correctly declines to
+act on an answer it could not get, the write is attempted, and 033 is the only
+thing between a revoked member and a landed write. That is what 024's header
+describes: *"RLS is the backstop if that check is ever bypassed or wrong, not
+the only gate."*
+
+## Falsifiability — proven, not asserted
+
+A red turned green by a fixture edit is the easiest way to delete a finding by
+accident, so the repaired checks were re-run with `flags.noWriteAccessCheck`
+(the mock's stand-in for "033 not applied"):
+
+```
+ok    033: the refusal is per-project — ... still publishes and still pulls
+FAIL  033: an identity revoked from EVERY project slips the client gate ...
+        the push must have been attempted and refused by the backend
+FAIL  033: a refused push advances no cursor and sets no success flag ...
+        a batch that never landed must not move the push cursor
+        + '2026-07-22T10:00:00.000Z'   - undefined
+FAIL  033: the RLS hint names both causes ...
+        the hint must offer revocation as a cause: undefined
+```
+
+The cursor advancing to the entry's own timestamp is the pre-033 leak itself:
+the revoked write was accepted and recorded as sent. The control check stays
+green. The repair did not make these checks undemanding.
+
+## One caveat on the run that verified it
+
+The verifying run scored 1272/1320 with 48 unrelated failures — `adapters
+missing`, `/api/session`, `/api/feed`, dashboard payloads. **Five monolith runs
+were executing concurrently** on this machine (other agents' worktrees), and
+those checks share `~/.membridge` state, ports and the real daemon. The same
+tree scored 1317/1320 an hour earlier when only one run was in flight. The
+`033:` block is mock-backed and immune to that class, which is why its verdict
+is readable from a noisy run — but the ambient failures are a real property of
+this machine under load, not a property of the branch.
