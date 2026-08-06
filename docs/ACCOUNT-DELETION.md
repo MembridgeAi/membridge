@@ -668,7 +668,19 @@ when the person *was* active. Recomputing them to exclude a since-deleted
 account would retroactively falsify a past period. Recommend leaving them, and
 flagging it rather than deciding it silently.
 
-### 8.5 What surfacing it would require — the backend spec
+### 8.5 What surfacing it required — BUILT
+
+> **Status: built on `agent-deletion`.** `supabase/migrations/053_team_members_list_deleted_at.sql`
+> (written, **not applied** — hand it to a human) plus the client filter in
+> `lib/teamsync.js` (`activeMembers`) wired into all nine present-tense call
+> sites. Unlike `052`, `053` needs no decision and should ship with the next
+> batch. **Attribution was left untouched, deliberately — §8.4 is still open.**
+>
+> **One change from the spec below, recorded rather than glossed:** the RPC
+> returns the **timestamp**, not a derived boolean. That discloses *when* an
+> account was deleted to every team member, which the boolean would not. The
+> reasoning for preferring the raw fact, and the two-line change to switch back,
+> are in `053`'s header §3.
 
 **The leverage is that all five present-tense surfaces go through one
 function.** Roster, access matrix, Insights, key sealing and trust pins every
@@ -676,14 +688,13 @@ one of them calls `team_members_list`. Teaching that single RPC about deleted
 accounts reaches all five.
 
 ```
--- SHAPE ONLY. Not written as a migration, because the number should be
--- claimed when the work is scheduled, not now.
+-- As built. Full header, including the four traps below, is in
+-- supabase/migrations/053_team_members_list_deleted_at.sql.
 create or replace function public.team_members_list(p_team uuid)
 returns table (user_id uuid, display_name text, role text,
-               joined_at timestamptz, account_deleted boolean)
+               joined_at timestamptz, deleted_at timestamptz)
 ...
-  select m.user_id, m.display_name, m.role, m.joined_at,
-         (u.deleted_at is not null) as account_deleted
+  select m.user_id, m.display_name, m.role, m.joined_at, u.deleted_at
     from public.team_members m
     left join auth.users u on u.id = m.user_id
    where m.team_id = p_team and public.is_team_member(p_team)
@@ -695,9 +706,12 @@ Four constraints on that change, each of which is a way to get it wrong:
    read `auth.users` when the caller has no privilege on it (§8.2). The existing
    `is_team_member(p_team)` predicate in the body must stay — definer means RLS
    does not apply automatically, which is the trap `035` §2 documents.
-2. **Return a boolean, not the timestamp.** `account_deleted` answers the only
-   question any caller asks. `deleted_at` additionally discloses *when*, to
-   every member of the team, for no gain.
+2. **Boolean vs timestamp — built as the timestamp.** A derived
+   `account_deleted` answers the only question any caller asks today;
+   `deleted_at` additionally discloses *when*, to every member of the team.
+   Built as the raw timestamp on the grounds that it is the durable fact and a
+   derived flag would have to be re-derived if anything ever needs the date.
+   If the disclosure is unwanted the change is two lines — `053` §3 names them.
 3. **`left join`, not `join`.** An inner join would silently drop any member
    whose `auth.users` row is genuinely gone once `052` and a real deletion path
    exist — turning a display bug into a member vanishing from the roster.
