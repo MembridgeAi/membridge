@@ -102,6 +102,11 @@ function createMockSupabase() {
     // memory_entries write check, restoring the pre-033 backend where a revoked
     // member could still push into a project they cannot read.
     noWriteAccessCheck: false,
+    // Stands in for "046 not applied": suppresses the AFTER INSERT trigger on
+    // public.team_members, restoring the backend where a join cannot be
+    // audited at all — the joiner is role 'member', team_audit's insert policy
+    // is manager-only, and recordAudit swallows the refusal.
+    noMemberJoinTrigger: false,
   };
 
   const uuid = () => crypto.randomUUID();
@@ -169,6 +174,37 @@ function createMockSupabase() {
     if (flags.noProjectInsertTrigger) return;
     materializeForProject(project);
   };
+  // 046_audit_member_joined.sql: the AFTER INSERT trigger on
+  // public.team_members. Modelled as a function called from every membership
+  // insert -- the same shape projectsInsertTrigger uses for 032 -- rather than
+  // inlined at the three RPCs, so it can be disabled on its own to prove the
+  // checks that depend on it actually fail without it.
+  //
+  // Two properties are the whole point and both are load-bearing here:
+  //   * it fires from the INSERT, so a repeat join (`on conflict do nothing`,
+  //     modelled below as the isMember guard) writes nothing;
+  //   * `when (new.role <> 'owner')` excludes create_team's founder row -- a
+  //     team's creator is not joining it.
+  // The row itself is composed entirely from the inserted values: no argument
+  // reaches it, which is why the real one is a trigger and not an RPC.
+  // flags.noMemberJoinTrigger stands in for "046 not applied".
+  const memberInsertTrigger = row => {
+    if (flags.noMemberJoinTrigger) return;
+    if (row.role === 'owner') return;
+    teamAudit.push({
+      id: uuid(),
+      team_id: row.teamId,
+      actor_id: row.userId,
+      action: 'member-joined',
+      object_type: 'member',
+      object_key: row.userId,
+      detail: { memberId: row.userId, targetName: row.displayName },
+      // Offset by the current row count, the same convention the POST route
+      // below uses, so two events written inside one millisecond still sort
+      // deterministically against each other.
+      created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+    });
+  };
   // 029 §5: project_access carries `foreign key (team_id, member_id)
   // references team_members (team_id, user_id) on delete cascade` (024:38-39),
   // so deleting a membership deletes its access rows in the real backend with
@@ -209,14 +245,18 @@ function createMockSupabase() {
     if (fn === 'create_team') {
       const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdAt: new Date().toISOString() };
       teams.set(team.id, team);
-      members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() });
+      const ownerRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() };
+      members.push(ownerRow);
+      memberInsertTrigger(ownerRow); // 046: no-op for an owner row, called anyway so the gate is what excludes it
       return json(res, 200, [{ team_id: team.id, invite_code: team.inviteCode }]);
     }
     if (fn === 'join_team') {
       const team = [...teams.values()].find(t => t.inviteCode === body.p_code);
       if (!team) return json(res, 400, { message: 'invalid invite code' });
       if (!isMember(team.id, userId)) {
-        members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() });
+        const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
+        members.push(joinRow);
+        memberInsertTrigger(joinRow); // 046
       }
       // 029 §2: record this member's access to every project the team already
       // shares. Runs on a repeat join too, where it is a no-op.
@@ -290,7 +330,9 @@ function createMockSupabase() {
       if (inv.maxUses !== null && inv.useCount >= inv.maxUses) return json(res, 400, { message: 'this invite link has already been used' });
       const team = teams.get(inv.teamId);
       if (!isMember(team.id, userId)) {
-        members.push({ teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() });
+        const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
+        members.push(joinRow);
+        memberInsertTrigger(joinRow); // 046
         inv.useCount++;
       }
       // 029 §2. In the real function this insert comes AFTER the membership
