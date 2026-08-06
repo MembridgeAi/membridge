@@ -28,8 +28,11 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 046 | Joining a team writes an audit row | `agent-removal` | no |
 | 047 | Two scoped Postgres roles for the ops panel | `agent-sec` | no |
 | 048 | `ops_audit.via_role` — records the verified credential beside the self-reported actor | `agent-sec` | no |
+| 049 | Records a voluntary departure in the audit trail | `agent-removal` | no — **file currently numbered 048 on that branch and must be renumbered to 049** |
 
-**Next free number: 049.**
+**Next free number: 050.**
+
+> **049 was allocated by the registry owner, not claimed by the lane.** `agent-removal` committed its departure-audit migration as `048`, which this table had already assigned. Neither branch conflicts on it — different filenames — so it would have merged silently. It is recorded here as 049 so the number is reserved while that lane renumbers; the fix belongs on `agent-removal`, not here.
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
 
@@ -295,6 +298,8 @@ Three branches carry this work — `agent-sec`, `agent-backend2` and `agent-remo
 1. **`test/mock-supabase.js` conflicts, and the resolution is "keep both".** Two lanes each appended flags to the same object. Taking either side alone silently drops the other lane's test flag, which turns one of their suites green for the wrong reason. Keep both blocks.
 
 2. **The `(other branch)` notes in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md) go stale the moment you merge.** Five rows carry that qualifier because the file lives on one branch and cannot see the others. Once merged, the files ARE on disk and the qualifier should come out. It is deliberately ugly so it gets noticed.
+
+3. **Check for two files sharing a migration number.** This already happened once: `agent-removal` committed a migration as `048` while the registry had assigned `048` elsewhere. Git does **not** conflict on that — different filenames, different paths, both files simply coexist — so it survives a merge in silence and only surfaces when someone applies them. `test/suites/migration-state.test.js` now fails on it; run that suite after merging, before doing anything else.
 
 Everything else merged cleanly, and the combined test suite was run — see the SEC-14 report.
 

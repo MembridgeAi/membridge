@@ -282,6 +282,36 @@ async function main() {
       + 'which is the collision the registry exists to prevent:\n' + doubled.join('\n'));
   });
 
+  // THE BLIND SPOT, found by a real collision DURING the SEC-14 dry run and
+  // fixed here. The two checks either side of this one both passed while
+  // 048_ops_audit_via_role.sql and 048_audit_member_left.sql sat in the same
+  // directory: the registry had exactly one row for 048, and every file's
+  // number had a row, so nothing was violated. The registry records that a
+  // NUMBER is claimed; it did not record that only ONE FILE may claim it.
+  //
+  // That is the same defect shape this whole session has been closing — a
+  // check that looks like it covers a case and does not — and it was invisible
+  // until two branches with different filenames under the same number were
+  // merged. git will not conflict on that: different paths, no overlap, both
+  // files simply coexist and the second one to be applied is a surprise.
+  await check('no two migration files share a number', () => {
+    const byNumber = new Map();
+    for (const f of files) {
+      const num = f.match(/^(\d{3})/)[1];
+      if (!byNumber.has(num)) byNumber.set(num, []);
+      byNumber.get(num).push(f);
+    }
+    const collisions = [...byNumber.entries()]
+      .filter(([, list]) => list.length > 1)
+      .map(([num, list]) => `  ${num}: ${list.join('  AND  ')}`);
+    assert.deepStrictEqual(collisions, [],
+      'two migration files claim the same number:\n' + collisions.join('\n')
+      + '\n\nGit does not conflict on this — different filenames, different paths, both '
+      + 'files just coexist — so it survives a merge silently and only shows up when '
+      + 'someone applies them. Renumber the one whose claim is NOT in the '
+      + 'APPLY-RUNBOOK registry, and add its row in the same commit.');
+  });
+
   await check('every migration file at or above the registry floor is registered', () => {
     // The floor is the lowest number the registry tracks, read from the table
     // rather than hardcoded: everything below it predates concurrent allocation
