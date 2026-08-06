@@ -99,10 +99,30 @@
 // RLS-bypassing principal writes a bad row" path is materially narrower than it
 // was. The pre-existing-rows gap is the one that does not depend on any of that.
 //
-// My second check accepting "both policies mention project_key" as sufficient
-// is therefore a weaker acceptance criterion than the threat warrants. Left as
-// written rather than tightened, because tightening it here would silently
-// change what this branch claims to have found; the honest move is to say so.
+// TIGHTENED, 2026-08-05, rather than left as written. The old acceptance
+// criterion was "both policies mention project_key", which a policy could
+// satisfy cosmetically — `and project_access.project_key is not null` names the
+// column and correlates nothing. Shipping a check that accepts a cosmetic fix
+// is the exact class this branch has spent the day closing, so it is now two
+// checks that separate the two halves of the property:
+//
+//   WRITE SIDE, FUTURE ROWS — the policies must actually CORRELATE project_key
+//   to the row's own team by reaching public.projects and tying BOTH columns,
+//   not merely mention the column.
+//
+//   WRITE SIDE, ROWS ALREADY IN THE TABLE — an RLS policy is not a constraint.
+//   It validates writes by principals subject to RLS and says nothing about
+//   what is already stored, so the finding is not closed until something
+//   addresses the existing set: a validating constraint/FK, or a sweep written
+//   down where an operator applying the migration will actually run it.
+//
+// Both now pass against agent-sec, which earns them: 037's policies correlate
+// through `exists (select 1 from public.projects p where p.id::text =
+// project_access.project_key and p.team_id = project_access.team_id)`, and its
+// header carries a SELECT-then-DELETE sweep under "THE SWEEP — NOT RUN BY THIS
+// MIGRATION, ON PURPOSE" that states plainly that the hole stays open for
+// existing rows until they are removed. Verified by execution, and verified to
+// REJECT a decoy policy that names project_key without correlating it.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check } = h;
 const assert = require('assert');
@@ -158,6 +178,57 @@ function newestPolicy(table, name) {
 // Does anything in supabase/migrations tie project_access.project_key to a
 // project belonging to project_access.team_id? A foreign key, a check
 // constraint, or a trigger on the table would all do it.
+// Does this policy's SQL actually TIE project_key to the row's own team, or
+// does it merely mention the column?
+//
+// The distinction is the whole point of the tightening. `and
+// project_access.project_key is not null` mentions it and constrains nothing;
+// the real shape reaches public.projects and correlates BOTH columns — the
+// project named must be the one the writing team owns. Anything that reaches
+// the projects table but ties only one of the two is still a hole: tying the
+// project alone permits any team to name it, tying the team alone permits any
+// project under that team.
+//
+// Alias-driven rather than hardcoding `p`, so a rename does not silently turn
+// this into a check that passes on everything.
+function policyCorrelatesProjectToTeam(sql) {
+  const flat = String(sql).replace(/\s+/g, ' ');
+  const sub = /exists\s*\(\s*select\b[^)]*?\bfrom\s+public\.projects\s+(\w+)/i.exec(flat);
+  if (!sub) return false;
+  const a = sub[1];
+  const tiesProject = new RegExp(`\\b${a}\\.id(?:::text)?\\s*=\\s*[\\w.]*\\bproject_key\\b`, 'i').test(flat)
+    || new RegExp(`\\bproject_key\\s*=\\s*\\b${a}\\.id\\b`, 'i').test(flat);
+  const tiesTeam = new RegExp(`\\b${a}\\.team_id\\s*=\\s*[\\w.]*\\bteam_id\\b`, 'i').test(flat)
+    || new RegExp(`\\bteam_id\\s*=\\s*\\b${a}\\.team_id\\b`, 'i').test(flat);
+  return tiesProject && tiesTeam;
+}
+
+// What, if anything, addresses rows ALREADY in project_access?
+//
+// A constraint or FK validates the existing set when it is added. A policy does
+// not. Where the remedy is a manual sweep instead, it only counts if it is
+// written down in the migration an operator is applying — a sweep nobody can
+// find is not a remedy — and it has to say the SELECT comes first, or it is an
+// invitation to delete rows nobody has looked at.
+function existingRowsAddressed() {
+  const constrained = projectKeyIsConstrained();
+  if (constrained.length) return `a constraint validates the stored set (${constrained.join('; ')})`;
+  for (const f of migrationFiles()) {
+    // The RAW file, comments included: the sweep is deliberately NOT executable
+    // SQL, so codeOf() — which strips comments — cannot see it by design.
+    const raw = fs.readFileSync(path.join(MIGRATIONS, f), 'utf8');
+    if (!/project_access/i.test(raw)) continue;
+    const hasSelect = /select[\s\S]{0,600}?from\s+public\.project_access[\s\S]{0,600}?not\s+exists/i.test(raw);
+    const hasDelete = /delete\s+from\s+public\.project_access/i.test(raw);
+    const namesTheGap = /future writes|already in the table|existing rows/i.test(raw);
+    const selectFirst = /run the select first|read (what it returns|them before deleting)|once that list has been read/i.test(raw);
+    if (hasSelect && hasDelete && namesTheGap && selectFirst) {
+      return `${f} documents a SELECT-first sweep and names the existing-rows gap`;
+    }
+  }
+  return null;
+}
+
 function projectKeyIsConstrained() {
   const reasons = [];
   for (const f of migrationFiles()) {
@@ -200,7 +271,10 @@ function main() {
     const update = newestPolicy('project_access', 'project_access_update');
     assert.ok(insert && update, 'project_access must have insert and update policies in supabase/migrations');
     const constrained = projectKeyIsConstrained();
-    const policyScopes = [insert, update].filter(p => /project_key/i.test(p.sql));
+    // CORRELATES, not merely mentions. The old version of this check accepted
+    // /project_key/ appearing anywhere in the policy, which `and project_key is
+    // not null` satisfies while constraining nothing.
+    const policyScopes = [insert, update].filter(p => policyCorrelatesProjectToTeam(p.sql));
     assert.ok(constrained.length || policyScopes.length === 2,
       'nothing ties project_access.project_key to project_access.team_id:\n'
       + `  ${insert.file} project_access_insert: ${insert.sql.replace(/\s+/g, ' ').trim()}\n`
@@ -210,6 +284,32 @@ function main() {
       + 'can_see_project reads it. Fix by requiring `exists (select 1 from public.projects p '
       + 'where p.id = project_key::uuid and p.team_id = team_id)` in both policies, or by '
       + 'scoping can_see_project — see the first check.');
+  });
+
+  // ---- 3. the write side, for rows that are ALREADY THERE ----
+  // Split out from the check above because it is a genuinely different claim
+  // and the two fail for different reasons. An RLS policy governs writes by
+  // principals subject to RLS; it is not a constraint and does not look at what
+  // is already stored. So correlating policies close the hole going forward and
+  // leave every row written before them exactly as it was — still resolved by
+  // can_see_project, which does not scope on team.
+  //
+  // Without this, the suite would report the finding closed as soon as the
+  // policies landed, which is the reading this whole audit exists to prevent:
+  // one green check licensing "the hole is closed" when only half of it is.
+  check('rows already in project_access are addressed, not just future writes', () => {
+    const how = existingRowsAddressed();
+    assert.ok(how,
+      'nothing addresses project_access rows that predate the write-side fix.\n'
+      + 'An RLS policy validates WRITES; it is not a constraint and never examines '
+      + 'the stored set. Any mis-scoped row written before the policy landed still '
+      + 'sits in the table, and can_see_project still resolves it on '
+      + '(project_key, member_id) with no team scope — so for those rows the '
+      + 'vulnerability is live and nothing here will ever go red about it.\n'
+      + 'Close it with a validating constraint or FK on project_access.project_key, '
+      + 'or document a sweep in the migration that adds the policy: a SELECT of the '
+      + 'mismatched rows, an instruction to READ the result before deleting, and the '
+      + 'matching DELETE. A sweep that exists only in someone\'s head is not a remedy.');
   });
 
   // ---- 3. the constraint that DOES exist, pinned so its scope is not overread ----
