@@ -175,7 +175,11 @@ or commit it to share AI context with your whole team.
 ## Session summaries
 
 A summary harvested from the agent's last chat message is decent; a summary
-the agent writes on purpose is better. The app asks once, on first run,
+the agent writes on purpose is better. Claude Code gets the second kind,
+because its Stop hook can hold the session open long enough to ask. Codex
+and other `AGENTS.md` readers get the first: what the session concluded,
+without the separate intent, decisions and gotchas. The app asks once, on
+first run,
 whether to turn this on (Settings toggles it any time; CLI:
 `membridge setup-hooks` / `remove-hooks`).
 
@@ -404,6 +408,9 @@ Point your client at `{ "command": "membridge", "args": ["mcp"] }`.
 | Codex (OpenAI) | Built in | Reads `~/.codex/sessions` rollouts, writes `AGENTS.md` |
 | Gemini CLI | Custom adapter | Point an adapter at its logs, add `GEMINI.md` to targets |
 | Cursor, opencode, Copilot CLI, … | Custom adapter | Any tool that logs sessions as JSONL, no code required |
+
+*Capture depth varies: see [Session summaries](#session-summaries) for what a
+tool without a session-end hook records.*
 
 A custom adapter is a config entry that tells MemBridge where a tool's JSONL
 logs live and which fields hold the project path, timestamp, and message:
