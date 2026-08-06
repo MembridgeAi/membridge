@@ -54,6 +54,10 @@ const server = require('../../lib/server');
 // teammate slice that get_project_memory serves and the injected block renders.
 const activity = require('../../lib/activity');
 const mcp = require('../../lib/mcp');
+// Section 6b: the durable archive is a SEPARATE store from proj.teamEntries,
+// and util.teamRowsFor structurally cannot see it.
+const teamArchive = require('../../lib/team-archive');
+const digest = require('../../lib/digest');
 
 const NOW = '2026-08-04T12:00:00.000Z';
 const SESSION = 'sess-revocation-1';
@@ -341,6 +345,71 @@ function main() {
         'emptyProjectDetail still counts proj.teamEntries directly — util.teamRowsFor is the only supported reader');
       assert.ok(!/proj\.teamEntries/.test(body),
         'emptyProjectDetail still reaches into proj.teamEntries');
+    });
+  }
+
+  // ---- 6b. the FOURTH delivery point: the durable archive ----
+  //
+  // Section 1 says "every delivery point goes quiet" and checks three: the
+  // SessionStart injection, the on-contact file note, and the project page
+  // card. Section 7 adds the cached ROWS. There is a fifth reader none of them
+  // touch — activity.projectCorpus with includeArchive, which is what the
+  // machine-local search corpus is built from — and it reads a DIFFERENT store:
+  //
+  //   lib/activity.js:374   if (proj.teamAccessLost) return { local, team };
+  //
+  // util.teamRowsFor fails closed on teamAccessLost, so the working cache in
+  // proj.teamEntries is safe. The durable archive is a separate store on disk
+  // that teamRowsFor cannot see, and that ONE LINE is the whole of its
+  // protection — as its own comment says, the guard "is re-tested below only to
+  // gate the ARCHIVE, which projectEntries deliberately does not read".
+  //
+  // Found by GUARD-DELETION mutation, and it survived the full suite including
+  // the monolith: deleting that line let a revoked project's archived teammate
+  // rows back into the corpus that feeds search and the MCP surface. Operator
+  // mutation is structurally blind to it — `if (x) return y;` has nothing to
+  // flip — which is why an operator-mode pass over this file said nothing about
+  // the line.
+  {
+    const key = makeProject('revoked-archive');
+    const link = teamsync.loadTeamLink(key);
+    const ARCHIVED = {
+      ...TEAM_ROW,
+      session: 'their-archived-session',
+      ts: '2026-08-03T08:00:00.000Z',
+      ask: 'archive-only prompt',
+      summary: 'Work that lives only in the durable archive.',
+      decisions: 'archivedrevocationtoken is the marker for this row',
+    };
+    teamArchive.appendRows(link.projectId, [ARCHIVED], { source: 'forward' });
+
+    const corpus = () => activity.projectCorpus(
+      key, projRecord(key), util.getConfig(), digest.compileRedactions(util.getConfig()),
+      { includeArchive: true, selfUserId: 'me' });
+
+    // The premise, asserted rather than assumed: while access is intact the
+    // archive row IS reachable. Without this, a corpus that returned nothing at
+    // all would satisfy the revocation check below and prove nothing.
+    check('archive: while access is intact, an archived teammate row IS served to the corpus', () => {
+      const found = corpus().team.some(e => /archivedrevocationtoken/.test(JSON.stringify(e)));
+      assert.ok(found, 'the fixture archive row never reached the corpus — the revocation check below would be vacuous');
+    });
+
+    {
+      const st = util.loadState();
+      st.projects[key].teamAccessLost = NOW;
+      st.projects[key].teamEntries = [];   // exactly what the access-lost branch leaves
+      st.projects[key].teamPullTs = null;
+      util.saveState(st);
+    }
+
+    check('revoked: the durable ARCHIVE stops feeding the corpus too, not just the cached rows', () => {
+      const out = corpus();
+      const leaked = out.team.filter(e => /archivedrevocationtoken/.test(JSON.stringify(e)));
+      assert.deepStrictEqual(leaked, [],
+        'a revoked project\'s ARCHIVED teammate rows are still being served into the search corpus, '
+        + 'which is what feeds the MCP surface and the injected block — teamRowsFor cannot see this store, '
+        + `so lib/activity.js's teamAccessLost gate is the only thing that stops it. Leaked: ${JSON.stringify(leaked)}`);
     });
   }
 

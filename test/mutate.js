@@ -221,9 +221,21 @@ function matchingBrace(src, openIdx) {
   return -1;
 }
 
+// Populated by guardMutants: `if` statements that REFUSE (their body reaches a
+// return/continue/break/throw) but that this operator would not touch. These
+// are the blind spot — a line no mode reaches does not show up as a survivor,
+// it shows up as nothing at all, and a report that lists only survivors reads
+// as though the region were fully measured.
+let declinedGuards = [];
+
 function guardMutants(src) {
   const code = blankNonCode(src);
   const mutants = [];
+  declinedGuards = [];
+  const decline = (i, why) => {
+    const line = src.slice(0, i).split('\n').length;
+    declinedGuards.push({ line, why, context: (src.split('\n')[line - 1] || '').trim().slice(0, 100) });
+  };
   for (let i = 0; i < code.length; i++) {
     if (!code.startsWith('if', i)) continue;
     if (/[\w$.]/.test(code[i - 1] || ' ')) continue;   // `notify`, `.if`, `elseif`
@@ -269,13 +281,21 @@ function guardMutants(src) {
       end = semi + 1;
     }
     if (!body) continue;
-    if (!GUARD_STARTERS.some(w => new RegExp(`^${w}\\b`).test(body))) continue;
+    // Does this `if` refuse AT ALL? A body that reaches a return/continue/
+    // break/throw anywhere is a refusal in substance even when this operator
+    // cannot express its deletion — those get recorded as declined rather than
+    // silently skipped.
+    const refuses = GUARD_STARTERS.some(w => new RegExp(`\\b${w}\\b`).test(body));
+    if (!GUARD_STARTERS.some(w => new RegExp(`^${w}\\b`).test(body))) {
+      if (refuses) decline(i, 'body does work before refusing (not a pure guard)');
+      continue;
+    }
     // One statement only. A body with an inner `;` is doing work as well as
     // refusing, and this operator has nothing to say about it.
-    if (body.replace(/;+\s*$/, '').includes(';')) continue;
+    if (body.replace(/;+\s*$/, '').includes(';')) { decline(i, 'multi-statement body (logs/mutates, then refuses)'); continue; }
     // An `else` means both branches are live; deleting the `if` alone leaves a
     // dangling else and would not compile anyway.
-    if (code.slice(end).trimStart().startsWith('else')) continue;
+    if (code.slice(end).trimStart().startsWith('else')) { decline(i, 'has an else branch — both paths are live'); continue; }
 
     const removed = src.slice(i, end);
     const line = src.slice(0, i).split('\n').length;
@@ -358,6 +378,20 @@ function runSuites(suites) {
   return { ok: r.status === 0, out: (r.stdout || '') + (r.stderr || '') };
 }
 
+// Say which refusals this operator would not touch. Survivors and kills only
+// describe the lines the tool REACHED; a guard it declined is measured by
+// neither mode unless ops mode happens to find an operator inside it, and that
+// silence is indistinguishable from coverage.
+function reportDeclined(args) {
+  if (args.mode !== 'guard') return;
+  const inScope = declinedGuards.filter(d => !args.lines || (d.line >= args.lines[0] && d.line <= args.lines[1]));
+  if (!inScope.length) return;
+  console.log(`\nDECLINED — ${inScope.length} refusal(s) this operator cannot express, so NOTHING here measured them:`);
+  for (const d of inScope) console.log(`  ${args.target}:${d.line}  ${d.why}\n      ${d.context}`);
+  console.log('  These are not survivors and not kills. They are unmeasured, and ops mode only');
+  console.log('  reaches them if the condition happens to contain an operator worth flipping.');
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.target) { console.error('need --target <file relative to repo root>'); process.exit(1); }
@@ -402,6 +436,7 @@ function main() {
   if (args.list) {
     for (const m of mutants) console.log(`${m.id.padEnd(42)} L${String(m.line).padEnd(5)} ${m.context}`);
     console.log(`\n${mutants.length} mutants`);
+    reportDeclined(args);
     return;
   }
   if (!args.suites.length) { console.error('need --suites <a,b,c>'); process.exit(1); }
@@ -466,6 +501,7 @@ function main() {
     console.log('\nBefore calling any of these a finding: re-run with --suites core. The legacy');
     console.log('monolith covers a great deal the split suites do not, and it is not in this loop.');
   }
+  reportDeclined(args);
   const after = fs.readFileSync(targetPath, 'utf8');
   if (after !== original) { console.error('\nTARGET NOT RESTORED — git checkout it before doing anything else'); process.exit(2); }
 }
