@@ -318,6 +318,13 @@ Three branches carry this work — `agent-sec`, `agent-backend2` and `agent-remo
 
    The fix in both cases is to collapse the two into one that does both jobs. Working versions of both are in the SEC-14 dry-run tree.
 
+5. **Two ways a verification grep passes while the state is wrong.** Both were hit for real during the renumber, and both are the same shape as the hazards above — the check succeeds and tells you nothing.
+
+   - **Grepping for the number you moved *away from* proves nothing about where it landed.** A clean result for the old number is consistent with the rename having gone somewhere wrong, or nowhere. It confirms only that the old value is absent. What catches a botched rename is reading the renamed files, not searching for their former name.
+   - **A single-number grep is structurally blind to one number meaning two things.** After a renumber pass, `049` referred both to the file just renamed *into* 049 and to references already sitting at 049 for something else — indistinguishable to any search for the string. The only thing that finds it is auditing per number and reading each hit in context.
+
+   Practical rule: after a renumber, list every migration number on disk and read what claims it, rather than grepping for the numbers you touched.
+
 Everything else merged cleanly, and the combined test suite was run — see the SEC-14 report.
 
 **This section exists because the merge had to be dry-run twice in one evening**, and the second run found more than the first.
