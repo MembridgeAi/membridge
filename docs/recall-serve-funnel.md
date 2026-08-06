@@ -386,6 +386,14 @@ the split suites). Measured, not inferred: the baseline run is a clean
 | 3 | **SEC-3/SEC-4** (`033: …`, revocation/teamsync) | **no** — different subsystem, different ticket; left for whoever owns it |
 | 1 | `C1: the npm tarball ships vendor/grammars` (packaging, flaky under load) | no |
 
+After the repair, `node test/run-tests.js` is **1316/1320**: the three `033:`
+revocation checks above, plus `mcp-wiring: not one byte of the real agent
+configs was touched` — which failed because the developer's own
+`~/.claude.json` was rewritten by a live Claude Code session *during* the run
+(the diff is two snapshots of the same real file, `cachedGrowthBookFeatures`
+apart). That check cannot hold while the machine is in use; it is not a
+regression, and it passed on the run immediately before.
+
 Attribution was checked rather than assumed: the failing Tier A fixture,
 replayed against `016486b` (pre-REV-4), `1d7e599` and REV-8's `lib/recall.js`,
 serves at the first and refuses at the other two — REV-4 broke it and REV-8 is
