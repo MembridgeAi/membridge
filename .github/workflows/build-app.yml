@@ -48,13 +48,21 @@ jobs:
       # prepare-app.js packaged a UI-less app and v0.2.0 shipped a window whose
       # entire contents were "UI not built". Mirrors ci.yml, including
       # `working-directory:` over `cd ui &&` (POSIX-only, breaks the Windows
-      # leg) and the build running BEFORE the root suite, whose /app
-      # static-serving checks need a real ui/dist.
+      # leg). ui build MUST stay before both Package (electron-builder copies
+      # ui/dist into the app) and node test/run.js (its /app static-serving
+      # checks need a real ui/dist).
       - run: npm ci
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      - run: node test/run.js
+      # node test/run.js used to sit here, before Package. That ordering meant
+      # a failing suite killed the job before the signed+notarized zip was
+      # ever built, so a red install-integrity check (or any other suite)
+      # blocked the download install.sh reads its SHA from -- chicken and egg,
+      # since install.sh's pin IS what install-integrity checks. The suite
+      # now runs AFTER upload-artifact, so the artifact exists whether or not
+      # tests are green, while "Attach to release" remains downstream of the
+      # suite and inherits the default step-fails-skips-later-steps gate.
       # The App Store Connect key is base64 in the secret, but electron-builder
       # passes APPLE_API_KEY straight to notarytool as a FILE PATH, so it has
       # to be decoded onto disk. It goes in RUNNER_TEMP rather than the
@@ -157,6 +165,11 @@ jobs:
           path: |
             dist/*.zip
             dist/*.dmg
+      # Runs AFTER upload-artifact on purpose: a red suite must not swallow
+      # the signed artifact, but it MUST still block "Attach to release"
+      # below via the default step-fails-skips-later-steps gate, so a release
+      # cut cannot ship an untested asset.
+      - run: node test/run.js
       - name: Attach to release
         if: github.event_name == 'release'
         run: gh release upload "$TAG" dist/*.zip dist/*.dmg --clobber
@@ -207,12 +220,16 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      - run: node test/run.js
+      # Same reorder as the mac job: Package + upload-artifact BEFORE the
+      # root suite, so a red suite cannot swallow the built zip. The suite
+      # still gates "Attach to release" below via the default
+      # step-fails-skips-later-steps behaviour.
       - run: npm run dist:win
       - uses: actions/upload-artifact@v4
         with:
           name: membridge-win
           path: dist/*.zip
+      - run: node test/run.js
       - name: Attach to release
         if: github.event_name == 'release'
         # Git Bash on the Windows runner, so the glob + $TAG match the mac job.
