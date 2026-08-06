@@ -575,6 +575,19 @@ export function dayFiles(entries: FeedEntry[]): DayFile[] {
   })
 }
 
+/** A path as its last two segments, prefixed '…/' when segments were
+ *  dropped. Clipped from the LEFT, always, because the filename is the one
+ *  part that identifies a file and a right clip eats exactly that. Harder
+ *  than shortPath on purpose: this runs three-up on a 10px line, where
+ *  shortPath's 34-character budget would spend the whole row on one path. */
+export function tailPath(file: string): string {
+  const parts = String(file || '').split('/').filter(Boolean)
+  if (parts.length === 0) return ''
+  if (parts.length === 1) return parts[0]
+  const tail = parts.slice(-2).join('/')
+  return parts.length > 2 ? `…/${tail}` : tail
+}
+
 // ---------------------------------------------------------------------------
 // Sessions and their prompts
 // ---------------------------------------------------------------------------
@@ -693,6 +706,15 @@ export interface DayBullet {
   text: string
 }
 
+/** One session's share of the day's bullets, and the session that produced
+ *  them. The day view renders these under a row that links at the session, so
+ *  a reader who wants the whole run behind a point is one click from it
+ *  instead of one scroll and then one click. */
+export interface DayBulletGroup {
+  session: DaySession
+  bullets: DayBullet[]
+}
+
 /** One field's worth of points, and ONLY when the writer actually made a list.
  *
  *  A newline is the authoritative boundary, so text written from v0.2.8 onward
@@ -715,8 +737,14 @@ function listPoints(text: string | null): string[] {
   return flat && flat.length <= DAY_BULLET_MAX ? [flat] : []
 }
 
-/** The day's bullets: what this person actually did, aggregated across every
- *  session of the day into one skimmable list, oldest work first.
+/** The day's bullets: what this person actually did, GROUPED under the session
+ *  that produced each of them, oldest session first.
+ *
+ *  Grouped rather than flat because the flat list could not say which run a
+ *  point came from, and recovering that from the output meant parsing the key
+ *  prefix, which is not a contract this module offers. The day view renders
+ *  these under a row that links at the session, so a reader who wants the run
+ *  behind a point is one click from it.
  *
  *  Each session contributes its OUTCOME line first. That line is the headline
  *  the distiller wrote, or the first sentence of its summary (mappers.outcomeOf
@@ -741,19 +769,30 @@ function listPoints(text: string | null): string[] {
  *  would be the better source, since a checkpoint trail is per-checkpoint
  *  distilled text. It is not reachable from here: /api/feed carries no
  *  `checkpoints` field at all (lib/feed.js normalizeLocal/normalizeTeam ship
- *  neither), so the trail exists only on the session-detail payload. */
-export function dayBullets(sessions: DaySession[], overview: DayOverview): DayBullet[] {
-  const out: DayBullet[] = []
+ *  neither), so the trail exists only on the session-detail payload.
+ *
+ *  The dedupe is ONE global `seen` set across the whole day, unchanged from
+ *  when this list was flat: a point that two sessions both stated appears
+ *  once, under the OLDER of the two, and a group left with nothing is omitted
+ *  rather than rendered as an empty heading.
+ *
+ *  Bullet keys are minted off a running total across the whole day rather than
+ *  per group, so a key means the same thing here and in the flat list below,
+ *  and two groups can never mint the same one. */
+export function dayBulletGroups(sessions: DaySession[], overview: DayOverview): DayBulletGroup[] {
+  const groups: DayBulletGroup[] = []
   const seen = new Set<string>()
+  let total = 0
   if (overview.kind === 'distilled' || overview.kind === 'summary') seen.add(sameLineKey(overview.text))
 
-  const push = (text: string, keyBase: string) => {
+  const push = (into: DayBullet[], text: string, keyBase: string) => {
     const flat = oneLine(text)
     if (!flat) return
     const key = sameLineKey(flat)
     if (!key || seen.has(key)) return
     seen.add(key)
-    out.push({ key: `${keyBase}:${out.length}`, text: flat.length > DAY_BULLET_MAX ? clipWords(flat, DAY_BULLET_MAX) : flat })
+    into.push({ key: `${keyBase}:${total}`, text: flat.length > DAY_BULLET_MAX ? clipWords(flat, DAY_BULLET_MAX) : flat })
+    total++
   }
 
   // Oldest session first, so the list reads in the order the work happened
@@ -761,18 +800,30 @@ export function dayBullets(sessions: DaySession[], overview: DayOverview): DayBu
   // above it, so this walks it backwards rather than re-sorting a copy.
   for (let i = sessions.length - 1; i >= 0; i--) {
     const session = sessions[i]
+    const bullets: DayBullet[] = []
     for (let j = session.entries.length - 1; j >= 0; j--) {
       const outcome = session.entries[j].outcome
       if (!outcome) continue
-      push(outcome, session.key)
+      push(bullets, outcome, session.key)
       break
     }
     for (const e of session.entries) {
-      for (const point of listPoints(e.decisions)) push(point, session.key)
-      for (const point of listPoints(e.gotchas)) push(point, session.key)
+      for (const point of listPoints(e.decisions)) push(bullets, point, session.key)
+      for (const point of listPoints(e.gotchas)) push(bullets, point, session.key)
     }
+    // A session whose every point was already said elsewhere contributes a
+    // heading over nothing, which reads as a rendering bug. Omitted instead.
+    if (bullets.length > 0) groups.push({ session, bullets })
   }
-  return out
+  return groups
+}
+
+/** The same bullets, flat. Defined THROUGH the grouped form rather than beside
+ *  it: two implementations of "the day's points" would drift, and the count on
+ *  the Summaries heading is this list's length while the rows under it come
+ *  from the groups, so a drift would be a visibly wrong number. */
+export function dayBullets(sessions: DaySession[], overview: DayOverview): DayBullet[] {
+  return dayBulletGroups(sessions, overview).flatMap(g => g.bullets)
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +1032,9 @@ export interface DayCard {
   intent: string
   files: DayFile[]
   bullets: DayBullet[]
+  /** The same bullets, under the session that produced them, oldest session
+   *  first. `bullets` is this flattened, so the two can never disagree. */
+  bulletGroups: DayBulletGroup[]
   /** Newest session first, each holding its own prompts oldest-first. Every
    *  entry of the day is reachable through these, so the card carries no
    *  second flat copy of them. */
@@ -1076,7 +1130,11 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
     const dayStart = localDayRangeMs(entryDayKey(newest) ?? '')?.start ?? null
     const dayFullyLoaded = dayStart !== null && oldestLoadedMs !== null && oldestLoadedMs < dayStart
     const overview = pickDayOverview(sorted, byDigestKey.get(key) ?? null, { dayFullyLoaded })
-    const bullets = dayBullets(sessions, overview)
+    // Grouped once and flattened, never computed twice: the flat list is
+    // defined as the flattening, so deriving it here keeps that true and costs
+    // one pass instead of two.
+    const bulletGroups = dayBulletGroups(sessions, overview)
+    const bullets = bulletGroups.flatMap(g => g.bullets)
     cards.push({
       key,
       slug: daySlug(key),
@@ -1094,6 +1152,7 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
       intent: dayIntent(dayAsks(sessions), sessions.length, overview.text),
       files: dayFiles(sorted),
       bullets,
+      bulletGroups,
       sessions,
     })
   }

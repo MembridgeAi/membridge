@@ -127,7 +127,7 @@
 }
 .day-card-meta .live-dot,
 .day-head-sub .live-dot,
-.day-session-live .live-dot {
+.day-session-row-live .live-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
@@ -138,7 +138,7 @@
 @media (prefers-reduced-motion: no-preference) {
   .day-card-meta .live-dot,
   .day-head-sub .live-dot,
-  .day-session-live .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
+  .day-session-row-live .live-dot { animation: pulse-live 2.4s ease-in-out infinite; }
 }
 /* The overview sentence: the card's whole reason to exist, so it gets the
  * row's reading size and spans to the stat line rather than stopping at the
@@ -305,6 +305,84 @@
   text-transform: none;
 }
 
+/* A folded section. The disclosure idiom is copied VERBATIM from
+ * .session-widget-summary / .session-chain-summary in features/session:
+ * native marker hidden, a '›' that rotates 90deg when open. One way to open a
+ * fold across the app; a second one would read as a different kind of control
+ * and get missed.
+ *
+ * The negative horizontal margin is load-bearing. It bleeds the hover fill
+ * var(--sp-2) past the text on both sides so the header reads as a ROW rather
+ * than as a text highlight, and it keeps the '›' on the same left text edge as
+ * the unfolded sections above and below. The radius is var(--r) and not
+ * --r-sm because base.css's :focus-visible ring is drawn at var(--r); a
+ * smaller radius here would leave the ring visibly off the corner. */
+.day-fold-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  /* Click target: full section width, and never under 32px tall. */
+  min-height: 32px;
+  padding: 6px var(--sp-2);
+  margin: 0 calc(-1 * var(--sp-2)) var(--sp-2);
+  border-radius: var(--r);
+  cursor: pointer;
+  list-style: none;
+}
+.day-fold-summary::-webkit-details-marker {
+  display: none;
+}
+.day-fold-summary::before {
+  content: '›';
+  color: var(--text3);
+  flex: none;
+}
+/* `transition` is NOT inherited, so the hover step-up further down changes the
+ * colour of CHILDREN and each of those children has to declare its own or the
+ * colour snaps while the fill behind it eases. */
+@media (prefers-reduced-motion: no-preference) {
+  .day-fold-summary { transition: background-color var(--dur-fast) var(--ease-out); }
+  .day-fold-summary::before {
+    transition: transform var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .day-fold-summary .day-section-title,
+  .day-fold-summary .day-fold-peek {
+    transition: color var(--dur-fast) var(--ease-out);
+  }
+}
+.day-fold[open] > .day-fold-summary::before {
+  transform: rotate(90deg);
+}
+/* The peek names ranks 1 to 3, which the open list re-states from the top, so
+ * it goes away on open: nothing renders twice and nothing jumps. */
+.day-fold[open] > .day-fold-summary .day-fold-peek {
+  display: none;
+}
+.day-fold-summary .day-section-title {
+  margin: 0;
+}
+.day-fold-peek {
+  font-size: var(--fs-sm);
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.day-fold-body {
+  min-width: 0;
+}
+.day-fold-summary:hover {
+  background: var(--hover);
+}
+.day-fold-summary:hover::before,
+.day-fold-summary:hover .day-section-title,
+.day-fold-summary:hover .day-fold-peek {
+  color: var(--text2);
+}
+
 /* Files touched. One per line rather than a wrapped run: a path is read from
  * its tail, and a wrapped run puts the tails wherever the line happens to
  * break. */
@@ -352,8 +430,23 @@
   background: var(--panel2);
 }
 
-/* What was done. The page's substance, so it gets a reading size rather than
- * the muted metadata size around it. */
+/* Summaries. The page's substance, so it gets a reading size rather than the
+ * muted metadata size around it. Each session's points sit under the row that
+ * names the session, behind the same left rule the session groups use, so a
+ * bullet reads as belonging to the run above it. One bullet marker on this
+ * page, not two. */
+.day-summaries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.day-summary-group {
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+.day-summary-group .day-bullets {
+  margin-top: 2px;
+}
 .day-bullets {
   margin: 0;
   padding: 0 0 0 var(--sp-3);
@@ -376,8 +469,9 @@
   background: var(--line2);
 }
 
-/* Prompts, grouped by session. The rule down the left is what says "these
- * belong to the session named above them" without a box per session. */
+/* Sessions, each with its prompts under it. The rule down the left is what
+ * says "these belong to the session named above them" without a box per
+ * session. */
 .day-sessions {
   display: flex;
   flex-direction: column;
@@ -392,37 +486,106 @@
 .day-session-targeted {
   border-left-color: var(--accent);
 }
-.day-session-head {
+/* One session, as a row you click into. It replaces a header of four spans of
+ * which only the ~11px time range was a link: roughly 60x15px of hit area
+ * inside a row 670px wide, with the affordance a '›' glyph 3px past an
+ * 8-character timestamp. The whole row is the target now, full section width
+ * and never under 32px tall -- above the 24x24 WCAG 2.2 AA minimum, below the
+ * 44px AAA target, an accepted trade for a desktop app at a 900px floor.
+ *
+ * The negative horizontal margin does the same job it does on .day-fold-summary:
+ * the hover fill bleeds past the text so this reads as a row, and the left
+ * text edge stays put. Radius matches base.css's :focus-visible ring.
+ *
+ * Enter activates it, Space does not: it is an a[href], the same trade
+ * DayCard.tsx made, and the two are now consistent. */
+.day-session-row {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 3px;
-}
-.day-session-link,
-.day-session-range {
-  font-size: var(--fs-sm);
-  color: var(--text2);
+  gap: var(--sp-2);
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px var(--sp-2);
+  margin: 0 calc(-1 * var(--sp-2)) 3px;
+  border-radius: var(--r);
+  color: inherit;
   text-decoration: none;
+  cursor: pointer;
 }
-.day-session-link:hover {
-  color: var(--accent2);
+/* Same non-inherited-transition rule as .day-fold-summary above: the hover
+ * step-up recolours the chevron, the tool and the live marker, so each of them
+ * declares its own transition. Declaring it only on the row would ease the
+ * fill and snap the text. */
+@media (prefers-reduced-motion: no-preference) {
+  .day-session-row {
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .day-session-row-chevron,
+  .day-session-row-tool,
+  .day-session-row-live {
+    transition: color var(--dur-fast) var(--ease-out);
+  }
 }
-.day-session-affordance {
-  margin-left: 3px;
-  color: var(--text3);
+/* --text, not --text2: the range is the row's identity and the first thing a
+ * reader targets. */
+.day-session-row-time {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  flex: none;
 }
-.day-session-project,
-.day-session-tool,
-.day-session-live {
+.day-session-row-tool,
+.day-session-row-project,
+.day-session-row-live,
+.day-session-row-meta {
   font-size: var(--fs-2xs);
   color: var(--text3);
 }
 /* Which project a session ran in, shown only on a day that spans several.
  * Slightly stronger than the tool beside it: on a mixed day it is the field
  * the reader is actually sorting the groups by. */
-.day-session-project {
+.day-session-row-project {
   color: var(--text2);
+}
+/* The auto margin lives on the CHEVRON, not on the meta.
+ *
+ * This row primitive is used in two sections, and only one of them passes
+ * `meta` (Sessions passes a prompt count; Summaries passes nothing, because
+ * the bullets are already underneath). With the auto margin on the meta, the
+ * chevron landed hard right in Sessions and mid-row in Summaries -- the same
+ * component showing its affordance in two different places on one screen,
+ * which reads as a layout bug rather than as a distinction.
+ *
+ * Putting it on the chevron pins "this opens" to the right edge in BOTH
+ * sections, and has the side benefit of keeping the prompt count next to the
+ * other metadata it belongs with instead of stranding it across the row. */
+.day-session-row-chevron {
+  flex: none;
+  margin-left: auto;
+  color: var(--text3);
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+.day-session-row:hover {
+  background: var(--hover);
+}
+.day-session-row:hover .day-session-row-chevron,
+.day-session-row:hover .day-session-row-tool,
+.day-session-row:hover .day-session-row-live {
+  color: var(--text2);
+}
+/* No session id, so there is no page to open. Rendered as a row that is
+   plainly not one, rather than as a dead anchor. The chevron is not rendered
+   at all in this variant (DaySessionRow.tsx) -- the rule below is the guard
+   that keeps it invisible if anyone ever puts it back. */
+.day-session-row-static {
+  cursor: default;
+}
+.day-session-row-static:hover {
+  background: transparent;
+}
+.day-session-row-static .day-session-row-chevron {
+  display: none;
 }
 .day-prompts {
   margin: 0;

@@ -4,33 +4,19 @@ import { Link } from 'wouter'
 import { Avatar } from '../../components/Avatar'
 import { shortPath } from '../../components/EntryRow'
 import {
-  FEED_SESSION_PARAM, ROUTES, backLink, dayHref, daySessionHref, parseDayFilters, sessionHref, useRawSearch,
+  FEED_SESSION_PARAM, ROUTES, backLink, dayHref, daySessionHref, parseDayFilters, useRawSearch,
 } from '../../app/routes'
 import { localDayRangeMs } from '../../data/localTime'
 import { relativeAgo } from '../../data/relativeTime'
 import { useFeed, useStatus } from '../../data/queries'
-import { DAY_FILE_LIMIT, buildDayCards, daySlugDay } from './dayCards'
+import { DAY_FILE_LIMIT, buildDayCards, daySlugDay, tailPath } from './dayCards'
 import type { DayCard, DaySession } from './dayCards'
+import { DaySessionRow, clockTime } from './DaySessionRow'
 import { MAX_AUTO_PAGES, dayLabel, dedupeById } from './FeedPage'
 import './feed.css'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
-}
-
-/** The viewer's own wall clock (no timeZone option, so the browser's resolved
- *  zone wins) -- same reasoning as EntryRow's own clockTime, which is private
- *  to that module. Pinned to UTC, a 7pm session read "2:00 AM" to the person
- *  who had just run it. */
-function clockTime(at: string): string {
-  return new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-}
-
-/** A session's time range, or a single time when it landed one prompt. */
-export function sessionTimeRange(session: Pick<DaySession, 'startedAt' | 'endedAt'>): string {
-  const from = clockTime(session.startedAt)
-  const to = clockTime(session.endedAt)
-  return from === to ? from : `${from} to ${to}`
 }
 
 /** One section of the day. Absent content means an absent section, never an
@@ -48,37 +34,104 @@ function DaySection({ title, count, children }: { title: string; count?: string;
   )
 }
 
+/** How many paths the closed fold names on its own line. Three is what the
+ *  owner asked for, and it is also what fits: at --fs-sm, three tailPaths with
+ *  their counts run about 60 characters, which is inside the section width at
+ *  the 900px floor. */
+const DAY_FILE_PEEK = 3
+
+/** The top of the ranking on one line, which is the whole of what the closed
+ *  fold says. Counts on ALL of them, including 1x, because here the number is
+ *  the ranking evidence: without it, "three files, one touch each" and "one
+ *  file the day came back to nine times" read identically. The open list
+ *  suppresses 1x, where rank position already carries that. */
+function filesPeek(files: DayCard['files']): string {
+  return files.slice(0, DAY_FILE_PEEK).map(f => `${tailPath(f.file)} ${f.touches}x`).join(' · ')
+}
+
 /** Every file the day touched, most-touched first, with the rest behind a
  *  count. Paths are shortened from the LEFT (shortPath), because a path
- *  clipped from the right eats the filename, the one part that identifies it. */
+ *  clipped from the right eats the filename, the one part that identifies it.
+ *
+ *  Folded, and closed by default. The blast radius is context for the day's
+ *  summaries, not the answer to "what happened", so it costs one 32px row
+ *  until asked for -- and closed it still names the three files the day kept
+ *  coming back to, which is what the owner asked the section for. Keeping it
+ *  open would push Summaries, the actual answer, off a 900x600 window.
+ *
+ *  Three honest levels, not two: the fold answers "do I care about files at
+ *  all", "+N more" answers "show me all 47", "Show fewer" reverses it. */
 function DayFiles({ files }: { files: DayCard['files'] }) {
   const [showAll, setShowAll] = useState(false)
   const hidden = Math.max(0, files.length - DAY_FILE_LIMIT)
   const shown = showAll ? files : files.slice(0, DAY_FILE_LIMIT)
+
+  const heading = (
+    <h2 className="day-section-title">
+      Files touched
+      {/* The TOTAL, never the shown-so-far number: a count that moved when the
+          list expanded would be reporting the control's state, not the day's. */}
+      <span className="day-section-count">{String(files.length)}</span>
+    </h2>
+  )
+  const list = (
+    <ul className="day-files">
+      {shown.map(f => (
+        <li key={f.file} className="day-file">
+          <span className="mono day-file-name" title={f.file}>{shortPath(f.file)}</span>
+          {f.touches > 1 && <span className="day-file-touches">{f.touches}x</span>}
+          {f.note && <span className="day-file-note">{f.note}</span>}
+        </li>
+      ))}
+    </ul>
+  )
+
+  // At three files or fewer the peek IS the list, so a fold would hide nothing
+  // and its chevron would promise content that does not exist.
+  if (files.length <= DAY_FILE_PEEK) {
+    return <section className="day-section">{heading}{list}</section>
+  }
+
   return (
-    <DaySection title="Files touched" count={String(files.length)}>
-      <ul className="day-files">
-        {shown.map(f => (
-          <li key={f.file} className="day-file">
-            <span className="mono day-file-name" title={f.file}>{shortPath(f.file)}</span>
-            {f.touches > 1 && <span className="day-file-touches">{f.touches}x</span>}
-            {f.note && <span className="day-file-note">{f.note}</span>}
-          </li>
-        ))}
-      </ul>
-      {hidden > 0 && (
-        <button type="button" className="day-more" onClick={() => setShowAll(v => !v)}>
-          {showAll ? 'Show fewer' : `+${hidden} more`}
-        </button>
-      )}
-    </DaySection>
+    <section className="day-section">
+      <details className="day-fold">
+        {/* <summary>'s content model is phrasing content optionally intermixed
+            with heading content: an <h2> is legal here, a <ul> is not. That is
+            why the peek is one <span> rather than the ranked list itself. */}
+        <summary className="day-fold-summary">
+          {heading}
+          <span className="mono day-fold-peek">{filesPeek(files)}</span>
+        </summary>
+        <div className="day-fold-body">
+          {list}
+          {hidden > 0 && (
+            <button type="button" className="day-more" onClick={() => setShowAll(v => !v)}>
+              {showAll ? 'Show fewer' : `+${hidden} more`}
+            </button>
+          )}
+        </div>
+      </details>
+    </section>
   )
 }
 
-/** One session's prompts under a header that names when it ran, which tool ran
- *  it, and links at its own page. The link is the whole reason the header
- *  exists: consolidating a day must not cost the reader the ability to open
- *  the single session they came for. */
+/** "1 prompt" / "3 prompts", or nothing at all when the session captured none.
+ *  Sentence case and unabbreviated, like every other count on this page. */
+function promptCountLabel(count: number): string | undefined {
+  if (count === 0) return undefined
+  return count === 1 ? '1 prompt' : `${count} prompts`
+}
+
+/** One session as a row you click into, with its prompts underneath as
+ *  evidence.
+ *
+ *  The prompts are NOT folded. The complaint this section is answering is
+ *  literally that sessions drop down instead of opening, and a per-session
+ *  disclosure here would reintroduce exactly that, one level further in. The
+ *  row navigates; the prompts sit under it, already visible.
+ *
+ *  The <ol> is a SIBLING of the row, never a child of it: the row is an <a>,
+ *  and an anchor inside an anchor is unnestable by the HTML parser. */
 function DaySessionGroup({ session, targeted, from, showProject }: { session: DaySession; targeted: boolean; from: string; showProject: boolean }) {
   const ref = useRef<HTMLDivElement | null>(null)
 
@@ -91,27 +144,14 @@ function DaySessionGroup({ session, targeted, from, showProject }: { session: Da
     ref.current.scrollIntoView({ block: 'center' })
   }, [targeted])
 
-  const range = sessionTimeRange(session)
   return (
     <div ref={ref} className={`day-session${targeted ? ' day-session-targeted' : ''}`}>
-      <div className="day-session-head">
-        {session.session
-          ? (
-            <Link href={sessionHref(session.session, from)} className="mono day-session-link">
-              {range}
-              <span className="day-session-affordance" aria-hidden="true">›</span>
-            </Link>
-          )
-          // A bare-plumbing row has no session, so there is no page to link
-          // at. Rendered as plain text rather than as a dead anchor.
-          : <span className="mono day-session-range">{range}</span>}
-        {/* Only when the day spans more than one project. On a single-project
-            day it is the same word under every group, which is noise. */}
-        {showProject && <span className="mono day-session-project">{session.project}</span>}
-        <span className="mono day-session-tool">{session.tool}</span>
-        {/* "live" only, for the reason spelled out on the day card. */}
-        {session.live && <span className="mono day-session-live">live <span className="live-dot" role="img" aria-label="Live" /></span>}
-      </div>
+      <DaySessionRow
+        session={session}
+        from={from}
+        showProject={showProject}
+        meta={promptCountLabel(session.prompts.length)}
+      />
       {session.prompts.length > 0 && (
         <ol className="day-prompts">
           {session.prompts.map(p => (
@@ -145,10 +185,12 @@ interface DayPageProps {
 /** One person's whole local calendar day, across every project, in full.
  *
  *  The order is the owner's, and it is an order of questions: what did this
- *  touch, what did it do, and what was it asked to do. The prompts come last
- *  and are grouped by session, because they are the raw material the first two
- *  sections are made of, and because a session is the unit anyone wants to
- *  open when they want more than this page has. */
+ *  touch, what did it do, and what was it asked to do. Files touched comes
+ *  first but folded shut, because it is context rather than the answer and its
+ *  three most-touched paths fit on the closed row. Summaries is the answer, so
+ *  it is open. Sessions comes last and stays unfolded: the prompts are the raw
+ *  material the two sections above are made of, and a session is the unit
+ *  anyone wants to open when they want more than this page has. */
 export function DayPage({ slug }: DayPageProps) {
   const statusQuery = useStatus()
   const solo = statusQuery.data?.solo ?? true
@@ -324,19 +366,48 @@ export function DayPage({ slug }: DayPageProps) {
 
       {card.files.length > 0 && <DayFiles files={card.files} />}
 
-      {card.bullets.length > 0 && (
-        <DaySection title="What was done">
-          <ul className="day-bullets">
-            {card.bullets.map(b => <li key={b.key} className="day-bullet">{b.text}</li>)}
-          </ul>
-        </DaySection>
+      {/* Summaries: the day's points, under the session that made each of
+          them, so a reader who wants the run behind a point is one click from
+          it rather than one scroll and then one click.
+
+          OPEN by default, and it is the only fold on this page that is. The
+          page exists to answer "what happened on this day", and this is that
+          answer; a page whose answer is behind a click has failed at its one
+          job. The fold exists because the owner asked for a named container,
+          not because the content should be hidden. No peek either: a preview
+          of content that is already on screen is noise. */}
+      {card.bulletGroups.length > 0 && (
+        <section className="day-section">
+          <details className="day-fold" open>
+            <summary className="day-fold-summary">
+              <h2 className="day-section-title">
+                Summaries
+                <span className="day-section-count">{String(card.bullets.length)}</span>
+              </h2>
+            </summary>
+            <div className="day-fold-body day-summaries">
+              {card.bulletGroups.map(g => (
+                <div key={g.session.key} className="day-summary-group">
+                  {/* Inside <details> but OUTSIDE <summary>, so this anchor is
+                      not nested in one: <summary> is not a link. */}
+                  <DaySessionRow session={g.session} from={from} showProject={card.projects.length > 1} />
+                  <ul className="day-bullets">
+                    {g.bullets.map(b => <li key={b.key} className="day-bullet">{b.text}</li>)}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </details>
+        </section>
       )}
 
-      {/* No count on the Prompts heading: every group below carries its own
-          header, and a bare number there reads as a prompt count, which is a
-          number /api/feed does not carry. */}
+      {/* "Sessions", not "Prompts": the section is now primarily a list of
+          sessions you can click into, and the count is the session count,
+          which is a number the card already states. The two agree by
+          construction. A count labelled "Prompts" would be a number
+          /api/feed does not carry. */}
       {card.sessions.length > 0 && (
-        <DaySection title="Prompts">
+        <DaySection title="Sessions" count={String(card.sessions.length)}>
           <div className="day-sessions">
             {card.sessions.map(s => (
               <DaySessionGroup

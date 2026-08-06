@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest'
 import type { DayDigest, FeedEntry } from '../../data/types'
 import {
   NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, UNDATED_DAY,
-  buildDayCards, dayBullets, dayCardKey, dayFiles, dayIntent, dayIntentSentences,
+  buildDayCards, dayBullets, dayBulletGroups, dayCardKey, dayFiles, dayIntent, dayIntentSentences,
   dayAsks, dayProjects, daySessions, daySlug, daySlugDay, dedupeSyncedTwins, digestKey, pickDayOverview, projectPart,
+  tailPath,
 } from './dayCards'
 
 // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ), so
@@ -430,6 +431,126 @@ describe('dayBullets', () => {
     const sessions = daySessions([entry({ id: 'a', session: 's1', outcome: '', undecryptable: true, intent: null })])
     const opaque = { kind: 'undecryptable' as const, text: OPAQUE_OVERVIEW, fromEntryId: null, coverageNote: null, source: 'pick' as const }
     expect(dayBullets(sessions, opaque)).toEqual([])
+  })
+})
+
+// The grouped form the Summaries section renders. It is the SOURCE of the flat
+// list above, not a second reading of it, which is the whole point: the count
+// on the heading is the flat list's length while the rows under it come from
+// the groups, so two implementations would eventually print a wrong number.
+describe('dayBulletGroups', () => {
+  const overview = { kind: 'distilled' as const, text: 'the day\'s sentence', fromEntryId: 'x', coverageNote: null, source: 'pick' as const }
+
+  it('groups each session\'s points under it, oldest session first', () => {
+    const sessions = daySessions([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'the morning\'s outcome' }),
+      entry({ id: 'b', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'the afternoon\'s outcome' }),
+    ])
+    const groups = dayBulletGroups(sessions, overview)
+    expect(groups.map(g => g.session.key)).toEqual(['s1', 's2'])
+    expect(groups.map(g => g.bullets.map(b => b.text))).toEqual([
+      ['the morning\'s outcome'],
+      ['the afternoon\'s outcome'],
+    ])
+  })
+
+  it('puts a point two sessions both stated under the OLDER one, once', () => {
+    const sessions = daySessions([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'the shared point' }),
+      entry({ id: 'b', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'The shared point.' }),
+    ])
+    const groups = dayBulletGroups(sessions, overview)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].session.key).toBe('s1')
+    expect(groups[0].bullets.map(b => b.text)).toEqual(['the shared point'])
+  })
+
+  it('omits a session left with nothing rather than rendering an empty heading', () => {
+    const sessions = daySessions([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'a real point' }),
+      // Nothing but the sentence already on the card above: no surviving point.
+      entry({ id: 'b', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'The day\'s sentence.' }),
+    ])
+    const groups = dayBulletGroups(sessions, overview)
+    expect(groups.map(g => g.session.key)).toEqual(['s1'])
+  })
+
+  it('keeps every bullet key distinct across groups, so React can key on it', () => {
+    const sessions = daySessions([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'one' }),
+      entry({ id: 'b', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'two' }),
+    ])
+    const keys = dayBulletGroups(sessions, overview).flatMap(g => g.bullets.map(b => b.key))
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  // THE invariant, asserted where it can actually break: on the CARD.
+  //
+  // This used to compare dayBulletGroups(...).flatMap(g => g.bullets) against
+  // dayBullets(...), which is the same expression on both sides -- dayBullets
+  // IS that flatMap -- so it was `x` equals `x` and could not fail. The pair
+  // that has to agree is card.bullets and card.bulletGroups, because the
+  // Summaries heading states card.bullets.length while the rows under it come
+  // from card.bulletGroups, and a disagreement there is a visibly wrong number
+  // on screen. buildDayCards derives both from one array, which is what makes
+  // the invariant hold; this is the test that would notice if that stopped
+  // being true.
+  it('puts the same bullets on the card as its groups flatten to, in the same order', () => {
+    const card = buildDayCards([
+      entry({
+        id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'the morning\'s outcome',
+        decisions: '- Durability beats recency\n- Merged before writing settings.json',
+      }),
+      entry({ id: 'b', session: 's1', at: '2026-07-29T18:30:00Z', outcome: 'the morning\'s outcome', gotchas: '- state.json has no locking' }),
+      entry({ id: 'c', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'the afternoon\'s outcome' }),
+    ])[0]
+    // Guard the guard: an empty list satisfies the equality trivially, so a
+    // fixture that stopped producing bullets would make this test green while
+    // testing nothing.
+    expect(card.bullets.length).toBeGreaterThan(0)
+    expect(card.bulletGroups.length).toBeGreaterThan(1)
+    expect(card.bullets).toEqual(card.bulletGroups.flatMap(g => g.bullets))
+  })
+
+  it('flattens to exactly dayBullets, in the same order', () => {
+    const sessions = daySessions([
+      entry({
+        id: 'a', session: 's1', at: '2026-07-29T18:00:00Z', outcome: 'the morning\'s outcome',
+        decisions: '- Durability beats recency\n- Merged before writing settings.json',
+      }),
+      entry({ id: 'b', session: 's1', at: '2026-07-29T18:30:00Z', outcome: 'the morning\'s outcome', gotchas: '- state.json has no locking' }),
+      entry({ id: 'c', session: 's2', at: '2026-07-29T21:00:00Z', outcome: 'the afternoon\'s outcome' }),
+      entry({ id: 'd', session: 's3', at: '2026-07-29T22:00:00Z', outcome: 'The day\'s sentence.' }),
+    ])
+    expect(dayBulletGroups(sessions, overview).flatMap(g => g.bullets))
+      .toEqual(dayBullets(sessions, overview))
+  })
+})
+
+// The peek line on the closed Files touched fold runs three paths across one
+// 11px row, where shortPath's 34-character budget would spend the whole row on
+// the first of them. Clipped from the LEFT, always: a right clip eats the
+// filename, which is the part that identifies the file.
+describe('tailPath', () => {
+  it('leaves a bare filename alone', () => {
+    expect(tailPath('README.md')).toBe('README.md')
+  })
+
+  it('leaves a two-segment path whole, with no ellipsis it did not earn', () => {
+    expect(tailPath('lib/hooks.js')).toBe('lib/hooks.js')
+  })
+
+  it('keeps the last two segments of a deep path and marks what it dropped', () => {
+    expect(tailPath('ui/src/features/feed/dayCards.ts')).toBe('…/feed/dayCards.ts')
+  })
+
+  it('ignores a leading or trailing slash rather than counting it as a segment', () => {
+    expect(tailPath('/lib/hooks.js')).toBe('lib/hooks.js')
+    expect(tailPath('lib/hooks/')).toBe('lib/hooks')
+  })
+
+  it('returns an empty string for an empty path instead of an ellipsis', () => {
+    expect(tailPath('')).toBe('')
   })
 })
 
