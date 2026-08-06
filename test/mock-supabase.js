@@ -326,7 +326,13 @@ function createMockSupabase() {
       const rows = members
         .filter(m => m.teamId === body.p_team)
         .sort((a, b) => String(a.joinedAt || '').localeCompare(String(b.joinedAt || '')))
-        .map(m => ({ user_id: m.userId, display_name: m.displayName, role: m.role, joined_at: m.joinedAt || null }));
+        // 053: the column that lets a client tell a soft-deleted account from a
+        // live one. Modelled here because the offline suite never sees the real
+        // backend, so without it a test cannot exercise the filter at all.
+        // Fixtures that do not set it get null, i.e. live -- matching a
+        // pre-053 backend, which is the state production is in right now.
+        .map(m => ({ user_id: m.userId, display_name: m.displayName, role: m.role,
+                     joined_at: m.joinedAt || null, deleted_at: m.deletedAt || null }));
       return json(res, 200, rows);
     }
     if (fn === 'team_feed') {
