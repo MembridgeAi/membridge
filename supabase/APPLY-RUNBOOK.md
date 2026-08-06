@@ -31,8 +31,10 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 049 | Records a voluntary departure in the audit trail | `agent-removal` | no |
 | 050 | Stops the audit trail pinning a deleted account open | `agent-removal` | no |
 | 051 | Drops the now-vestigial `memory_entries_delete` policy | `agent-sec` | no |
+| 052 | Account-deletion FK actions on five uncontested constraints — PARKED, see `docs/ACCOUNT-DELETION.md` §6 | `agent-deletion` | no |
+| 053 | `team_members_list` carries `deleted_at`, so soft-deleted accounts stop receiving team keys | `agent-deletion` | no |
 
-**Next free number: 052.**
+**Next free number: 054.**
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
@@ -68,6 +70,14 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 12 | `050_team_audit_actor_set_null.sql` | Stops those audit rows from making a member's account undeletable. **Must not be left behind — see below.** *(removal lane)* |
 | 13 | `051_drop_memory_entries_delete_policy.sql` | Removes a database rule that no longer does anything, and would quietly start doing something again if a permission were ever restored. |
 | 14 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
+| 15 | `053_team_members_list_deleted_at.sql` | Lets a client tell a soft-deleted account from a live one, so a departed member stops receiving team encryption keys. Independent of everything above — any order, on its own. *(deletion lane)* |
+
+**`052_account_deletion_fk_actions.sql` is deliberately NOT in this table.** It
+is parked pending a product decision — see `docs/ACCOUNT-DELETION.md` section 6
+— and applying it alone would remove five guardrails without making account
+deletion actually work, since `memory_entries.author_id` still blocks every
+real user until that decision lands. It belongs to a later batch, once section
+6 is settled, not to this one.
 
 **Why `031` is last.** It is the only one that changes how the database behaves for *future* work rather than fixing something specific, and it is the only one reconstructed from a live object rather than written from scratch. Do it when the other five are known good, so that if anything odd happens afterwards you know which change to look at.
 
