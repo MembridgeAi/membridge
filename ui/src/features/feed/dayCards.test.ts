@@ -3,7 +3,8 @@ import type { DayDigest, FeedEntry } from '../../data/types'
 import {
   NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, UNDATED_DAY,
   buildDayCards, dayBullets, dayCardKey, dayFiles, dayIntent, dayIntentSentences,
-  dayAsks, dayProjects, daySessions, daySlug, daySlugDay, dedupeSyncedTwins, digestKey, pickDayOverview, projectPart,
+  dayAsks, dayProjects, daySessions, daySlug, daySlugDay, dayTools, dedupeSyncedTwins, digestKey,
+  pickDayOverview, projectPart, tailPath, toolLabel,
 } from './dayCards'
 
 // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ), so
@@ -334,6 +335,100 @@ describe('dayFiles', () => {
   })
 })
 
+// The card's last line runs three paths across a 10px row, so it clips much
+// harder than shortPath does -- and always from the LEFT, because the filename
+// is the part that identifies a file. Nothing is lost: every rendered path
+// carries its full text in `title`.
+describe('tailPath', () => {
+  it('keeps a bare filename whole', () => {
+    expect(tailPath('feed.css')).toBe('feed.css')
+  })
+
+  it('keeps two segments whole, with no leading ellipsis to explain', () => {
+    expect(tailPath('lib/feed.js')).toBe('lib/feed.js')
+  })
+
+  it('clips a deep path from the left, keeping the filename and its folder', () => {
+    expect(tailPath('ui/src/features/feed/dayCards.ts')).toBe('…/feed/dayCards.ts')
+  })
+
+  it('clips an absolute path the same way rather than leading with the volume', () => {
+    expect(tailPath('/Users/x/membridge/lib/feed.js')).toBe('…/lib/feed.js')
+  })
+
+  it('ignores a trailing slash rather than rendering an empty segment', () => {
+    expect(tailPath('lib/feed/')).toBe('lib/feed')
+  })
+
+  it('renders nothing for no path', () => {
+    expect(tailPath('')).toBe('')
+  })
+})
+
+describe('dayTools', () => {
+  it('names each tool once, busiest first', () => {
+    const tools = dayTools(daySessions([
+      entry({ id: 'a', session: 's1', tool: 'Codex' }),
+      entry({ id: 'b', session: 's2', tool: 'Claude Code' }),
+      entry({ id: 'c', session: 's3', tool: 'Claude Code' }),
+    ]))
+    expect(tools).toEqual(['Claude Code', 'Codex'])
+  })
+
+  it('counts SESSIONS, not rows, so a chatty session does not outrank a quiet one', () => {
+    // Codex ran once and landed four prompts; Claude Code ran twice. Counting
+    // rows would put Codex first and misstate which tool did the day's work.
+    const tools = dayTools(daySessions([
+      entry({ id: 'c1', session: 'codex', at: '2026-07-29T20:00:00Z', tool: 'Codex' }),
+      entry({ id: 'c2', session: 'codex', at: '2026-07-29T20:01:00Z', tool: 'Codex' }),
+      entry({ id: 'c3', session: 'codex', at: '2026-07-29T20:02:00Z', tool: 'Codex' }),
+      entry({ id: 'c4', session: 'codex', at: '2026-07-29T20:03:00Z', tool: 'Codex' }),
+      entry({ id: 'k1', session: 'cc1', at: '2026-07-29T19:00:00Z', tool: 'Claude Code' }),
+      entry({ id: 'k2', session: 'cc2', at: '2026-07-29T18:00:00Z', tool: 'Claude Code' }),
+    ]))
+    expect(tools).toEqual(['Claude Code', 'Codex'])
+  })
+
+  it('breaks a tie on the name, so the line does not reshuffle between polls', () => {
+    const tools = dayTools(daySessions([
+      entry({ id: 'a', session: 's1', tool: 'Cursor' }),
+      entry({ id: 'b', session: 's2', tool: 'Claude Code' }),
+    ]))
+    expect(tools).toEqual(['Claude Code', 'Cursor'])
+  })
+
+  it('drops a session whose tool was never captured, rather than naming a blank', () => {
+    const tools = dayTools(daySessions([
+      entry({ id: 'a', session: 's1', tool: '' }),
+      entry({ id: 'b', session: 's2', tool: '   ' }),
+      entry({ id: 'c', session: 's3', tool: 'Cursor' }),
+    ]))
+    expect(tools).toEqual(['Cursor'])
+  })
+
+  it('says nothing for a day with no sessions', () => {
+    expect(dayTools([])).toEqual([])
+  })
+})
+
+describe('toolLabel', () => {
+  it('names one tool plainly', () => {
+    expect(toolLabel(['Claude Code'])).toBe('Claude Code')
+  })
+
+  it('names two', () => {
+    expect(toolLabel(['Claude Code', 'Codex'])).toBe('Claude Code, Codex')
+  })
+
+  it('elides the tail past two, the same shape projectLabel uses', () => {
+    expect(toolLabel(['Claude Code', 'Codex', 'Cursor'])).toBe('Claude Code, Codex +1')
+  })
+
+  it('renders nothing, not a stray separator, for no tools', () => {
+    expect(toolLabel([])).toBe('')
+  })
+})
+
 describe('daySessions', () => {
   // The consequence of dropping collapseSessionCheckpoints from the feed:
   // buildEntries emits one entry per PROMPT, so a session with several prompts
@@ -618,6 +713,19 @@ describe('buildDayCards', () => {
       entry({ id: 'c1', session: 's1', at: '2026-07-29T20:00:00Z' }),
     ])
     expect(cards[0].sessionCount).toBe(1)
+  })
+
+  // Derived once, here, and carried. The renderer reads card.tools rather than
+  // recomputing them, so the card's last line and the day view it opens cannot
+  // disagree about which tools did the work.
+  it('carries the day\'s distinct tools on the card, busiest first', () => {
+    const cards = buildDayCards([
+      entry({ id: 'a', session: 's1', at: '2026-07-29T20:00:00Z', tool: 'Codex' }),
+      entry({ id: 'b', session: 's2', at: '2026-07-29T19:00:00Z', tool: 'Claude Code' }),
+      entry({ id: 'c', session: 's3', at: '2026-07-29T18:00:00Z', tool: 'Claude Code' }),
+    ])
+    expect(cards).toHaveLength(1)
+    expect(cards[0].tools).toEqual(['Claude Code', 'Codex'])
   })
 
   it('counts a session-less row as its own session rather than folding them together', () => {
