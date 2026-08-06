@@ -34,24 +34,17 @@ import { FakeDataClient } from './FakeDataClient'
  * TODO with a test behind it, not an exemption.
  */
 
-// Mappers whose fixture path goes through the real mapper.
-const CROSSED = ['mapMember', 'mapProjectRow', 'mapSession'] as const
+// Mappers whose fixture path goes through the real mapper. This is now every
+// mapper in mappers.ts, which makes the inventory check below a guarantee
+// rather than a ledger of known holes: there is no classification a new mapper
+// can quietly join.
+const CROSSED = ['mapFeedEntry', 'mapLiveSession', 'mapMember', 'mapProjectRow', 'mapSession', 'mapStreamEntry'] as const
 
-// Mappers the fixture still bypasses, with why. Moving one of these to
-// CROSSED means converting the matching FakeDataClient builder to author the
-// raw wire shape. Nothing here is safe; it is only known.
-const OUTSTANDING: Record<string, string> = {
-  mapFeedEntry:
-    'FakeDataClient.getFeed() authors FeedEntry literals. Medium: one raw shape (RawFeedEntry) ' +
-    'and no derived clock state, but the fixture builds paged results and day grouping on top ' +
-    'of the mapped objects.',
-  mapLiveSession:
-    'FakeDataClient.getLiveSessions() authors LiveSession literals. Shares RawFeedEntry with ' +
-    'mapFeedEntry, so it should be converted in the same pass.',
-  mapStreamEntry:
-    'FakeDataClient.getProjectStream() authors StreamEntry literals. Also RawFeedEntry-based; ' +
-    'same pass as the two above.',
-}
+// Mappers the fixture still bypasses, with why. EMPTY, and it should stay that
+// way: adding an entry here is a deliberate statement that a boundary was left
+// open, and it needs a reason good enough to write down. Prefer converting the
+// fixture.
+const OUTSTANDING: Record<string, string> = {}
 
 describe('the FakeDataClient/mapper boundary', () => {
   // The guard that makes the hole non-extensible. A new mapper lands in
@@ -169,6 +162,50 @@ describe('the FakeDataClient/mapper boundary', () => {
   // author a Session directly and you silently skip every default the app
   // relies on, so a payload the daemon really sends (sparse, with nulls and
   // absent arrays) is never exercised.
+  // The three feed-shaped mappers all derive their two most-read fields --
+  // `outcome` via outcomeOf (headline first, else the summary's clipped first
+  // sentence) and `intent` via intentOf (goal before ask). Stating those as
+  // literals meant neither rule was ever exercised by a component test.
+  describe('feed, stream and live rows really are mapper output', () => {
+    it('derives outcome from the headline, and leaves it empty when there is none', async () => {
+      const page = await new FakeDataClient().getFeed({ author: null, project: null, source: null }, { limit: 50, before: null })
+      const withHeadline = page.entries.find(e => e.session === 's-f2')!
+      expect(withHeadline.outcome).toBe('Hook ownership now decided by durability, not who ran last.')
+      // No headline and no summary -> empty, from the mapper, not written as ''.
+      expect(page.entries.find(e => e.session === 's-f1')!.outcome).toBe('')
+    })
+
+    it('derives intent from goal, and null when there is neither goal nor ask', async () => {
+      const page = await new FakeDataClient().getFeed({ author: null, project: null, source: null }, { limit: 50, before: null })
+      expect(page.entries.find(e => e.session === 's-f4')!.intent).toBe('fix the port collision in the test suite')
+      expect(page.entries.find(e => e.session === 's-f5')!.intent).toBeNull()
+    })
+
+    it('gives every entry the mapper composite id, not a hand-written one', async () => {
+      const page = await new FakeDataClient().getFeed({ author: null, project: null, source: null }, { limit: 50, before: null })
+      // session|ts. FeedPage dedupes on this and DayCard keys on it, so it has
+      // to be the real thing rather than a fixture-only label.
+      expect(page.entries.find(e => e.session === 's-f1')!.id).toBe('s-f1|2026-07-29T20:36:00Z')
+    })
+
+    it('normalizes the brief fields the fixture no longer states', async () => {
+      const stream = await new FakeDataClient().getProjectStream()
+      // These used to come from an emptyBrief() spread in the fixture. They now
+      // come from the mapper, which is where they come from in the app.
+      expect(stream[0].decisions).toBeNull()
+      expect(stream[0].gotchas).toBeNull()
+      expect(stream[0].changes).toEqual([])
+    })
+
+    it('derives a live session id from its session, and a null outcome before any headline', async () => {
+      const live = await new FakeDataClient().getLiveSessions()
+      expect(live.map(l => l.id)).toEqual(['s1', 's2'])
+      // outcomeOf(...) || null -- a session still working has no outcome yet.
+      expect(live[0].outcome).toBeNull()
+      expect(live[0].tool).toBe('Codex')
+    })
+  })
+
   describe('sessions really are mapper output', () => {
     it('normalizes a sparse payload rather than trusting the fixture to be complete', async () => {
       const s = await new FakeDataClient().getSession('s-f1')

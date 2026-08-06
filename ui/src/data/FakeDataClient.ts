@@ -3,7 +3,7 @@ import type { DataClient, Capabilities } from './DataClient'
 // hands back domain objects it authored itself can never fail the way the app
 // fails -- see teamMembers() below and fixtureBoundary.test.ts.
 import {
-  mapMember, mapProjectRow, mapSession,
+  mapFeedEntry, mapLiveSession, mapMember, mapProjectRow, mapSession, mapStreamEntry,
   type MemberActivity, type RawFeedEntry, type RawMemberRow, type RawProjectRow, type RawSessionPayload,
 } from './mappers'
 
@@ -18,6 +18,10 @@ import type {
  *  `latestSummary` and `recentAuthorIds` from, so authoring them raw is how the
  *  project fixture gets those two fields from the real mapper instead of
  *  asserting them into existence. */
+/** What a fixture states about one wire row: the project it belongs to, plus
+ *  whatever else that row is actually about. Everything else is defaulted. */
+type RawEntrySpec = Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project' | 'projectPath'>
+
 function rawFeedEntry(over: Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project' | 'projectPath'>): RawFeedEntry {
   return {
     ts: '2026-07-28T10:00:00Z',
@@ -111,12 +115,6 @@ export interface FakeOptions {
   // whose folder is gone (missing) -- the Archived section's two render
   // states. Opt-in so fixtures that predate archiving are untouched.
   withArchived?: boolean
-}
-
-// The brief fields every StreamEntry now carries (session detail page, Task
-// 2). The fixtures predate them; absence means null / [], never undefined.
-function emptyBrief(): Pick<StreamEntry, 'summaryFull' | 'decisions' | 'gotchas' | 'changes'> {
-  return { summaryFull: null, decisions: null, gotchas: null, changes: [] }
 }
 
 // A 60-prompt session's chain, newest-first (one prompt a minute counting
@@ -456,10 +454,18 @@ export class FakeDataClient implements DataClient {
     return this.guard<Project[]>(rows.map(row => mapProjectRow(row, feed)))
   }
   getLiveSessions() {
-    return this.guard<LiveSession[]>(this.opts.empty ? [] : [
-      { id: 's1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', projectName: 'membridge', startedAt: '2026-07-29T20:36:00Z', intent: 'make the summary hook fire on session boundaries, not only on stop', outcome: null },
-      { id: 's2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', projectName: 'membridge', startedAt: '2026-07-29T21:00:00Z', intent: 'rebuild the apps interface from the ground up', outcome: null },
-    ])
+    // mapLiveSession derives the id from `session`, the tool from `source`,
+    // and `outcome` from outcomeOf(...) || null -- so a live session with no
+    // headline yet comes back with a null outcome because the mapper says so.
+    const rows: RawEntrySpec[] = [
+      { session: 's1', ts: '2026-07-29T20:36:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
+        goal: 'make the summary hook fire on session boundaries, not only on stop',
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      { session: 's2', ts: '2026-07-29T21:00:00Z', author: 'You', authorId: this.viewerId, source: 'Claude Code', live: true,
+        goal: 'rebuild the apps interface from the ground up',
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+    ]
+    return this.guard<LiveSession[]>(this.opts.empty ? [] : rows.map(e => mapLiveSession(rawFeedEntry(e))))
   }
   // null for an unknown id -- FakeDataClient must model the real client's
   // "evicted session" resolution, not throw, so the not-in-memory page state
@@ -471,22 +477,52 @@ export class FakeDataClient implements DataClient {
     return this.guard<Session | null>(raw ? mapSession(raw) : null)
   }
   getProjectStream() {
-    return this.guard<StreamEntry[]>([
-      { id: 'e1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T19:00:00Z', live: true, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], session: 's-e1', ...emptyBrief() },
-    ])
+    const rows: RawEntrySpec[] = [
+      { session: 's-e1', ts: '2026-07-29T19:00:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
+        headline: 'Hook ownership now decided by durability, not who ran last.',
+        goal: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'],
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+    ]
+    return this.guard<StreamEntry[]>(rows.map(e => mapStreamEntry(rawFeedEntry(e))))
   }
   // Feed fixture: 5 entries across 2 projects, 2 named authors + "you", 2
   // tools, spanning 2 UTC calendar days -- enough to exercise day-grouping,
   // every filter, and (via a caller-supplied `before`) backward paging
   // without a live daemon.
   private feedFixture(): FeedEntry[] {
-    return [
-      { id: 'f1', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-29T20:36:00Z', live: true, outcome: '', intent: 'make the summary hook fire on session boundaries, not only on stop', files: [], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f1', ...emptyBrief() },
-      { id: 'f2', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-29T19:00:00Z', live: false, outcome: 'Hook ownership now decided by durability, not who ran last.', intent: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f2', ...emptyBrief() },
-      { id: 'f3', author: 'Sarah', authorId: 'sarah', tool: 'Claude Code', at: '2026-07-29T10:00:00Z', live: false, outcome: 'Listing flow validates addresses before payment.', intent: 'validate the address before charging the card', files: ['lib/listing.js'], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f3', ...emptyBrief() },
-      { id: 'f4', author: 'Andrew', authorId: 'andrew', tool: 'Codex', at: '2026-07-28T22:00:00Z', live: false, outcome: 'Ports fixed and pushed.', intent: 'fix the port collision in the test suite', files: ['test/run-tests.js'], project: 'membridge', projectPath: '/Users/x/membridge', session: 's-f4', ...emptyBrief() },
-      { id: 'f5', author: 'You', authorId: this.viewerId, tool: 'Claude Code', at: '2026-07-28T18:00:00Z', live: false, outcome: 'Landing page deployed.', intent: null, files: [], project: 'sublease', projectPath: '/Users/x/sublease', session: 's-f5', ...emptyBrief() },
+    // Wire rows, mapped. `outcome` and `intent` are DERIVED here, not stated:
+    // outcomeOf prefers a headline and otherwise clips the summary's first
+    // sentence to OUTCOME_MAX, and intentOf prefers `goal` over `ask`. Stating
+    // them as literals meant no test ever exercised either rule -- including
+    // the clipping, which is the one most likely to change.
+    //
+    // `id` is now the mapper's composite (session|ts) rather than 'f1'..'f5'.
+    // It is an internal key -- FeedPage dedupes on it and DayCard uses it as a
+    // React key -- and no test asserts it. Session links read `session`, which
+    // is unchanged.
+    const rows: RawEntrySpec[] = [
+      { session: 's-f1', ts: '2026-07-29T20:36:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex', live: true,
+        goal: 'make the summary hook fire on session boundaries, not only on stop',
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      { session: 's-f2', ts: '2026-07-29T19:00:00Z', author: 'You', authorId: this.viewerId, source: 'Claude Code',
+        headline: 'Hook ownership now decided by durability, not who ran last.',
+        goal: 'make the summary hook fire on session boundaries', files: ['lib/hooks.js'],
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      { session: 's-f3', ts: '2026-07-29T10:00:00Z', author: 'Sarah', authorId: 'sarah', source: 'Claude Code',
+        headline: 'Listing flow validates addresses before payment.',
+        goal: 'validate the address before charging the card', files: ['lib/listing.js'],
+        project: 'sublease', projectPath: '/Users/x/sublease' },
+      { session: 's-f4', ts: '2026-07-28T22:00:00Z', author: 'Andrew', authorId: 'andrew', source: 'Codex',
+        headline: 'Ports fixed and pushed.',
+        goal: 'fix the port collision in the test suite', files: ['test/run-tests.js'],
+        project: 'membridge', projectPath: '/Users/x/membridge' },
+      // No goal and no ask, so intentOf yields null -- the "nothing to show"
+      // case, derived rather than written as `intent: null`.
+      { session: 's-f5', ts: '2026-07-28T18:00:00Z', author: 'You', authorId: this.viewerId, source: 'Claude Code',
+        headline: 'Landing page deployed.',
+        project: 'sublease', projectPath: '/Users/x/sublease' },
     ]
+    return rows.map(e => mapFeedEntry(rawFeedEntry(e)))
   }
   getFeed(filters: FeedFilters, opts: { limit: number; before: string | null }) {
     if (this.opts.empty) return this.guard<FeedPage>({ entries: [], nextBefore: null })
