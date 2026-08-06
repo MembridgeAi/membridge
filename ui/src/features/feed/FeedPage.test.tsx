@@ -5,11 +5,11 @@ import { focusManager } from '@tanstack/react-query'
 import { renderApp, renderWith } from '../../test/renderApp'
 import { FakeDataClient } from '../../data/FakeDataClient'
 import { FEED_PAGE_SIZE } from '../../data/queries'
-import type { FeedEntry } from '../../data/types'
+import type { FeedEntry, FeedPage as FeedPageResult } from '../../data/types'
 import { dayCardStats, projectLabel } from './DayCard'
 import { NO_SUMMARY_OVERVIEW, OPAQUE_OVERVIEW, buildDayCards } from './dayCards'
 import { dayHref, daySessionHref } from '../../app/routes'
-import { FeedPage, UNDATED_LABEL, dayLabel, groupByDay } from './FeedPage'
+import { FEED_WEEK_DAYS, FeedPage, MAX_AUTO_PAGES, UNDATED_LABEL, dayLabel, groupByDay } from './FeedPage'
 
 // session defaults to null (not a shared string) so two default-built entries
 // never accidentally fold into each other -- a null session is only ever
@@ -26,6 +26,41 @@ const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
  *  buildDayCards rather than by hand, so a test can never assert a slug the
  *  feed does not actually mint. */
 const hrefFor = (entries: FeedEntry[], index = 0) => dayHref(buildDayCards(entries)[index].slug)
+
+/** `count` pages, each carrying ONE entry on its own local day, walking back a
+ *  day at a time from Jul 29.
+ *
+ *  One new day per page is deliberately the shape the pager is worst at: it is
+ *  what forces the walk, where a realistic 30-row page usually straddles
+ *  several days and reaches a week in three or four requests. Every page hands
+ *  back a cursor, including the last, so a test asserting the pager stopped is
+ *  asserting it hit its own target rather than that the feed ran out of rows. */
+const oneDayPerPage = (count: number): FeedPageResult[] =>
+  Array.from({ length: count }, (_, i) => {
+    const date = 29 - i
+    return {
+      entries: [entry({ id: `p${i}`, session: `p${i}`, at: `2026-07-${date}T20:00:00Z`, outcome: `day ${i}` })],
+      nextBefore: `2026-07-${date - 1}T00:00:00Z`,
+      dayDigests: [],
+    }
+  })
+
+/** How many requests the pager made once it stopped making them.
+ *
+ *  Samples until two consecutive reads 100ms apart are equal. A runaway loop
+ *  never settles, so a caller putting a bound on the result is asserting
+ *  TERMINATION rather than a rate -- and unlike a fixed sleep, it does not turn
+ *  into a phantom failure when the machine is busy compiling something else. */
+const settledCalls = async (spy: { mock: { calls: unknown[] } }): Promise<number> => {
+  let last = -1
+  for (let i = 0; i < 25; i++) {
+    const now = spy.mock.calls.length
+    if (now === last) return now
+    last = now
+    await new Promise(r => setTimeout(r, 100))
+  }
+  return spy.mock.calls.length
+}
 
 // The suite is pinned to America/Los_Angeles (vite.config.ts, test.env.TZ),
 // so "20:00Z" is 13:00 the same day and "02:00Z" is 19:00 the PREVIOUS day
@@ -66,6 +101,39 @@ describe('groupByDay', () => {
     ], NOW)
     expect(groups.map(g => g.day)).toEqual(['TODAY · WED JUL 29', 'TUE JUL 28'])
     expect(groups[0].entries.map(e => e.id)).toEqual(['b', 'c'])
+  })
+
+  // Board ticket #10. The label carries no year, so it is not an identity.
+  // Jul 29 falls on a Wednesday in both 2020 and 2026, which makes those two
+  // days render the SAME heading text -- and the group was bucketed and
+  // React-keyed on that text. Two consequences, both real: six years of
+  // activity collapsed under one divider whenever nothing between them broke
+  // the run, and two siblings sharing a React key, which frees React to
+  // reconcile one day's cards into the other day's section. Paging a week at a
+  // time makes reaching a second July 29th cheaper, so this stopped being
+  // theoretical.
+  it('gives two same-labelled days years apart their own key, not one shared', () => {
+    const NOW = new Date('2026-07-29T23:00:00Z')
+    const groups = groupByDay([
+      entry({ id: 'now', at: '2026-07-29T20:00:00Z' }),
+      entry({ id: 'then', at: '2020-07-29T20:00:00Z' }),
+    ], NOW)
+    // The rendered text is unchanged, and is genuinely identical apart from
+    // the TODAY prefix -- which is exactly why it cannot be the key.
+    expect(groups.map(g => g.day)).toEqual(['TODAY · WED JUL 29', 'WED JUL 29'])
+    expect(groups).toHaveLength(2)
+    expect(groups.map(g => g.key)).toEqual(['2026-07-29', '2020-07-29'])
+    expect(new Set(groups.map(g => g.key)).size).toBe(groups.length)
+  })
+
+  it('buckets undated rows together under one named key rather than on NaN', () => {
+    const groups = groupByDay([
+      entry({ id: 'a', at: '' }),
+      entry({ id: 'b', at: 'not a date' }),
+    ], new Date('2026-07-29T23:00:00Z'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].key).toBe('undated')
+    expect(groups[0].day).toBe(UNDATED_LABEL)
   })
 
   it('keeps one local day together even when the entries straddle UTC midnight', () => {
@@ -277,22 +345,105 @@ describe('FeedPage', () => {
     expect(new URLSearchParams(href.slice(href.indexOf('?'))).get('author')).toBe('andrew')
   })
 
-  it('auto-pages until the feed covers a few whole days, without a click', async () => {
+  it('auto-pages until the feed covers a WEEK, without a click, then stops', async () => {
     // The starvation the owner hit: /api/feed pages by ROW and grouping
     // happens after, so one busy teammate's 30 rows fill page one and a
-    // quieter person's card for the same day lands behind "Show more". The
-    // feed keeps pulling until it has MIN_DAYS_LOADED days.
+    // quieter person's card for the same day lands behind "Show more". Andrew's
+    // ask is that the feed be a week long before that button appears, so the
+    // pager walks to FEED_WEEK_DAYS distinct local days.
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'getFeed')
-      .mockResolvedValueOnce({ entries: [entry({ id: 'p1', session: 'p1', outcome: 'busy teammate' })], nextBefore: '2026-07-20T00:00:00Z', dayDigests: [] })
-      .mockResolvedValueOnce({ entries: [entry({ id: 'p2', session: 'p2', at: '2026-07-19T20:00:00Z', outcome: 'quiet teammate' })], nextBefore: '2026-07-18T00:00:00Z', dayDigests: [] })
-      .mockResolvedValueOnce({ entries: [entry({ id: 'p3', session: 'p3', at: '2026-07-17T20:00:00Z', outcome: 'older still' })], nextBefore: null, dayDigests: [] })
+    // One more page than the week needs, all of them offering a cursor: the
+    // pager has to stop on its own target rather than on running out.
+    for (const page of oneDayPerPage(FEED_WEEK_DAYS + 1)) spy.mockResolvedValueOnce(page)
     renderWith(client, <FeedPage />)
 
     // No click anywhere in this test.
-    expect(await screen.findByText('older still')).toBeInTheDocument()
-    expect(screen.getByText('quiet teammate')).toBeInTheDocument()
-    expect(spy).toHaveBeenCalledTimes(3)
+    expect(await screen.findByText(`day ${FEED_WEEK_DAYS - 1}`)).toBeInTheDocument()
+    expect(screen.getByText('day 0')).toBeInTheDocument()
+    expect(await settledCalls(spy)).toBe(FEED_WEEK_DAYS)
+    // A week is loaded, so the control is now the reader's to press, not a
+    // spinner they are waiting on.
+    expect(await screen.findByRole('button', { name: 'Show more' })).toBeEnabled()
+  })
+
+  it('says "Loading…" for the WHOLE walk to a week, not just one request', async () => {
+    // isFetchingNextPage drops to false between pages. A button keyed on it
+    // alone flickers back to "Show more" mid-week and invites a press that
+    // queues a second week on top of the one still arriving.
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'getFeed')
+    spy.mockResolvedValueOnce(oneDayPerPage(1)[0])
+    // Page two never arrives. A hanging page is the only way to hold the screen
+    // in the mid-walk state deterministically -- with resolving mocks the whole
+    // week can land before the first assertion runs, and the test would be
+    // measuring the scheduler rather than the button.
+    spy.mockImplementation(() => new Promise<FeedPageResult>(() => {}))
+
+    renderWith(client, <FeedPage />)
+    await screen.findByText('day 0')
+    // One day of the seven is in hand, so the control is not the reader's yet.
+    expect(await screen.findByRole('button', { name: 'Loading…' })).toBeDisabled()
+  })
+
+  it('"Show more" adds another week rather than a single page', async () => {
+    const client = new FakeDataClient()
+    const spy = vi.spyOn(client, 'getFeed')
+    for (const page of oneDayPerPage(FEED_WEEK_DAYS * 2)) spy.mockResolvedValueOnce(page)
+    renderWith(client, <FeedPage />)
+
+    await screen.findByText(`day ${FEED_WEEK_DAYS - 1}`)
+    expect(await settledCalls(spy)).toBe(FEED_WEEK_DAYS)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Show more' }))
+
+    // A second week, off ONE press: the button moves the day target and the
+    // pager walks to it, rather than handing back a single page.
+    expect(await screen.findByText(`day ${FEED_WEEK_DAYS * 2 - 1}`)).toBeInTheDocument()
+    expect(await settledCalls(spy)).toBe(FEED_WEEK_DAYS * 2)
+    expect(screen.getByText('day 0')).toBeInTheDocument()
+  })
+
+  it('walks again after a filter change instead of freezing on a dead "Loading…"', async () => {
+    // The pager latches "already asked at this page count" in a ref, and
+    // useFeed keys its cache on the filters -- so picking a filter swaps in a
+    // different cache entry whose page count starts over at zero. A latch left
+    // at the PREVIOUS filter's count matched the new one on the first pass and
+    // the pager refused to walk a feed it had never walked.
+    //
+    // Survivable while the button was keyed on isFetchingNextPage: the reader
+    // saw a live "Show more" and drove it by hand. Keyed on the DAY TARGET, the
+    // same state renders a disabled "Loading…" that no request will ever
+    // finish, with no way out but another filter change or a reload.
+    const client = new FakeDataClient()
+    // The unfiltered feed RUNS OUT after two pages. That is what leaves the
+    // latch set: the pager's last attempt did not grow the page count.
+    const unfiltered = oneDayPerPage(2)
+    unfiltered[1] = { ...unfiltered[1], nextBefore: null }
+    const filtered = oneDayPerPage(FEED_WEEK_DAYS)
+    const spy = vi.spyOn(client, 'getFeed').mockImplementation((filters, opts) => {
+      const pages = filters.project ? filtered : unfiltered
+      const next = opts.before === null
+        ? 0
+        : pages.findIndex(p => p.nextBefore === opts.before) + 1
+      return Promise.resolve(pages[Math.min(next, pages.length - 1)])
+    })
+    renderWith(client, <FeedPage />)
+
+    await screen.findByText('day 1')
+    const beforeFilter = await settledCalls(spy)
+
+    const select = await screen.findByLabelText('Filter by project')
+    await within(select).findByRole('option', { name: 'sublease' })
+    await userEvent.selectOptions(select, '/Users/x/sublease')
+
+    // The pager has to walk the NEW query key. With the stale latch it made
+    // exactly one request (the query's own first page) and then stopped, so a
+    // bound of "more than one past the old count" is what separates walking
+    // from frozen.
+    expect(await settledCalls(spy)).toBeGreaterThan(beforeFilter + 1)
+    // And the control is the reader's again, not a spinner nothing will finish.
+    expect(await screen.findByRole('button', { name: 'Show more' })).toBeEnabled()
   })
 
   it('stops auto-paging when a page errors, instead of hammering the daemon', async () => {
@@ -308,14 +459,15 @@ describe('FeedPage', () => {
     })
     renderWith(client, <FeedPage />)
     await screen.findByText('only day')
-    await new Promise(r => setTimeout(r, 400))
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(3)
+    expect(await settledCalls(spy)).toBeLessThanOrEqual(3)
   })
 
   it('stops auto-paging when further pages add no new day', async () => {
     // The other non-progress case: the daemon keeps answering, and keeps
-    // answering with the same day. Progress is tracked on the page count, so
-    // each state is asked about once and the cap ends it.
+    // answering with the same day. Progress is tracked on the PAGE COUNT, not
+    // on the fetching flag, so each state is asked about once and the ceiling
+    // ends it. A week target does not change that -- it only raises where the
+    // ceiling sits.
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'getFeed').mockImplementation(async () => {
       await new Promise(r => setTimeout(r, 5))
@@ -323,28 +475,26 @@ describe('FeedPage', () => {
     })
     renderWith(client, <FeedPage />)
     await screen.findByText('one day only')
-    await new Promise(r => setTimeout(r, 400))
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(6)
+    expect(await settledCalls(spy)).toBeLessThanOrEqual(MAX_AUTO_PAGES)
   })
 
   it('"Show more" pages backwards using the previous page\'s cursor, keeping the earlier page visible', async () => {
-    // Page one already carries enough days that auto-paging is satisfied, so
+    // Page one already carries a whole week, so auto-paging is satisfied and
     // this exercises the MANUAL control rather than racing the effect.
     const client = new FakeDataClient()
     const spy = vi.spyOn(client, 'getFeed')
       .mockResolvedValueOnce({
-        entries: [
-          entry({ id: 'd1', session: 'd1', at: '2026-07-29T20:00:00Z', outcome: 'first page entry' }),
-          entry({ id: 'd2', session: 'd2', at: '2026-07-28T20:00:00Z', outcome: 'day two' }),
-          entry({ id: 'd3', session: 'd3', at: '2026-07-27T20:00:00Z', outcome: 'day three' }),
-        ],
+        entries: Array.from({ length: FEED_WEEK_DAYS }, (_, i) => entry({
+          id: `d${i}`, session: `d${i}`, at: `2026-07-${29 - i}T20:00:00Z`,
+          outcome: i === 0 ? 'first page entry' : `day ${i}`,
+        })),
         nextBefore: '2026-07-20T00:00:00Z', dayDigests: [],
       })
       .mockResolvedValueOnce({ entries: [entry({ id: 'page2', session: 'p2', at: '2026-07-19T20:00:00Z', outcome: 'second page entry' })], nextBefore: null, dayDigests: [] })
     renderWith(client, <FeedPage />)
 
     expect(await screen.findByText('first page entry')).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Show more' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Show more' }))
 
     expect(await screen.findByText('second page entry')).toBeInTheDocument()
     expect(screen.getByText('first page entry')).toBeInTheDocument()
@@ -721,5 +871,84 @@ describe('feed: the daemon\'s day sentence', () => {
     await screen.findByText('the day\'s distilled outcome')
     expect(container.querySelector('.day-card-overview')!.textContent).toBe('the day\'s distilled outcome')
     expect(container.querySelector('.day-card-coverage')).toBeNull()
+  })
+})
+
+// Andrew's ask: "Id also like the top 3 files touched on the day cards, along
+// with the tool(s) used". The card's last line, quietest thing on it, and the
+// one place the feed says WHAT was touched rather than what it was about.
+describe('feed: what the day touched', () => {
+  const touchedLine = async (entries: FeedEntry[]) => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({ entries, nextBefore: null, dayDigests: [] })
+    const { container } = renderWith(c, <FeedPage />)
+    await screen.findByText('the day\'s outcome')
+    const card = container.querySelector('.day-card') as HTMLElement
+    return { card, touched: card.querySelector('.day-card-touched') }
+  }
+
+  const worked = (over: Partial<FeedEntry>) =>
+    entry({ outcome: 'the day\'s outcome', ...over })
+
+  it('names the tools used, then the three most-touched files', async () => {
+    const { touched } = await touchedLine([
+      worked({ id: 'a', session: 's1', tool: 'Claude Code', files: ['lib/feed.js', 'ui/src/features/feed/dayCards.ts'] }),
+      worked({ id: 'b', session: 's2', tool: 'Claude Code', at: '2026-07-29T19:00:00Z', files: ['lib/feed.js'] }),
+      worked({ id: 'c', session: 's3', tool: 'Codex', at: '2026-07-29T18:00:00Z', files: ['feed.css'] }),
+    ])
+    expect(touched!.querySelector('.day-card-tools')!.textContent).toBe('Claude Code, Codex')
+
+    const files = [...touched!.querySelectorAll('.day-card-file')]
+    // Shortened from the LEFT, and each one keeps its full path in `title`, so
+    // nothing the 10px line clipped is unrecoverable.
+    expect(files.map(f => f.textContent)).toEqual([
+      'lib/feed.js2x', 'feed.css1x', '…/feed/dayCards.ts1x',
+    ])
+    expect(files.map(f => f.getAttribute('title'))).toEqual([
+      'lib/feed.js', 'feed.css', 'ui/src/features/feed/dayCards.ts',
+    ])
+    // Tools FIRST: a short, near-constant label holds a stable left edge down a
+    // column of cards, where the ranked paths belong on the elastic right.
+    expect(touched!.firstElementChild!.className).toBe('day-card-tools')
+  })
+
+  it('shows exactly three files however many the day touched', async () => {
+    // The total is already on the stat line ("5 files"), so a second count here
+    // would be noise. Three, and the rest are on the day view.
+    const { card, touched } = await touchedLine([
+      worked({ id: 'a', session: 's1', files: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'] }),
+    ])
+    expect(touched!.querySelectorAll('.day-card-file')).toHaveLength(3)
+    expect(card.querySelector('.day-card-stats')!.textContent).toContain('5 files')
+  })
+
+  it('renders however few files there are, never padded to three', async () => {
+    const { touched } = await touchedLine([
+      worked({ id: 'a', session: 's1', files: ['lib/feed.js'] }),
+    ])
+    expect(touched!.querySelectorAll('.day-card-file')).toHaveLength(1)
+  })
+
+  it('carries the tool alone when the day touched no files', async () => {
+    const { touched } = await touchedLine([
+      worked({ id: 'a', session: 's1', tool: 'Cursor', files: [] }),
+    ])
+    expect(touched!.querySelector('.day-card-tools')!.textContent).toBe('Cursor')
+    expect(touched!.querySelectorAll('.day-card-file')).toHaveLength(0)
+  })
+
+  it('carries the files alone when no tool name was captured', async () => {
+    const { touched } = await touchedLine([
+      worked({ id: 'a', session: 's1', tool: '', files: ['lib/feed.js'] }),
+    ])
+    expect(touched!.querySelector('.day-card-tools')).toBeNull()
+    expect(touched!.querySelectorAll('.day-card-file')).toHaveLength(1)
+  })
+
+  it('drops the whole line for a day with neither, rather than an empty row', async () => {
+    const { touched } = await touchedLine([
+      worked({ id: 'a', session: 's1', tool: '', files: [] }),
+    ])
+    expect(touched).toBeNull()
   })
 })

@@ -149,7 +149,10 @@
 .day-card-meta {
   padding-top: 2px;
   color: var(--text3);
-  font-size: 10px;
+  /* var(--fs-xs) IS 10px. Written as the token because .day-card-touched below
+     uses it, and a card mixing the literal with the token for one value is how
+     a later change to the type scale silently misses half a row. */
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .day-card-meta .live-dot,
@@ -214,6 +217,62 @@
   font-size: var(--fs-xs);
   font-style: italic;
 }
+/* What the day touched: the tools that ran, then the three most-touched files.
+ * ROW 5, the last thing on the card, spanning columns 2 through 4 — column 4 is
+ * free on this row, and using it buys ~90px of width the 2/4 rows above leave
+ * on the table. An empty grid row collapses to nothing with no row-gap
+ * declared, so this lands correctly whether or not rows 3 and 4 are populated.
+ *
+ * WIDTH, measured at the 900px floor: 900 window - 170 rail = 730 content,
+ * - 32 card padding = 698, - 19 avatar - 10 column gap = 669px for this row. At
+ * 10px mono (~6.0px/char) that is ~111 characters. The worst realistic line —
+ * "Claude Code, Codex" (18) + " · " (3) + 3 × ["…/feed/dayCards.ts" (19) +
+ * " 9x" (3) + " · " (3)] — is ~93 chars ≈ 558px, so it fits with ~110px slack.
+ *
+ * NO horizontal scroll on this line, deliberately: .shell-main is min-width: 0;
+ * overflow-x: auto, so an unbounded line would produce a scrollbar inside the
+ * content column, the exact defect .wrap-anywhere and the projects.css note
+ * exist to prevent. nowrap + overflow: hidden is safe here precisely because
+ * the cell and every child are min-width: 0.
+ *
+ * --text2 and NOT --text3 for the tool and the paths: --text3 at 10px measures
+ * 3.48:1 on --bg dark and 2.46:1 light, i.e. not readable. --text2 is 7.34:1
+ * dark and 4.56:1 light. --text3 is kept only for the touch counts, which are
+ * numbers sitting against their own label and carry no meaning alone. `.mono`
+ * supplies tabular-nums, so 9x/12x align down a column of cards. */
+.day-card-touched {
+  grid-column: 2 / 5;
+  grid-row: 5;
+  margin-top: 3px;
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  color: var(--text2);
+}
+/* Separators drawn here rather than in the JSX, so no stray middot can survive
+ * an absent tool label or an empty file list. */
+.day-card-touched > * + *::before {
+  content: '·';
+  margin: 0 6px;
+  color: var(--text3);
+}
+/* The tool always survives the clip: first, and never shrinks. */
+.day-card-tools {
+  flex: none;
+}
+.day-card-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.day-card-file-touches {
+  margin-left: 4px;
+  color: var(--text3);
+}
 /* Bottom-right stat line. Grid-placed in the meta column under the live
  * indicator so it stays put when the overview wraps to two lines. */
 .day-card-stats {
@@ -222,7 +281,8 @@
   justify-self: end;
   align-self: end;
   color: var(--text3);
-  font-size: 10px;
+  /* var(--fs-xs), same 10px, same reason as .day-card-meta above. */
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .day-card-chevron {

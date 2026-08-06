@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
 import { FEED_SESSION_PARAM, daySessionHref, useRawSearch } from '../../app/routes'
-import { isSameLocalDay, weekdayMonthDay } from '../../data/localTime'
+import { isSameLocalDay, localDayKey, weekdayMonthDay } from '../../data/localTime'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
 import type { FeedEntry } from '../../data/types'
 import { DayCard } from './DayCard'
-import { buildDayCards } from './dayCards'
+import { UNDATED_DAY, buildDayCards } from './dayCards'
 import './feed.css'
 
 function errorMessage(error: unknown): string {
@@ -35,6 +35,19 @@ export function dayLabel(iso: string, now: Date = new Date()): string {
 }
 
 interface DayGroup<T> {
+  /** The viewer's LOCAL calendar day, YYYY-MM-DD, or UNDATED_DAY for a row
+   *  whose timestamp is not a time. What the group is bucketed and React-keyed
+   *  on, and it carries the YEAR, which is the whole reason it is not `day`.
+   *
+   *  `day` below is a human label with no year in it ("WED JUL 29"), so two
+   *  Jul 29ths that both fall on a Wednesday -- 2020 and 2026, to name the pair
+   *  a reader can actually reach -- produce the same string. Bucketed on it,
+   *  two days six years apart merged into one section whenever nothing loaded
+   *  in between put a different label between them; keyed on it, React saw two
+   *  siblings claiming one identity and was free to reconcile the wrong card
+   *  into the wrong heading. Neither needed a year of scrolling to hit once the
+   *  feed started paging a week at a time. */
+  key: string
   day: string
   entries: T[]
 }
@@ -48,14 +61,21 @@ interface DayGroup<T> {
 // chrome ABOVE day cards rather than above bare entries, and both shapes have
 // to bucket by exactly the same local-day rule. One function, so the two can
 // never disagree about which day something happened on.
+//
+// Bucketed on the local day KEY and labelled separately: the identity of a day
+// and the words describing it are two different things, and the label is lossy
+// (see DayGroup.key). localDayKey is the same conversion dayCards.entryDayKey
+// runs, so a divider and the cards under it can never disagree about which day
+// they are, and UNDATED_DAY is the same bucket name those rows group into.
 export function groupByDay<T extends { at: string }>(items: T[], now: Date = new Date()): DayGroup<T>[] {
   const sorted = [...items].sort((a, b) => b.at.localeCompare(a.at))
   const groups: DayGroup<T>[] = []
   for (const item of sorted) {
-    const day = dayLabel(item.at, now)
+    const ms = Date.parse(item.at)
+    const key = Number.isNaN(ms) ? UNDATED_DAY : localDayKey(new Date(ms))
     const current = groups[groups.length - 1]
-    if (current && current.day === day) current.entries.push(item)
-    else groups.push({ day, entries: [item] })
+    if (current && current.key === key) current.entries.push(item)
+    else groups.push({ key, day: dayLabel(item.at, now), entries: [item] })
   }
   return groups
 }
@@ -79,16 +99,37 @@ export function dedupeById(entries: FeedEntry[]): FeedEntry[] {
   return out
 }
 
-/** How many distinct local days the feed pulls for before it stops
- *  auto-paging. Three is enough that today is never alone on the page even
- *  when one person dominates it, and small enough that a cold open still
- *  settles in one or two extra requests. */
-const MIN_DAYS_LOADED = 3
+/** The unit the feed loads in, and the unit "Show more" adds: a week of
+ *  distinct local days. Andrew's ask, verbatim -- "the feed should be a week
+ *  long before the show more button, and when pressed should add a week at a
+ *  time". Three days was the old target, and it stopped the feed a day or two
+ *  into the reader's own week, which is the wrong place to put a control: a
+ *  week is the span a person actually reasons about ("what did we do this
+ *  week"), and stopping short of it makes them press a button to reach the
+ *  answer they opened the screen for. */
+export const FEED_WEEK_DAYS = 7
 
-/** Hard ceiling on auto-paging, independent of how many days turn up. An
- *  account whose whole history is one busy day would otherwise walk its entire
- *  feed looking for a third day that does not exist. */
-export const MAX_AUTO_PAGES = 5
+/** Pages the auto-pager will spend PER WEEK of target. Not an absolute cap any
+ *  more, because "Show more" raises the target by a week and a fixed ceiling
+ *  would make the second press a no-op.
+ *
+ *  14, and the number is measured rather than round. /api/feed serves 30 rows a
+ *  page (queries.FEED_PAGE_SIZE), so 14 pages is 420 rows per week of target.
+ *  The busiest single day on Andrew's real feed measures ~60 rows across a
+ *  two-person team (dayCards.ts records the breakdown: 15 + 9 + 18 + 18), so
+ *  420 rows reaches seven days of that. Below ~12 the ceiling would bind before
+ *  the week was covered on exactly the busy accounts the week target exists
+ *  for; far above 14 the sequential round trips on a cold open become something
+ *  the reader waits through. In practice the loop exits long before the ceiling
+ *  -- a 30-row page usually straddles more than one day, so a normal feed
+ *  reaches seven days in three or four pages -- and the ceiling only bites on
+ *  an account whose whole history is a handful of very busy days.
+ *
+ *  DayPage imports this as its own absolute backstop for walking back to one
+ *  day. Raising it is right there too, and for the same reason: a feed that now
+ *  spans a week wants a day view that can reach a day a week back rather than
+ *  showing "That day is not in view" for one it just linked to. */
+export const MAX_AUTO_PAGES = 14
 
 /** The Feed screen: DAY CARDS, and nothing else. One card per person per local
  *  calendar day, across every project they touched, newest activity first,
@@ -99,9 +140,14 @@ export const MAX_AUTO_PAGES = 5
  *  a stack of session rows, which was the same volume problem the card exists
  *  to solve, one level down; the detail lives on its own page now.
  *
- *  Filters (person/project/tool) all route through the query, and "Show more"
- *  pages backwards by the daemon's own cursor, so filtering and paging always
- *  agree with each other. */
+ *  Filters (person/project/tool) all route through the query, and paging runs
+ *  backwards by the daemon's own cursor, so filtering and paging always agree
+ *  with each other.
+ *
+ *  The screen loads a WEEK of distinct local days before it offers "Show more",
+ *  and each press adds another week. Both are day counts rather than page
+ *  counts, because /api/feed pages by row: a page-counting version hands the
+ *  reader a "week" that is one busy teammate's Tuesday. */
 export function FeedPage() {
   const statusQuery = useStatus()
   const solo = statusQuery.data?.solo ?? true
@@ -122,6 +168,17 @@ export function FeedPage() {
   const [author, setAuthor] = useState('')
   const [project, setProject] = useState('')
   const [source, setSource] = useState('')
+
+  // How many distinct local days the feed is currently trying to cover. Starts
+  // at a week and grows a week per "Show more", which is what makes that button
+  // load a WEEK rather than a page: it moves the target and the auto-pager
+  // below does the walking, however many pages that turns out to take.
+  //
+  // A day target rather than a page count, for the reason the pager already
+  // documents: /api/feed pages by ROW, so one busy teammate's 30 rows can be a
+  // single day and a page-counting button would hand the reader a "week" that
+  // is Tuesday.
+  const [daysWanted, setDaysWanted] = useState(FEED_WEEK_DAYS)
 
   const projectsQuery = useProjects()
   const membersQuery = useMembers(!solo)
@@ -172,9 +229,15 @@ export function FeedPage() {
   )
   const dayCards = useMemo(() => buildDayCards(entries, dayDigests), [entries, dayDigests])
   const dayGroups = groupByDay(dayCards)
+  // What the pager counts as progress. The UNDATED bucket holds rows whose `at`
+  // could not be parsed (lib/feed.js emits `ts: e.ts || ''`), and it is not a
+  // day: counting it would let the feed stop one REAL day short of the week it
+  // promised, on exactly the accounts whose data is already suspect. It still
+  // renders; it just does not pay towards the target.
+  const datedDayCount = dayGroups.filter(g => g.key !== UNDATED_DAY).length
 
-  // Keep pulling pages until the feed covers a few whole days, not just a few
-  // rows. /api/feed pages by ROW and grouping happens after, so one busy
+  // Keep pulling pages until the feed covers `daysWanted` whole days, not just
+  // a few rows. /api/feed pages by ROW and grouping happens after, so one busy
   // teammate starves everyone else: 30 rows of theirs is a full page and a
   // quieter person's card for the same day lands behind "Show more". Measured
   // on a two-person team, 59 rows from one of them filled page one entirely.
@@ -183,6 +246,12 @@ export function FeedPage() {
   // count would still be gameable by the same person (many projects, many
   // cards, same day), and days are what the reader actually scans.
   //
+  // No `since` parameter is sent to reach the week, deliberately. useFeed keys
+  // its cache on the filters alone, and adding a bound to the request would
+  // change that key and cost the day view its cache hit off the feed -- the
+  // long comment in DayPage.tsx is about exactly that hit. Paging to a day
+  // count is what reaches a week without touching the key.
+  //
   // TERMINATION IS TRACKED ON PROGRESS, never on the fetching flag alone.
   // isFetchingNextPage is both a guard and a dependency, so an effect keyed on
   // it re-arms every time a fetch settles: with nothing recording that an
@@ -190,13 +259,29 @@ export function FeedPage() {
   // cursor, or simply adds no new day loops forever. Measured at 66 requests
   // in 1.5 seconds against an erroring second page, for as long as the screen
   // is open. The pageCount ref is what makes it terminate -- if the last
-  // attempt did not grow data.pages, stop asking -- and MAX_AUTO_PAGES caps
-  // even a perfectly healthy walk.
+  // attempt did not grow data.pages, stop asking -- and pageCeiling caps even a
+  // perfectly healthy walk. That mechanism is unchanged; only the target moved.
   const autoPagedFrom = useRef(-1)
+  // The latch means "already asked at this page count", and page counts START
+  // OVER when the query key changes: useFeed keys its cache on the filters, so
+  // picking a person or a project swaps in a different cache entry whose
+  // pageCount walks 0, 1, 2 again. A latch still holding the PREVIOUS filter's
+  // count then matches the new filter's count on the very first pass, and the
+  // pager refuses to walk a feed it has never walked.
+  //
+  // That staleness predates the week target, but it used to be survivable: the
+  // button below was keyed on isFetchingNextPage, so the reader saw a live
+  // "Show more" and could drive it by hand. Keyed on the TARGET, the same state
+  // renders a disabled "Loading..." that no request will ever finish, with no
+  // way out but another filter change or a reload. Reset with the query key.
+  useEffect(() => { autoPagedFrom.current = -1 }, [filters])
   const pageCount = feedQuery.data?.pages.length ?? 0
+  // The ceiling scales with the target, so the second "Show more" is not a
+  // no-op the way a fixed cap would make it.
+  const pageCeiling = MAX_AUTO_PAGES * Math.max(1, Math.ceil(daysWanted / FEED_WEEK_DAYS))
   useEffect(() => {
-    if (dayGroups.length >= MIN_DAYS_LOADED) return
-    if (pageCount >= MAX_AUTO_PAGES) return
+    if (datedDayCount >= daysWanted) return
+    if (pageCount >= pageCeiling) return
     // A failed page is a reason to stop, not to retry in a tight loop. The
     // reader still has "Show more", which is a deliberate act.
     if (feedQuery.isError) return
@@ -206,7 +291,32 @@ export function FeedPage() {
     if (autoPagedFrom.current === pageCount) return
     autoPagedFrom.current = pageCount
     feedQuery.fetchNextPage()
-  }, [dayGroups.length, pageCount, feedQuery.isError, feedQuery.hasNextPage, feedQuery.isFetchingNextPage, feedQuery.fetchNextPage])
+  }, [datedDayCount, daysWanted, pageCeiling, pageCount, feedQuery.isError, feedQuery.hasNextPage, feedQuery.isFetchingNextPage, feedQuery.fetchNextPage])
+
+  // The auto-pager is still walking towards the current target. The button has
+  // to say so for the WHOLE walk, not just while one request is in flight:
+  // isFetchingNextPage drops to false between pages, so a label keyed on it
+  // alone flickers back to "Show more" mid-week and invites a press that queues
+  // another week on top of the one still arriving. Once the ceiling is reached
+  // this goes false on purpose -- the pager has given up, and the reader gets a
+  // live button to push past it by hand.
+  const fillingToTarget = datedDayCount < daysWanted
+    && feedQuery.hasNextPage
+    && !feedQuery.isError
+    && pageCount < pageCeiling
+  const loadingMore = feedQuery.isFetchingNextPage || fillingToTarget
+
+  // One press, one more week. It moves the target AND fetches the next page
+  // itself; the target alone would not be enough, because the effect refuses to
+  // run once a page has errored and this button is the only way back from that
+  // state. Latching the ref at the current page count keeps the effect from
+  // racing this call with a second request for the same page; once the page
+  // lands the count moves and the pager resumes towards the new target.
+  const showMore = () => {
+    setDaysWanted(days => days + FEED_WEEK_DAYS)
+    autoPagedFrom.current = pageCount
+    feedQuery.fetchNextPage()
+  }
 
   // A `?session=` deep link names a SESSION, and the feed is days. Today's
   // rows (features/today/LiveEntry.tsx) are all built this way, and so is
@@ -280,7 +390,7 @@ export function FeedPage() {
       )}
 
       {dayGroups.map(group => (
-        <div key={group.day}>
+        <div key={group.key}>
           <div className="feed-day">{group.day}</div>
           {group.entries.map(card => (
             <DayCard
@@ -303,10 +413,10 @@ export function FeedPage() {
         <button
           type="button"
           className="feed-show-more"
-          onClick={() => feedQuery.fetchNextPage()}
-          disabled={feedQuery.isFetchingNextPage}
+          onClick={showMore}
+          disabled={loadingMore}
         >
-          {feedQuery.isFetchingNextPage ? 'Loading…' : 'Show more'}
+          {loadingMore ? 'Loading…' : 'Show more'}
         </button>
       )}
     </div>

@@ -3,6 +3,7 @@ import { Avatar } from '../../components/Avatar'
 import { dayHref, daySessionHref } from '../../app/routes'
 import { relativeAgo } from '../../data/relativeTime'
 import type { FeedFilters } from '../../data/types'
+import { tailPath, toolLabel } from './dayCards'
 import type { DayCard as DayCardModel, DayProject } from './dayCards'
 
 /** How many project names a card spells out before the rest become a count.
@@ -78,6 +79,7 @@ interface DayCardProps {
  *  parser unnests a nested anchor and the live DOM would stop matching this
  *  JSX. */
 export function DayCard({ card, showAvatar, targeted = false, targetSession = null, filters = null }: DayCardProps) {
+  const tools = card.tools
   const overviewClass = card.overview.kind === 'undecryptable'
     ? 'day-card-overview day-card-overview-opaque'
     : card.overview.kind === 'none'
@@ -134,6 +136,34 @@ export function DayCard({ card, showAvatar, targeted = false, targetSession = nu
           product exists to prevent. */}
       {card.overview.coverageNote && (
         <span className="day-card-coverage">{card.overview.coverageNote}</span>
+      )}
+      {/* WHAT the day touched, under WHAT it was for. Last line of the card and
+          the quietest, at 10px mono against the sentence's 12px prose, because
+          it is supporting evidence for the two lines above rather than a third
+          claim competing with them.
+
+          Tools first, files after. The tool name is short, categorical and
+          near-constant, so it holds a stable left edge down a column of cards
+          and can be scanned as a column; the files are variable-length and
+          ranked, so they belong on the elastic right where the least important
+          one absorbs the clipping. The line is nowrap + overflow: hidden, so
+          the third file is the first thing to go -- correct, on a line ordered
+          by importance -- and nothing wraps, so card height is fixed and the
+          feed does not shift as pages land.
+
+          Every separator is drawn in CSS (`> * + *::before`), never in this
+          JSX, so an absent tool or an empty file list cannot leave a stray
+          middot behind. Each file keeps its FULL path in `title`, so nothing
+          tailPath shortened is unrecoverable. */}
+      {(tools.length > 0 || card.files.length > 0) && (
+        <span className="mono day-card-touched">
+          {tools.length > 0 && <span className="day-card-tools">{toolLabel(card.tools)}</span>}
+          {card.files.slice(0, 3).map(f => (
+            <span key={f.file} className="day-card-file" title={f.file}>
+              {tailPath(f.file)}<span className="day-card-file-touches">{f.touches}x</span>
+            </span>
+          ))}
+        </span>
       )}
       <span className="mono day-card-stats">{dayCardStats(card).join(' · ')}</span>
       <span className="day-card-chevron" aria-hidden="true">›</span>

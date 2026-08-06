@@ -531,6 +531,19 @@ function sameLineKey(text: string): string {
  *  an answer, and the point of that section is the blast radius at a glance. */
 export const DAY_FILE_LIMIT = 12
 
+/** A path as its last two segments, prefixed '…/' when segments were
+ *  dropped. Clipped from the LEFT, always, because the filename is the one
+ *  part that identifies a file and a right clip eats exactly that. Harder
+ *  than shortPath on purpose: this runs three-up on a 10px line, where
+ *  shortPath's 34-character budget would spend the whole row on one path. */
+export function tailPath(file: string): string {
+  const parts = String(file || '').split('/').filter(Boolean)
+  if (parts.length === 0) return ''
+  if (parts.length === 1) return parts[0]
+  const tail = parts.slice(-2).join('/')
+  return parts.length > 2 ? `…/${tail}` : tail
+}
+
 /** Supporting churn that tends to dominate a planning-heavy day. Same ranking
  *  EntryRow.rowFiles applies for the same reason, used here only to break ties
  *  between files touched the same number of times. */
@@ -573,19 +586,6 @@ export function dayFiles(entries: FeedEntry[]): DayFile[] {
     if (aSupporting !== bSupporting) return aSupporting - bSupporting
     return a.file.localeCompare(b.file)
   })
-}
-
-/** A path as its last two segments, prefixed '…/' when segments were
- *  dropped. Clipped from the LEFT, always, because the filename is the one
- *  part that identifies a file and a right clip eats exactly that. Harder
- *  than shortPath on purpose: this runs three-up on a 10px line, where
- *  shortPath's 34-character budget would spend the whole row on one path. */
-export function tailPath(file: string): string {
-  const parts = String(file || '').split('/').filter(Boolean)
-  if (parts.length === 0) return ''
-  if (parts.length === 1) return parts[0]
-  const tail = parts.slice(-2).join('/')
-  return parts.length > 2 ? `…/${tail}` : tail
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +691,40 @@ export function daySessions(entries: FeedEntry[]): DaySession[] {
     })
   }
   return sessions.sort((a, b) => b.endedAt.localeCompare(a.endedAt))
+}
+
+// ---------------------------------------------------------------------------
+// Tools that ran
+// ---------------------------------------------------------------------------
+
+/** Distinct tools that ran this day, busiest first (session count desc,
+ *  then name asc). Blank tool names dropped. */
+export function dayTools(sessions: DaySession[]): string[] {
+  const counts = new Map<string, number>()
+  for (const s of sessions) {
+    const tool = String(s.tool || '').trim()
+    if (!tool) continue
+    counts.set(tool, (counts.get(tool) ?? 0) + 1)
+  }
+  // Sessions, not rows, and the tie breaks on the name: a chatty session must
+  // not outrank a quiet one, and two tools used once each have to order the
+  // same way on every poll or the card's line reshuffles under the reader.
+  return [...counts.entries()]
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+    .map(([tool]) => tool)
+}
+
+/** How many tools the card names before the rest become a count. Two is
+ *  what fits beside three paths at the 900px floor. */
+export const TOOL_LIMIT = 2
+
+/** "Claude Code", "Claude Code, Codex", "Claude Code, Codex +1".
+ *  Same eliding shape as projectLabel, deliberately: two lists on one card
+ *  that elide differently read as two different kinds of thing. */
+export function toolLabel(tools: string[]): string {
+  const shown = tools.slice(0, TOOL_LIMIT)
+  const hidden = tools.length - shown.length
+  return hidden > 0 ? `${shown.join(', ')} +${hidden}` : shown.join(', ')
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1065,11 @@ export interface DayCard {
    *  thing twice. Empty when the day captured no usable ask. */
   intent: string
   files: DayFile[]
+  /** The distinct tools that ran this day, busiest first. Derived HERE and
+   *  carried, never recomputed in the renderer: the card's last line pairs it
+   *  with the files below, and two derivations of the same fact are how the
+   *  line and the day view it opens start disagreeing about who did the work. */
+  tools: string[]
   bullets: DayBullet[]
   /** The same bullets, under the session that produced them, oldest session
    *  first. `bullets` is this flattened, so the two can never disagree. */
@@ -1151,6 +1190,7 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
       overview,
       intent: dayIntent(dayAsks(sessions), sessions.length, overview.text),
       files: dayFiles(sorted),
+      tools: dayTools(sessions),
       bullets,
       bulletGroups,
       sessions,
