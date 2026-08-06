@@ -320,7 +320,15 @@ Three branches carry this work — `agent-sec`, `agent-backend2` and `agent-remo
 
 Everything else merged cleanly, and the combined test suite was run — see the SEC-14 report.
 
-**This section exists because the merge had to be dry-run twice in one evening.** The first run was already stale by the time it finished: a lane committed a new migration, and later renumbered, while the run was in flight. That is not an accident of timing to be waited out — with several lanes active it is the normal condition, and it is the reason to assemble the batch once deliberately rather than discovering its shape in Marco's SQL editor.
+**This section exists because the merge had to be dry-run twice in one evening**, and the second run found more than the first.
+
+A lane moved underneath the dry run three separate times: it committed a new migration mid-run, committed another, and began renumbering — all while the merge was being assembled and tested. **That is the normal condition when several lanes are active, not an accident of timing to be waited out.**
+
+The practical consequence, and the reason this is written down rather than left as a war story:
+
+> **A dry run proves the shape composes. It cannot prove the shape is still current.**
+>
+> Whoever does the real merge must re-run these checks at merge time — the two `grep -c` commands above, `node test/run.js migration-state`, and the full suite — against whatever the branches actually contain *then*. Do not trust this section, or any report, as evidence about a tree you have not just assembled yourself. The checks are cheap; the report has a timestamp and the branches do not care about it.
 
 ---
 
