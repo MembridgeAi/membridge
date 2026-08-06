@@ -367,6 +367,14 @@ async function main() {
     'ops_log',
     // drop-carrying; guarding the create alone would be a regression, see above
     'team_feed', 'my_teams',
+    // Added by the SEC-14 integration dry run, and they are the reason that dry
+    // run was worth doing: the removal lane's 044 and 045 redefine these, which
+    // 002_team_v2.sql also defines. NEITHER LANE COULD SEE IT — this check lives
+    // on agent-sec and those migrations live on agent-removal, so the collision
+    // exists only in the merged tree and appeared nowhere in either lane's green.
+    // Both are signature-stable (void / void, same arguments), so they belong to
+    // the guardable group on the same terms as the rest.
+    'remove_member', 'leave_team',
   ]);
 
   check('no NEW function is superseded across migrations without a re-run guard', () => {

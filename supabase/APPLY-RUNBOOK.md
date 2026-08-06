@@ -56,7 +56,11 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 4 | `040_revoke_memory_entries_delete.sql` | Stops a signed-in user deleting their own shared memory straight through the API without it being recorded. |
 | 5 | `042_definer_function_hardening.sql` | Takes three database functions off the public key, and stops one of them answering questions about teams you are not in. |
 | 6 | `043_revoke_blanket_table_grants.sql` | Removes a leftover blanket permission on three internal tables, including the one holding unredeemed invite tokens. |
-| 7 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
+| 7 | `041_project_stats_carry_archived.sql` | Lets the team hub show archived projects instead of silently dropping them. *(backend lane)* |
+| 8 | `044_removal_rotates_invite_code.sql` | Removing someone from a team also changes the team's standing invite code, so they cannot walk back in with it. *(removal lane)* |
+| 9 | `045_leave_rotates_invite_code.sql` | Same, for someone who leaves voluntarily. *(removal lane)* |
+| 10 | `046_audit_member_joined.sql` | Records in the audit trail when somebody joins a team. *(removal lane)* |
+| 11 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
 
 **Why `031` is last.** It is the only one that changes how the database behaves for *future* work rather than fixing something specific, and it is the only one reconstructed from a live object rather than written from scratch. Do it when the other five are known good, so that if anything odd happens afterwards you know which change to look at.
 
@@ -72,8 +76,14 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 > - App shipped first, `038` later → **there is a window where the app tells people an invite is single-use and it is not.** Two people clicking the same link at the same moment both get in.
 >
 > If you are applying these and the release has not gone out yet, you are fine — just do `038` now.
+>
+> ### The same constraint applies to `044`, `045` and `046`
+>
+> All three say it in their own headers: **apply to the live database before shipping the client, not after.** And all three warn that CI cannot catch a miss, because the offline tests run against a mock that already models the new behaviour. If the client ships first, the symptom is *silence* — the app works, nothing errors, and the protection simply is not there.
+>
+> So the rule for this whole batch is one line: **apply everything here before the next release goes out.**
 
-There are no other ordering constraints between these seven. Each one touches a different thing, and none of them depends on another having run first.
+There are no other ordering constraints between these eleven — confirmed by merging all three branches together and reading every header, not assumed. `041`, `044`, `045` and `046` each state in their own headers that they are order-independent, and `046` and `038` were checked against each other in both directions. Each one touches a different thing, and none of them depends on another having run first.
 
 `047` is the exception to that and is not in the table above: it changes the credential the ops panel logs in with, so it is a database step **and** a Worker deploy. It has its own section, its own order, and its own rollback.
 
@@ -163,7 +173,24 @@ Most likely it returns nothing. If it returns rows, **read them before deleting 
 
 ---
 
-### 7. `031_ensure_rls_event_trigger.sql`
+### 7-10. The other lanes' four — `041`, `044`, `045`, `046`
+
+These come from the backend and removal lanes rather than the security one. They are grouped because the instruction is the same for all four: **paste, then check the one behaviour each names.** Each file's own header carries the detail.
+
+| File | After applying, check |
+|------|------------------------|
+| `041_project_stats_carry_archived.sql` | The team hub still lists projects, and archived ones now appear rather than silently vanishing. |
+| `044_removal_rotates_invite_code.sql` | Remove a member from a test team; the team's invite code should change. Confirm the old code no longer lets them re-join. |
+| `045_leave_rotates_invite_code.sql` | Same, but have the member leave voluntarily rather than being removed. |
+| `046_audit_member_joined.sql` | Have someone join a team; a "member joined" entry should appear in that team's audit trail. It did not before. |
+
+All four are order-independent — of each other and of everything above. `044` and `045` may be applied in either order or one without the other; `046` was checked against `038` in both directions during the merge dry run.
+
+**All three of the removal lane's migrations carry the same deploy gate as `038`** — apply before the client ships, not after. See the box near the top.
+
+---
+
+### 11. `031_ensure_rls_event_trigger.sql`
 
 **Does:** there is a safety net that switches on row-level security whenever a table is created. Today, if it fails, it writes a line to a log nobody reads and lets the table be created anyway. After this, it refuses the creation.
 
@@ -183,7 +210,7 @@ drop table public.rls_smoke_test;
 
 ---
 
-## 8. `047_ops_panel_roles.sql` — do this one separately
+## 12. `047_ops_panel_roles.sql` — do this one separately
 
 **This one is different from the six above and should not be done in the same sitting.** The others fix something and are finished when the SQL is applied. This one changes *which credential the ops panel logs in with*, so it is a database step **and** a Worker deploy, and the two have to happen in the right order.
 
@@ -258,6 +285,18 @@ It does not tell you which of the three of you did something. All three share on
 ### What is deliberately still outstanding
 
 The old all-powerful key still exists and still works — on purpose, because it is the rollback. Removing its access is a separate change for later, once the new logins have proven themselves. Doing both at once would delete the safety net in the same step that needs it.
+
+---
+
+## If you are the one merging these branches together
+
+Three branches carry this work — `agent-sec`, `agent-backend2` and `agent-removal` — and merging them was dry-run once (SEC-14) so the surprises are known. Two things need a human decision:
+
+1. **`test/mock-supabase.js` conflicts, and the resolution is "keep both".** Two lanes each appended flags to the same object. Taking either side alone silently drops the other lane's test flag, which turns one of their suites green for the wrong reason. Keep both blocks.
+
+2. **The `(other branch)` notes in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md) go stale the moment you merge.** Five rows carry that qualifier because the file lives on one branch and cannot see the others. Once merged, the files ARE on disk and the qualifier should come out. It is deliberately ugly so it gets noticed.
+
+Everything else merged cleanly, and the combined test suite was run — see the SEC-14 report.
 
 ---
 
