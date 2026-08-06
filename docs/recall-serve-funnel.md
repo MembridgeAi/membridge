@@ -533,3 +533,111 @@ A normal repo would have far fewer ranged reads, more true Tier A candidates —
 and therefore a lag that binds much more than it does here. The 1.1% and the
 "lag is free" both need re-measuring on a normal install before either is
 treated as a fact about the product rather than about this machine.
+
+# REV-11: can a ranged read be served? Measured — and the gate is not what it costs
+
+`node scripts/measure-ranged-repeats.js` (new, read-only). Same corpus and the
+same `ledgerKeyFor` identity as REV-10, so the two reports compose: 927
+in-project reads, 392 same-session repeats, 380 of them ranged.
+
+Claude Code's Read returns `limit` lines from `offset`, so a call covers
+`[offset, offset+limit-1]` (at most `READ_TOOL_MAX_LINES` without a limit).
+Every repeat is classified against the **union of what the session was already
+handed** for that path.
+
+## The answer to "measure that first": most ranged repeats are not repeats
+
+| every repeat read | n | share | of which unchanged |
+|---|---|---|---|
+| same window (exact offset+limit) | 9 | 2.3% | 8 |
+| contained in earlier reads | 63 | 16.1% | 23 |
+| partial overlap | 69 | 17.6% | 52 |
+| **disjoint — genuinely new lines** | **251** | **64.0%** | 166 |
+
+**Two thirds of ranged repeats ask for lines the session was never given, and
+another 18% ask for lines only partly given.** An agent walking a 24k-line file
+in windows is not repeating work; it is doing new work through a small
+aperture. The gate refuses 380 reads, but only **31** of them (7.9% of repeats)
+are redundant-and-unchanged, and **8 of those are already servable today**
+because they were not ranged.
+
+**So narrowing the gate is worth 23 reads.** Priced with `recall.js`'s own
+`estimateCallTokens`:
+
+| | tokens | share of all read tokens measured |
+|---|---|---|
+| every in-project read in this history | 6,063,624 | — |
+| avoidable **today** by a correct Tier A | 192,000 | **3.2%** |
+| **unlocked by narrowing the ranged gate** | **7,560** | **0.1%** |
+
+Ranged repeats are small by construction — a windowed read is priced
+`limit × 12`, not `size / 4` — so even the ones that *are* redundant are worth
+almost nothing. **The gate is not costing what its size suggests. Do not narrow
+it.** Tier A's honest ceiling on this history is the 3.2%, and that is the
+number the feature should be judged on.
+
+## The finding that matters more: the gate protects the wrong side
+
+`decide()` refuses on the **incoming call's** range. It knows nothing about the
+range of the **evidence**. `readByThisSession` asks the ledger whether this
+session read the *path* — the ledger has never recorded which lines came back.
+So a session handed lines 90–179 that then issues an unranged read is told
+*"this session already read supabase/schema.sql (unchanged since)"*, and skips
+a read of lines 1–89 it has never seen.
+
+Two live cases in this history, both from the corpus rather than constructed:
+
+```
+supabase/schema.sql        call wants [1-90],   session was handed [90-179]
+lib/dashboard.js           call wants [1-2000], session was handed [1-45] [4583-4590]
+```
+
+**2 of the 10 currently-servable Tier A candidates — 20% — are false claims,
+covering 25,080 tokens the agent is told it can skip.** That is 3.3x the entire
+prize from narrowing the ranged gate, pointing the other way: it *removes* a
+false statement rather than adding a true one.
+
+This is the same shape as the REV-4 bug one layer down — a true statement about
+the wrong interval, now a true statement about the wrong *window* — and it has
+never fired in production for one reason only: Tier A was inert until REV-8.
+**REV-8 made it live.** Nothing has been changed on this account, per the
+ticket; recommended as the next fix, and it is cheap: the hook already writes
+`sessionState.reads` on every read and already sees `offset`/`limit`, so
+recording the delivered window costs no extra I/O. Tier A then requires the
+call's window to be covered by the recorded union, and an absent range record
+fails closed exactly as an absent hash does.
+
+## Proving it from the transcript costs more than REV-10 priced
+
+REV-10 costed transcript-tail confirmation at 0.16ms for a 64KB tail. That
+number was right for the read and wrong for the job: measured against the same
+corpus, the earlier read of the same window sits **p50 306KB, p90 421KB** back
+in the transcript. A 64KB tail reaches **1 of 9** such pairs.
+
+| tail | catches | CPU (10.3MB transcript) |
+|---|---|---|
+| 64KB | 11% | 0.17ms |
+| 512KB | — | 0.54ms |
+| 1024KB | 100% | **0.92ms** |
+
+So transcript confirmation is ~**0.9ms per read**, not 0.16ms — on every Read
+in every session, to unlock 0.1% of read tokens. **That closes REV-10's open
+option too**: the tail shape is not cheap enough for either job. (n=9 for the
+distance, so treat the percentile as an order of magnitude, not a figure.)
+
+## What generalises and what is this machine
+
+**This machine's worst-case-ness:** the 73.4% ranged share. This repo's hottest
+files are enormous (`test/run-tests.js`, 24k lines) and agents read enormous
+files in windows. A normal repo would range far less.
+
+**What generalises:** the ratio *within* ranged repeats — 64% disjoint, 18%
+overlap, 2.3% same window. That is a fact about how an agent walks a file it
+cannot hold at once, not about this repo. And it points the same way everywhere:
+a repo with fewer ranged reads has a smaller prize in absolute terms, not a
+larger one. Narrowing the gate does not get better elsewhere.
+
+**What cannot be established here:** no second project on this machine has the
+volume to check any of it — the largest non-MemBridge project has 144 Read
+calls, and 97 of them target MemBridge files. The 3.2% ceiling, like everything
+else on this path, needs a normal install before it is a fact about the product.
