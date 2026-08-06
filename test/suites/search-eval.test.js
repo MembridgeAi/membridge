@@ -370,10 +370,15 @@ async function main() {
         'a backfilled row claimed lexical field matches it does not have');
     });
 
-    check('backfill: total counts what was served, never fewer than results', () => {
+    // `totalKnownHere`, not `total`: the count is a floor of what this machine
+    // holds, and it is named that way so an agent cannot quote it as a
+    // team-wide total (see searchMemory in lib/activity.js). The property
+    // asserted is unchanged — the count covers the backfilled rows too, so it
+    // can never come in under the number of results actually handed back.
+    check('backfill: the count covers what was served, never fewer than results', () => {
       const res = activity.searchMemory({ query: 'porcupine quantizer centroids', limit: 10 });
-      assert.ok(res.total >= res.results.length,
-        `total ${res.total} is below the ${res.results.length} results actually returned`);
+      assert.ok(res.totalKnownHere >= res.results.length,
+        `totalKnownHere ${res.totalKnownHere} is below the ${res.results.length} results actually returned`);
     });
 
     check('backfill: a FULL page gets none — no lexical hit is ever displaced', () => {

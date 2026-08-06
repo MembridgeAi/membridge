@@ -2491,7 +2491,13 @@ async function main() {
     });
     const searchEmpty = await (await fetch(`${base}/api/search?q=`)).json();
     check('/api/search answers an empty query with an empty result set, never an error', () => {
-      assert.deepStrictEqual(searchEmpty, { query: '', total: 0, results: [] });
+      // The resting state carries the same fields a real answer does — a page
+      // that reads `totalIsFloor` must not find it missing on the one response
+      // it renders before anyone types. `total` is the transitional alias this
+      // route still emits for the app's search page (lib/server.js); the
+      // honest name is `totalKnownHere` (lib/activity.js searchMemory).
+      assert.deepStrictEqual(searchEmpty,
+        { query: '', totalKnownHere: 0, totalIsFloor: true, total: 0, results: [] });
     });
     const searchFiltered = await (await fetch(`${base}/api/search?q=webhook&author=nobody-by-this-name`)).json();
     check('/api/search applies filters before ranking', () => {
@@ -14988,11 +14994,16 @@ async function main() {
       assert.ok(selected.results.some(hit), 'the un-negated person filter stopped selecting by name');
     });
 
-    check('search filters: exclusion narrows the TOTAL, not just the returned page', () => {
+    // `totalKnownHere`, not `total`: the count is a floor of what this machine
+    // holds and is named so an agent cannot quote it as a team-wide total (see
+    // searchMemory in lib/activity.js). The property here is unchanged and is
+    // the stronger one — the count must describe the FILTERED pool, or it
+    // reports rows the caller was not allowed to see.
+    check('search filters: exclusion narrows the COUNT, not just the returned page', () => {
       const all = mcpMod.searchMemory({ query: 'searchfiltertoken' });
       const excluded = mcpMod.searchMemory({ query: 'searchfiltertoken', author: '!Andrew' });
-      assert.ok(excluded.total < all.total,
-        `excluding a person left the total unchanged (${excluded.total} vs ${all.total}) -- the count would describe rows the reader cannot see`);
+      assert.ok(excluded.totalKnownHere < all.totalKnownHere,
+        `excluding a person left the count unchanged (${excluded.totalKnownHere} vs ${all.totalKnownHere}) -- the count would describe rows the reader cannot see`);
     });
   }
 
