@@ -133,6 +133,46 @@ async function main() {
       assert.ok(res.body.inviteCode, 'the flattened inviteCode must survive for a manager');
     });
 
+    // REM-5: the same credential, closed as a CLASS rather than on one route.
+    //
+    // A credential closed on one path and open on another is the shape this
+    // work has hit repeatedly, and two routes already read the same my_teams
+    // row (teams[].invite_code and the flattened inviteCode) — closing one and
+    // leaving the other would have published it to the same screen. A manual
+    // audit of every reader found no third daemon path, but "I read them all"
+    // is not a regression guard: the next endpoint to spread a team row, or to
+    // add a debug dump, gets no review from that audit.
+    //
+    // So: sweep every member-reachable GET and assert the code appears in NONE
+    // of their bodies, whatever the status. Substring on the raw response text,
+    // not a field lookup, so it catches the code arriving under a name nobody
+    // thought to check. Status is deliberately not asserted — a 403 and a 200
+    // are both fine, a body containing the credential is not.
+    await check('no member-reachable daemon endpoint returns the standing invite code', async () => {
+      const code = (await teamRowFor('owner', alpha.team_id)).invite_code;
+      assert.ok(code, 'fixture: need the live code to search for');
+      const paths = [
+        '/api/team',
+        '/api/status',
+        '/api/settings',
+        '/api/projects',
+        '/api/feed',
+        `/api/team/projects?teamId=${alpha.team_id}`,
+        `/api/team/members?teamId=${alpha.team_id}`,
+        `/api/team/audit?teamId=${alpha.team_id}`,
+        `/api/team/invites?teamId=${alpha.team_id}`,
+        `/api/team/my-data?teamId=${alpha.team_id}`,
+      ];
+      const leaked = [];
+      for (const p of paths) {
+        const res = await apiAs('member', 'GET', p);
+        if (JSON.stringify(res.body || '').includes(code)) leaked.push({ path: p, status: res.status });
+      }
+      assert.deepStrictEqual(leaked, [],
+        'these endpoints hand an ordinary member the team\'s permanent join credential: ' +
+        JSON.stringify(leaked));
+    });
+
     // -----------------------------------------------------------------------
     // 2. Removal rotates — unconditionally, and for everybody.
     // -----------------------------------------------------------------------
