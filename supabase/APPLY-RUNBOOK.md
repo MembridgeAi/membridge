@@ -27,8 +27,9 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 045 | Leaving a team rotates the standing invite code | `agent-removal` | no |
 | 046 | Joining a team writes an audit row | `agent-removal` | no |
 | 047 | Two scoped Postgres roles for the ops panel | `agent-sec` | no |
+| 048 | `ops_audit.via_role` — records the verified credential beside the self-reported actor | `agent-sec` | no |
 
-**Next free number: 048.**
+**Next free number: 049.**
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
 
@@ -241,6 +242,18 @@ wrangler rollback
 The previous version uses the original `SUPABASE_SERVICE_KEY`, which this change **does not touch or remove**. It keeps working the entire time. There is no window where the panel has no valid credential unless you delete that secret — so don't, not until this has been running happily for a while.
 
 You do not need to undo anything in the database to recover. The two new logins sitting unused are harmless. If you want them gone anyway, the exact statements are at the bottom of `047`, commented out — but do the Worker rollback first, or you will pull the credential out from under a running panel.
+
+### While you are here: `048_ops_audit_via_role.sql`
+
+**Does:** adds one column to the ops audit log recording *which credential* a write arrived under, next to the operator name the panel reports.
+
+**Apply it any time — it is additive and affects nothing else.** No check needed beyond the panel still loading.
+
+**What it is for, so it is not mistaken for more:** the operator name in the ops audit log is **self-reported**. The panel fills it in from the verified sign-in, so it is right in normal use — but anyone holding the panel's write key could pass a different name, and that cannot be fixed in the database (the reasoning is in the file). This column records something the database *can* check: after you switch the panel over in the step above, every legitimate write shows `ops_panel_write`. A row showing anything else means something called the database without going through the panel.
+
+It does not tell you which of the three of you did something. All three share one credential.
+
+---
 
 ### What is deliberately still outstanding
 

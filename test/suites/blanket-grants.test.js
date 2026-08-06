@@ -134,6 +134,60 @@ function main() {
       + 'would fail its FK against the team being deleted and abort the cascade.');
   });
 
+  // ---- SEC-13: the ops audit trail says what it can back up --------------
+  //
+  // The actor on an ops write is SELF-REPORTED — `p_actor` is an argument, so
+  // anyone holding the write credential composes it. That cannot be fixed at
+  // the database layer (048 §1 works through all four routes and why each
+  // fails), so the deliverable is that nothing in the repo claims otherwise.
+  // Three places did, and the wrangler.toml one understated the key in the
+  // paragraph written to explain its risk.
+  //
+  // These are documentation checks, which is unusual in a suite of structural
+  // ones, and deliberate: when the conclusion of a security question is "accept
+  // and document", the documentation IS the control, and an uncontrolled
+  // control rots back to the comfortable wording within a release or two.
+  check('nothing claims the ops audit actor is verified or non-forgeable', () => {
+    const claims = [
+      ['supabase/migrations/021_ops_panel.sql', /verified Access email, never client-supplied/],
+      ['cloudflare/README.md', /audited\*{0,2} with the verified Access email/],
+      ['cloudflare/ops-api/wrangler.toml', /used for exactly one RPC/],
+    ];
+    const offenders = [];
+    for (const [rel, pattern] of claims) {
+      const p = path.join(__dirname, '..', '..', rel);
+      if (!fs.existsSync(p)) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      // The corrected texts QUOTE the old wording to explain why it was wrong.
+      // A bare substring search would therefore flag the fix — and a rule that
+      // punishes recording the mistake teaches people to delete the history
+      // instead. So a hit only counts when the file does NOT also carry the
+      // correction marker beside it.
+      const corrected = /used to read|used to list|CORRECTION|self-reported/i.test(src);
+      if (pattern.test(src) && !corrected) offenders.push(rel);
+    }
+    assert.deepStrictEqual(offenders, [],
+      'these files state or imply that the ops audit actor is verified by the database. '
+      + 'It is not: p_actor is an argument, so a holder of the write credential can pass any '
+      + 'string. Say self-reported, and say what the trail DOES guarantee — that the event is '
+      + 'real (ops_log is service_role-only), the time is the database\'s, and nothing can be '
+      + `erased. offenders: ${offenders.join(', ')}`);
+  });
+
+  check('ops_log records the verified role alongside the asserted actor', () => {
+    const newest = [...sources()].reverse()
+      .find(s => /create\s+or\s+replace\s+function\s+public\.ops_log/i.test(s.code));
+    assert.ok(newest, 'ops_log must be defined in supabase/migrations');
+    assert.match(newest.code, /via_role/,
+      `ops_log (${newest.file}) writes only the caller-supplied actor. The role claim in the `
+      + 'request JWT is the one identity-adjacent value PostgREST VERIFIES rather than '
+      + 'receives, and recording it is what distinguishes a write that arrived through the '
+      + "panel's own credential from one that did not.");
+    assert.match(newest.code, /request\.jwt\.claims/,
+      'via_role must come from the verified JWT claims, not from another argument — an '
+      + 'argument would be exactly as forgeable as the actor it sits beside');
+  });
+
   // ---- counter-check (green today, must KEEP passing) -------------------
   // The precedent this whole ticket is built on. If this ever goes red, the
   // pattern above has been undone at its source and the class check is

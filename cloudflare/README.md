@@ -292,10 +292,36 @@ affected user, which is the correct place for them — an admin panel that can
 irreversibly destroy a customer account is a bad trade for the convenience. Do
 those deliberately in the Supabase console.
 
-**Every write is audited** with the verified Access email. `p_actor` is a required
-argument on each write RPC, so the trail cannot be skipped by omitting it. An
-admin panel without an audit log is indistinguishable from someone holding the
-service key.
+**Every write is audited**, and the actor is **self-reported** — read that
+carefully, because the previous wording here ("audited with the verified Access
+email") claimed more than the design delivers.
+
+The Worker fills `p_actor` from the Cloudflare Access email it has verified, so
+in normal operation the name in the trail is correct. But `p_actor` is an
+*argument*, so from the database's side it is composed by whoever holds the
+credential. Anyone with the panel's write key can pass any string. The trail
+answers "which of us did this" among the operators in `ALLOWED_EMAILS`; it does
+not survive a stolen credential, and it was never able to.
+
+What the trail *does* guarantee, even against someone holding that credential:
+
+- **The event is real.** `ops_log` is granted to `service_role` alone, so the
+  panel's write role cannot write arbitrary rows — only cause them as a side
+  effect of the four real actions.
+- **The time is the database's**, not the caller's (`ops_audit.at` defaults to
+  `now()` and `ops_log` never names the column).
+- **Nothing can be erased.** `ops_audit` has RLS on with zero policies and no
+  table grants, so there is no UPDATE or DELETE path at all.
+
+So: the *actor* is mislabelable by someone who already holds the write key; the
+*event*, its *time* and its *occurrence* are not. And mislabelling is the least
+of what that key buys — see the note on `SUPABASE_SERVICE_KEY` in
+`ops-api/wrangler.toml`. Migration `048` records `via_role`, the one
+identity-adjacent value PostgREST verifies rather than accepts, and its header
+sets out why the actor itself cannot be made verifiable in the database.
+
+An admin panel without an audit log is still indistinguishable from someone
+holding the service key — that reasoning stands, and is why the trail exists.
 
 ### Onboarding, and why the panel cannot just create a team
 

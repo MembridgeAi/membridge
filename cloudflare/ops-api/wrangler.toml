@@ -40,9 +40,26 @@ EXCLUDE_TEAMS = "[]"
 # On SUPABASE_SERVICE_KEY, stated plainly rather than hidden: this is the one
 # high-privilege credential in the design. It is required because ops_snapshot()
 # is granted to service_role only (migration 019) — anon is the public internet
-# and authenticated is every signed-in customer, so neither can be used. The
-# mitigations are that it lives only as a Worker secret, this Worker is the sole
-# holder, it is used for exactly one RPC that returns aggregates, and the Worker
-# has no route reachable without Access. If this Worker is ever compromised,
-# rotate this key first. A dedicated read-only Postgres role would be strictly
-# better and is the natural next hardening step.
+# and authenticated is every signed-in customer, so neither can be used.
+#
+# CORRECTION. This paragraph used to list among its mitigations that the key "is
+# used for exactly one RPC that returns aggregates". That is false and it
+# understated the key in the one place written to explain its risk: the Worker
+# uses it for EIGHT RPCs, four of which WRITE (ops_set_team_note,
+# ops_set_team_internal, ops_rotate_invite, ops_create_onboarding_invite — see
+# the ACTIONS table in src/index.js). ops_create_onboarding_invite mints a token
+# that redeem_onboarding_invite turns into a new team. And service_role has
+# rolbypassrls with read+write on every public table, so what the key can do is
+# not bounded by what this Worker chooses to call.
+#
+# The mitigations that ARE true: it lives only as a Worker secret, this Worker
+# is the sole holder, and the Worker has no route reachable without Access. If
+# this Worker is ever compromised, rotate this key first.
+#
+# SUPERSEDED BY migration 047, which creates two scoped roles — ops_panel_read
+# and ops_panel_write — with EXECUTE on their own subset of those eight RPCs, no
+# rolbypassrls and no table privileges at all. Once OPS_READ_KEY and
+# OPS_WRITE_KEY are set and the Worker is deployed, this key is no longer used
+# at runtime. It is deliberately kept until then because it is the rollback
+# (`wrangler rollback`); removing it is a later, separate step. See
+# supabase/APPLY-RUNBOOK.md.

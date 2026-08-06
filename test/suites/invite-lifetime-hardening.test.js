@@ -359,6 +359,12 @@ async function main() {
     'join_team', 'link_project', 'gen_invite_token', 'peek_invite',
     'redeem_invite', 'ops_snapshot', 'redeem_onboarding_invite',
     'can_see_project', 'is_team_member_uid',
+    // ops_log joined this group when 048 redefined it to record via_role. It
+    // is signature-stable (returns void, same four arguments), so it is
+    // guardable on the same terms as the rest — and it was caught by THIS
+    // check rather than noticed, which is the check doing its job on its
+    // author's own change.
+    'ops_log',
     // drop-carrying; guarding the create alone would be a regression, see above
     'team_feed', 'my_teams',
   ]);
