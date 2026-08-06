@@ -1328,6 +1328,59 @@ async function main() {
     assert.ok(!auth.includes('abcDEF123456ghijKLmn') && auth.includes('[redacted:authorization]'), `auth -> ${auth}`);
   });
 
+  // NEAR-MISS CORPUS. The table above proves each pattern matches its own
+  // happy-path sample, and the negatives below prove it does not over-match.
+  // Neither catches the failure that actually leaks: a credential one
+  // character off the shape the pattern was written for. Every line here was
+  // verified to survive redaction unchanged before the fix that added it.
+  check('redact: credential shapes one character off the happy path are still redacted', () => {
+    const leaks = [
+      // connection-uri listed six database schemes. https://user:pass@host is
+      // the commonest credential-in-URL shape of all and was not among them.
+      ['https creds', 'clone https://admin:hunter2@git.internal.example.com/repo.git', 'hunter2'],
+      ['http creds', 'curl http://svc_user:S3cr3tPass@api.acme.com/v1/ping', 'S3cr3tPass'],
+      ['ssh creds', 'rsync ssh://root:toorpass@10.0.0.5/vol', 'toorpass'],
+      ['git creds', 'git://deploy:sekritpw@host/repo.git', 'sekritpw'],
+      // bearer was /g where its sibling authorization is /gi. Lowercase
+      // "bearer" is what appears in curl transcripts, logs and prose.
+      ['lowercase bearer', 'retrying with bearer abc123def456ghi789', 'abc123def456ghi789'],
+      ['uppercase BEARER', 'BEARER abc123def456ghi789', 'abc123def456ghi789'],
+      // AWS issues ASIA (STS), ABIA and ACCA alongside AKIA. All are 20 chars,
+      // which is below ENTROPY_MIN_LEN, so the backstop cannot catch them.
+      ['AWS STS key', 'aws sts token id ASIAY34FZKBOKMUTVV7A', 'ASIAY34FZKBOKMUTVV7A'],
+      // xoxc (browser session) and xoxd (cookie) are full-account credentials
+      // and fell outside the [abeprs] class.
+      ['slack xoxc', 'token xoxc-2216254567-2216-abcdefghijk-1234567890', 'xoxc-2216254567'],
+      // secret-assignment required the name to be immediately followed by the
+      // separator, so the JSON form -- which is what an agent's tool
+      // arguments, an MCP config and a settings.json dump all look like --
+      // sailed straight through while the shell/env form was caught.
+      ['JSON password', '{"password": "hunter2"}', 'hunter2'],
+      ['JSON api_key', '{"api_key": "acme-live-42"}', 'acme-live-42'],
+      ['JSON token, no space', '"token":"shhh-dont-tell"', 'shhh-dont-tell'],
+    ];
+    for (const [name, input, secret] of leaks) {
+      const out = redactLib.redactDefault(input);
+      assert.ok(!out.includes(secret), `${name}: secret survived -> ${out}`);
+    }
+  });
+
+  // The scheme and name widenings above must not start eating ordinary prose,
+  // ordinary URLs, or the identifiers the negatives section already protects.
+  check('redact: the widened URI schemes and quoted names do not over-match', () => {
+    const survivors = [
+      'see https://example.com/docs/getting-started for the walkthrough',
+      'clone https://github.com/membridge/membridge.git and run npm ci',
+      'the http://localhost:7799 dashboard shows the fleet',
+      'email andrew@example.com about the ssh://host/vol mount',
+      'ASIAN markets and ACCAdemic writing are ordinary words',
+      'the tokenizer and passwordless flows are documented',
+    ];
+    for (const s of survivors) {
+      assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s} -> ${redactLib.redactDefault(s)}`);
+    }
+  });
+
   // Live incident: a sign-in callback of the form
   // https://host/auth/cli?code=<uuid> reached memory with all 23 patterns
   // before this one already running. Nothing caught it -- no pattern named
