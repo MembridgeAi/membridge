@@ -72,6 +72,7 @@ it does not make the repo self-verifying, and nothing offline could.
 | 038 `invite_redeem_atomic` | **NOT applied** | `select prosrc from pg_proc where proname = 'redeem_invite';` — applied when the body contains `get diagnostics` and a WHERE carrying `max_uses`. **Must land with the INV-1 client change, not after it** |
 | 039 `team_audit_created_at` | **NOT applied** | `select tgname from pg_trigger where tgrelid = 'public.team_audit'::regclass;` — applied when `team_audit_stamp_created_at` is listed |
 | 042 `definer_function_hardening` | **NOT applied** | `select proname, proacl from pg_proc where proname in ('can_see_project','team_feed_counts','set_project_access_default');` — applied when no acl entry grants EXECUTE to `anon` or to PUBLIC. Carries a smoke test: seal a team key to a NEW joiner |
+| 044 `ops_panel_roles` | **NOT applied** | `select rolname, rolbypassrls, rolcanlogin from pg_roles where rolname in ('ops_panel_read','ops_panel_write');` — applied when both exist with `rolbypassrls = f`. **Inert on its own**: it only ADDS roles and does not touch `service_role`, so the panel is unaffected until the Worker is redeployed with the new secrets. Full verification and rollback in the file |
 | 043 `revoke_blanket_table_grants` | **NOT applied** | `select relname, relacl from pg_class where relname in ('onboarding_invites','ops_audit','ops_team_meta');` — applied when no acl entry names `anon` or `authenticated` |
 
 ## Migration history table

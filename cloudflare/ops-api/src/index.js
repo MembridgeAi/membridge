@@ -144,12 +144,44 @@ async function authenticate(request, env) {
 }
 
 // --- Supabase --------------------------------------------------------------
-async function rpc(env, fn, args) {
+// SEC-11. Reads and writes hold DIFFERENT database credentials, each scoped to
+// its own Postgres role (migration 044). Neither has rolbypassrls and neither
+// has any table privilege at all — every ops_* RPC is SECURITY DEFINER, so the
+// function body runs as its owner and the caller supplies only the right to
+// call. A leaked read credential pointed at /rest/v1/teams gets a permission
+// error rather than a table, and cannot mint an onboarding invite (which
+// redeem_onboarding_invite turns into a new team) or rotate a team's code.
+//
+// NO FALLBACK TO SUPABASE_SERVICE_KEY, deliberately. Falling back when the
+// scoped key is absent would mean an unset variable silently restores
+// database-wide privilege — the exact "absent input read as permission" shape
+// this codebase has now produced four times (project_access reading an empty
+// result as no-restriction, readAccess reading an unreadable default as true,
+// the ops allowlist reading an empty list as no-allowlist, and this). Missing
+// key is a loud 503, and the deploy order in supabase/APPLY-RUNBOOK.md exists
+// so that state is never reached.
+function dbKey(env, mode) {
+  const name = mode === 'write' ? 'OPS_WRITE_KEY' : 'OPS_READ_KEY';
+  const key = env[name];
+  if (!key) {
+    throw new Error(`${name} is not set on this Worker. The ops panel authenticates with `
+      + 'two scoped database roles (migration 044); set both secrets with `wrangler secret put` '
+      + 'or roll back to the previous deployment, which uses SUPABASE_SERVICE_KEY.');
+  }
+  return key;
+}
+
+async function rpc(env, fn, args, mode = 'read') {
+  const key = dbKey(env, mode);
   const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
     headers: {
-      apikey: env.SUPABASE_SERVICE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      // The apikey header is the project gateway's, not the role's — the ROLE
+      // comes from the `role` claim in the bearer JWT. SUPABASE_ANON_KEY is
+      // public by design, so preferring it here is not a privilege decision;
+      // falling back to the scoped key keeps this working if it is unset.
+      apikey: env.SUPABASE_ANON_KEY || key,
+      Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(args || {}),
@@ -209,11 +241,21 @@ export default {
         return json({ error: 'bad team id' }, 400);
       }
 
+      // A missing credential is a CONFIGURATION error, not a database error,
+      // and must not arrive as a 500 that reads like "the RPC failed". 503 with
+      // the variable named is what tells whoever is on the deploy that they are
+      // one `wrangler secret put` from working, rather than sending them to
+      // look at Postgres.
+      try { dbKey(env, 'write'); } catch (err) {
+        console.error(`ops-api: ${String(err.message || err)}`);
+        return json({ error: String(err.message || err) }, 503);
+      }
+
       try {
         // p_actor is the VERIFIED Access email, never anything the client sent.
         // It is a required argument on every write RPC, so the audit trail
         // cannot be skipped by omitting it.
-        const out = await rpc(env, spec.rpc, { p_actor: email, ...spec.args(body) });
+        const out = await rpc(env, spec.rpc, { p_actor: email, ...spec.args(body) }, 'write');
         return json({ ok: true, result: out });
       } catch (err) {
         return json({ error: String(err.message || err) }, 500);
@@ -233,13 +275,42 @@ export default {
     }
 
     // --- overview ----------------------------------------------------------
+    // SEC-11, failure mode (b). `ops_audit_recent` and `ops_onboarding_invites`
+    // used to swallow every failure as `.catch(() => [])`, so a MISSING GRANT
+    // rendered an empty list — indistinguishable from "nothing has happened
+    // recently". The panel looked healthy and was lying, which is the worst
+    // outcome of a credential change: not an outage you notice, a downgrade you
+    // do not. Scoping the role makes a per-RPC permission error a real
+    // possibility for the first time, so the swallow had to go with it.
+    //
+    // The fallbacks are UNCHANGED so the panel's existing fields keep their
+    // shapes and the UI cannot break on this. What is added is `degraded`: an
+    // additive field naming every read that failed and why. Empty array means
+    // everything answered.
+    const degraded = [];
+    // `fallback` may be a value or a function of the error message, because
+    // ops_snapshot's existing contract with the panel is to return { error }
+    // and counters' is to return { error, rows: [] }. Preserving each shape
+    // exactly is what makes this additive rather than a UI change.
+    const readOr = (name, fallback, promise) => promise.catch(e => {
+      const error = String((e && e.message) || e);
+      console.error(`ops-api: read "${name}" failed: ${error}`);
+      degraded.push({ source: name, error });
+      return typeof fallback === 'function' ? fallback(error) : fallback;
+    });
+
     const [counters, business, audit, invites] = await Promise.all([
-      fetchCounters(env).catch(e => ({ error: String(e.message || e), rows: [] })),
-      rpc(env, 'ops_snapshot', { p_exclude_teams: [] }).catch(e => ({ error: String(e.message || e) })),
-      rpc(env, 'ops_audit_recent', { p_limit: 50 }).catch(() => []),
-      rpc(env, 'ops_onboarding_invites', {}).catch(() => []),
+      readOr('counters', error => ({ error, rows: [] }), fetchCounters(env)),
+      readOr('ops_snapshot', error => ({ error }), rpc(env, 'ops_snapshot', { p_exclude_teams: [] })),
+      readOr('ops_audit_recent', [], rpc(env, 'ops_audit_recent', { p_limit: 50 })),
+      readOr('ops_onboarding_invites', [], rpc(env, 'ops_onboarding_invites', {})),
     ]);
 
-    return json({ counters, business, audit, invites, viewer: email });
+    // fetchCounters reports a bad response by RETURNING { error } rather than
+    // throwing, so it never reaches readOr's catch. Folded in here so one field
+    // means one thing: if `degraded` is empty, every source answered.
+    if (counters && counters.error) degraded.push({ source: 'counters', error: counters.error });
+
+    return json({ counters, business, audit, invites, degraded, viewer: email });
   },
 };

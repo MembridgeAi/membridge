@@ -1,4 +1,4 @@
-# Runbook — the six pieces of SQL waiting to be applied
+# Runbook — the SQL waiting to be applied
 
 **Written for whoever sits down to apply these, without having been in the sessions that wrote them.** You should not need to open a single migration header to follow this. If you want the reasoning behind any one of them, it is in that file's header; this page is the order, the risks and the checks.
 
@@ -17,7 +17,7 @@ Status of every migration lives in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md).
 
 ## The order
 
-Apply in this order. It is numeric order with **one deliberate exception: `031` goes last.**
+Apply in this order. It is numeric order with **one deliberate exception: `031` goes last.** `044` is a seventh item that should be done separately — see its own section at the end.
 
 | # | File | What it does, in one sentence |
 |---|------|-------------------------------|
@@ -44,6 +44,8 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 > If you are applying these and the release has not gone out yet, you are fine — just do `038` now.
 
 There are no other ordering constraints between these six. Each one touches a different thing, and none of them depends on another having run first.
+
+`044` is the exception to that and is not in the table above: it changes the credential the ops panel logs in with, so it is a database step **and** a Worker deploy. It has its own section, its own order, and its own rollback.
 
 ---
 
@@ -136,6 +138,74 @@ drop table public.rls_smoke_test;
 ```
 
 **If that errors instead of succeeding,** the safety net is now refusing a creation it should have allowed. That is the fail-closed behaviour working too eagerly — it is recoverable, and the error message says what to do. Do not drop the trigger to get past it.
+
+---
+
+---
+
+## 7. `044_ops_panel_roles.sql` — do this one separately
+
+**This one is different from the six above and should not be done in the same sitting.** The others fix something and are finished when the SQL is applied. This one changes *which credential the ops panel logs in with*, so it is a database step **and** a Worker deploy, and the two have to happen in the right order.
+
+**Does:** the ops panel currently logs into the database with a key that can read and write everything, ignoring all the protections above. This creates two much smaller logins — one that can only read the four things the panel displays, one that can only perform the four actions it offers — and neither can touch a table directly at all.
+
+### The safe part, which you can do any time
+
+**Applying `044` on its own changes nothing.** It only creates the two new logins; it does not remove the old one, and nothing uses the new ones until the Worker is redeployed. If you apply it and stop there, the panel carries on exactly as before. That is deliberate.
+
+After applying, check both logins exist and neither can bypass the security rules:
+
+```sql
+select rolname, rolbypassrls, rolcanlogin from pg_roles
+ where rolname in ('ops_panel_read','ops_panel_write');
+-- expect two rows, both with rolbypassrls = f
+```
+
+And the check that proves the point — neither can read a table:
+
+```sql
+select has_table_privilege('ops_panel_read', 'public.teams', 'SELECT') as should_be_false;
+```
+
+### The part that needs care — switching the panel over
+
+**Order matters. Do not deploy the Worker first.**
+
+1. Apply `044` (above).
+2. Mint two access tokens, one per role. They are signed with the project's JWT secret (Supabase dashboard → Project Settings → API). Each is an ordinary Supabase JWT whose `role` claim is `ops_panel_read` or `ops_panel_write` instead of `service_role`.
+   > **Check this first:** newer Supabase projects have moved to a different key system. If your project shows "JWT Signing Keys" rather than a single "JWT Secret", the minting step is different and it is worth confirming the approach before going further, rather than discovering it half way.
+3. Set both as Worker secrets — this prompts, so the values never reach your shell history:
+   ```
+   wrangler secret put OPS_READ_KEY
+   wrangler secret put OPS_WRITE_KEY
+   ```
+4. Deploy the Worker.
+5. **Check, in this order:**
+   - The panel loads and shows real numbers.
+   - **The recent-activity list is NOT empty.** This is the important one — see below.
+   - Perform one harmless action (set a note on a team). It should succeed.
+
+### Why "is the list empty?" is the check that matters
+
+If one permission is missing, the panel does **not** break. It renders with an empty activity list, which looks exactly like a quiet week. That is the failure worth guarding against, because it is the one you would not notice.
+
+The Worker now reports this rather than hiding it: the response carries a `degraded` field naming anything that failed. If the list looks empty and you want to be sure, open the browser's network tab on the panel's `/api` request and look at `degraded` — it should be `[]`.
+
+### Rollback — you can do this without me
+
+**If anything looks wrong at any point, roll the Worker back. That is the whole recovery.**
+
+```
+wrangler rollback
+```
+
+The previous version uses the original `SUPABASE_SERVICE_KEY`, which this change **does not touch or remove**. It keeps working the entire time. There is no window where the panel has no valid credential unless you delete that secret — so don't, not until this has been running happily for a while.
+
+You do not need to undo anything in the database to recover. The two new logins sitting unused are harmless. If you want them gone anyway, the exact statements are at the bottom of `044`, commented out — but do the Worker rollback first, or you will pull the credential out from under a running panel.
+
+### What is deliberately still outstanding
+
+The old all-powerful key still exists and still works — on purpose, because it is the rollback. Removing its access is a separate change for later, once the new logins have proven themselves. Doing both at once would delete the safety net in the same step that needs it.
 
 ---
 
