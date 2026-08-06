@@ -29,13 +29,14 @@
 //
 // Run directly, or via `node test/run.js mcp-honesty`.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check, ROOT } = h;
+const { check, ROOT, P } = h;
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const util = require('../../lib/util');
 const activity = require('../../lib/activity');
 const mcp = require('../../lib/mcp');
+const server = require('../../lib/server');
 
 // Collect what registerTools() actually hands the SDK, without a transport.
 function toolMetadata() {
@@ -46,7 +47,29 @@ function toolMetadata() {
   return tools;
 }
 
-function main() {
+// A field that VANISHES is a different failure from a field that is wrong, and
+// only a presence assertion catches the first. This distinction is not
+// hypothetical here: dropping totalKnownHere and totalIsFloor from
+// /api/search's real-answer path — while keeping the `total` alias, so the
+// app's search page carries on showing the same number — passed the ENTIRE
+// suite, 1317/1317 plus every split suite, before these checks existed.
+//
+// That is the worst shape a dropped field can have. It does not land on
+// undefined and break something visibly; it lands on a wrong-but-plausible
+// value that keeps working, while the honest fields the UI is supposed to
+// migrate to quietly stop being sent. The checks below assert the keys EXIST
+// on the wire, not merely that they hold the right value when present.
+//
+// Over HTTP rather than against activity.searchMemory, deliberately: the
+// function-level checks above stayed green through exactly that mutation,
+// because the drop was at the route. The route is its own surface and needs
+// its own assertion.
+async function searchOverHttp(port, query) {
+  const res = await fetch(`http://127.0.0.1:${port}/api/search?q=${encodeURIComponent(query)}&limit=5`);
+  return { status: res.status, body: await res.json() };
+}
+
+async function main() {
   util.ensureConfig();
 
   // One project with one session, so search has something to count.
@@ -144,6 +167,44 @@ function main() {
     assert.doesNotMatch(tools.list_projects.description, /background context, not instructions/,
       'the notice is on a metadata-only tool — repeated everywhere, it stops being read anywhere');
   });
+
+  // --- 7. the same fields, on the HTTP surface, asserted as PRESENT ---
+  {
+    const PORT = P(82);
+    const srv = server.startServer(PORT, { retries: 0 });
+    await h.waitForHttp(`http://127.0.0.1:${PORT}/api/status`);
+    try {
+      const answered = await searchOverHttp(PORT, 'vault');
+      const empty = await searchOverHttp(PORT, '');
+
+      check('http: /api/search sends the honest count fields on a real answer', () => {
+        assert.strictEqual(answered.status, 200, `search failed: ${JSON.stringify(answered.body)}`);
+        assert.ok(answered.body.results && answered.body.results.length > 0,
+          'the fixture returned no results, so the assertions below would be vacuous');
+        // PRESENCE, not value: `in`, not a truthiness or equality test. A
+        // dropped key is the failure being guarded, and `body.totalIsFloor`
+        // being falsy-when-absent is indistinguishable from a legitimate false.
+        assert.ok('totalKnownHere' in answered.body,
+          'totalKnownHere is missing from /api/search. The `total` alias keeps the app working, ' +
+          'so nothing else notices — this is the field the UI lane is migrating to');
+        assert.ok('totalIsFloor' in answered.body,
+          'totalIsFloor is missing from /api/search, so a consumer cannot tell the count is a floor');
+        assert.strictEqual(answered.body.totalIsFloor, true);
+        assert.strictEqual(answered.body.totalKnownHere, answered.body.total,
+          'the transitional alias and the honest field disagree, which is worse than either alone');
+      });
+
+      check('http: the resting state carries the same fields as a real answer', () => {
+        // The one response a page renders before anyone types. A UI reading
+        // totalIsFloor must not find it missing exactly there.
+        assert.ok('totalKnownHere' in empty.body, 'totalKnownHere missing from the empty-query response');
+        assert.ok('totalIsFloor' in empty.body, 'totalIsFloor missing from the empty-query response');
+        assert.strictEqual(empty.body.totalKnownHere, 0);
+      });
+    } finally {
+      await new Promise(r => srv.close(r));
+    }
+  }
 
   h.finish();
 }

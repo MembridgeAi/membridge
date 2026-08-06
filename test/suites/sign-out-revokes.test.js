@@ -21,12 +21,13 @@
 //
 // Run directly, or via `node test/run.js sign-out-revokes`.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check, P } = h;
+const { check, P, httpPost } = h;
 const assert = require('assert');
 const fs = require('fs');
 const { createMockSupabase } = require('../mock-supabase');
 const util = require('../../lib/util');
 const teamsync = require('../../lib/teamsync');
+const server = require('../../lib/server');
 
 // Whether a stolen copy of credentials.json can still buy an access token.
 // This is the question the whole ticket is about, so it is asked directly of
@@ -171,6 +172,61 @@ async function main() {
         assert.strictEqual(out.revoked, false, 'an unreachable backend was reported as a confirmed revocation');
         assert.ok(out.error, 'no reason given for the failed revocation');
       });
+    }
+
+    // --- 4b. THE ROUTE, not just the function ---
+    //
+    // Everything above drives teamsync.signOut directly, and a measured drop
+    // test showed what that misses: deleting `revoked`, `revokeError` or
+    // `authenticated` from POST /api/team/logout leaves this suite fully green,
+    // because nothing here crosses the wire. Nothing else covered that route
+    // either — no split suite and no section of the monolith mentions it.
+    //
+    // The three fields are one signal between them. `revoked` false with no
+    // `revokeError` is a warning with nothing to say; `revokeError` present
+    // with no `revoked` is a reason for a failure nobody declared; and the UI's
+    // fail-closed default reads a missing `revoked` as "not revoked", which is
+    // safe but would leave the warning path permanently dark if `revokeError`
+    // went with it. So all three are asserted PRESENT — `in`, not truthiness,
+    // because a dropped key and a legitimate false/null are the same value.
+    {
+      const PORT = P(83);
+      const srv = server.startServer(PORT, { retries: 0 });
+      await h.waitForHttp(`http://127.0.0.1:${PORT}/api/status`);
+      try {
+        await signIn();
+        const ok = await httpPost(PORT, '/api/team/logout', {});
+
+        await signIn();
+        mock.flags.failLogout = true;
+        let failed;
+        try {
+          failed = await httpPost(PORT, '/api/team/logout', {});
+        } finally {
+          mock.flags.failLogout = false;
+        }
+
+        check('route: a successful sign-out reports all three fields', () => {
+          assert.ok('authenticated' in ok, 'authenticated missing from the logout response');
+          assert.ok('revoked' in ok, 'revoked missing — the UI cannot tell a real revocation from a local wipe');
+          assert.ok('revokeError' in ok, 'revokeError missing — the warning path has nothing to render');
+          assert.strictEqual(ok.authenticated, false);
+          assert.strictEqual(ok.revoked, true, `the backend confirmed nothing: ${JSON.stringify(ok)}`);
+          assert.strictEqual(ok.revokeError, null);
+        });
+
+        check('route: a refused revocation reports revoked:false WITH a reason', () => {
+          assert.ok('revoked' in failed && 'revokeError' in failed,
+            `the failure case lost a field: ${JSON.stringify(failed)}`);
+          assert.strictEqual(failed.authenticated, false,
+            'the machine must still be signed out locally even when revocation fails');
+          assert.strictEqual(failed.revoked, false, 'a refused logout was reported as revoked');
+          assert.ok(failed.revokeError && String(failed.revokeError).length > 0,
+            'revoked:false arrived with no reason, so the UI can only say something vague went wrong');
+        });
+      } finally {
+        await new Promise(r => srv.close(r));
+      }
     }
 
     // --- 5. signing out when already signed out is not a failure ---

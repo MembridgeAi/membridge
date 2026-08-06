@@ -191,6 +191,22 @@ async function main() {
       assert.strictEqual(row.ts, BASE.ts, 'a mangled ts breaks the on_conflict key');
       assert.strictEqual(row.source, BASE.source);
     });
+    // The exemption is carried by a MARKER OBJECT that the walker unwraps.
+    // Delete that unwrap — an `if (...) return` whose job is to not do
+    // something, the shape mutation testing is blind to — and the marker
+    // itself ships: project_id becomes { value, reason } and the internal
+    // justification text crosses the wire as data. Found by deliberately
+    // deleting the guard rather than by waiting for a tool that cannot see it.
+    check('no exemption marker or its reason text ever reaches the wire', () => {
+      const wire = JSON.stringify(row);
+      assert.ok(!wire.includes('row identity:'),
+        'an exemption reason string is on the wire — the marker object survived unwrapping, ' +
+        'so internal commentary is shipping as payload');
+      assert.ok(!wire.includes('"reason"'), 'a marker object reached the row');
+      for (const k of ['project_id', 'author_id', 'ts', 'source', 'session']) {
+        assert.strictEqual(typeof row[k], 'string', `${k} is not a string — it shipped as a marker object`);
+      }
+    });
     check('the row keeps its exact key set — PostgREST rejects a batch that disagrees', () => {
       assert.deepStrictEqual(Object.keys(row), [
         'project_id', 'author_id', 'author_name', 'ts', 'source', 'session',
