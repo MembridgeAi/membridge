@@ -68,7 +68,11 @@
 -- the reason 031, 032 and 033 all give. `revoke` is idempotent; re-running this
 -- file is a no-op.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- UNAPPLIED AS OF 2026-08-05. Nothing here has been run against any
+-- database. State is recorded in supabase/MIGRATION-STATE.md; settle it with:
+--   select relname, relacl from pg_class
+--    where relname in ('onboarding_invites','ops_audit','ops_team_meta');
+--   -- applied when no acl entry names anon or authenticated
 -- ---------------------------------------------------------------------------
 
 revoke all on table public.onboarding_invites from public, anon, authenticated;

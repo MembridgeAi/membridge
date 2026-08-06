@@ -17,6 +17,11 @@
 -- branch this file replaces. State is recorded in supabase/MIGRATION-STATE.md
 -- and nowhere else; do not restate it in claude/ops/ or a handoff.
 --
+-- LIVE SHAPE VERIFIED 2026-08-05 — the live body was dumped read-only with
+--   select pg_get_functiondef(oid) from pg_proc where proname = 'rls_auto_enable';
+-- and diffed against this file. All three differences below are accounted for:
+-- (1) is the intended change, (2) and (3) are fixed.
+--
 -- THE LIVE BODY HAS NOW BEEN READ (read-only, 2026-08-05) AND DIFFED AGAINST
 -- THIS FILE. Three differences, one of which must be fixed before applying:
 --

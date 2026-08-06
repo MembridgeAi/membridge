@@ -316,7 +316,88 @@ async function main() {
         + 'from this check for exactly that reason.');
     });
 
-    check('team_audit rows cannot be backdated by whoever writes them', () => {
+    // ---- the same class, one object type over: FUNCTIONS (SEC-8) -----------
+  //
+  // 029 defines redeem_invite with the TOCTOU; 038 fixes it; re-running 029
+  // reinstates it. Identical to the policy case above and worse in one respect:
+  // a reverted policy opens a door, while this silently restores a concurrency
+  // bug that only shows under load.
+  //
+  // WHY THE POLICY GUARD DOES NOT SIMPLY TRANSFER — the finding that scoped
+  // this. Function supersession comes in two shapes here:
+  //
+  //   SIGNATURE-STABLE (9 functions). Pure `create or replace`, no drop. The
+  //   guard works exactly as it does for policies: guard every older
+  //   definition, leave the newest as create-or-replace, and a fresh replay
+  //   still ends on the newest because create-or-replace always applies.
+  //
+  //   DROP-CARRYING (team_feed, my_teams). Their return type CHANGES between
+  //   versions — team_feed goes from 10 columns to 21 — and create-or-replace
+  //   cannot change a return type, so each superseding migration issues
+  //   `drop function if exists` first. Guarding only the CREATE in those files
+  //   would leave the DROP live: re-running 004 would drop the current 21-column
+  //   team_feed and then, finding it absent, install the 11-column one. The
+  //   guard would make that case actively worse rather than safer. They are
+  //   also the loud half — a missing column breaks callers immediately, unlike
+  //   redeem_invite reverting in silence.
+  //
+  // So the guard is right for one group and wrong for the other, which is why
+  // this check tracks them separately instead of demanding one treatment.
+  //
+  // NEITHER GROUP IS CONVERTED YET, deliberately. Wrapping a function whose
+  // body is `$$`-quoted inside a `do $guard$` block is three levels of dollar
+  // quoting in files that are pasted into a SQL editor by hand, and there is no
+  // Postgres in this environment to parse the result — no psql, no supabase
+  // CLI, and the Docker daemon is not running. Shipping 15 hand-written
+  // nested-quoted blocks that have never been parsed, into migrations whose
+  // failure mode is "half the file ran", is a worse trade than the re-run it
+  // prevents. Recorded here so the backlog is in code rather than only in a
+  // report, and so a NEW instance still fails.
+  const RERUN_UNGUARDED_FUNCTIONS = new Set([
+    // signature-stable; guardable, conversion pending a environment that can
+    // parse PL/pgSQL
+    'join_team', 'link_project', 'gen_invite_token', 'peek_invite',
+    'redeem_invite', 'ops_snapshot', 'redeem_onboarding_invite',
+    'can_see_project', 'is_team_member_uid',
+    // drop-carrying; guarding the create alone would be a regression, see above
+    'team_feed', 'my_teams',
+  ]);
+
+  check('no NEW function is superseded across migrations without a re-run guard', () => {
+    const byName = new Map();
+    for (const f of migrationFiles()) {
+      const code = codeOf(f);
+      const re = /create\s+(?:or\s+replace\s+)?function\s+public\.(\w+)/gi;
+      let m;
+      while ((m = re.exec(code)) !== null) {
+        const before = code.slice(Math.max(0, m.index - 600), m.index);
+        const guarded = /not\s+exists/i.test(before) && /pg_proc/i.test(before);
+        if (!byName.has(m[1])) byName.set(m[1], []);
+        byName.get(m[1]).push({ file: f, guarded });
+      }
+    }
+    const unguarded = [];
+    for (const [name, defs] of byName) {
+      if (defs.length < 2) continue;
+      if (RERUN_UNGUARDED_FUNCTIONS.has(name)) continue; // tracked above
+      const older = defs.slice(0, -1).filter(d => !d.guarded);
+      if (older.length) {
+        unguarded.push(`  ${name}: ${older.map(d => d.file).join(', ')} `
+          + `superseded by ${defs[defs.length - 1].file}, unguarded`);
+      }
+    }
+    assert.deepStrictEqual(unguarded, [],
+      'these functions are defined in more than one migration with no guard on the older '
+      + 'definitions, so re-running an older file reverts the newer one:\n' + unguarded.join('\n')
+      + '\n\nIf the function is SIGNATURE-STABLE, guard the older creates on '
+      + '`not exists (select 1 from pg_proc ...)` and leave the newest as create-or-replace. '
+      + 'If the supersession carries a `drop function` because the return type changed, do '
+      + 'NOT guard only the create — the drop would still fire and the guard would then '
+      + 'install the OLD body. Add it to RERUN_UNGUARDED_FUNCTIONS with a reason instead, '
+      + 'and say which of the two shapes it is.');
+  });
+
+  check('team_audit rows cannot be backdated by whoever writes them', () => {
       const guarded = migrationFiles().some(f => {
         const code = codeOf(f);
         if (/create\s+trigger\s+\w+[\s\S]{0,300}?on\s+public\.team_audit\b/i.test(code)) return true;

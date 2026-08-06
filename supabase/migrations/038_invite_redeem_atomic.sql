@@ -62,7 +62,10 @@
 -- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` in this project, for
 -- the reason 031, 032 and 033 all give. Both statements are re-runnable.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- UNAPPLIED AS OF 2026-08-05. Nothing here has been run against any
+-- database. State is recorded in supabase/MIGRATION-STATE.md; settle it with:
+--   select prosrc from pg_proc where proname = 'redeem_invite';
+--   -- applied when the body contains `get diagnostics` and a WHERE carrying max_uses
 -- ---------------------------------------------------------------------------
 
 create or replace function public.redeem_invite(p_token text, p_display_name text)

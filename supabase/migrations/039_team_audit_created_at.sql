@@ -43,7 +43,10 @@
 -- HOW TO APPLY — SQL EDITOR ONLY, NEVER `supabase db push` in this project, for
 -- the reason 031, 032 and 033 all give. Both statements are re-runnable.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- UNAPPLIED AS OF 2026-08-05. Nothing here has been run against any
+-- database. State is recorded in supabase/MIGRATION-STATE.md; settle it with:
+--   select tgname from pg_trigger where tgrelid = 'public.team_audit'::regclass;
+--   -- applied when `team_audit_stamp_created_at` is listed
 -- ---------------------------------------------------------------------------
 
 create or replace function public.team_audit_stamp_created_at()

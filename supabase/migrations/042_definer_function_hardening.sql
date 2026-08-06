@@ -154,5 +154,9 @@ grant execute on function public.is_team_member_uid(uuid, uuid) to authenticated
 -- failure 030 was written to fix). It should still succeed. If it does not, the
 -- caller conjunct is the only thing that changed.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- UNAPPLIED AS OF 2026-08-05. Nothing here has been run against any
+-- database. State is recorded in supabase/MIGRATION-STATE.md; settle it with:
+--   select proname, proacl from pg_proc
+--    where proname in ('can_see_project','team_feed_counts','set_project_access_default');
+--   -- applied when no acl entry grants EXECUTE to anon or to PUBLIC (an empty grantee)
 -- ---------------------------------------------------------------------------

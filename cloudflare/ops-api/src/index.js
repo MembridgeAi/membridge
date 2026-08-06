@@ -104,7 +104,42 @@ async function authenticate(request, env) {
   const allowed = (env.ALLOWED_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const email = String(claims.email || '').toLowerCase();
   if (!email) return null;
-  if (allowed.length && !allowed.includes(email)) return null;
+
+  // SEC-10. This used to read `if (allowed.length && !allowed.includes(email))`,
+  // so an unset or whitespace-only ALLOWED_EMAILS SKIPPED the allowlist instead
+  // of refusing. Everyone holding a valid Access JWT for this aud was then
+  // admitted to the Worker that holds SUPABASE_SERVICE_KEY — and service_role
+  // has rolbypassrls, so none of the RLS, membership predicates or definer
+  // gates protecting the rest of the product are in the path behind this.
+  // Nothing logged it and the panel kept working, so the only way to notice was
+  // to read the line.
+  //
+  // An absent input was being read as permission. That is the THIRD instance of
+  // that shape found today — with `project_access` treating an empty PostgREST
+  // result as "no restriction", and readAccess treating an unreadable
+  // default_access answer as `true` — which makes it a pattern in this
+  // codebase rather than one careless line.
+  //
+  // It now fails CLOSED and says which of the two refusals happened. That
+  // distinction is the whole point: "the allowlist is empty" is an operator
+  // error that takes the panel down until a variable is set, and it must not be
+  // indistinguishable in the logs from "you personally are not on the list".
+  // A misconfiguration that silently locks everyone out is only marginally
+  // better than one that silently lets everyone in — both are unexplained.
+  //
+  // BEHAVIOUR CHANGE, stated: if ALLOWED_EMAILS is ever unset or emptied, the
+  // panel returns 403 for everybody instead of admitting everybody. That is
+  // loud and recoverable; the previous behaviour was silent and was not.
+  if (!allowed.length) {
+    console.error('ops-api: ALLOWED_EMAILS is unset or empty — refusing all access. '
+      + 'This is a configuration error, not a rejected user: set the ALLOWED_EMAILS '
+      + 'secret on the Worker to a comma-separated list of Access emails.');
+    return null;
+  }
+  if (!allowed.includes(email)) {
+    console.warn('ops-api: refusing an authenticated Access identity that is not in ALLOWED_EMAILS');
+    return null;
+  }
   return email;
 }
 
