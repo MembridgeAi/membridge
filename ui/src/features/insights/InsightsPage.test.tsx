@@ -232,6 +232,24 @@ describe('Insights when the current window itself was cut short', () => {
   // derived from the fetched pages, so a short fetch really can undercount it
   // and `exact` says nothing about it either way. It keeps its floor mark on
   // exactly the same payload the assertion above requires to be unmarked.
+  // BOUNDARY, found by mutation. `coveredDays < windowDays` survived being
+  // changed to `<=`, which means nothing pinned the case where the fetch
+  // reached EXACTLY the window asked for. Under `<=` that reads as a cut
+  // window and announces "the oldest 0 days were never read" -- the page
+  // claiming it is less certain than it is, which is the same defect as
+  // claiming more certainty, just in the flattering direction.
+  it('does not call the window cut when the fetch reached exactly the window asked for', async () => {
+    renderWith(await clientServing(await cut({ lookbackDays: 30, coveredDays: 30 })), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    // Not the requested/reached phrasing: nothing of the current window was missed.
+    expect(notice.textContent).not.toMatch(/30 days requested/)
+    expect(notice.textContent).not.toMatch(/oldest 0 days/)
+    // The honest reading at this boundary: the window is whole, the PRIOR one
+    // is what got capped.
+    expect(notice).toHaveTextContent(/comparison against the previous 30 days is capped/)
+  })
+
   it('marks members-syncing as a floor instead of counting people out', async () => {
     renderWith(await clientServing(await cut()), <InsightsPage />)
 
@@ -310,6 +328,40 @@ describe('Insights when only the prior window was cut short', () => {
     renderWith(await clientServing(await capped()), <InsightsPage />)
     await screen.findByTestId('problems-unconfirmed')
     expect(screen.queryByTestId('problems-broken')).toBeNull()
+  })
+})
+
+// `ok === total ? 'all healthy' : "N haven't shared recently"` survived being
+// inverted, so nothing distinguished a fully-synced team from a partly-synced
+// one. Inverted, a team where everyone is syncing reads "0 haven't shared
+// recently" and a team with someone missing reads "all healthy" -- a false
+// assurance about whether teammates' work is reaching you, which is the whole
+// question this stat exists to answer.
+describe('the members-syncing note distinguishes a whole team from a partial one', () => {
+  const serving = async (ok: number, total: number) => {
+    const base = await new FakeDataClient().getInsights(30)
+    return clientServing({ ...base, membersSyncing: { ok, total } })
+  }
+
+  it('says all healthy only when everyone has shared into the window', async () => {
+    renderWith(await serving(3, 3), <InsightsPage />)
+    // Anchored on a LOADED figure first: the loading frame renders the same
+    // four stat labels with bars in place of numbers, so finding the label
+    // alone resolves one state too early.
+    await screen.findByText('412')
+    const cell = screen.getByText('members syncing').closest('.stat-cell')
+    expect(cell).toHaveTextContent('3/3')
+    expect(cell).toHaveTextContent(/all healthy/)
+    expect(cell?.textContent).not.toMatch(/shared recently/)
+  })
+
+  it('counts the quiet ones when somebody has not', async () => {
+    renderWith(await serving(2, 3), <InsightsPage />)
+    await screen.findByText('412')
+    const cell = screen.getByText('members syncing').closest('.stat-cell')
+    expect(cell).toHaveTextContent('2/3')
+    expect(cell).toHaveTextContent(/1 haven't shared recently/)
+    expect(cell?.textContent).not.toMatch(/all healthy/)
   })
 })
 

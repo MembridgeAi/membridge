@@ -396,6 +396,46 @@ describe('inviting is offered only to people who can actually invite', () => {
   })
 })
 
+// Both found by mutation, both test gaps rather than product bugs.
+describe('the team header and the share card say only what is known', () => {
+  // memberCountLabel's `n === null` branch survived inversion because the
+  // fixture could not produce a null count at all -- TeamSummary types it
+  // `number | null` ("unknown" and "empty" are different facts, never a
+  // fabricated 0) but FakeDataClient typed it `number`. Inverted, an unknown
+  // count prints "null members".
+  it('prints no count clause when the member count is unknown', async () => {
+    renderWith(new FakeDataClient({ memberCountUnknown: true }), <TeamPage />)
+    await screen.findByText('MemBridge HQ')
+    expect(screen.queryByText(/null members/)).toBeNull()
+    expect(screen.queryByText(/· \d+ members?/)).toBeNull()
+  })
+
+  it('prints the count when it is known', async () => {
+    renderWith(new FakeDataClient(), <TeamPage />)
+    expect(await screen.findByText(/3 members/)).toBeInTheDocument()
+  })
+
+  // `share.status === 'manual'` survived inversion: the existing manual-copy
+  // test asserts the value is REVEALED and that "Copied" is not claimed, but
+  // never which explanation the reader gets. Inverted, a failed copy reads
+  // "Send this to whoever should join" -- telling the user the copy worked.
+  it('says the copy failed when it failed, not merely showing the value', async () => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    renderWith(new FakeDataClient(), <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    expect(await screen.findByText(/Couldn't copy automatically/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Send this to whoever should join/i)).toBeNull()
+  })
+
+  it('says nothing about a failed copy when the copy succeeded', async () => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+    renderWith(new FakeDataClient(), <TeamPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /^copy invite link$/i }))
+    expect(await screen.findByText(/Send this to whoever should join/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Couldn't copy automatically/i)).toBeNull()
+  })
+})
+
 describe('Team page routing', () => {
   it('is in the rail even on a machine with no team, and resolves at /team', async () => {
     visit('/team')

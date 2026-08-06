@@ -46,6 +46,12 @@ function rawFeedEntry(over: Partial<RawFeedEntry> & Pick<RawFeedEntry, 'project'
 }
 
 export interface FakeOptions {
+  /** Models an older daemon whose team row carries no member_count, so
+   *  TeamSummary.memberCount is null. That state was UNREACHABLE from this
+   *  fixture (it typed the field `number`), which is why nothing caught the
+   *  null branch of memberCountLabel -- "unknown" and "empty" are different
+   *  facts and only one of them may be printed. */
+  memberCountUnknown?: boolean
   /** Models a sign-out whose BACKEND revocation failed, carrying the daemon's
    *  wording. Null/absent = the backend confirmed the session was ended. */
   signOutRevokeError?: string | null
@@ -713,16 +719,16 @@ export class FakeDataClient implements DataClient {
   selectedTeamId() { return this.teamId }
   selectTeam(teamId: string | null) { this.teamId = teamId }
   /** The team fixture the current selection points at (first, by default). */
-  private selectedTeam(): { id: string; name: string; role: Role; memberCount: number } | null {
+  private selectedTeam(): { id: string; name: string; role: Role; memberCount: number | null } | null {
     const teams = this.teamFixtures()
     if (!teams.length) return null
     return teams.find(t => t.id === this.teamId) ?? teams[0]
   }
-  private teamFixtures(): { id: string; name: string; role: Role; memberCount: number }[] {
+  private teamFixtures(): { id: string; name: string; role: Role; memberCount: number | null }[] {
     const authenticated = this.signedIn
     if (!(authenticated && !this.opts.solo)) return []
     return [
-      { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.teamMembers().length },
+      { id: 'team-1', name: 'MemBridge HQ', role: this.opts.role ?? 'owner', memberCount: this.opts.memberCountUnknown ? null : this.teamMembers().length },
       ...(this.opts.secondTeam ? [{ id: 'team-2', name: 'Weekend Side Project', role: 'member' as Role, memberCount: 2 }] : []),
     ]
   }
@@ -854,7 +860,12 @@ export class FakeDataClient implements DataClient {
       // observable here or the switcher is only pretending.
       team: (() => {
         const t = this.selectedTeam()
-        return t ? { ...t, inviteCode: 'INV-7F3K9Q' } : null
+        // Settings.team.memberCount is `number`, NOT `number | null` -- the two
+        // payloads model different things and only TeamSummary (the account's
+        // team list) carries the older-daemon unknown. Falling back to the real
+        // roster length here keeps memberCountUnknown scoped to the surface it
+        // is about instead of quietly widening a second type.
+        return t ? { ...t, memberCount: t.memberCount ?? this.teamMembers().length, inviteCode: 'INV-7F3K9Q' } : null
       })(),
       viewerId: this.viewerId,
       webUrl: this.opts.webUrl !== undefined ? this.opts.webUrl : 'https://join.membridge.me',
