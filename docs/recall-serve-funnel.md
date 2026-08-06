@@ -706,6 +706,24 @@ requested and a read happened" — not to certainty.
 | both that *and* the hook's pre-filter | the e2e corpus check fails through the real hook, printing the false claim verbatim: *"this session already read supabase/schema.sql (unchanged since; hash f9784f46)"* |
 | the hook's pre-filter alone | everything stays green — `tierFor` catches it. Defence in depth, and the reason the second row above needs both |
 
+## Cost: none that can be measured
+
+`scripts/bench-recall-hook.js 7`, REV-12 against REV-8 (`ad49c25`),
+back-to-back with the order alternated three times, p50 of the child's own CPU:
+
+| round | REV-12 | REV-8 | delta |
+|---|---|---|---|
+| 1 | 13.14ms | 12.63ms | +0.51ms |
+| 2 | 14.49ms | 15.44ms | **−0.95ms** |
+| 3 | 14.01ms | 13.32ms | +0.69ms |
+
+The difference straddles zero and the run-to-run noise is larger than the
+effect, which is what the design predicted: the window rides along in a write
+the hook was already making, and the coverage test is arithmetic over at most
+32 spans. (These absolute numbers are ~13ms where REV-8's table reported ~31ms
+for the same work — that table was measured with four test suites running; this
+one on a quiet machine. Only the within-pair deltas compare across the two.)
+
 That middle row is why the e2e check is not vacuous: with only the policy
 reverted the suite passed, because the pre-filter caught it. Worth stating,
 because a test that passes for a reason other than the one it names is how a
