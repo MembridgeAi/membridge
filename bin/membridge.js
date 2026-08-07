@@ -174,9 +174,23 @@ function cmdDaemon() {
   //
   // Deliberately NOT a real lockfile: the plan (locked decision #4) calls for
   // a liveness check at this scope; a lockfile is a bigger surface.
+  //
+  // Restart handoff exception. `POST /api/daemon/restart` replaces this daemon
+  // by spawning a new `membridge daemon` while the OLD one is still alive (it
+  // must outlive the request long enough to flush the response, then exits
+  // ~200ms later -- see lib/server.js and api-machine.spawnReplacement). To the
+  // replacement that predecessor looks exactly like a duplicate to refuse, so
+  // without a signal the guard below kills the restart and the pid never
+  // changes. spawnReplacement sets MEMBRIDGE_TAKEOVER=1 to authorize THIS boot
+  // to take over a live daemon. It is read once and deleted so it can never
+  // leak into an unrelated child this process later spawns, nor wave through a
+  // genuine second daemon -- a user-run `membridge daemon` never carries it, so
+  // the refusal below still fires for a real duplicate.
+  const isRestartHandoff = process.env.MEMBRIDGE_TAKEOVER === '1';
+  delete process.env.MEMBRIDGE_TAKEOVER;
   const existingPid = readPid();
   if (existingPid && isRunning(existingPid)) {
-    if (isMembridgeProcess(existingPid)) {
+    if (isMembridgeProcess(existingPid) && !isRestartHandoff) {
       const port = config.dashboardPort;
       console.error(
         `MemBridge is already running (pid ${existingPid}, dashboard http://127.0.0.1:${port}). ` +
@@ -184,7 +198,11 @@ function cmdDaemon() {
       );
       process.exit(1);
     }
-    util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
+    if (isRestartHandoff) {
+      util.log(`restart handoff: taking over from daemon pid ${existingPid}`);
+    } else {
+      util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
+    }
   } else if (existingPid) {
     util.log(`pid file names dead process ${existingPid}; taking over (stale)`);
   }
