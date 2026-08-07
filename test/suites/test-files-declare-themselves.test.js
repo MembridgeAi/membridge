@@ -105,7 +105,11 @@ function main() {
     if (reachable.has(f)) return 'infrastructure';
     return markerOf(fs.readFileSync(f, 'utf8')) ? 'declared' : 'UNDECLARED';
   };
-  const rel = f => path.relative(path.join(TEST_DIR, '..'), f);
+  // Forward-slash the relative path: path.relative yields backslashes on
+  // Windows, and every comparison below (and the declared-list literal) is
+  // written with '/'. Without this the whole gate misclassifies on the Windows
+  // CI leg.
+  const rel = f => path.relative(path.join(TEST_DIR, '..'), f).split(path.sep).join('/');
 
   // ---- teeth: the classifier must actually discriminate, or the bite below
   // is satisfied by a function that returns 'discovered' for everything.

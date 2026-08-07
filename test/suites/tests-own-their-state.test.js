@@ -182,7 +182,9 @@ function main() {
   const report = files.map(f => {
     const src = fs.readFileSync(f, 'utf8');
     return {
-      file: path.relative(path.join(TEST_DIR, '..'), f),
+      // Forward-slash it: path.relative yields backslashes on Windows and every
+      // `x.file === 'test/...'` comparison below is written with '/'.
+      file: path.relative(path.join(TEST_DIR, '..'), f).split(path.sep).join('/'),
       ...scanFile(src),
       ...readMarkers(src),
     };

@@ -22,9 +22,21 @@ const assert = require('assert');
 const path = require('path');
 const projectResolve = require('../../lib/project-resolve');
 const scan = require('../../lib/scan');
+const util = require('../../lib/util');
 
-const TRACKED = '/repos/alpha';
-const OTHER = '/repos/beta';
+// Absolute fixture paths must be NATIVE to the platform. isTrackedProject runs
+// every key through path.resolve()+lowercase (util.normPath); on Windows a POSIX
+// literal "/repos/alpha" resolves to "C:\repos\alpha" and then no longer matches
+// the tracked-root string seeded here. Real callers pass native paths, and
+// trackedRoots() (lib/scan.js) builds the set through normPath -- so a POSIX
+// literal in a raw Set is a test artifact, not a product path. Build every
+// absolute fixture path from the platform root, and seed tracked-root sets the
+// way production does.
+const ABS = (...segs) => path.resolve(path.sep === '\\' ? 'C:\\' : '/', ...segs);
+const roots = (...paths) => new Set(paths.map(util.normPath));
+
+const TRACKED = ABS('repos', 'alpha');
+const OTHER = ABS('repos', 'beta');
 
 async function main() {
   // THE CONTAINMENT RULE. An edit to a file that lives in no tracked root must
@@ -43,7 +55,7 @@ async function main() {
   // project's agent-memory files being edited from inside another project's
   // session. That is the cross-project leak this audit exists to check for.
   await check("another project's agent-memory files are not absorbed", () => {
-    const foreign = path.join('/Users/someone/.claude/projects/-repos-beta/memory/NOTE.md');
+    const foreign = ABS('Users', 'someone', '.claude', 'projects', '-repos-beta', 'memory', 'NOTE.md');
     const events = [{ kind: 'edit', project: TRACKED, file: foreign, ts: '2026-08-05T00:00:00Z' }];
     projectResolve.rehomeEvents(events, new Set([TRACKED]));
     assert.strictEqual(events[0].project, null,
@@ -56,9 +68,9 @@ async function main() {
   // the project, and the ingestion gate must then actually drop it.
   await check('the ingestion gate drops an event with no project', () => {
     const kept = scan.filterTrackedSessions(
-      [{ kind: 'edit', project: null, file: '/x', ts: '2026-08-05T00:00:00Z' },
+      [{ kind: 'edit', project: null, file: ABS('x'), ts: '2026-08-05T00:00:00Z' },
         { kind: 'edit', project: TRACKED, file: path.join(TRACKED, 'a.js'), ts: '2026-08-05T00:00:00Z' }],
-      new Set([TRACKED]),
+      roots(TRACKED),
       { hasMembridge: () => false, isProtectedDir: () => false },
     );
     assert.strictEqual(kept.length, 1, 'exactly the attributable event survives');
@@ -70,10 +82,10 @@ async function main() {
   // already minted at that path. Without the ordering, one bad key keeps
   // re-qualifying every new home-cwd session forever.
   await check('a protected directory is refused even if already in tracked roots', () => {
-    const home = '/Users/someone';
-    const tracked = scan.isTrackedProject(home, new Set([home]), {
-      hasMembridge: () => true,            // both permissive branches say yes
-      isProtectedDir: p => p === home,     // and the guard must still win
+    const home = ABS('Users', 'someone');
+    const tracked = scan.isTrackedProject(home, roots(home), {
+      hasMembridge: () => true,                                  // both permissive branches say yes
+      isProtectedDir: p => util.normPath(p) === util.normPath(home), // and the guard must still win
     });
     assert.strictEqual(tracked, false,
       'isProtectedDir must be checked before roots.has() and before the ' +

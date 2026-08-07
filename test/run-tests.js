@@ -20248,7 +20248,14 @@ const repoRoot = require('../lib/repo-root');
       assert.ok(fs.statSync(dirInItsPlace).isDirectory(), 'whatever was there must still be there');
     });
 
-    check('mcp-register: a mode-000 codex config is refused, not overwritten', () => {
+    // checkNeedsUnreadable, not check: chmod 000 does not clear READ on Windows
+    // (and root reads through any mode), so the file stays readable there and
+    // the old inline `if (readable) {...} else {...}` took an else that asserted
+    // nothing -- a zero-assertion body, which check-accounting fails outright.
+    // The wrapper registers this only where a file can genuinely be made
+    // unreadable and prints a visible `skip` otherwise, exactly like its five
+    // siblings below.
+    checkNeedsUnreadable('mcp-register: a mode-000 codex config is refused, not overwritten', () => {
       // The consequence, end to end: here the DIRECTORY is writable, so a
       // read-as-empty would rename straight over the user's servers.
       const home = mkHome(['.codex']);
@@ -20256,16 +20263,10 @@ const repoRoot = require('../lib/repo-root');
       const THEIRS = '[mcp_servers.node_repl]\ncommand = "node"\n';
       fs.writeFileSync(file, THEIRS);
       fs.chmodSync(file, 0o000);
-      let readable = true;
-      try { fs.readFileSync(file, 'utf8'); } catch { readable = false; }
-      if (!readable) { // root, and Windows' chmod, cannot produce this
-        const rows = mcpRegister.registerAll(base(home));
-        assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
-        fs.chmodSync(file, 0o600);
-        assert.strictEqual(fs.readFileSync(file, 'utf8'), THEIRS, 'their servers must still be there');
-      } else {
-        fs.chmodSync(file, 0o600);
-      }
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
+      fs.chmodSync(file, 0o600);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), THEIRS, 'their servers must still be there');
     });
 
     check('mcp-register: a write that throws costs one agent, never the launch', () => {
