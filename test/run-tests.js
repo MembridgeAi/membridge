@@ -23784,8 +23784,18 @@ const repoRoot = require('../lib/repo-root');
       process.env.MEMBRIDGE_HOME = HOME_WRITER;
       util.ensureConfig();
       {
+        // sharePrompts: 'verbatim' is load-bearing for the "permitted write
+        // must land" probe below, which reads the write by finding its prompt
+        // ask (ALLOWED-WRITE-OPEN) among the pushed rows. This home is created
+        // fresh, and Task 5A (eda6ef5) changed the fresh-install default from
+        // verbatim to 'distilled' — under which entryToRow ships null for ask.
+        // The row still lands, but its ask text would not, so the probe (which
+        // greps for that text) would fail on a purely intended sharing change
+        // rather than on any per-project refusal defect. Opt in explicitly, as
+        // the other homes that assert verbatim asks on pull already do, so the
+        // write stays observable regardless of the default.
         const cfgW = util.loadUserConfig();
-        cfgW.team = { ...(cfgW.team || {}), encrypt: false };
+        cfgW.team = { ...(cfgW.team || {}), encrypt: false, sharePrompts: 'verbatim' };
         util.saveUserConfig(cfgW);
       }
       const writerCreds = await teamsync.signup(util.getConfig(), 't17-writer@test.dev', 'pw-t17w', 'Writer17');
