@@ -22,7 +22,7 @@
 // (harness.js keeper on PORT_BASE+99 is unaffected.)
 
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check, ROOT, BIN, noEgress } = h;
+const { check, skip, ROOT, BIN, noEgress } = h;
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -36,6 +36,30 @@ function readPidFile() {
 }
 
 async function main() {
+  // WINDOWS: the guard this suite proves is gated OFF on win32 in cmdDaemon --
+  // its liveness/refusal path hangs daemon startup on the Windows CI runner
+  // (second `membridge daemon`: empty output, pid never overwritten, killed at
+  // the 4s timeout with status=null), which is worse than no guard. Tracked in
+  // task #34 for a Windows-observed fix. There is nothing to refuse here, so the
+  // three behavioural checks below cannot run; skip them VISIBLY (never a silent
+  // green) and instead pin the gate itself -- if it is removed before #34 lands
+  // a verified guard, Windows startup can hang again and this goes red.
+  if (process.platform === 'win32') {
+    skip('a second `membridge daemon` does not overwrite the running daemon\'s pid file',
+      'win32: duplicate-daemon guard gated to POSIX until task #34');
+    skip('a second `membridge daemon` exits non-zero when one is already running',
+      'win32: duplicate-daemon guard gated to POSIX until task #34');
+    skip('a second `membridge daemon` names the running pid in its refusal message',
+      'win32: duplicate-daemon guard gated to POSIX until task #34');
+    check('cmdDaemon gates the duplicate-daemon guard off on win32 (task #34)', () => {
+      const src = fs.readFileSync(BIN, 'utf8');
+      assert.ok(/platform\s*!==\s*'win32'/.test(src),
+        'the win32 gate around the duplicate-daemon refusal is gone -- Windows daemon '
+        + 'startup can hang again until task #34 lands a Windows-verified guard');
+    });
+    return; // the bottom `main().then(() => h.finish())` tallies and exits
+  }
+
   // 1. Fake-MemBridge fixture. `ps -o command= -p <pid>` on macOS and Linux
   //    reports the command line as invoked; a script whose FILENAME contains
   //    "membridge" is enough to satisfy the guard's /membridge/i check --
