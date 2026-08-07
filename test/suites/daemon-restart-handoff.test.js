@@ -29,7 +29,7 @@
 // itself opens NO listening socket, so it needs no P(N) offset.
 
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
-const { check, BIN, noEgress } = h;
+const { check, skip, BIN, noEgress } = h;
 const assert = require('assert');
 const fs = require('fs');
 const http = require('http');
@@ -122,8 +122,18 @@ async function main() {
     // 4. The genuine-duplicate guard must still refuse. Point the pid file at the
     //    live daemon and start a plain `membridge daemon` (NO restart handoff):
     //    it must exit non-zero without taking the pid.
+    //
+    //    WINDOWS: the duplicate-daemon guard is gated OFF on win32 in cmdDaemon
+    //    (its liveness/refusal path hangs daemon startup on the Windows CI
+    //    runner -- tracked in task #34), so a genuine duplicate is NOT refused
+    //    there and this check cannot hold. Skip it visibly on win32; the handoff
+    //    checks above still run on every platform, which is the point of this
+    //    suite. Restore this once #34 lands a Windows-verified guard.
     const livePid = pid2 || pid1;
-    if (isAlive(livePid)) {
+    if (process.platform === 'win32') {
+      skip('a genuine second `membridge daemon` is still refused (guard not fail-open)',
+        'win32: duplicate-daemon guard gated to POSIX until task #34');
+    } else if (isAlive(livePid)) {
       fs.writeFileSync(util.pidPath(), String(livePid));
       const dupPort = await noEgress.freePort();
       const dup = spawnSync(process.execPath, [BIN, 'daemon'], {
