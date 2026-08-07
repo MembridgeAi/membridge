@@ -3036,7 +3036,7 @@ async function main() {
       team: { url: '', anonKey: '' },
     })).json();
     check('settings: self-hosted team backend can reset to default', () => {
-      assert.deepStrictEqual(stTeamBackendReset.team, { url: '', anonKey: '', customBackend: false });
+      assert.deepStrictEqual(stTeamBackendReset.team, { url: '', anonKey: '', customBackend: false, sharePrompts: 'verbatim' });
       const cfg = util.getConfig();
       assert.strictEqual(cfg.team.url, '');
       assert.strictEqual(cfg.team.anonKey, '');
@@ -13324,8 +13324,11 @@ async function main() {
       const r = spawnSync(process.execPath, ['-e', "require(process.argv[1]).ensureConfig()", path.join(__dirname, '..', 'lib', 'util.js')], { env, encoding: 'utf8' });
       assert.strictEqual(r.status, 0, r.stderr);
       const written = JSON.parse(read(path.join(homeNew, 'config.json')));
-      assert.strictEqual(written.team.sharePrompts, true, 'a fresh config did not opt in');
-      assert.strictEqual(util.freshInstallConfig().team.sharePrompts, true, 'freshInstallConfig lost the flag');
+      // Task 5A widened sharePrompts from a boolean to a three-value mode; a
+      // fresh install now ships the DISTILLED default (shares the agent-written
+      // goal, never raw prompts) rather than the old verbatim `true`.
+      assert.strictEqual(written.team.sharePrompts, 'distilled', 'a fresh config did not opt in');
+      assert.strictEqual(util.freshInstallConfig().team.sharePrompts, 'distilled', 'freshInstallConfig lost the flag');
     });
 
     check('privacy: an existing config without the flag is NOT flipped by the shipped defaults', () => {
@@ -13348,13 +13351,16 @@ async function main() {
     check('privacy: CLI team share-prompts toggles the config flag', () => {
       const homeCli = path.join(ROOT, 'home-pg-cli');
       const env = { ...process.env, MEMBRIDGE_HOME: homeCli };
+      // Task 5A: the CLI aliases legacy `on`/`off` onto the three-value mode —
+      // `on` is verbatim (raw prompts), `off` is the string 'off' (not a
+      // boolean), and the confirmation line names the resolved mode.
       const on = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'on'], { env, encoding: 'utf8' });
       assert.strictEqual(on.status, 0, on.stderr);
-      assert.ok(/Prompt sharing ON/.test(on.stdout), `on said: ${on.stdout}`);
-      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, true, 'flag not saved');
+      assert.ok(/Prompt sharing VERBATIM/.test(on.stdout), `on said: ${on.stdout}`);
+      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, 'verbatim', 'flag not saved');
       const off = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'off'], { env, encoding: 'utf8' });
       assert.strictEqual(off.status, 0, off.stderr);
-      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, false, 'flag not cleared');
+      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, 'off', 'flag not cleared');
       const bad = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'maybe'], { env, encoding: 'utf8' });
       assert.strictEqual(bad.status, 1, 'invalid value was accepted');
     });
