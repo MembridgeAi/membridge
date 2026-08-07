@@ -138,10 +138,21 @@ function cmdDaemon() {
   fs.writeFileSync(util.pidPath(), String(process.pid));
   util.log(`daemon started (pid ${process.pid}, interval ${config.intervalSec}s, v${pkg.version})`);
 
-  // Auto-register the Claude Code Stop hook on every daemon boot, so it lands
-  // however MemBridge was installed (git clone, npm, curl) without a manual
-  // `setup-hooks` step. Silent and fail-open — never blocks the daemon.
-  const { registration } = hooks.ensureInstalled() || {};
+  // Reconcile the Claude Code hooks on every daemon boot, so a consented
+  // install stays current however MemBridge was installed (git clone, npm,
+  // curl). Silent and fail-open — never blocks the daemon.
+  //
+  // It no longer INSTALLS on its own say-so: a machine that has never been
+  // asked, and one that opted out with `remove-hooks`, both get nothing
+  // written (#48/#49). There is no dialog on this path, so say so once in the
+  // log rather than leaving a CLI user wondering why no summaries appear —
+  // silence is what made the old behaviour invisible in the first place.
+  const { registration, consent } = hooks.ensureInstalled() || {};
+  if (registration === 'no-consent') {
+    util.log(consent === 'declined'
+      ? 'Claude Code hooks are turned off for this machine — nothing was written to your settings (`membridge setup-hooks` re-enables them)'
+      : 'Claude Code hooks are not installed and nothing was written to your settings — run `membridge setup-hooks` to enable session summaries, recall and teammate notes');
+  }
 
   const cleanup = () => {
     try {
@@ -287,7 +298,14 @@ function cmdStatus() {
   console.log(`Interval:  ${config.intervalSec}s   Targets: ${util.effectiveTargets(config).join(', ')}`);
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
-  console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'}, Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
+  // "not installed" now has two very different causes, and a status line that
+  // conflated them would send an opted-out user hunting a bug: nobody has been
+  // asked yet, or they said no and MemBridge is honouring it.
+  const consentState = hooks.hookConsent.state(config);
+  const notInstalled = consentState === 'declined'
+    ? 'not installed (hooks turned off for this machine; `membridge setup-hooks` re-enables)'
+    : 'not installed (run `membridge setup-hooks`)';
+  console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'}, Claude Code hook ${hooks.isHookInstalled() ? 'installed' : notInstalled}`);
   printEffectiveHook();
   printCaptureHealth(config);
   printMcpStatus(config);
