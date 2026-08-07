@@ -57,32 +57,23 @@ function readPid() {
     return null;
   }
 }
-// Windows liveness. `process.kill(pid, 0)` is NOT a reliable existence probe on
-// Windows: libuv's kill opens the target with PROCESS_TERMINATE |
-// PROCESS_QUERY_INFORMATION, so a pid we can see but not terminate answers EPERM
-// (thrown, read here as "dead") -- the exact false-negative that let the
-// duplicate-daemon guard fall through to takeover on the Windows CI leg while it
-// held on macOS/Linux. tasklist only needs query rights and is the authoritative
-// existence check; a hit prints a CSV row whose second field is the quoted pid,
-// a miss prints an "INFO:" line with no such field. Always on PATH (System32).
-function win32Alive(pid) {
-  try {
-    const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8' });
-    if (r.status !== 0 || !r.stdout) return false;
-    return r.stdout.includes(`"${pid}"`);
-  } catch {
-    return false;
-  }
-}
-
+// A thrown EPERM means the process EXISTS but this caller lacks terminate
+// rights on it -- which is alive, not dead. That distinction is invisible on
+// macOS/Linux (where we usually can signal a pid we can see) but load-bearing
+// on Windows: libuv's kill opens the target with PROCESS_TERMINATE, and the
+// duplicate-daemon guard's probe runs in a SECOND daemon checking a pid a
+// DIFFERENT process spawned, so Windows denies terminate rights and answers
+// EPERM. The old `catch { return false }` read that as dead, so the guard fell
+// through to takeover on the Windows CI leg while holding on mac/Linux. ESRCH
+// (and anything else) is genuinely not-running. No subprocess: an earlier
+// tasklist-based probe here hung the daemon on a loaded Windows runner.
 function isRunning(pid) {
   if (!pid) return false;
-  if (process.platform === 'win32') return win32Alive(pid);
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    return e && e.code === 'EPERM';
   }
 }
 
@@ -96,11 +87,11 @@ function isRunning(pid) {
 // `node.exe` / `MemBridge.exe`, and reading a process's full command line needs
 // wmic (removed on current Windows) or a PowerShell CIM query (slow, and not
 // guaranteed present) -- both too fragile to gate daemon startup on. So on
-// Windows we conservatively assume a live pid IS MemBridge (isRunning above is
-// now authoritative via tasklist), erring toward "refuse to start a second
-// daemon" -- the alternative (two daemons racing state.json, which has no
-// locking) is worse than a rare false-positive refusal a user clears with
-// `membridge stop`.
+// Windows we conservatively assume a live pid IS MemBridge (isRunning above
+// gets Windows liveness right via the EPERM read), erring toward "refuse to
+// start a second daemon" -- the alternative (two daemons racing state.json,
+// which has no locking) is worse than a rare false-positive refusal a user
+// clears with `membridge stop`.
 function isMembridgeProcess(pid) {
   if (!pid) return false;
   if (process.platform === 'win32') return true;
