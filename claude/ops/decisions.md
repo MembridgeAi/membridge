@@ -210,22 +210,57 @@ when they do fail. Code at `lib/server.js:1367` onward.
 
 ---
 
-## `MIN_COMPRESSION` gets recalibrated when the BPE tokenizer lands
+## `MIN_COMPRESSION` was recalibrated when the BPE tokenizer landed — and stays 2.25
 
-**Status:** decided in principle, blocking the Tier 2 tokenizer work. The
-tokenizer sits uncommitted in an agent worktree and `lib/token-estimate.js` on
-master is still chars/4.
+**Status:** DONE. The recalibration was carried out and the answer is that the
+existing value is correct. No code behaviour changed. The evidence is a suite,
+`test/suites/compression-floor.test.js`, which re-derives it on every run.
 
-**Reasoning.** `MIN_COMPRESSION` is `2.25` at `lib/recall.js:41`, and it gates a
-ratio: `callTokens / skeletonTokens`. That constant was calibrated while both
-sides of the ratio were produced by the chars/4 heuristic. A real BPE tokenizer
-changes the units on one side of that comparison only, so `2.25` stops
-expressing the thing it was chosen to express.
+**The original reasoning, which was sound.** `MIN_COMPRESSION` is `2.25` at
+`lib/recall.js`, and it gates a ratio: `callTokens / skeletonTokens`. That
+constant was calibrated while both sides of the ratio were produced by the
+chars/4 heuristic — an estimator that understates real source by ~6% in
+aggregate *and* whose error tracks file type, so it was wrong by different
+amounts on the two sides. A real BPE tokenizer changes how both sides are
+priced, so `2.25` could easily have stopped expressing the thing it was chosen
+to express. Re-measuring was the right call, and it was not optional.
 
-Recalibrating **restores the original intent**. It is not relaxing a quality
-bar, and it should not be argued about as though it were. The number was a
-measurement in one unit system and it needs to be re-measured in the new one.
-Shipping the tokenizer without doing that would silently move the gate.
+**What the measurement found.** Over 283 real repo files, priced under both
+estimators against the *same* skeleton text (`skeletonize()` does not depend on
+the tokenizer — its own keep/drop gate counts lines):
+
+- The serve population at an unchanged 2.25 goes **197 → 204**. Three files lose
+  the floor, ten gain it. The predicted drop is not there.
+- The shift decomposes: the call side rises a fixed ~10% (`bytes/4` →
+  `bytes/BYTES_PER_TOKEN`); a **code** skeleton's BPE-vs-chars/4 error is
+  *smaller* than that, so code compression ratios **rise** (×1.02).
+- The expected drop is real but confined to **Markdown** (×0.82), whose
+  heading-only skeletons tokenize expensively per character. It changes no
+  decision: the lowest Markdown ratio in the repo is **8.07×**, nowhere near the
+  floor. 86 of 86 Markdown files served before and after.
+- No nearby threshold does meaningfully better. The best-matching value is 2.30,
+  which beats 2.25 by 2.1% of the corpus — inside the noise of a corpus that
+  moves with the repo.
+
+**Why "change nothing" is the active decision, not inertia.** With both sides
+now counted in the same vocabulary, 2.25 means an actual 2.25× in tokens, which
+it never did before. Re-tuning it to reproduce the old serve population would
+re-introduce the estimator's bias as a hardcoded constant — the precise mistake
+the recalibration existed to undo.
+
+**To be explicit about what did NOT decide this.** The value was not kept in
+order to stop `avoided.serves` from dropping on upgrade. Had the measurement
+said the floor was wrong on the merits, the right move would have been to change
+it and let the reported figure land wherever it landed. It says the opposite, so
+the constant stays on the evidence alone. (The epoch reset in
+`lib/holdout-epoch.js` does restart the measurement clock; that is a separate,
+accepted consequence and the compression floor contributes nothing to it.)
+
+**One coupling a future re-tune must not miss.** `lib/diagnostics.js`'s
+`compression_realization` comment converts this threshold to an expected ratio
+by hand ("2.25x implies roughly 0.55+"). It is a comment, not a read — the
+suite asserts auto-pause never acquires a real dependency on this constant — but
+it goes stale silently if the number ever moves.
 
 ---
 
