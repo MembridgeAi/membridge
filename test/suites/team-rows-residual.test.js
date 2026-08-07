@@ -50,7 +50,16 @@ const digest = require('../../lib/digest');
 const mcp = require('../../lib/mcp');
 const server = require('../../lib/server');
 
-const NOW = '2026-08-05T12:00:00.000Z';
+// Real time, not a literal — for the reason documented at the top of
+// test/suites/teammate-notes-revocation.test.js. Two of the readers this suite
+// pins (mcp.getProjectMemory and digest.renderBlock) go through
+// digest.teamInjectSlice, which drops rows older than config.teamMaxAgeHours
+// (default 72) against `Date.now()` and takes no injected clock. Pinned to
+// 2026-08-05T12:00Z, this suite's "before the sweep the stale rows ARE served"
+// premise would have started failing at 2026-08-08T12:00Z and on every run
+// after — a green suite with an expiry date. A couple of hours old is what a
+// row fresh off the wire is in production.
+const NOW = new Date(Date.now() - 2 * 3600000).toISOString();
 const SESSION = 'sess-mate';
 // A pushed teammate row in wire shape, with every field the four readers
 // consult — enough for a decision, a file note, a search hit, and a block line.
