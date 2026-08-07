@@ -86,7 +86,48 @@ improvement and it is not parity.
 
 ---
 
-## 4. Design
+## 3b. Measured against a real install — this supersedes §4
+
+Codex CLI **0.147.0-alpha.6.5**, 2026-08-07. `codex features list` reports
+`hooks` as **stable, enabled**. Everything below was observed, not inferred.
+
+**`~/.codex/sessions` is created lazily.** It did not exist before the first
+session and I nearly concluded the adapter watched a dead path. It does not:
+after one session the rollout landed at
+`~/.codex/sessions/2026/08/07/rollout-*.jsonl`, exactly where `sessionRoots`
+looks, and `threads.rollout_path` in `state_5.sqlite` agrees. **The adapter's
+path is correct.** Recorded because absence-of-evidence was about to become a
+structural claim, which is the failure mode this run kept finding.
+
+**A registered SessionEnd hook did not fire.** Correct schema, and the probe
+was proven working by piping JSON to it directly. But the session aborted on a
+401 (this machine is not logged in), so *"`codex exec` does not emit
+SessionEnd"* and *"an aborted session does not emit SessionEnd"* remain
+**unseparated**. Settling it needs `codex login`.
+
+**`task_complete` is in the rollout, and it changes the design.** The final
+entry is `event_msg` / `task_complete`. That is an end-of-session signal
+**already in the file we already read**, which means none of §4's inherited
+costs apply: no registration in a second tool's config, no 1s budget, no
+duplicating the consent gate, no dependency on whether SessionEnd fires under
+`codex exec`. It also makes the unresolved 401 question moot rather than
+blocking — you do not care whether the hook fires if you do not need the hook.
+
+The hook's one remaining advantage was `transcript_path` for provenance, and
+`threads.rollout_path` supplies that from SQLite. **So (a) and (b) below are
+probably unnecessary.** Prefer reading `task_complete`; keep the hook only if
+something later needs a signal *outside* the rollout.
+
+Two consequences: the `lib/hooks.js` overlap with the consent/vintage lane
+drops to **zero**, and the estimate loses ~1.5 days.
+
+**Still blocked on one thing:** every rollout on this machine is degenerate
+(the 401 means no assistant content), so the extractor in (c) — the part
+carrying the whole quality claim — cannot be designed against real data yet.
+It needs one authenticated session. Building it against synthetic fixtures
+would be designing for a shape nobody has confirmed.
+
+## 4. Design (superseded in part — see §3b before building)
 
 **Three pieces.** The hook must do nothing that can take a second.
 
