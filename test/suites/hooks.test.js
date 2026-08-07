@@ -562,6 +562,305 @@ async function main() {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Consent (#48, #49). Two defects, one missing record.
+  //
+  // #48: the first-run dialog was decorative. ensureInstalled() wrote the Stop
+  // hook, BOTH PreToolUse hooks, the SessionStart hook and a Bash auto-approve
+  // rule, and only THEN did the dialog ask. "Not now" wrote
+  // distill.consent='declined', which no hook body and no reconciler ever
+  // read, and returned the sentence "no hook installed" over an install that
+  // had just happened.
+  //
+  // #49: `remove-hooks` and the Settings toggle stripped the entries and the
+  // next launch put them all back, because ensureInstalled consulted nothing.
+  //
+  // Every test below pins the RECORD, not a sentence: the same shape
+  // mcp-register uses for its 'unregister' opt-out.
+  // ---------------------------------------------------------------------
+  {
+    const hookConsent = require('../../lib/hook-consent');
+    const consentLib = require('../../lib/consent');
+    // A sandbox with its own MemBridge home, so each block gets its own
+    // config.json and one block's decision can never leak into another's.
+    const consentBox = (name, config) => {
+      const s = sandbox(name);
+      fs.mkdirSync(s.home, { recursive: true });
+      if (config) fs.writeFileSync(path.join(s.home, 'config.json'), JSON.stringify(config, null, 2));
+      return s;
+    };
+    const inBox = (s, fn) => withHome(s.home, () => withSettings(s.settings, () => asDurableInstall(fn)));
+    const ourEntries = settings => JSON.stringify(settings.hooks || {}).match(/membridge-hook\.js/g) || [];
+
+    check('#48 first run: ensureInstalled writes NOTHING into settings.json before the user has been asked', () => {
+      const s = consentBox('consent-fresh');
+      writeJson(s.settings, { model: 'opus' });
+      const r = inBox(s, () => hooks.ensureInstalled());
+      assert.deepStrictEqual(readJson(s.settings), { model: 'opus' },
+        'the dialog asks AFTER this runs -- anything written here was written without consent');
+      assert.strictEqual(r.registration, 'no-consent');
+      assert.strictEqual(r.consent, 'unknown');
+    });
+
+    check('#48 first run: "Not now" leaves nothing installed and SAYS so truthfully', () => {
+      const s = consentBox('consent-declined');
+      writeJson(s.settings, { model: 'opus' });
+      const msg = inBox(s, () => {
+        hooks.ensureInstalled();              // the launch path, as it really runs
+        return consentLib.applyConsent('declined');
+      });
+      assert.deepStrictEqual(readJson(s.settings), { model: 'opus' });
+      assert.ok(/no hook installed/.test(msg), `message must stay true: ${msg}`);
+      assert.strictEqual(withHome(s.home, () => hookConsent.state()), 'declined');
+    });
+
+    check('#48: a decline over an unreadable settings.json is still RECORDED, and says it could not clean up', () => {
+      // The cleanup reads settings.json, which throws on a malformed file. That
+      // must never take the first-run dialog handler down with it, and it must
+      // never report the removal it did not do -- but the decision itself lives
+      // in config.json and is honoured regardless.
+      const s = consentBox('consent-declined-unreadable');
+      fs.writeFileSync(s.settings, '{ not json');
+      const msg = inBox(s, () => consentLib.applyConsent('declined'));
+      assert.ok(/could not be read/.test(msg), `the failure must be reported, not swallowed: ${msg}`);
+      assert.ok(!/no hook installed/.test(msg), 'and it must not claim an install that could not be checked');
+      assert.strictEqual(withHome(s.home, () => hookConsent.state()), 'declined',
+        'the decision must survive a cleanup that could not run');
+      assert.strictEqual(fs.readFileSync(s.settings, 'utf8'), '{ not json', 'the unreadable file must be left alone');
+    });
+
+    check('#48: a decline that finds a pre-consent install REMOVES it, and says what it removed', () => {
+      // The state every user who ever clicked "Not now" is in today: the hooks
+      // went in before the question. Recording the decline is not enough --
+      // the sentence is only true if the entries are gone.
+      const s = consentBox('consent-declined-cleanup', { hooks: { consent: 'granted' } });
+      writeJson(s.settings, { model: 'opus' });
+      const msg = inBox(s, () => {
+        hooks.ensureInstalled();
+        assert.ok(ourEntries(readJson(s.settings)).length >= 3, 'fixture: the pre-consent install must be there to remove');
+        return consentLib.applyConsent('declined');
+      });
+      const after = readJson(s.settings);
+      assert.deepStrictEqual(ourEntries(after), [], 'a decline must leave no MemBridge hook behind');
+      assert.strictEqual((after.permissions || {}).allow, undefined, 'the auto-approve rule is part of the install');
+      assert.ok(/removed/i.test(msg), `the message must report the removal, not claim nothing was installed: ${msg}`);
+    });
+
+    check('#48: the Stop hook body stands down when consent was declined', () => {
+      const s = consentBox('consent-body-stop', { distill: { enabled: true, consent: 'declined' } });
+      const proj = path.join(s.dir, 'proj');
+      fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+      fs.writeFileSync(path.join(s.home, 'state.json'), JSON.stringify({
+        version: util.STATE_VERSION, files: {}, catchup: {}, feedback: {},
+        projects: { [proj]: { events: [{ ts: new Date().toISOString(), kind: 'edit', session: 'sd1', file: path.join(proj, 'a.js') }] } },
+      }));
+      fs.writeFileSync(path.join(s.home, 'membridge.pid'), String(process.pid));
+      const run = () => spawnSync(process.execPath, [HOOK_JS], {
+        input: JSON.stringify({ session_id: 'sd1', cwd: proj, hook_event_name: 'Stop' }),
+        encoding: 'utf8', env: { ...process.env, MEMBRIDGE_HOME: s.home },
+      });
+      const declined = run();
+      assert.strictEqual(declined.status, 0, 'a declined user must never have their session end trapped');
+      assert.strictEqual(declined.stdout, '',
+        'the block JSON is how this hook stops a session end -- a declined user must not get one');
+      assert.strictEqual(withHome(s.home, () => hookStops.summarize()).lastStop.outcome, 'declined',
+        'the flight recorder must say WHY it was silent -- "declined" is not "no edits"');
+      // The same fixture with consent granted DOES block: this proves the test
+      // above measures the gate and not a broken fixture.
+      fs.writeFileSync(path.join(s.home, 'config.json'), JSON.stringify({ distill: { enabled: true, consent: 'granted' } }));
+      const granted = run();
+      assert.strictEqual(JSON.parse(granted.stdout || '{}').decision, 'block',
+        `fixture check: a consenting user is still asked (${granted.stdout} ${granted.stderr})`);
+    });
+
+    // The three PreToolUse/SessionStart bodies. Each is asserted as a PAIR --
+    // the same fixture, once granted and once declined -- because "produced no
+    // output" on its own is what a broken fixture looks like too. These are the
+    // hooks that had NO consent check of any kind: recall and search run off
+    // `config.recall.enabled` (default ON) and the notes hook off its own
+    // switch, so all three kept running for a user who had said no.
+    const bodyBox = name => {
+      const s = consentBox(name);
+      const proj = path.join(s.dir, 'proj');
+      fs.mkdirSync(path.join(proj, '.membridge'), { recursive: true });
+      const now = new Date().toISOString();
+      fs.writeFileSync(path.join(s.home, 'state.json'), JSON.stringify({
+        version: util.STATE_VERSION, files: {}, catchup: {}, feedback: {},
+        projects: { [proj]: { events: [
+          { ts: now, kind: 'prompt', session: 's1', text: 'make the widget exporter work', source: 'Claude Code' },
+          { ts: now, kind: 'edit', session: 's1', file: path.join(proj, 'a.js') },
+          { ts: now, kind: 'summary', session: 's1', text: 'built the widget exporter' },
+        ] } },
+      }));
+      return { ...s, proj };
+    };
+    // Both sides of every pair run the same command with the same payload; only
+    // the recorded decision differs.
+    const runBody = (s, sub, payload) => {
+      const r = spawnSync(process.execPath, sub ? [HOOK_JS, sub] : [HOOK_JS], {
+        input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, MEMBRIDGE_HOME: s.home },
+      });
+      assert.strictEqual(r.status, 0, `the hook must always fail open: ${r.stderr}`);
+      return r.stdout;
+    };
+    const withDecision = (s, decision, fn) => {
+      fs.writeFileSync(path.join(s.home, 'config.json'), JSON.stringify({ distill: { enabled: true, consent: decision } }));
+      return fn();
+    };
+
+    check('#48: the recall hook body (every Read) stands down when consent was declined', () => {
+      const s = bodyBox('consent-body-recall');
+      const file = path.join(s.proj, 'big.js');
+      const content = Array.from({ length: 40 }, (_, i) => `function f${i}() { doWork(${i}); }`).join('\n') + '\n';
+      fs.writeFileSync(file, content);
+      const recallStore = require('../../lib/recall-store');
+      const ledgerStore = require('../../lib/ledger-store');
+      const recallLib = require('../../lib/recall');
+      withHome(s.home, () => {
+        recallStore.put(s.proj, 'big.js', {
+          contentHash: require('crypto').createHash('sha1').update(content).digest('hex'),
+          skeleton: 'SKELETON_FOR_BIG', skeletonTokens: 50, fileTokens: 900, engine: 'strip', rejections: 0,
+        });
+        ledgerStore.writeLedger(s.proj, {
+          fileReaders: { 'big.js': { sessions: ['other-session'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session' } },
+        });
+      });
+      // Outside the 3% measurement holdout, chosen deterministically the way
+      // lib/recall.js's own tests do -- never a flaky pick.
+      const bucket = sid => require('crypto').createHash('sha1').update(String(sid)).digest().readUInt32BE(0) % 100;
+      let session = null;
+      for (let i = 0; i < 1000 && !session; i++) {
+        const cand = `aaaaaaaa-bbbb-cccc-dddd-${String(i).padStart(12, '0')}`;
+        if (bucket(cand) >= recallLib.HOLDOUT_PCT) session = cand;
+      }
+      const payload = { session_id: session, cwd: s.proj, tool_name: 'Read', tool_input: { file_path: file, limit: 100 } };
+      assert.strictEqual(withDecision(s, 'declined', () => runBody(s, 'recall', payload)), '',
+        'a declined user must not have their Read intercepted');
+      const granted = withDecision(s, 'granted', () => runBody(s, 'recall', payload));
+      assert.strictEqual(JSON.parse(granted).hookSpecificOutput.permissionDecision, 'deny',
+        'fixture check: this same read IS intercepted for a consenting user');
+    });
+
+    check('#48: the search hook body (every Grep/Glob) stands down when consent was declined', () => {
+      const s = bodyBox('consent-body-search');
+      const payload = {
+        session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', cwd: s.proj,
+        tool_name: 'Grep', tool_input: { pattern: 'widget exporter' },
+      };
+      assert.strictEqual(withDecision(s, 'declined', () => runBody(s, 'search', payload)), '',
+        'the search hook ships with no switch of its own -- consent is the only thing that can stop it');
+      const granted = withDecision(s, 'granted', () => runBody(s, 'search', payload));
+      assert.ok(/MemBridge memory/.test(granted), `fixture check: a consenting user still gets memory: ${granted}`);
+    });
+
+    check('#48: the teammate-notes SessionStart body stands down when consent was declined', () => {
+      const s = bodyBox('consent-body-notes');
+      fs.writeFileSync(path.join(s.proj, '.membridge', 'summaries.jsonl'),
+        JSON.stringify({ session: 's1', ts: new Date().toISOString(), did: 'built the widget exporter', headline: 'widget exporter' }) + '\n');
+      const payload = {
+        session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', cwd: s.proj,
+        source: 'startup', hook_event_name: 'SessionStart',
+      };
+      assert.strictEqual(withDecision(s, 'declined', () => runBody(s, 'notes-session-start', payload)), '',
+        'a declined user must not have context injected into their session');
+      const granted = withDecision(s, 'granted', () => runBody(s, 'notes-session-start', payload));
+      assert.ok(/SessionStart/.test(granted), `fixture check: a consenting user still gets the block: ${granted}`);
+    });
+
+    check('#49: remove-hooks records an opt-out that the next launch HONOURS -- all four reconcilers', () => {
+      const s = consentBox('consent-remove', { hooks: { consent: 'granted' } });
+      writeJson(s.settings, { model: 'opus' });
+      inBox(s, () => {
+        hooks.ensureInstalled();
+        const installed = readJson(s.settings);
+        assert.deepStrictEqual(Object.keys(installed.hooks).sort(), ['PreToolUse', 'SessionStart', 'Stop']);
+        hooks.removeHooks();
+      });
+      assert.deepStrictEqual(ourEntries(readJson(s.settings)), [],
+        'fixture: remove-hooks already worked -- the bug is what comes next');
+      assert.strictEqual(withHome(s.home, () => hookConsent.state()), 'declined',
+        'remove-hooks must record the opt-out, exactly like mcp-register.unregisterNow');
+      const r = inBox(s, () => hooks.ensureInstalled());
+      const afterLaunch = readJson(s.settings);
+      assert.deepStrictEqual(ourEntries(afterLaunch), [],
+        'the next launch restored the hooks the user just removed');
+      assert.strictEqual((afterLaunch.permissions || {}).allow, undefined,
+        'and the auto-approve rule came back with them');
+      assert.strictEqual(r.registration, 'no-consent');
+    });
+
+    check('#49: each reconciler refuses on its own -- gating only the Stop one leaves three doors open', () => {
+      const s = consentBox('consent-four-doors', { hooks: { consent: 'declined' } });
+      writeJson(s.settings, { model: 'opus' });
+      const results = inBox(s, () => [
+        hooks.reconcileStopHook(), hooks.reconcileRecallHook(),
+        hooks.reconcileSearchHook(), hooks.reconcileNotesHooks(),
+      ]);
+      for (const r of results) {
+        assert.strictEqual(r.optedOut, true, 'a reconciler called directly must honour the opt-out too');
+        assert.strictEqual(r.wrote, false);
+      }
+      assert.deepStrictEqual(readJson(s.settings), { model: 'opus' });
+    });
+
+    check('#49: setup-hooks is the documented way back in, and it sticks across a launch', () => {
+      const s = consentBox('consent-back-in', { hooks: { consent: 'declined' } });
+      writeJson(s.settings, { model: 'opus' });
+      const r = inBox(s, () => {
+        hooks.setupHooks();
+        return hooks.ensureInstalled();
+      });
+      assert.ok(ourEntries(readJson(s.settings)).length >= 3, 'an explicit setup-hooks must override an earlier opt-out');
+      assert.strictEqual(withHome(s.home, () => hookConsent.state()), 'granted');
+      assert.notStrictEqual(r.registration, 'no-consent', 'the launch after an explicit opt-IN must keep reconciling');
+    });
+
+    check('existing install: a granted user keeps working, with no record and no re-prompt', () => {
+      // Andrew's live config: distill.consent granted, written long before
+      // config.hooks existed. This must reconcile exactly as it always did.
+      const s = consentBox('consent-legacy-grant', { distill: { enabled: true, consent: 'granted' } });
+      writeJson(s.settings, { model: 'opus' });
+      inBox(s, () => hooks.ensureInstalled());
+      const after = readJson(s.settings);
+      assert.deepStrictEqual(Object.keys(after.hooks).sort(), ['PreToolUse', 'SessionStart', 'Stop']);
+      assert.strictEqual(consentLib.needsConsentPrompt(withHome(s.home, () => util.getConfig())), false,
+        'a user who already said yes must never be asked again');
+    });
+
+    check('existing install: hooks on disk but no consent record anywhere is grandfathered, once', () => {
+      // The CLI user who ran `membridge setup-hooks` and never saw a dialog.
+      // Standing down would break a working install to satisfy bookkeeping.
+      const s = consentBox('consent-legacy-install');
+      writeJson(s.settings, {
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: asDurableInstall(() => hooks.hookCommand()), timeout: 10 }] }] },
+      });
+      const r = inBox(s, () => hooks.ensureInstalled());
+      assert.notStrictEqual(r.registration, 'no-consent', 'an install that predates the record must keep reconciling');
+      assert.ok(ourEntries(readJson(s.settings)).length >= 3, 'the launch must still repair the rest of the install');
+      const cfg = withHome(s.home, () => util.getConfig());
+      assert.strictEqual(cfg.hooks.consent, 'granted', 'the grandfathered grant must be recorded so the probe runs once');
+      assert.strictEqual(cfg.hooks.via, 'pre-existing-install', 'and it must say it was inferred, not answered');
+      assert.strictEqual(consentLib.needsConsentPrompt(cfg), false, 'a working install must not be interrupted by a dialog');
+    });
+
+    check('existing install: grandfathering asks whether a hook is REGISTERED, not whether it still resolves', () => {
+      // The commonest legacy shape on a real machine: the app moved, npm
+      // relinked, or the worktree the command points at is gone. Judging that
+      // install by liveness would read it as "never installed", stand down,
+      // and leave the one machine that most needs a repair reconcile without
+      // one -- the exact repair this launch path exists to perform.
+      const s = consentBox('consent-legacy-dead-path');
+      writeJson(s.settings, {
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: '"/nonexistent/bin/node" "/gone/lib/membridge-hook.js"', timeout: 10 }] }] },
+      });
+      assert.strictEqual(inBox(s, () => hooks.isHookInstalled()), false,
+        'fixture: this install is genuinely broken -- that is the point');
+      const r = inBox(s, () => hooks.ensureInstalled());
+      assert.notStrictEqual(r.registration, 'no-consent', 'a broken consented install must still be repaired');
+      assert.strictEqual(inBox(s, () => hooks.isHookInstalled()), true, 'and the repair must have actually happened');
+    });
+  }
+
   h.finish();
 }
 

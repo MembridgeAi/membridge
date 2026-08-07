@@ -130,6 +130,15 @@ const memorydb = require('../lib/memorydb');
 const claudeAdapter = require('../lib/adapters/claude-code');
 const codexAdapter = require('../lib/adapters/codex');
 const hooks = require('../lib/hooks');
+// `membridge remove-hooks` (and the Settings toggle, and a declined first-run
+// prompt) now records a REAL opt-out that every reconciler and every hook body
+// honours until something opts back in -- that is the whole of #49. This file
+// is one long sequential story that exercises removal MECHANICS over and over
+// and then keeps asserting on registration, so each removal here re-opts-in
+// the way a user pressing the toggle back on does. Without it the rest of the
+// story would be asserting against a machine that has correctly turned
+// MemBridge off.
+const reOptIn = () => hooks.hookConsent.record('granted', 'test-fixture');
 const redactLib = require('../lib/redact');
 const feed = require('../lib/feed');
 const mcpMod = require('../lib/mcp');
@@ -2979,14 +2988,17 @@ async function main() {
     // and toggling distill.enabled installs/removes the Claude Code Stop hook
     // AND records consent — otherwise the first-run popup (needsConsentPrompt)
     // would keep nagging even after the Settings toggle already acted.
-    // hookInstalled is already true here: the daemon force-registers the Stop
-    // hook at boot (hooks.ensureInstalled), so it is present regardless of the
-    // Settings toggle. Disabling still removes it in-session; the next daemon
-    // boot re-registers it (unconditional by design).
+    // hookInstalled is FALSE here, and that is the fix for #48: a daemon boot
+    // no longer force-registers the Stop hook on nobody's say-so. This config
+    // has never answered the consent question (distill.consent is null below),
+    // so hooks.ensureInstalled writes nothing at all and the Settings toggle
+    // underneath is what installs. Disabling removes it AND records the
+    // opt-out, so the next boot no longer puts it back (#49).
     const consentLib = require('../lib/consent');
     const stFresh = await (await fetch(`${base}/api/settings`)).json();
     check('settings: hookInstalled + distill fields are reported', () => {
-      assert.strictEqual(stFresh.hookInstalled, true, 'daemon should auto-register the Stop hook at boot');
+      assert.strictEqual(stFresh.hookInstalled, false,
+        'a launch must not install hooks into a config that was never asked');
       assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 12 });
     });
     const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
@@ -3021,6 +3033,12 @@ async function main() {
       assert.strictEqual(stDistillInvalid.distill.minEdits, 3, 'invalid minEdits (0) was accepted');
       assert.strictEqual(stDistillInvalid.distill.checkpointEvery, 7, 'invalid checkpointEvery (non-numeric) was accepted');
     });
+    // Opt back in, explicitly, before the rest of this file exercises hook
+    // registration. The Settings toggle above is a REAL opt-out now (#49): it
+    // records a decision that every reconciler and every hook body honours,
+    // and nothing in the product silently reverses it any more -- that was the
+    // bug. This one line is what a user pressing the toggle back on does.
+    hooks.hookConsent.record('granted', 'test-fixture');
     const stTeamBackend = await (await post(`${base}/api/settings`, {
       team: { url: 'https://selfhost.supabase.co ', anonKey: ' anon-test-key ' },
     })).json();
@@ -10311,6 +10329,7 @@ async function main() {
     assert.strictEqual(after.hooks.Stop.length, 2, 'the MemBridge Stop entry was not appended alongside the user entry');
     assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], 'remove-hooks deleted a Stop hook that was never ours');
@@ -10345,6 +10364,7 @@ async function main() {
       assert.strictEqual(after.hooks.Stop.length, 2, `the MemBridge Stop entry was not appended alongside the false-positive user entry: ${falsePositiveCmd}`);
       assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       const afterRm = JSON.parse(read(f));
       assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], `remove-hooks deleted a Stop hook that was never ours: ${falsePositiveCmd}`);
@@ -10489,6 +10509,7 @@ async function main() {
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     assert.strictEqual(after.hooks.PreToolUse[2].matcher, 'Grep|Glob', 'the search hook must register on Grep/Glob, not inherit a foreign matcher');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a hook that was never ours');
@@ -10512,6 +10533,7 @@ async function main() {
     assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit the false-positive matcher');
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a false-positive recall-shaped hook that was never ours');
@@ -10842,6 +10864,7 @@ async function main() {
     assert.ok(/Distill:\s+enabled, Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
   });
   const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
+  reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
   const afterRemove = JSON.parse(read(claudeSettings));
   check('distill: remove-hooks strips only membridge entries', () => {
     assert.ok(/Removed the MemBridge hooks/.test(removeOut.stdout), removeOut.stdout);
@@ -10863,6 +10886,7 @@ async function main() {
     const after2 = JSON.parse(read(permFile));
     assert.strictEqual(after2.permissions.allow.filter(r => /membridge/i.test(r)).length, 1, 'rule duplicated on re-run');
     spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     const after3 = JSON.parse(read(permFile));
     const allow3 = ((after3.permissions || {}).allow) || [];
     assert.ok(!allow3.some(r => /membridge/i.test(r)), 'rule not removed by remove-hooks');
@@ -10877,6 +10901,7 @@ async function main() {
     let allow = JSON.parse(read(f)).permissions.allow;
     assert.ok(allow.includes(userRule) && allow.includes(hooks.appendAllowRule()), 'setup should add ours and keep the user rule');
     spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
     assert.ok(allow.includes(userRule), 'remove-hooks deleted a user rule that only contains "membridge"');
     assert.ok(!allow.includes(hooks.appendAllowRule()), 'our append rule should be gone');
@@ -10914,6 +10939,7 @@ async function main() {
     const after = JSON.parse(read(f));
     assert.ok(after.permissions.allow.includes(hooks.appendAllowRule()), 'the real append allow rule was not installed/recognized');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     const allowRm = ((afterRm.permissions || {}).allow) || [];
@@ -10928,6 +10954,7 @@ async function main() {
     const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(out.status, 0, out.stderr);
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
     assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule that was never ours (unanchored notmembridge-hook.js false positive)');
@@ -10940,6 +10967,7 @@ async function main() {
     const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(out.status, 0, out.stderr);
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
     assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule whose substrings merely appear out of order');
@@ -10957,6 +10985,7 @@ async function main() {
     assert.deepStrictEqual(after.permissions.allow.slice(0, rules.length), rules, 'unrelated rule order changed');
     assert.strictEqual(after.permissions.allow[rules.length], hooks.appendAllowRule(), 'our rule not appended after the user rules');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.permissions.allow, rules, 'unrelated rules changed or reordered by remove-hooks');
@@ -16323,6 +16352,7 @@ async function main() {
       });
 
       const pcRemove = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envPc, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       check('commits: remove-hooks strips only the membridge line; a membridge-only hook file is deleted', () => {
         assert.strictEqual(pcRemove.status, 0, pcRemove.stderr);
         assert.ok(/post-commit/.test(pcRemove.stdout), `remove-hooks must report the post-commit cleanup, said: ${pcRemove.stdout}`);
@@ -16345,6 +16375,7 @@ async function main() {
         assert.ok(body.includes('membridge-hook.js'), 'our line must still be appended');
       });
       const mbRemove = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envPc, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       check('commits: remove-hooks leaves a user line that merely mentions membridge intact', () => {
         assert.strictEqual(mbRemove.status, 0, mbRemove.stderr);
         assert.strictEqual(read(path.join(projHook, '.git', 'hooks', 'post-commit')), userMb,
@@ -17017,6 +17048,7 @@ async function main() {
         'must NOT fall back to .git/hooks when core.hooksPath is set');
     });
     const hpRemove = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: hpEnv, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     check('spine: remove-hooks honors core.hooksPath (strips from the configured hooks dir)', () => {
       assert.strictEqual(hpRemove.status, 0, hpRemove.stderr);
       assert.ok(!fs.existsSync(path.join(projHP, '.myhooks', 'post-commit')),
@@ -19465,6 +19497,7 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(countSub(before.hooks.SessionStart, /notes-session-start/), 1, 'setup-hooks did not register the notes SessionStart hook');
       assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 0, 'setup-hooks registered a PostCompact hook that can never deliver');
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       const after = JSON.parse(read(f));
       assert.deepStrictEqual(after.hooks.SessionStart, [mineStart], "remove-hooks left our SessionStart entry behind, or ate the user's");
@@ -25548,6 +25581,7 @@ const repoRoot = require('../lib/repo-root');
         'setup-hooks duplicated the search entry');
       // ...and remove-hooks takes ours out while leaving the user's alone.
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       const afterRm = JSON.parse(read(f));
       assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry],
@@ -25567,6 +25601,7 @@ const repoRoot = require('../lib/repo-root');
       const after = JSON.parse(read(f));
       assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks claimed a hook that was never ours");
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       assert.deepStrictEqual(JSON.parse(read(f)).hooks.PreToolUse, [userEntry],
         'remove-hooks deleted a hook that was never ours');
