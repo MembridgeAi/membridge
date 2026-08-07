@@ -795,6 +795,39 @@ export function useLeaveTeam() {
   })
 }
 
+// The deletion preview. `enabled` is load-bearing: this is a backend RPC round
+// trip, and it should fire when the confirmation dialog opens rather than
+// sitting in the background of a Settings page nobody is deleting from.
+//
+// staleTime/gcTime 0 so every open re-reads. A stale count is tolerable almost
+// everywhere else in this product and intolerable here: it is the number a
+// person reads before agreeing to destroy something, and other machines push
+// to the same account between opens.
+export function useMyData(enabled: boolean) {
+  const c = useDataClient()
+  return useQuery({
+    queryKey: ['myData'],
+    queryFn: () => c.getMyData(),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+  })
+}
+
+// Irreversible. Invalidates everything on success rather than patching
+// individual caches: entries this user wrote surface in the feed, in search,
+// in project counts and in insights, and any one of those still rendering
+// removed rows would read as "it didn't work" -- the single impression this
+// action must never give.
+export function useDeleteMyData() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (projectId?: string | null) => c.deleteMyData(projectId ?? null),
+    onSuccess: () => { void qc.invalidateQueries() },
+  })
+}
+
 // Discovery for the add-project dialog (GET /api/scan). `enabled` is the
 // whole point: scanPayload re-reads every session file on this machine from
 // byte 0, so this must fire when the dialog opens and never on its own.
