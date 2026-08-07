@@ -177,6 +177,10 @@ function cmdDaemon() {
       // memory from syncing.
       const idx = activity.refreshSearchIndex();
       if (idx && idx.refreshed) util.log(`search index: refreshed ${idx.refreshed} project(s)`);
+      // Logged separately from `refreshed`: this one DELETES rows (a project
+      // that was paused, archived, marked off or removed), and a deletion
+      // nothing records is a deletion nobody can explain afterwards.
+      if (idx && idx.purged) util.log(`search index: purged ${idx.purged} hidden/removed project(s)`);
       teamTick();
       countersTick();
       // Record that a pass completed, so /api/status can report the sync loop's
