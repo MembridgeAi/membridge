@@ -1,4 +1,28 @@
 'use strict';
+// NOT_RUN_BY_CI: a manual demonstration harness. CI runs `node test/run.js`,
+// which discovers test/suites/*.test.js and test/run-tests.js only. Run by
+// hand: `node test/recall-e2e.js` (~0.4s, exits 0 today).
+//
+// MEASURED, like test/teammate-notes-e2e.js, and the answer is the same —
+// though it took a step more work to get there, because the first number
+// looked like the opposite. Scored as a mutation runner over lib/recall.js
+// (`node test/mutate.js --target lib/recall.js --mode ops --cmd "node
+// test/recall-e2e.js"`):
+//
+//   this file:          21 killed / 48, ALL 21 by a failing assertion
+//   split suites:        0 killed / 48
+//   the monolith (core): 17 killed / 17 of the sampled subset, 0 survived
+//
+// So the split suites cover lib/recall.js not at all, and for a moment this
+// file looked like the only thing standing over it. It is not: every sampled
+// mutant it kills, test/run-tests.js kills too, by assertion. Its coverage is
+// real but wholly duplicated by the monolith, so wiring it into CI would add
+// wall-clock and no discrimination — the same verdict as the teammate-notes
+// harness, reached by a different route.
+//
+// Sampled, not swept: 8 of the 21 kills were taken to core (expanding to 17
+// mutants). The other 13 are UNVERIFIED against core, not cleared.
+//
 // Task 10: end-to-end proof. Drives the REAL adapter -> ledger -> recall
 // store -> PreToolUse hook -> fold pipeline against a throwaway fixture
 // repo, so the whole recall-saving-layer feature (docs/superpowers/specs/

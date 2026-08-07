@@ -74,6 +74,17 @@ input, select { font: inherit; border-radius: var(--r); background: var(--panel2
   50% { opacity: 0.55; transform: scale(1.3); }
 }
 
+/* The loading-bar pulse (components.css's .loading-block). Opacity only —
+   never scale or translate — because these bars stand in the line box of the
+   text that is about to replace them, and a bar that moves reads as content
+   arriving when nothing has. Slower than pulse-live on purpose: this says
+   "still working", not "this is live right now", and the two must not look
+   like the same signal. Gated per call site, same as the two above. */
+@keyframes pulse-load {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 /* Reduced motion — hard kill-switch. Collapses every animation and
    transition in the app, including ones a future edit adds without
    remembering to gate it. Non-negotiable. */

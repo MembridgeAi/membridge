@@ -3,6 +3,21 @@
 -- run against the already-live backend without touching existing tables/rows.
 -- Run in the Supabase SQL editor, or `supabase db push` if you use the CLI.
 --
+-- ⚠ DO NOT RE-APPLY THIS FILE AFTER 044 AND 045.
+-- It defines public.remove_member and public.leave_team, and both were later
+-- REPLACED — 044 makes removing a member rotate the team's standing invite
+-- code, 045 does the same for a voluntary departure. Re-running this file
+-- restores these older bodies with `create or replace` and silently reverts
+-- both, so a removed member's old invite code starts working again. No error,
+-- no diff, and the symptom is a security property quietly gone.
+--
+-- The same warning is on 044 and 045 themselves. It is repeated HERE because
+-- this is the file someone about to re-paste actually opens — a note living
+-- only in the newer files is read by everyone except the person doing the
+-- dangerous thing. Enforced as a class by
+-- test/suites/invite-lifetime-hardening.test.js, which tracks every function
+-- defined in one migration and superseded in a later one.
+--
 -- v1 (schema.sql) stays the source for the base tables and RLS. Everything
 -- here is additive; the legacy teams.invite_code keeps working alongside the
 -- new invite links.

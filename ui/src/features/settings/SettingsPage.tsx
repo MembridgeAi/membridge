@@ -4,7 +4,7 @@ import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
 import { readEncryption } from '../../components/encryptionState'
 import { useDataClient } from '../../data/DataClientProvider'
-import { useOpenConfigFile, useSetSetting, useSettings, useStatus } from '../../data/queries'
+import { useOpenConfigFile, useSetSetting, useSettings, useSoloView, useStatus } from '../../data/queries'
 import { absoluteTime, relativeAgo } from '../../data/relativeTime'
 import type { DeliveryChannel, HooksVersionStatus, Settings } from '../../data/types'
 import { ContextFilesDialog } from './ContextFilesDialog'
@@ -203,6 +203,9 @@ export function SettingsPage() {
   const statusQuery = useStatus()
   const setSetting = useSetSetting()
   const openConfigFile = useOpenConfigFile()
+  // T-78: hides the Team memory encryption row on solo. Called here, above
+  // any conditional return below, per rules-of-hooks.
+  const soloView = useSoloView()
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null)
 
   // Full error page only for a first-load failure (no data at all); a failed
@@ -318,13 +321,23 @@ export function SettingsPage() {
        * row's job is to let him SEE the state, not to change it here; the
        * config file is deliberately the only way in, and "Open config file"
        * above is how you get there. */}
-      <SettingRow
-        label="Team memory encryption"
-        description="End-to-end means teammates' apps decrypt locally and the server cannot read your content. Routing metadata — project, timestamp, session, tool and your display name — travels outside the ciphertext. Change it in your config file (team.encrypt, team.plaintextOff), not here."
-        testId="setting-plaintext"
-      >
-        <EncryptionDetail privacy={settings.privacy} />
-      </SettingRow>
+      {/* T-78: Team memory encryption is the ONE Privacy row that describes
+          team behaviour ("teammates' apps decrypt locally") and names the two
+          config keys (team.encrypt, team.plaintextOff) that only mean
+          something once a team exists. On a solo (or signed-out) install both
+          are noise: there is no team to encrypt for, and pointing at those
+          keys hands the user two variables to search their config for with no
+          value. Hidden entirely, matching the ticket's rule that the
+          surface goes AWAY on solo rather than saying "n/a". */}
+      {!soloView && (
+        <SettingRow
+          label="Team memory encryption"
+          description="End-to-end means teammates' apps decrypt locally and the server cannot read your content. Routing metadata — project, timestamp, session, tool and your display name — travels outside the ciphertext. Change it in your config file (team.encrypt, team.plaintextOff), not here."
+          testId="setting-plaintext"
+        >
+          <EncryptionDetail privacy={settings.privacy} />
+        </SettingRow>
+      )}
       <SettingRow
         label="Redaction patterns"
         description="Built-in key, token and credential shapes, plus your own"

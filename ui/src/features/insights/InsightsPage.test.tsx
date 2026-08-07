@@ -81,6 +81,12 @@ describe('InsightsPage against a backend predating migration 027', () => {
     ...(await new FakeDataClient().getInsights(30)),
     exact: false,
     truncated: true,
+    // Same coveredDays shape backend #79 ships even on an ancient wire; the
+    // TWO fields describe DIFFERENT facts (`exact` covers the headline counts,
+    // `truncated` covers the paged breakdowns), so the counts-are-floors path
+    // still needs the reached span to phrase the notice.
+    lookbackDays: 12,
+    coveredDays: 12,
     sessions: { count: 267, deltaPct: null },
     entriesShared: { count: 2000, delta: null },
   })
@@ -110,6 +116,252 @@ describe('InsightsPage against a backend predating migration 027', () => {
     renderApp({}, <InsightsPage />)
     expect(await screen.findByText('187')).toBeInTheDocument()
     expect(screen.queryByText(/approximate/)).toBeNull()
+  })
+})
+
+// T-76 + T-71. A 30-day and a 90-day window are indistinguishable on a team
+// with real history -- both saturate the same MAX_PAGES x TEAM_FEED_PAGE cap.
+// Under T-76 (before backend #79) the truncation was invisible to the client
+// because the wire masked it through `exact`; the fix landed as absence copy
+// ("the reached depth is not reported") because that was the strongest
+// sentence the payload permitted.
+//
+// With #79 the wire now carries `coveredDays` (== lookbackDays), the actual
+// reach of the fetch, so the notice moves from "something was cut" to "30
+// days requested, N days reached." The two truncation shapes have to be told
+// apart:
+//   - `coveredDays < windowDays` -- the current window itself is short. The
+//     ticket's headline case.
+//   - `coveredDays >= windowDays` (but still truncated) -- the current window
+//     is whole, the PRIOR one is short, the delta is what got capped.
+describe('Insights when the current window itself was cut short', () => {
+  const cut = async (over: Partial<Insights> = {}) => ({
+    ...(await new FakeDataClient().getInsights(30)),
+    // Post-#79: exact stays true on a current backend even when truncated,
+    // because the two headline counts come from the database and only the
+    // paged breakdowns are floors. The old masked flag would have hidden this
+    // whole path -- see the type doc for `truncated`.
+    exact: true,
+    truncated: true,
+    lookbackDays: 12,
+    coveredDays: 12,
+    sessions: { count: 267, deltaPct: null },
+    entriesShared: { count: 2000, delta: null },
+    ...over,
+  })
+
+  it('names both the requested and reached ranges, in days', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    // The actionable sentence: what you asked for, and what you got. Both
+    // numbers, both units, no "some part of it was cut" hedge.
+    expect(notice).toHaveTextContent(/30 days requested, 12 days reached/)
+    // The missing span is stated as the arithmetic difference so a scanner
+    // can see how big the gap is without doing the subtraction themselves.
+    expect(notice).toHaveTextContent(/oldest 18 days/)
+    expect(notice).toHaveTextContent(/floor over the 12 days that were/)
+  })
+
+  it('names the window the reader actually chose', async () => {
+    renderWith(await clientServing(await cut({ window: 90, lookbackDays: 12, coveredDays: 12 })), <InsightsPage />)
+    await screen.findByTestId('insights-truncated')
+    await userEvent.click(screen.getByRole('button', { name: '90 days' }))
+    expect(await screen.findByTestId('insights-truncated'))
+      .toHaveTextContent(/90 days requested, 12 days reached/)
+  })
+
+  // The part that matters. "Nothing has arrived from Sarah" is drawn from the
+  // truncated rows, so under a cut window it may be an artefact of the cap
+  // rather than a fact about Sarah.
+  it('never files a silent teammate under Broken when the data was cut', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    const unconfirmed = await screen.findByTestId('problems-unconfirmed')
+    expect(within(unconfirmed).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
+    expect(unconfirmed).toHaveTextContent(/Unconfirmed/)
+    expect(unconfirmed).toHaveTextContent(/silence here may be unread data/)
+
+    // The accusing frame is gone entirely -- both the "nothing is reaching the
+    // team" heading and its inverse claim that nothing is wrong.
+    expect(screen.queryByTestId('problems-broken')).toBeNull()
+    expect(screen.queryByText(/nothing is reaching the team/i)).toBeNull()
+    expect(screen.queryByText(/Nothing is broken right now/i)).toBeNull()
+  })
+
+  // Every action on this page asks the reader to go and chase a named
+  // teammate. You may not send someone after a problem the page cannot
+  // establish. (The real daemon sets action: null for absence problems; the
+  // fixture supplies one, which is exactly the case worth pinning.)
+  it('offers no chase-this-person action on an unconfirmed problem', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+    await screen.findByTestId('problems-unconfirmed')
+    expect(screen.queryByRole('button', { name: /send setup steps/i })).toBeNull()
+  })
+
+  // T-84. `exact` and `truncated` are two independent bits describing two
+  // different things: `exact` says the two headline COUNTS were counted in the
+  // database (027_team_feed_counts.sql), `truncated` says the paged FEED FETCH
+  // stopped at its cap. AND-ing them wrongly is what masked feedTruncated on
+  // the wire for four releases (3b0a97f); the mirror-image mistake is here --
+  // marking a database-exact count as a floor just because the feed was cut.
+  //
+  // A "≥" on a number that is in fact the real total is not a safe hedge. It
+  // tells the reader their figure is a lower bound and invites them to assume
+  // the truth is higher, which is a different wrong answer, not a softer one.
+  it('does not mark the database-exact counts as floors just because the feed was cut', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+    await screen.findByTestId('insights-truncated')
+
+    // Counted in the database, so these are the real totals however short the
+    // feed fetch was.
+    expect(screen.getByText('267')).toBeInTheDocument()
+    expect(screen.getByText('2,000')).toBeInTheDocument()
+    expect(screen.queryByText('≥267')).toBeNull()
+    expect(screen.queryByText('≥2,000')).toBeNull()
+
+    // CAP_NOTE blames an out-of-date server, and the server is not out of
+    // date -- `exact` is true. Its own doc says it is for `exact:false +
+    // truncated:true` and nothing else.
+    expect(screen.queryByText(/approximate/)).toBeNull()
+    expect(screen.queryByText(/out of date/)).toBeNull()
+  })
+
+  // The counterpart, and the reason this is not simply "drop the floor mark":
+  // members-syncing is NOT one of the database-counted figures. `ok` is
+  // derived from the fetched pages, so a short fetch really can undercount it
+  // and `exact` says nothing about it either way. It keeps its floor mark on
+  // exactly the same payload the assertion above requires to be unmarked.
+  // BOUNDARY, found by mutation. `coveredDays < windowDays` survived being
+  // changed to `<=`, which means nothing pinned the case where the fetch
+  // reached EXACTLY the window asked for. Under `<=` that reads as a cut
+  // window and announces "the oldest 0 days were never read" -- the page
+  // claiming it is less certain than it is, which is the same defect as
+  // claiming more certainty, just in the flattering direction.
+  it('does not call the window cut when the fetch reached exactly the window asked for', async () => {
+    renderWith(await clientServing(await cut({ lookbackDays: 30, coveredDays: 30 })), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    // Not the requested/reached phrasing: nothing of the current window was missed.
+    expect(notice.textContent).not.toMatch(/30 days requested/)
+    expect(notice.textContent).not.toMatch(/oldest 0 days/)
+    // The honest reading at this boundary: the window is whole, the PRIOR one
+    // is what got capped.
+    expect(notice).toHaveTextContent(/comparison against the previous 30 days is capped/)
+  })
+
+  it('marks members-syncing as a floor instead of counting people out', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    // Anchored on loaded content: the loading frame renders the same four stat
+    // LABELS with bars in place of figures, so a findByText on the label alone
+    // resolves one state too early.
+    await screen.findByTestId('insights-truncated')
+    const cell = screen.getByText('members syncing').closest('.stat-cell')
+    expect(cell).toHaveTextContent('≥2/3')
+    expect(cell).toHaveTextContent(/a floor/)
+    // `ok` can only be undercounted by a short fetch, so the missing member
+    // must not be reported as a person who has gone quiet.
+    expect(cell).not.toHaveTextContent(/haven't shared recently/)
+  })
+
+  // The CSV is the copy that gets forwarded to the person it names, so it must
+  // not out-claim the screen it came from.
+  it('exports the problem as unconfirmed rather than broken, and carries the reached span', async () => {
+    const csv = buildCsv(await cut())
+    expect(csv).toContain('feed_truncated,true')
+    expect(csv).toContain('feed_covered_days,12')
+    expect(csv).toContain('unconfirmed,Nothing has arrived from Sarah')
+    expect(csv).not.toContain('broken,Nothing has arrived from Sarah')
+  })
+
+  it('keeps Broken, Minor and the plain fraction when the fetch completed', async () => {
+    renderApp({}, <InsightsPage />)
+
+    const broken = await screen.findByTestId('problems-broken')
+    expect(within(broken).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
+    expect(screen.getByTestId('problems-minor')).toBeInTheDocument()
+    expect(screen.queryByTestId('problems-unconfirmed')).toBeNull()
+    expect(screen.queryByTestId('insights-truncated')).toBeNull()
+    expect(screen.getByRole('button', { name: /send setup steps/i })).toBeInTheDocument()
+    expect((screen.getByText('members syncing').closest('.stat-cell'))).toHaveTextContent('2/3')
+  })
+})
+
+// T-71 second shape: the CURRENT window is whole but the PRIOR one is not, so
+// the trend against the previous window is what got capped. Different sentence
+// entirely -- "30 days requested, 42 days reached" would read as growth, when
+// the point is that the reader can trust everything in the current window and
+// only the year-over-year comparison is unavailable.
+describe('Insights when only the prior window was cut short', () => {
+  const capped = async () => ({
+    ...(await new FakeDataClient().getInsights(30)),
+    exact: true,
+    truncated: true,
+    // The daemon requests window * 2 = 60 days; reaching 42 means the LAST
+    // 30 days are complete and the previous 30 days are short.
+    lookbackDays: 42,
+    coveredDays: 42,
+    sessions: { count: 812, deltaPct: null },
+    entriesShared: { count: 3400, delta: null },
+  })
+
+  it('names the trend as capped, not the window as truncated', async () => {
+    renderWith(await clientServing(await capped()), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    // Not the "requested / reached" phrasing -- that would read as growth
+    // ("30 requested, 42 reached") when the actual fact is a capped delta.
+    expect(notice.textContent).not.toMatch(/30 days requested/)
+    expect(notice).toHaveTextContent(/comparison against the previous 30 days is capped/)
+    // Reassures on the current window itself, which is the fact the reader
+    // most needs to know before deciding whether to trust the figures below.
+    expect(notice).toHaveTextContent(/last 30 days are complete/)
+    expect(notice).toHaveTextContent(/stopped 42 days back/)
+  })
+
+  it('still demotes the silent-teammate sentence, because the sentence reads over the same rows', async () => {
+    // Coordinator's rule: silent-teammate demotion fires whenever truncated
+    // is true, not only when the current window is short. The delta-only
+    // case still means the problems list was built from a capped view --
+    // any teammate whose last row is older than 42 days is invisible.
+    renderWith(await clientServing(await capped()), <InsightsPage />)
+    await screen.findByTestId('problems-unconfirmed')
+    expect(screen.queryByTestId('problems-broken')).toBeNull()
+  })
+})
+
+// `ok === total ? 'all healthy' : "N haven't shared recently"` survived being
+// inverted, so nothing distinguished a fully-synced team from a partly-synced
+// one. Inverted, a team where everyone is syncing reads "0 haven't shared
+// recently" and a team with someone missing reads "all healthy" -- a false
+// assurance about whether teammates' work is reaching you, which is the whole
+// question this stat exists to answer.
+describe('the members-syncing note distinguishes a whole team from a partial one', () => {
+  const serving = async (ok: number, total: number) => {
+    const base = await new FakeDataClient().getInsights(30)
+    return clientServing({ ...base, membersSyncing: { ok, total } })
+  }
+
+  it('says all healthy only when everyone has shared into the window', async () => {
+    renderWith(await serving(3, 3), <InsightsPage />)
+    // Anchored on a LOADED figure first: the loading frame renders the same
+    // four stat labels with bars in place of numbers, so finding the label
+    // alone resolves one state too early.
+    await screen.findByText('412')
+    const cell = screen.getByText('members syncing').closest('.stat-cell')
+    expect(cell).toHaveTextContent('3/3')
+    expect(cell).toHaveTextContent(/all healthy/)
+    expect(cell?.textContent).not.toMatch(/shared recently/)
+  })
+
+  it('counts the quiet ones when somebody has not', async () => {
+    renderWith(await serving(2, 3), <InsightsPage />)
+    await screen.findByText('412')
+    const cell = screen.getByText('members syncing').closest('.stat-cell')
+    expect(cell).toHaveTextContent('2/3')
+    expect(cell).toHaveTextContent(/1 haven't shared recently/)
+    expect(cell?.textContent).not.toMatch(/all healthy/)
   })
 })
 
@@ -179,10 +431,17 @@ describe('InsightsPage', () => {
   })
 
   it('never calls getInsights in solo mode', async () => {
+    // T-78 item 14: on a fresh solo install (no team of any kind) the copy
+    // says WHAT this screen is, not what permission it needs -- a signed-out
+    // user has no team, so "available to team owners and admins" was true
+    // but useless. The role-restricted case (a signed-in member, tested just
+    // above) keeps its original wording, since for that reader the tier is
+    // the answer.
     const client = new FakeDataClient({ solo: true })
     const insightsSpy = vi.spyOn(client, 'getInsights')
     renderWith(client, <InsightsPage />)
-    expect(await screen.findByText(/owners and admins/i)).toBeInTheDocument()
+    expect(await screen.findByText(/team surface/i)).toBeInTheDocument()
+    expect(screen.getByText(/join or create a team/i)).toBeInTheDocument()
     expect(insightsSpy).not.toHaveBeenCalled()
   })
 
@@ -295,5 +554,97 @@ describe('InsightsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: '7 days' }))
     expect(await screen.findByRole('button', { name: '7 days' })).toHaveAttribute('aria-pressed', 'true')
     expect(insightsSpy).toHaveBeenCalledWith(7)
+  })
+})
+
+// T-61, and the screen Marco actually named. GET /api/team/insights?window=30
+// takes 3.6-4.0s on his install (three consecutive curl runs: 3.98s, 3.93s,
+// 3.63s), and for all of it this page rendered:
+//
+//   t=65ms    an empty <div className="insights-page" /> -- a blank window
+//   t=253ms   a bare "Loading…" paragraph, no header, no strip, no columns
+//   t=4371ms  the entire page, all at once
+//
+// Two undesigned states and a four-second layout jump. Note this is a
+// DIFFERENT endpoint from /api/insights (0.6ms), which this screen never calls
+// -- the fast one is not the one behind the wait.
+describe('Insights while its payload is still in flight', () => {
+  const pendingInsights = () => {
+    const client = new FakeDataClient()
+    // Never resolves: pending is the state under test.
+    vi.spyOn(client, 'getInsights').mockReturnValue(new Promise(() => {}))
+    return client
+  }
+
+  it('renders the page frame immediately instead of a bare Loading line', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    // The frame: title, window selector, and the four stat cells the loaded
+    // page renders -- so nothing is renamed or re-counted when data lands.
+    //
+    // Awaited on the window selector, not on the heading: the OUTER gate
+    // (status/settings, tested in its own describe below) renders a heading
+    // too, so a findBy on that would resolve one state too early and assert
+    // against the wrong frame.
+    expect(await screen.findByRole('group', { name: 'Time window' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Insights' })).toBeInTheDocument()
+    for (const label of ['sessions', 'times memory helped', 'members syncing', 'memory entries shared']) {
+      expect(screen.getByText(label)).toBeInTheDocument()
+    }
+    expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('shows bars, not zeros, in every stat cell', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    const cell = (await screen.findByText('sessions')).closest('.stat-cell')
+    expect(cell?.querySelector('.loading-block')).not.toBeNull()
+    expect(cell?.querySelector('.stat-value')?.textContent).not.toMatch(/\d/)
+  })
+
+  it('holds both columns open with placeholder rows', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    expect(await screen.findByTestId('insights-people-loading')).toBeInTheDocument()
+    expect(screen.getByTestId('insights-problems-loading')).toBeInTheDocument()
+  })
+
+  // A 30-day window that takes four seconds is exactly when a reader wants to
+  // ask for 7 instead. Disabling the control would make them wait out an
+  // answer they have already decided against.
+  it('keeps the window selector usable during the wait', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    const sevenDays = await screen.findByRole('button', { name: '7 days' })
+    expect(sevenDays).toBeEnabled()
+    await userEvent.click(sevenDays)
+    expect(sevenDays).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  // Nothing to export yet. An absent control is honest where a disabled one is
+  // a dead button, and a live one would hand back an empty CSV.
+  it('offers no Export CSV until there is something to export', async () => {
+    renderWith(pendingInsights(), <InsightsPage />)
+
+    await screen.findByRole('heading', { name: 'Insights' })
+    expect(screen.queryByRole('button', { name: 'Export CSV' })).toBeNull()
+  })
+})
+
+// The outer gate, before the role check: this returned a literally empty
+// element while getSettings() fanned out to /api/settings + /api/status +
+// /api/team (~250ms, dominated by /api/team).
+describe('Insights before status and settings have resolved', () => {
+  it('names the screen instead of painting a blank window', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getSettings').mockReturnValue(new Promise(() => {}))
+    renderWith(client, <InsightsPage />)
+
+    expect(await screen.findByRole('heading', { name: 'Insights' })).toBeInTheDocument()
+    expect(screen.getByTestId('insights-outer-loading')).toBeInTheDocument()
+    // NOT the admin page's furniture: this runs before the role check, and a
+    // member who typed the URL must not watch it assemble and then be refused.
+    expect(screen.queryByRole('group', { name: 'Time window' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Export CSV' })).toBeNull()
   })
 })

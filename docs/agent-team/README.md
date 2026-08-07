@@ -14,7 +14,7 @@ The importer reads this structure specifically:
 
 ```
 docs/agent-team/
-  CLAUDE.md          → becomes the LEAD's orchestration prompt
+  CLAUDE.md          → becomes CTOpus's orchestration prompt (the lead)
   agents/
     ui.md              → member  (React app, ui/ only)
     backend.md         → member  (daemon, CLI, Supabase, tests)
@@ -23,7 +23,9 @@ docs/agent-team/
     doubting-thomas.md → member  (judges candidates and fixes)
 ```
 
-The lead is **not** an agent file — it comes from `CLAUDE.md`. Each member file
+CTOpus is **not** an agent file — the prompt comes from `CLAUDE.md`. That is also why the role is
+named rather than called "lead": `lead` and `team-lead` are reserved member names (see below), so
+the orchestrator could not be registered under either. Each member file
 is YAML frontmatter (`name`, optional `skills`) plus a markdown body that
 becomes that member's workflow. Because members only ever see their own file,
 the standing orders and the test gate are repeated in each one on purpose; that

@@ -23,6 +23,15 @@ interface ProjectRowProps {
    *  caller compares its mutation's variables against this row's path, so a
    *  pending sync on one project never disables another row's button. */
   syncPending?: boolean
+  /** T-78: on a solo install (or a signed-out one) the Shared/Private tag is
+   *  hidden entirely. `project.shared` on this row is derived from whatever
+   *  `.membridge/team.json` happens to sit next to the source (a stray copy
+   *  from a teammate's clone marks a private project as team-linked), so a
+   *  "Shared" chip pointed at a team the user is not on is worse than absent
+   *  — a decorative <span> with no click handler leaves them no way to
+   *  disagree. Passed as a prop rather than read here so React.memo's shallow
+   *  equality can skip re-renders when the flag hasn't changed. */
+  soloView?: boolean
 }
 
 /** One "Projects · this week" row: name/tag/avatars + latest summary on the
@@ -34,7 +43,7 @@ interface ProjectRowProps {
  *  structural sharing already keeps an unchanged `project` object's identity
  *  stable across a poll, so memo here only re-renders a row whose own data
  *  actually changed. */
-function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: ProjectRowProps) {
+function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending, soloView }: ProjectRowProps) {
   const behind = project.sync.state === 'behind'
   const handleSync = useCallback(() => onSyncProject(project.path), [onSyncProject, project.path])
   // One announced label for the avatar group below. Same treatment, and the
@@ -60,9 +69,11 @@ function ProjectRowImpl({ project, memberNames, onSyncProject, syncPending }: Pr
               projectHref keeps the target identical to the one the Projects
               table builds, so the two screens can never point apart. */}
           <Link href={projectHref(project.path)} className="project-name">{project.name}</Link>
-          <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
-            {project.shared ? 'Shared' : 'Private'}
-          </span>
+          {!soloView && (
+            <span className={`tag ${project.shared ? 'tag-team' : 'tag-private'}`}>
+              {project.shared ? 'Shared' : 'Private'}
+            </span>
+          )}
           {/* Gated on a non-empty set, the same way ProjectPage's header stack
               is. An empty span still costs .project-left-top's 8px flex gap, so
               a project with no recent authors used to sit with a visible hole

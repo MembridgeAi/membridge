@@ -1,4 +1,5 @@
 'use strict';
+// NO_UNOWNED_FILE_READS: this suite constructs path.join(os.homedir(), ...) values as EVENT FIXTURE STRINGS (planted into state, compared as strings), never fs.<read> from disk via them. See test/suites/tests-own-their-state.test.js.
 // Attribution of edits to files that live OUTSIDE every tracked project.
 //
 // THE RULE: a session that edited nothing inside a project does not appear in

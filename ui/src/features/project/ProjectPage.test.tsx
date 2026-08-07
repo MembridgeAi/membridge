@@ -259,3 +259,99 @@ describe('a shared project opens shared', () => {
     })
   })
 })
+
+// T-72. The project page's two worst not-yet-known-as-empty states, both fed by
+// GET /api/feed?project=… (850ms-1.1s measured). Sampled per animation frame in
+// a visible Chrome on a real 28-session project:
+//
+//   0    -> 1640ms   main region entirely blank (useProjects awaits /api/feed)
+//   1640 -> 2486ms   "No activity captured yet."  + Status "waiting for the
+//                    first session"  — on a project with 28 captured sessions
+//
+// The status chip is the worse of the two: an empty note is a claim about a
+// list, but a muted health chip is a claim about whether the product is working
+// at all, and it was asserting a state the code had not observed.
+describe('ProjectPage while its data is still in flight', () => {
+  const forever = () => new Promise<never>(() => {})
+
+  it('does not claim the project has no activity while the stream is loading', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjectStream').mockReturnValue(forever())
+    renderWith(client, <ProjectPage slug="membridge" />)
+
+    expect(await screen.findByTestId('project-stream-loading')).toBeInTheDocument()
+    expect(screen.queryByText('No activity captured yet.')).toBeNull()
+  })
+
+  it('does not report "waiting for the first session" before the stream answers', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjectStream').mockReturnValue(forever())
+    renderWith(client, <ProjectPage slug="membridge" />)
+
+    await screen.findByTestId('project-stream-loading')
+    expect(screen.queryByText('waiting for the first session')).toBeNull()
+    // And not the opposite lie either — "delivering" is equally unearned here.
+    expect(screen.queryByText('delivering')).toBeNull()
+  })
+
+  it('names the page instead of rendering nothing while the project list loads', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjects').mockReturnValue(forever())
+    renderWith(client, <ProjectPage slug="membridge" />)
+
+    expect(await screen.findByTestId('project-loading')).toBeInTheDocument()
+    // Must NOT have decided the project is missing — that is the other branch
+    // of this same `if (!project)`.
+    expect(screen.queryByText(/not found/)).toBeNull()
+  })
+
+  // The screen still has to be able to say "nothing" once it really knows.
+  it('still reports no activity once the stream comes back empty', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'getProjectStream').mockResolvedValue([])
+    renderWith(client, <ProjectPage slug="membridge" />)
+
+    expect(await screen.findByText('No activity captured yet.')).toBeInTheDocument()
+    expect(screen.queryByTestId('project-stream-loading')).toBeNull()
+  })
+})
+
+// T-78 item 12: opening a project that carries a stray .membridge/team.json
+// on a solo (or signed-out) install used to render three separate assertions
+// about a team the user is not in -- the "Shared" chip in the header, a "Team
+// sync ✓ up to date" line in the Sync panel, and an Encryption chip labelled
+// "end-to-end" or worse. All three land elsewhere on this page under a team
+// install, so this suite asserts absence in solo view without stripping the
+// SyncPanel's local-sync row.
+describe('ProjectPage on a stray-shared solo install', () => {
+  it('drops the Shared chip from the header', async () => {
+    // membridge is the fixture's team-linked project; on a solo, signed-out
+    // install its "shared" flag has to be treated as noise.
+    renderApp({ solo: true, authenticated: false }, <ProjectPage slug="membridge" />)
+    await screen.findByText(/membridge/)
+    expect(screen.queryByText('Shared')).toBeNull()
+    expect(screen.queryByText('Private')).toBeNull()
+  })
+
+  it('drops the Team-sync framing and the Encryption row from the Sync panel', async () => {
+    renderApp({ solo: true, authenticated: false }, <ProjectPage slug="membridge" />)
+    await screen.findByText(/membridge/)
+    // The row itself stays -- the daemon still processes the project
+    // locally, and that's useful to see -- but the "Team" adjective is gone.
+    expect(screen.queryByText('Team sync')).toBeNull()
+    // Anchored on the row's own key cell so this can't collide with the
+    // panel's "Sync" section-label heading, which reads identically.
+    const syncRow = document.querySelector('.panel-last .kv .kv-key')
+    expect(syncRow?.textContent).toBe('Sync')
+    // Encryption keys are meaningless without a team to encrypt for.
+    expect(screen.queryByText('Encryption')).toBeNull()
+  })
+
+  it('keeps all three surfaces on a team install', async () => {
+    renderApp({}, <ProjectPage slug="membridge" />)
+    await screen.findByText(/Hook ownership/)
+    expect(screen.getByText('Shared')).toBeInTheDocument()
+    expect(screen.getByText('Team sync')).toBeInTheDocument()
+    expect(screen.getByText('Encryption')).toBeInTheDocument()
+  })
+})

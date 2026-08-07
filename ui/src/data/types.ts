@@ -406,10 +406,39 @@ export interface FeedPage {
  *  user_id, display_name, role, joined_at. A teammate's paused daemon or expired
  *  token lives on THEIR machine and is not knowable here — so this models
  *  "when did anything of theirs last arrive", never a diagnosis. */
+/**
+ * What signing out actually achieved. TWO outcomes, not one.
+ *
+ * This machine forgetting the session always happens: teamsync.signOut deletes
+ * credentials.json unconditionally, so a user offline or behind an outage can
+ * still sign out of their own laptop. Ending the session on the BACKEND can
+ * fail independently.
+ *
+ * `revoked` is true ONLY when the backend confirmed it -- never inferred from
+ * the absence of an error. When it is false, any copy of credentials.json
+ * taken before the sign-out (a backup, a synced folder, another process as the
+ * same user) still mints valid tokens until the session expires, and no retry
+ * from here can change that: the credentials are already gone from this
+ * machine, so there is nothing left to revoke WITH. Changing the account
+ * password is the only certain remedy.
+ */
+export interface SignOutResult {
+  revoked: boolean
+  /** The backend's own wording for why revocation failed; null when revoked. */
+  revokeError: string | null
+}
+
 export interface Member {
   id: string
   name: string
-  email: string
+  // There is no `email`. The members RPC has never returned one, so mapMember
+  // filled this with '' on every row and MemberRow rendered a permanently
+  // blank address line under every name -- the same defect, and the same
+  // remedy, as `Invite.email` above. It survived because FakeDataClient
+  // authored Member literals with plausible addresses instead of going
+  // through mapMember, so every test and every screenshot saw data the app
+  // could not produce. Removed from the TYPE, not just the row, so nothing
+  // can render it again.
   role: Role
   joinedAt: string
   // Distinct projects this member has POSTED team-feed entries into -- NOT
@@ -420,7 +449,60 @@ export interface Member {
   // load-bearing.
   projectCount: number
   lastSharedAt: string | null   // newest team-feed entry authored by them; null = nothing ever
-  keyAlert: boolean             // their encryption key changed since we pinned it (state.keyAlerts)
+  /**
+   * Whether this member's encryption key still matches the one we pinned.
+   *
+   * A STRING, not a boolean, and that is the point. A teammate's box pubkey
+   * comes from the server, so a compromised backend could substitute its own
+   * and read the sealed team key; lib/teampins.js catches that. But a boolean
+   * cannot carry "we don't know", so that state collapses into `false` and
+   * renders identically to "verified" -- the user reads the absence of a
+   * warning as an assurance nobody made. That was the original bug here
+   * (mapMember hardcoded `keyAlert: false` for everyone), and a boolean would
+   * reintroduce it in a new costume.
+   *
+   *   'alert'   -- disagrees with our pin. Show the chip.
+   *   'ok'      -- we hold a pin and the running gate agreed with it.
+   *   'unknown' -- we cannot say. NEVER render this as "verified".
+   *
+   * 'unknown' is the honest answer in three real situations: no pin for the
+   * member (they have published no key, so TOFU never happened and there is
+   * nothing to disagree with), encryption switched off, and the crypto gate
+   * PAUSED, where the pins on disk may be stale and nothing re-checks them.
+   * An 'alert' outranks all three -- a key change that was found stays found,
+   * and turning encryption off must not silence it.
+   *
+   * READ IT AS `=== 'alert'`. All three values are truthy, so `if (keyStatus)`
+   * lights the chip for everybody, which is the one edit that silently puts
+   * the original bug back.
+   */
+  keyStatus: 'alert' | 'ok' | 'unknown'
+  /**
+   * #59. How much of this member's local history a person filter CANNOT reach.
+   *
+   * Team rows pulled before the daemon projected `author_id` carry an author
+   * NAME and no id. The person picker's option value is the member's uuid and
+   * the daemon matches on that uuid first, so those rows are invisible to the
+   * filter -- and the empty result they produce is byte-identical to the empty
+   * result for someone who has genuinely done nothing. This field is what
+   * tells the two apart.
+   *
+   *   entries  -- local team rows with no author_id whose author name is this
+   *               member's display name.
+   *   projects -- how many DISTINCT local projects those rows sit in. A count,
+   *               never a list: it lets the UI say "across 3 projects" without
+   *               putting teammate project paths into an identity payload.
+   *
+   * BOTH COUNT THIS MACHINE ONLY -- a pre-fix row is a local storage property,
+   * so no server can answer this.
+   *
+   * ALWAYS PRESENT, carrying zero when there is nothing to report. Not
+   * optional, and deliberately so: an absent field is indistinguishable from
+   * "no problem", which is the same silent zero the ticket exists to fix. The
+   * UI condition is `m.preFixLocal.entries > 0`, and it can only be written
+   * that way because the zero is explicit.
+   */
+  preFixLocal: { entries: number; projects: number }
 }
 
 // One outstanding invite link (GET /api/team/invites, lib/api-access.js
@@ -429,6 +511,14 @@ export interface Member {
 // pastes, and everyone who redeems one joins as a member. Those two fields
 // existed on this type before any endpoint could fill them, which is why the
 // row rendered a permanently blank address.
+/** Lifetime bounds for a freshly minted invite. `0` means "no limit" -- the
+ *  daemon's deliberate opt-out -- and is NOT the same as omitting the field,
+ *  which is why both are always sent explicitly. */
+export interface InviteOptions {
+  expiresDays: number
+  maxUses: number
+}
+
 export interface Invite {
   /** The invite token. Also the id: it is the primary key AND exactly what
    *  revoking takes, so a row needs nothing else to be revocable. */
@@ -512,10 +602,30 @@ export interface Insights {
   // rather than from measuring fetched rows, so they are true totals at any
   // window size. False only on a backend predating that migration.
   exact: boolean
-  // Only reachable when `exact` is false: the paged fallback ran out of pages,
-  // so the counts are floors and their deltas are null. Against a current
-  // backend this is always false.
+  // Un-masked as of #79: the feed fetch really did stop at the 10-page cap,
+  // regardless of whether the two headline COUNTS are exact. Under the old
+  // masked wire (`feedTruncated && !exact`) this was always false against a
+  // 027+ backend; T-76 shipped against that mask and was dormant on production.
+  // Now this fires whenever the fetch saturated, and the T-76 UI (truncation
+  // notice, silent-teammate demotion, floor-mark on members-syncing) is what
+  // that boolean is for. `exact` still covers the two headline counts
+  // (sessions, entries) independently -- both flags carry their own meaning.
   truncated: boolean
+  // How far back the paged fetch actually reached, in days. Untruncated, this
+  // equals `window * 2` (the daemon requests the two-window span for the
+  // current-vs-prior comparison). Truncated, it shrinks to the floor the fetch
+  // hit -- and this is the ONE number that lets the UI say "30 days requested,
+  // N days reached" rather than "some part of it was cut".
+  //
+  // WHY TWO FIELDS FOR THE SAME NUMBER. The daemon's own silent-teammate and
+  // concentration sentences quote `lookbackDays` ("in the last Nd") and always
+  // will; `coveredDays` is the same integer under a UI-facing name for "days
+  // reached" in the truncation notice. They hold the same value today (see the
+  // #79 commit body). Deliberately no helper abstracting across them: a helper
+  // is how the two drift when the daemon later diverges them, so each site
+  // reads the name it means and cites the other in a comment.
+  lookbackDays: number
+  coveredDays: number
   sessions: { count: number; deltaPct: number | null }
   membersSyncing: { ok: number; total: number }
   entriesShared: { count: number; delta: number | null }

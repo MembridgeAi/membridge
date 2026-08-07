@@ -471,6 +471,60 @@ the endpoints baked into a build, and setting either to an empty string
 To pause a single project, click Pause in the dashboard, or drop an empty
 `.membridge-off` file in its root.
 
+### If your team tracks `CLAUDE.md` in git
+
+MemBridge rewrites its managed block in each target file whenever a project has
+new agent activity. If that file is **tracked**, every rewrite leaves your working
+tree dirty until you commit or discard it — and git commands that require a clean
+tree will refuse:
+
+```
+$ git pull --rebase
+error: cannot pull with rebase: You have unstaged changes.
+error: please commit or stash them.
+```
+
+The merge you already landed upstream stays landed; only your local checkout is
+left behind. Three ways to live with it, best first.
+
+**1. Let git stash around the rebase for you (recommended).** git already does
+exactly this, correctly:
+
+```bash
+git config --global rebase.autoStash true
+```
+
+`git pull --rebase` then stashes the block, rebases, and reapplies it. Your tree
+comes back dirty afterwards, which is right — the block is still there. Nothing in
+MemBridge needs changing, and unlike a background process doing the stashing, git
+is the one holding the lock on your repo.
+
+**2. Commit the block with your work.** It is generated, but it is also a real
+description of what happened in the project, and committing it is what makes it
+visible to teammates who do not run MemBridge.
+
+**3. Point `targets` somewhere untracked.** Add the file to `.gitignore` and keep
+your hand-written instructions in a file MemBridge does not manage — this repo
+does exactly that, with rules under `.claude/rules/`:
+
+```jsonc
+{ "targets": ["MEMBRIDGE.md"] }   // and .gitignore MEMBRIDGE.md
+```
+
+**State the cost before you choose 3, because it is easy to miss:** teammates then
+stop receiving synced context in the file their agents actually read. The whole
+point of the block is that an agent picks it up at startup without being asked; a
+gitignored target delivers that only on machines running MemBridge. If your team
+shares instructions through a tracked `CLAUDE.md`, option 1 keeps both properties
+and option 3 trades one away.
+
+MemBridge does **not** need any of this while a git operation is mid-flight. A sync
+that finds a rebase, merge, cherry-pick, revert or bisect in progress defers its
+write to the next tick rather than dirtying a tree git is holding, and reports the
+project as skipped with the reason until it can write. Nothing is lost: the project
+stays marked as having pending work, so the next tick after the operation ends
+writes everything that arrived during it.
+
 ## FAQ
 
 **Do I need the terminal?** No. Installing, creating a team, inviting,

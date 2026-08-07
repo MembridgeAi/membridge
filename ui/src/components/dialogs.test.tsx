@@ -10,6 +10,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { FormDialog } from './FormDialog'
 import { MemberRow } from '../features/members/MemberRow'
 import type { Member } from '../data/types'
+import { mapMember } from '../data/mappers'
 
 function confirmProps(overrides: Partial<Parameters<typeof ConfirmDialog>[0]> = {}) {
   return {
@@ -126,10 +127,22 @@ describe('FormDialog modal behavior (Fix 11)', () => {
 })
 
 describe('MemberRow menu focus restore (Fix 11)', () => {
-  const member: Member = {
-    id: 'andrew', name: 'Andrew', email: 'andrew@acme.dev', role: 'admin',
-    joinedAt: '2026-07-20T09:00:00Z', projectCount: 1, lastSharedAt: null, keyAlert: false,
-  }
+  // Built through the real mapper rather than as a Member literal, for the
+  // same reason FakeDataClient is: a hand-authored domain object can carry
+  // fields the mapper would never produce, and this suite would then be
+  // exercising a member the app cannot construct. Authoring the wire row is
+  // also what stops this fixture from having to be edited every time a
+  // derived field changes.
+  //
+  // #59: zero preFixLocal, because this row is about the member MENU, not
+  // about search reach -- zero is the value that asserts nothing either way.
+  const member: Member = mapMember(
+    {
+      user_id: 'andrew', display_name: 'Andrew', role: 'admin',
+      joined_at: '2026-07-20T09:00:00Z', preFixLocal: { entries: 0, projects: 0 },
+    },
+    { projectCount: 1, lastSharedAt: null },
+  )
 
   function renderRow(onRequestRemove: (m: Member) => void = () => {}) {
     render(

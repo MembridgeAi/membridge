@@ -88,6 +88,46 @@ describe('FirstRun', () => {
     })
   })
 
+  // T-80: the toggle sits at the daemon default (enabled: true on a fresh
+  // install), and finish() writes exactly the DISPLAYED value -- so "Get
+  // started" without touching the switch persists enabled: true. The old
+  // caption did not tell the user that: "You can turn this off any time from
+  // Settings" is a fine description of the setting but says nothing about
+  // what leaving the switch alone means, so onboarding ended with the user
+  // not knowing whether the next session would be captured.
+  describe('the caption states what Get started will save', () => {
+    it('names the on-state when the toggle is on', async () => {
+      renderApp({}, <FirstRun />)
+      const desc = await screen.findByText(/get started will save this as on/i)
+      expect(desc).toBeInTheDocument()
+      // The old description is entirely replaced -- an unchanged sentence sitting
+      // above the new one would still read as "you can turn it off later" without
+      // ever saying whether it is on now.
+      expect(screen.queryByText(/^You can turn this off any time from Settings\.$/)).toBeNull()
+    })
+
+    it('names the off-state when the toggle is off', async () => {
+      const client = new FakeDataClient()
+      const base = await client.getSettings()
+      vi.spyOn(client, 'getSettings').mockResolvedValue({
+        ...base,
+        delivery: base.delivery.map(c => c.id === 'summaries' ? { ...c, enabled: false } : c),
+      })
+      renderWith(client, <FirstRun />)
+      expect(await screen.findByText(/get started will save this as off/i)).toBeInTheDocument()
+      expect(screen.queryByText(/save this as on/i)).toBeNull()
+    })
+
+    // Two fixture states, both with the same client and the same
+    // description-driving getter, so the assertion pins that the caption is
+    // derived from the daemon-reported state rather than from a hardcoded
+    // string. A "flip the switch live" test would need the mutation to
+    // invalidate the settings query the fake resolves synchronously, which
+    // this codebase does through react-query and cannot easily be arranged
+    // per-test without reaching into the query cache -- and the state->text
+    // link is what this ticket is about, tested directly by the two above.
+  })
+
   it('surfaces a load failure instead of rendering a blank page', async () => {
     renderApp({ failWith: 'daemon unreachable' }, <FirstRun />)
     expect(await screen.findByText(/couldn't reach/i)).toBeInTheDocument()

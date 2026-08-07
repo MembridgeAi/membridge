@@ -1,6 +1,14 @@
 -- 015_feedback.sql
 -- The public.feedback table backing membridge.app/feedback (CLI + site nudges).
 -- NOTE: this table was created directly in the dashboard before this migration
+-- LIVE SHAPE UNVERIFIED AS OF 2026-08-05. This file says it mirrors the live
+-- table, and nobody has run the query that would settle it. Settle it with:
+--   select column_name, data_type, is_nullable from information_schema.columns
+--    where table_schema = 'public' and table_name = 'feedback' order by ordinal_position;
+--   select polname, polcmd from pg_policy
+--    where polrelid = 'public.feedback'::regclass;
+-- then replace this marker with LIVE SHAPE VERIFIED <date>.
+--
 -- existed; the DDL below mirrors the LIVE shape exactly and is idempotent, so a
 -- fresh environment reproduces prod and running it against prod is a no-op.
 -- Anon may INSERT only (no SELECT/UPDATE/DELETE policy => reads fully denied).

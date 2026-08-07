@@ -42,6 +42,41 @@ describe('audit rows in words', () => {
   it('covers membership and invite events', () => {
     expect(auditSentence(event({ action: 'member-removed', targetName: 'Priya' }))).toBe('removed Priya from the team')
     expect(auditSentence(event({ action: 'member-joined' }))).toBe('joined the team')
+    // Leaving and being removed are different events and must read differently:
+    // the actor of a departure is its own subject, so "left the team" needs no
+    // target phrase, where "removed Priya" does.
+    expect(auditSentence(event({ action: 'member-left', targetName: 'Priya' }))).toBe('left the team')
+  })
+
+  it('describes somebody erasing their own history, with the count and the scope', () => {
+    // Written from SQL (035 §3), not by the daemon, which is why it had no
+    // case here for so long: nothing in lib/ names the action.
+    expect(auditSentence(event({
+      action: 'own-data-deleted', objectType: 'member',
+      detail: JSON.stringify({ memberId: 'usr_1', deleted: 12, projectKey: null }),
+    }))).toBe('deleted 12 of their own entries')
+    expect(auditSentence(event({
+      action: 'own-data-deleted', objectType: 'member',
+      detail: JSON.stringify({ memberId: 'usr_1', deleted: 1, projectKey: 'proj_9' }),
+    }))).toBe('deleted 1 of their own entry from one project')
+    // A count the row does not carry must not become "deleted null entries".
+    expect(auditSentence(event({ action: 'own-data-deleted', objectType: 'member', detail: null })))
+      .toBe('deleted their own entries')
+  })
+
+  it('names the person rather than their id when an unknown action is about a member', () => {
+    // The fallback still shows everything it has -- an unrecognised event
+    // rendered awkwardly beats one silently dropped -- but it must not print a
+    // uuid where the daemon already resolved a name.
+    expect(auditSentence(event({
+      action: 'some-future-action', objectType: 'member',
+      objectLabel: '8f21c0de-1111-4222-8333-444444444444', objectName: null, targetName: 'Priya',
+    }))).toBe('some-future-action member Priya')
+    // With no name resolved it falls back to the raw key, as before.
+    expect(auditSentence(event({
+      action: 'some-future-action', objectType: 'member',
+      objectLabel: 'usr_gone', objectName: null, targetName: null,
+    }))).toBe('some-future-action member usr_gone')
     expect(auditSentence(event({ action: 'invite-created' }))).toBe('created an invite')
     expect(auditSentence(event({ action: 'invite-revoked' }))).toBe('revoked an invite')
     expect(auditSentence(event({ action: 'team-renamed', detail: JSON.stringify({ name: 'Acme AI' }) })))

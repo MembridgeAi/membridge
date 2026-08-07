@@ -46,7 +46,14 @@ export function AuditList() {
 
   return (
     <div className="audit-panel">
-      <div className="section-label">Team activity · last {events.length} events</div>
+      {/* The count clause is DROPPED while the request is in flight rather than
+          replaced with a bar: this is one sentence, and a placeholder wedged
+          into the middle of it reads worse than the shorter true sentence.
+          Before this, `events` was `auditQuery.data ?? []` so the heading
+          announced "last 0 events" for 958ms on a trail holding six. */}
+      <div className="section-label">
+        Team activity{auditQuery.isPending ? '' : ` · last ${events.length} events`}
+      </div>
       {auditQuery.isError && (
         <p className="audit-error" role="alert">Couldn't load the audit trail. {errorMessage(auditQuery.error)}</p>
       )}

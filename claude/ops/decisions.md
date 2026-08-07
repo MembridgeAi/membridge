@@ -10,6 +10,100 @@ and are flagged as such.
 
 ---
 
+## Invite links default to single-use, 24-hour expiry
+
+Decided 2026-08-05. Today, `POST /api/team/invite` writes
+`expiresAt: null, maxUses: null` whenever the request omits those fields —
+which the UI always does, because it never surfaces them. Every invite the
+product mints is therefore an unlimited-use link that never expires. That is
+not a bug; it is a default nobody picked.
+
+**Decision.** The default is single-use, 24-hour expiry. `lib/server.js:2660`
+must synthesize a 24h `expiresAt` when `body.expiresDays` is absent, and a
+`maxUses` of 1 when `body.maxUses` is absent. A shareable, longer-lived link
+remains reachable — but only through an explicit UI override, so the person
+minting one has to know they are minting one.
+
+**Why 24 hours and not 7 days.** The link is a bearer credential that grants
+team membership. The failure mode of unlimited-use is that a leak (a
+screenshot, a Slack backlog, a forwarded message) admits arbitrary strangers
+indefinitely. 24 hours makes the invite short enough that a leak has to be
+current to be exploitable, and long enough that a normal invitation-and-reply
+loop fits inside it. 7 days is what other invitation systems use; the pitch
+here is a shared team memory, so the credential's blast radius is
+"everything you have ever synced to that team." Shorter is warranted.
+
+**What still ships with the safe default working.** Migration 038 is applied,
+so a 1-use invite genuinely admits one person even under concurrent
+redemption. Migrations 044 and 045 rotate the standing invite code on
+member removal or departure, so a departed member cannot resurrect a link
+they redeemed. Both are the plumbing this decision relies on and both are
+live.
+
+**What the shareable override needs.** A UI control in the invite dialog:
+"generate a link anyone can use" (or equivalent) that produces the
+unlimited-use, longer-lived (or no-expiry) version explicitly. The person
+picking it has to see the trade — the current defaults are the equivalent of
+that toggle being always-on and hidden. The override belongs on the same
+screen as the invite, not in a settings pane elsewhere.
+
+**What this does NOT decide.** It does not change the standing invite code
+(the one `my_teams()` returns to managers). That is a different credential
+with different semantics and lives on the team, not the invite. It also
+does not touch onboarding invites — those are already single-use.
+
+Related: [[state-claiming-unearned-success]] (a "default nobody chose" is
+the same shape).
+
+---
+
+## The injected block does not show its own token cost
+
+Decided 2026-08-05. The block adds tokens to every session's input, ~958 BPE
+tokens on average across ten tracked projects, and the question was whether
+the block itself should carry a line saying so.
+
+**Decision: no.** Do not print a cost figure inside the block, do not surface
+it in the UI as a per-session running total, do not expose it in any
+"transparency" pane. This overrides the recommendation in
+`docs/block-cost-measurement.md`, which proposed a `blockInjectedTokens`
+sibling in the ledger; that field is still not added. If a future decision
+overturns this, it is a new decision here, not an implementation detail.
+
+**Why.** Three reasons, in the order they matter:
+
+1. **The cost side is measurable and the benefit side is not, right now.**
+   Sufficiency-gate telemetry has 16 avoidance hits across 22,700 requests
+   and `measurement.state` is `measuring`, `effect: null` by design. A honest
+   cost line pairs with a null benefit line, which reads as "we cost N and
+   save nothing." That is not what the data says, but it is what a reader
+   sees. Publishing an asymmetric measurement is the worse dishonesty than
+   not publishing it, because "we do not know yet" is exactly the state
+   `docs/block-cost-measurement.md` documents.
+
+2. **A cost figure without a ratio invites the wrong optimisation.** People
+   will turn the block off to save the visible number, and the switch that
+   turns it off is not the switch that turns off the actual cost driver
+   (session count, project count). The number people would act on is not the
+   number that would move.
+
+3. **Every other information density in the block is unmeasured too.** No
+   line tells you the token cost of a specific recent-asks summary, a
+   teammate row, or the standing invariant text. Singling out a total is
+   asymmetric with the block's own convention.
+
+**What this does NOT decide.** It does not close whether the *ledger* should
+carry `blockInjectedTokens` for internal instrumentation. That is a separate
+question: making the number computable is fine and useful; showing it to
+users is what is refused. If the answer to the instrumentation question is
+also no, it needs its own entry.
+
+Related: [[block-cost-vs-measured-benefit]] (the underlying measurement),
+[[state-claiming-unearned-success]] (why partial numbers presented as
+complete drive the wrong action).
+
+---
+
 ## A deliberately deleted project does not come back on re-add
 
 **Decided 2026-08-01.** Alpha readiness F3 makes adoption backfill a project's

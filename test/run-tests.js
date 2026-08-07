@@ -1,7 +1,26 @@
 'use strict';
 // Zero-dependency end-to-end tests. Everything runs against a throwaway temp
 // dir via MEMBRIDGE_* env overrides — no real user files are read or written.
-const assert = require('assert');
+// FIRST of all, before any lib/ require: nothing here talks to a real host
+// unless it says so. Four outbound lanes ship a BAKED production default, and
+// this prelude used to neutralize exactly one of them (counters, by convention
+// in setupFixtures). test/no-egress.js documents all four, and why an empty env
+// var means production rather than "off".
+const noEgress = require('./no-egress');
+noEgress.install();
+
+// SECOND, and before `require('assert')` below: a check that makes no
+// assertion cannot fail, and prints `ok` all the same. Four instances of that
+// shape landed in one week — including the six-strong Windows guard family a
+// few hundred lines down, which reported green on both Windows CI legs with
+// the bug it guards deliberately restored. check-accounting.js hands this file
+// a counting copy of assert and turns a zero-assertion check into a FAIL; its
+// header documents what it can and cannot catch. Shared with test/harness.js
+// so the gate covers both runners, not whichever one the next bug misses.
+const accounting = require('./check-accounting');
+accounting.install();
+
+const assert = require('assert'); // the counting copy, via install() above
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
@@ -59,6 +78,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 // real config file (snapshotted BEFORE any fixture code runs) must be
 // byte-identical after the entire suite finishes. `null` (file absent) is a
 // valid snapshot value too -- the comparison is symmetric either way.
+//
+// KNOWN_READS_UNOWNED_FILE: ~/.membridge/config.json — leak-detection snapshot, same shape as test/harness.js. Rare-writer file; cannot use a fixture (the whole point is to detect a fixture leaking into the real path). See test/suites/tests-own-their-state.test.js.
+// KNOWN_READS_UNOWNED_FILE: ~/.membridge/state.json — same, for the state file.
 const REAL_CONFIG_PATH = path.join(os.homedir(), '.membridge', 'config.json');
 function snapshotRealConfig() {
   try { return fs.readFileSync(REAL_CONFIG_PATH, 'utf8'); } catch { return null; }
@@ -149,41 +171,30 @@ const PORT_BASE = (() => {
   // the pid-based probe below is the fallback for running this file directly.
   const assigned = Number(process.env.MEMBRIDGE_TEST_PORT_BASE || '');
   if (Number.isFinite(assigned) && assigned >= 17900) return assigned;
-  const net = require('net');
-  const free = port => {
-    try {
-      const s = net.createServer();
-      s.listen(port, '127.0.0.1');
-      const r = s.listening;
-      s.close();
-      return r;
-    } catch { return false; }
-  };
-  const start = 17900 + ((process.pid % 40) * 100);
-  for (let i = 0; i < 40; i++) {
-    const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
-    // 41 and 96 bracket the range actually used (Task 17 pushed the high end
-    // from 85 to 92; the OAuth state tests took it to 96); a block free at
-    // both ends is in practice a free block. +99 is the sentinel a live run
-    // holds for its whole lifetime (see below) — checking it is what makes
-    // two CONCURRENT runs land on different blocks, not just runs that have
-    // already bound a server.
-    if (free(base + 41) && free(base + 96) && free(base + 99)) return base;
-  }
-  return start; // nothing free anywhere: proceed and let the real bind report it
+  // Running this file DIRECTLY: the block is derived from the pid and is NOT
+  // verified free. A probe loop used to sit here checking base+41/+96/+99 and
+  // reading `server.listening` synchronously after `listen(port, '127.0.0.1')`
+  // — always false, because that overload defers through a DNS lookup. So it
+  // declared every port busy, fell out of the loop, and returned this same
+  // unverified pid guess while looking like a verified one. The keeper bind
+  // below is the only real signal, and it now warns when the block is taken.
+  return 17900 + ((process.pid % 40) * 100);
 })();
 const P = n => PORT_BASE + n;
 
-// RESERVE the block for this process's lifetime by holding base+99. Probing
-// alone reserves nothing: this suite does not bind its first real server for
-// a while, and a second run starting in that window adopts the same block and
-// the two corrupt each other's results in both directions (observed live:
-// concurrent runs each failing a different check per attempt). unref() so the
-// keeper never holds the process open; a bind error means no reservation,
-// never a crash.
+// RESERVE the block for this process's lifetime by holding base+99 (test/run.js
+// probes it before handing the block out). This suite does not bind its first
+// real server for a while, and a second run starting in that window adopts the
+// same block and the two corrupt each other's results in both directions
+// (observed live: concurrent runs each failing a different check per attempt).
+// unref() so the keeper never holds the process open; a bind error is not
+// fatal, but it is the one hard evidence that this block is already in use, so
+// it is said out loud rather than swallowed.
 {
   const keeper = net.createServer();
-  keeper.on('error', () => {});
+  keeper.on('error', () => {
+    process.stderr.write(`warning: port block ${PORT_BASE} is already held by another run; this suite may cross-talk with it\n`);
+  });
   keeper.listen(PORT_BASE + 99, '127.0.0.1');
   keeper.unref();
 }
@@ -192,18 +203,12 @@ const results = [];
 // Supports both sync and async fn. Sync callers (the vast majority) ignore
 // the return value, exactly as before. Async callers must `await check(...)`
 // so a rejected assertion is recorded as a FAIL instead of becoming an
-// unhandled promise rejection that crashes the whole suite.
-function check(name, fn) {
-  const onOk = () => { results.push([name, null]); console.log(`  ok    ${name}`); };
-  const onErr = err => { results.push([name, err]); console.log(`  FAIL  ${name}\n        ${err.message}`); };
-  try {
-    const ret = fn();
-    if (ret && typeof ret.then === 'function') return ret.then(onOk, onErr);
-    onOk();
-  } catch (err) {
-    onErr(err);
-  }
-}
+// unhandled promise rejection that crashes the whole suite — and, since the
+// accounting above, so it is recorded AT ALL: an unawaited async check settles
+// after the tally is printed. checkNoThrow(name, reason, fn) is how a check
+// says asserting nothing is the intent; skip(name, why) is how an unmet
+// precondition is stated out loud instead of registering a green line.
+const { check, checkNoThrow, skip, checkNothingLeftInFlight } = accounting.createCheck(results);
 const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
 // Every SOURCE-SHAPE check (assertions about the bytes of a file committed to
@@ -228,6 +233,39 @@ const count = (hay, needle) => hay.split(needle).length - 1;
 // read-only attribute and can never make a file unreadable. So "no getuid"
 // simply means the root-reads-through-anything caveat cannot apply.
 const notRoot = () => typeof process.getuid !== 'function' || process.getuid() !== 0;
+
+// Can this platform actually make a file unreadable? PROBED, not sniffed: on
+// Windows fs.chmod only toggles the read-only bit and cannot clear READ, and
+// root reads through any mode. Six checks in the "read failure must not read as
+// missing" family (hooks.readSettings / util.loadUserConfig / util.loadState /
+// ledger-store.readLedger — the config/state/settings/ledger DESTRUCTION bug)
+// prove their guard by making a fixture unreadable and asserting the loader
+// THROWS. They each used to wrap that in `if (notRoot() && denied)` with no
+// else, so where the fixture stayed readable the assertions vanished and the
+// only thing left was "the fixture I just wrote is unchanged" — true because
+// nothing ran. Five of the six reported `ok` on BOTH Windows CI legs having
+// proven nothing at all, for the guard that stands between an unreadable
+// state.json and its destruction. Skips are visible now, per the convention the
+// POSIX-mode checks in this file already use.
+const canDenyReads = (() => {
+  if (!notRoot()) return false;
+  const probe = path.join(ROOT, '.can-deny-reads-probe');
+  try {
+    fs.writeFileSync(probe, 'x');
+    fs.chmodSync(probe, 0o000);
+    try { fs.readFileSync(probe, 'utf8'); return false; } catch { return true; }
+  } catch {
+    return false;
+  } finally {
+    try { fs.chmodSync(probe, 0o600); fs.rmSync(probe, { force: true }); } catch {}
+  }
+})();
+// A check whose whole point is an unreadable file: registered only where that
+// is achievable, skipped VISIBLY otherwise. Never silently green.
+const checkNeedsUnreadable = (name, fn) => (canDenyReads
+  ? check(name, fn)
+  : console.log(`  skip  ${name} — this platform cannot make a file unreadable `
+    + '(Windows chmod cannot clear READ; root reads through any mode), so the check would assert nothing'));
 
 // Canonical spelling of a path for comparing against paths GIT wrote to disk.
 // git runs real canonicalization on what it records (macOS: /var ->
@@ -2353,6 +2391,49 @@ async function main() {
       assert.ok(status.projectCount >= 1, 'no projects reported');
       assert.ok(status.adapters.includes('Claude Code') && status.adapters.includes('MyTool'), 'adapters missing');
     });
+
+    // ---- the plants below share state.json with a LIVE DAEMON ----
+    // state.json has no locking, so any load -> work -> save erases whatever
+    // another process wrote in between. Two sections inside this window
+    // (statusPayload's teamAuthPaused plant, and the /api/session fixture)
+    // write state.json and then assert on it. That is only safe while the
+    // daemon writes NOTHING for the length of the window, and until now that
+    // was true by coincidence rather than by design -- which is how the
+    // /api/session 404 flake reached CI. The coincidences are named and
+    // asserted here so a change to any of them fails loudly, in this check,
+    // instead of surfacing as an unrelated section going intermittently red.
+    //
+    // cmdDaemon runs tick() to completion BEFORE startServer binds, so by the
+    // time /api/status answered above, syncOnce's write is already on disk
+    // (refreshSearchIndex and noteTick never touch state.json). What remains
+    // are the tick's two fire-and-forget tails, plus any LATER tick.
+    const tickAtWindowStart = status.health && status.health.lastTickAt;
+    check('daemon window: the daemon cannot write state.json while the sections below plant into it', () => {
+      const counters = require('../lib/counters');
+      assert.ok(tickAtWindowStart,
+        'the boot tick has not been observed, so syncOnce may still be mid-write while the plants below land');
+      // 1. countersTick -> emitCounters ends in loadState/saveState. Held by
+      //    TWO independent switches now: setupFixtures' countersUrl:'' and the
+      //    prelude's MEMBRIDGE_NO_DIAGNOSTICS=1 (test/no-egress.js), which
+      //    lib/counters.js honours through diagnostics.diagnosticsEnabled.
+      assert.strictEqual(counters.countersEnabled(util.getConfig()), false,
+        'the counters tail would loadState/saveState a few hundred ms after boot -- exactly when the plants below land (this is the /api/session flake)');
+      // 2. teamTick -> syncTeams ends in saveState. isConfigured() is TRUE by
+      //    default (see test/no-egress.js), so the ONLY thing that returns the
+      //    pass before that write is the absence of credentials. #67 made the
+      //    destination loopback, which removes the production-write risk but
+      //    NOT this one: with credentials on disk, getAccessToken resolves them
+      //    with no network call at all and the pass runs to its saveState
+      //    against the dead sink. So this stays load-bearing, and a credential
+      //    fixture planted anywhere above this line silently re-opens the race.
+      assert.strictEqual(teamsync.loadCredentials(), null,
+        'credentials exist in this home, so the daemon\'s teamTick will run a full syncTeams pass and save state on top of the plants below');
+      // 3. No SECOND tick may land inside the window. The chained timeout is
+      //    re-read from config each round, so this is the config the daemon is
+      //    actually using, read back off its own status payload.
+      assert.ok(status.intervalSec >= 600,
+        `intervalSec is ${status.intervalSec}: a second tick would fire inside this window and race the plants`);
+    });
     // The dashboard needs a visible E2E signal (the whole point of "how does a
     // user SEE encryption is on"). statusPayload surfaces the state the header
     // badge renders: enabled (default-on unless the explicit hatch), whether
@@ -2375,10 +2456,9 @@ async function main() {
     // reason next to encryption.paused. Two reasons, not one: only a dead
     // session is the user's to fix.
     check('statusPayload surfaces a paused team session for the header pill', () => {
-      const saved = util.loadState();
       try {
         util.saveState({
-          ...saved,
+          ...util.loadState(),
           teamAuthPaused: { reason: 'session-expired', detail: 'JWT expired', since: '2026-07-25T10:00:00.000Z' },
         });
         const a = statusPayload().auth;
@@ -2388,7 +2468,14 @@ async function main() {
           'how long the team has been getting nothing must survive to the UI');
         assert.ok(/JWT expired/.test(a.detail || ''), 'the underlying reason belongs in the tooltip');
       } finally {
-        util.saveState(saved);
+        // SURGICAL: remove only the key this check added. Restoring a whole-file
+        // snapshot taken before the plant is the clobber running the other way
+        // -- it discards everything any other writer (the live daemon above, or
+        // production code this check itself invoked) put in the file meanwhile.
+        // state.json has no locking; a restore is a write like any other.
+        const fresh = util.loadState();
+        delete fresh.teamAuthPaused;
+        util.saveState(fresh);
       }
     });
     check('statusPayload claims no auth pause on a healthy home', () => {
@@ -2517,7 +2604,13 @@ async function main() {
     });
     const searchEmpty = await (await fetch(`${base}/api/search?q=`)).json();
     check('/api/search answers an empty query with an empty result set, never an error', () => {
-      assert.deepStrictEqual(searchEmpty, { query: '', total: 0, results: [] });
+      // The resting state carries the same fields a real answer does — a page
+      // that reads `totalIsFloor` must not find it missing on the one response
+      // it renders before anyone types. `total` is the transitional alias this
+      // route still emits for the app's search page (lib/server.js); the
+      // honest name is `totalKnownHere` (lib/activity.js searchMemory).
+      assert.deepStrictEqual(searchEmpty,
+        { query: '', totalKnownHere: 0, totalIsFloor: true, total: 0, results: [] });
     });
     const searchFiltered = await (await fetch(`${base}/api/search?q=webhook&author=nobody-by-this-name`)).json();
     check('/api/search applies filters before ranking', () => {
@@ -2568,7 +2661,6 @@ async function main() {
     // the prompt chain -- a session page must never surface a secret the feed
     // suppressed.
     {
-      const savedSessionState = util.loadState();
       const sessProj = path.join(ROOT, 'projects', 'session-detail-app');
       fs.mkdirSync(path.join(sessProj, 'src'), { recursive: true });
       const SECRET = 'sk-plantedsecret1234567890abcd';
@@ -2693,7 +2785,17 @@ async function main() {
           'an encrypted row must never be dressed up as an unshared one');
       });
 
-      util.saveState(savedSessionState);
+      // SURGICAL: drop only the two projects this block planted. The previous
+      // whole-file snapshot restore discarded everything written since the
+      // snapshot was taken -- including by the live daemon above, and by the
+      // production code these checks invoked -- because state.json has no
+      // locking and a restore is just another write.
+      {
+        const fresh = util.loadState();
+        delete fresh.projects[sessProj];
+        delete fresh.projects[teamProjS];
+        util.saveState(fresh);
+      }
     }
 
     // Catch-Up read pointer: GET is pure; mark/undo rewrite it. Run sequentially
@@ -2857,11 +2959,19 @@ async function main() {
       assert.strictEqual(rawCfg.advisor.apiKey, GOOD_KEY, 'key not persisted');
       assert.strictEqual(rawCfg.intervalSec, 45, 'interval not persisted');
     });
-    check('settings: config file is chmod 600 once a key is present', () => {
-      if (process.platform === 'win32') return;
-      const mode = fs.statSync(util.configPath()).mode & 0o777;
-      assert.strictEqual(mode, 0o600, `mode was ${mode.toString(8)}`);
-    });
+    // POSIX mode bits do not exist on Windows, and the early-return this used
+    // to open with made it a check that printed `ok` having asserted nothing
+    // on the windows-latest leg — for the guard that keeps a file holding a
+    // live API key from being world-readable. The skip is visible now.
+    if (process.platform === 'win32') {
+      skip('settings: config file is chmod 600 once a key is present',
+        'Windows has no POSIX mode bits; fs.chmod there toggles only the read-only attribute');
+    } else {
+      check('settings: config file is chmod 600 once a key is present', () => {
+        const mode = fs.statSync(util.configPath()).mode & 0o777;
+        assert.strictEqual(mode, 0o600, `mode was ${mode.toString(8)}`);
+      });
+    }
     const stExtra = await (await post(`${base}/api/settings`, {
       extraTargets: { cursor: true, gemini: true },
     })).json();
@@ -3508,6 +3618,19 @@ async function main() {
         assert.ok(r.costUsd >= 0);
       } finally { srv.close(); }
     });
+
+    // The positive half of the invariant above, asserted at the far end of the
+    // window rather than argued from config: the daemon must have run EXACTLY
+    // ONE tick across every section between here and its boot. A second tick
+    // would mean syncOnce wrote state.json somewhere in the middle of the
+    // plants above, which is the race itself rather than a risk of it.
+    const statusAtWindowEnd = await (await fetch(`${base}/api/status`)).json().catch(() => null);
+    check('daemon window: the daemon ran exactly one tick for the whole window, so nothing it did raced the plants', () => {
+      assert.ok(statusAtWindowEnd && statusAtWindowEnd.health, 'the daemon stopped answering before the window closed');
+      assert.strictEqual(statusAtWindowEnd.health.lastTickAt, tickAtWindowStart,
+        `the daemon ticked again inside the window (boot ${tickAtWindowStart}, latest ${statusAtWindowEnd.health.lastTickAt}) -- `
+        + 'that tick wrote state.json underneath the sections above, which plant into it and assert on it');
+    });
   } finally {
     child.kill();
     await new Promise(r => mockApi.close(r));
@@ -3682,8 +3805,7 @@ async function main() {
     // and a config override still takes precedence.
     const savedUrl = process.env.MEMBRIDGE_TEAM_URL;
     const savedKey = process.env.MEMBRIDGE_TEAM_ANON_KEY;
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     try {
       assert.ok(teamsync.backend({}), 'baked backend missing');
       assert.ok(teamsync.backend({ team: { url: 'https://x.supabase.co', anonKey: 'k' } }),
@@ -4429,7 +4551,12 @@ async function main() {
     const goalChangesFeed = await feedPayload({ limit: 10 });
     check('feedPayload: entries expose goal + changes', () => {
       const e = (goalChangesFeed.entries || [])[0];
-      if (e) { assert.ok('goal' in e, 'goal key present'); assert.ok('changes' in e, 'changes key present'); }
+      // The premise, asserted rather than assumed. Both key assertions used to
+      // sit inside `if (e)`, so a feed that regressed to returning NO entries
+      // switched this check off instead of failing it.
+      assert.ok(e, `the feed returned no entries, so the key assertions below would prove nothing (got ${JSON.stringify(goalChangesFeed.entries)})`);
+      assert.ok('goal' in e, 'goal key present');
+      assert.ok('changes' in e, 'changes key present');
     });
 
     // --- liveness -----------------------------------------------------------
@@ -5347,8 +5474,7 @@ async function main() {
     });
   } finally {
     process.env.MEMBRIDGE_HOME = HOME_A;
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock.server.close(r));
   }
 
@@ -5761,8 +5887,7 @@ async function main() {
         'the in-project session should still push');
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock2.server.close(r));
   }
 
@@ -7180,8 +7305,15 @@ async function main() {
     assert.strictEqual(holdoutStillHeldOutRegardlessOfAge.reason, 'holdout');
 
     // 3. Tier A: same session already read it, hash matches -> pointer serve.
+    // Since REV-4 that takes BOTH halves of the evidence: the ledger proving
+    // the read happened, and the hash this session recorded AT that read
+    // (sessionState.reads). The store's contentHash proves a different
+    // interval and no longer stands in for either. REV-12 adds the third:
+    // WHICH LINES were delivered -- `ranges` -- because the ledger records
+    // that a session read a PATH and has never recorded a window.
     const tierA = recall.decide(base({
       limit: 100,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7209,6 +7341,7 @@ async function main() {
     const rangedTierA = recall.decide(base({
       offset: 23510,
       limit: 42,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7232,6 +7365,7 @@ async function main() {
     const offsetZeroStillServed = recall.decide(base({
       offset: 0,
       limit: 100,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7240,8 +7374,12 @@ async function main() {
     assert.strictEqual(offsetZeroStillServed.tier, 'A');
 
     // 4. Tier A refused: same session read it, but the file changed since.
+    // The session recorded HASH-OLD at its read and the file is HASH-NEW now,
+    // which is exactly the interval Tier A's wording claims and REV-4 made it
+    // prove.
     const tierAMismatch = recall.decide(base({
       limit: 100,
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH-OLD', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH-OLD', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH-NEW' },
@@ -7282,9 +7420,12 @@ async function main() {
     assert.strictEqual(tierBBelowFloor.serve, false);
     assert.strictEqual(tierBBelowFloor.reason, 'below-compression-floor');
 
-    // 7. Refused: the call itself is under the 400-token floor.
+    // 7. Refused: the call itself is under the 400-token floor. The tier has
+    // to APPLY for the floor to be what refuses it -- decide() checks the tier
+    // first -- so this fixture carries the read-time hash Tier A needs.
     const underFloor = recall.decide(base({
-      limit: 10, // ~139 tokens, well under MIN_CALL_TOKENS
+      limit: 10, // ~139 tokens under the real tokenizer, well under MIN_CALL_TOKENS
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7452,7 +7593,7 @@ async function main() {
     const wellFormed = {
       projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
       sessionId: 'session-x', toolName: 'Read', offset: null, limit: 100,
-      sessionState: { served: {}, interceptions: 0 },
+      sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 3, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
       fileStat: { size: 4000, hash: 'HASH1' },
@@ -7644,6 +7785,22 @@ async function main() {
         [relA2]: { sessions: [sessB], reads: 1, lastTs: 't', firstTs: 't', firstSession: sessB },
       },
     });
+    // Two reads, because Tier A now proves its own interval (REV-4/REV-8): the
+    // FIRST read of a path is what records the hash this session saw, and the
+    // second is the one that can be answered from it. The store entry above is
+    // irrelevant to Tier A and left in place only because it was already here.
+    const outA2First = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 }));
+    check('recall hook: the first read of a path bootstraps Tier A instead of serving it', () => {
+      assert.strictEqual(outA2First.status, 0, outA2First.stderr);
+      assert.strictEqual(outA2First.stdout, '', 'nothing may be served before there is evidence to serve it on');
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessB), 'utf8'));
+      // A read record is { hash, ranges } since REV-12 -- the content AND the
+      // window it was handed, because "you already read this" is a claim about
+      // both. A record with a hash and no window fails closed at serve time.
+      assert.strictEqual(raw.reads[relA2].hash, hashA2, 'the read-time hash was not recorded, so Tier A can never fire here');
+      assert.deepStrictEqual(raw.reads[relA2].ranges, [[1, 34]], 'the delivered window (limit 34) was not recorded');
+      assert.strictEqual(raw.interceptions, 1, 'a bootstrap read must not burn an interception');
+    });
     const outA2 = runRecallHook(recallPayload(sessB, fileA2, { limit: 34 })); // 34*12 = 408 tokens, just clears the 400 floor
 
     check('recall hook: tier A serve past the first interception, with a modest saving, omits the terminal line', () => {
@@ -7720,7 +7877,16 @@ async function main() {
     check('recall hook: a stale store entry (file changed since) is never served, even though the tier would otherwise apply', () => {
       assert.strictEqual(outF.status, 0, outF.stderr);
       assert.strictEqual(outF.stdout, '', 'a hash mismatch must never serve stale content');
-      assert.ok(!fs.existsSync(hooksRecall.sessionStatePath(recallProj, sessF)), 'no session state written for a refused serve');
+      // A refused serve must leave no trace of a serve -- no `served` entry,
+      // no interception burned. It DOES record the read-time hash (REV-4):
+      // that is the evidence a later Tier A needs, and the read that cannot be
+      // served is precisely the one that has to record it. Asserting the file
+      // is absent would be asserting that the bootstrap does not happen.
+      const raw = JSON.parse(fs.readFileSync(hooksRecall.sessionStatePath(recallProj, sessF), 'utf8'));
+      assert.deepStrictEqual(raw.served, {}, 'a refused serve must never mark the path served');
+      assert.strictEqual(raw.interceptions, 0, 'a refused serve must never burn an interception');
+      assert.strictEqual(raw.reads[relF].hash, recallHash(fs.readFileSync(fileF, 'utf8')),
+        'the read-time hash of what is actually on disk was not recorded');
     });
 
     // An untracked project (no state.projects entry, no .membridge) must
@@ -7809,11 +7975,18 @@ async function main() {
       assert.ok(reason.includes('SKELETON_E2E'), `expected the cached skeleton in the served body: ${reason}`);
     });
 
-    // M5: recallStore.get() must be consulted BEFORE the target file is read
-    // and sha1'd -- on a store miss (the common case) that hash is pure waste
-    // (measured 74ms on a 22MB file). Pinned by making the file's CONTENT
-    // unreadable while stat() still succeeds: hashing it would throw and land
-    // a 'hook recall error' line in the log, returning early never touches it.
+    // M5, rewritten for REV-8. It used to pin "a store miss returns before
+    // hashing", which was correct until Tier A stopped needing a store entry:
+    // that early return was exactly what kept the read-time hash from ever
+    // being recorded, so Tier A could not fire for ~90% of reads. A store miss
+    // now DOES hash (bounded by MAX_HASH_BYTES -- see
+    // test/suites/recall-tier-a-serves.test.js for the cap and the bootstrap).
+    //
+    // What survives, and is pinned here, is the half of M5 that was about the
+    // user rather than the clock: an unreadable file must be a SILENT step
+    // aside. It is an ordinary condition, and filing it as 'hook recall error'
+    // on every read of that file would turn the log into noise. Pinned by
+    // making the CONTENT unreadable while stat() still succeeds.
     // (A root-run test suite cannot enforce chmod, so this pins on any normal
     // developer/CI account and passes vacuously as root.)
     const missRel = 'src/nostore.js';
@@ -7824,11 +7997,11 @@ async function main() {
     const outMiss = runRecallHook({ session_id: nonHoldoutSession(missRel, 'sess-miss'), cwd: missProj, tool_name: 'Read', tool_input: { file_path: missFile, limit: 100 } });
     const logAfterMiss = fs.existsSync(util.logPath()) ? fs.readFileSync(util.logPath(), 'utf8') : '';
     fs.chmodSync(missFile, 0o644);
-    check('recall hook: M5 -- a store miss returns before hashing the target file', () => {
+    check('recall hook: M5 -- an unreadable file is a silent step-aside, never a logged error', () => {
       assert.strictEqual(outMiss.status, 0, outMiss.stderr);
       assert.strictEqual(outMiss.stdout, '', 'a store miss must never serve');
       assert.ok(!logAfterMiss.slice(logBefore.length).includes('hook recall error'),
-        'the hook hashed the file before checking the store: an unreadable file threw instead of being a cheap miss');
+        'an ordinary unreadable file was filed as an internal hook error, on every read of it');
     });
 
     // L6: a held-out read with NOTHING cached used to append a holdout row
@@ -8229,7 +8402,7 @@ async function main() {
     const led1 = ledgerStoreT6.updateLedger(projPin, [], util.getConfig(), () => tPin + 10);
     requestsBefore.push({ requests: led1.requests, volume: led1.volume, sessions: led1.sessions });
     check('ledger-fold-recall (revisable settlement): a confirmed serve settles on the very FIRST fold pass, no grace wait', () => {
-      assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led1.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0);
       assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(projPin)) || fs.readFileSync(ledgerFoldRecall.eventsPath(projPin), 'utf8') === '',
         'the settled serve must be consumed out of the queue on this same pass');
@@ -8244,7 +8417,7 @@ async function main() {
     const led2 = ledgerStoreT6.updateLedger(projPin, [followUpPin1], util.getConfig(), () => tPin + 20);
     requestsBefore.push({ requests: led2.requests, volume: led2.volume, sessions: led2.sessions });
     check('ledger-fold-recall (revisable settlement): a later follow-up CORRECTS a full avoidance down to a partial win', () => {
-      assert.deepStrictEqual(led2.avoided, { tokens: PIN_PARTIAL, serves: 1, tierA: 0, tierB: 1, partialWins: 1, netNegatives: 0 });
+      assert.deepStrictEqual(led2.avoided, { tokens: PIN_PARTIAL, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 1, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0, 'a positive net must never bump rejections');
       assert.strictEqual(led2.openServes[0].classified, 'partial');
       assert.deepStrictEqual(led2.openServes[0].correctedBy, ['sess-pin|fu-pin-1|' + path.join(projPin, relPin)]);
@@ -8261,7 +8434,7 @@ async function main() {
     const led3 = ledgerStoreT6.updateLedger(projPin, [followUpPin2], util.getConfig(), () => tPin + 30);
     requestsBefore.push({ requests: led3.requests, volume: led3.volume, sessions: led3.sessions });
     check('ledger-fold-recall (revisable settlement): a second follow-up corrects a partial win down to a net negative, bumping rejection exactly once', () => {
-      assert.deepStrictEqual(led3.avoided, { tokens: PIN_PARTIAL - rereadCost(14440), serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 });
+      assert.deepStrictEqual(led3.avoided, { tokens: PIN_PARTIAL - rereadCost(14440), serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 });
       assert.ok(led3.avoided.tokens < 0, 'the fixture must actually cross into negative for this case to test anything');
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 1);
       assert.strictEqual(led3.openServes[0].classified, 'negative');
@@ -8375,7 +8548,7 @@ async function main() {
       }
       check('ledger-fold-recall (FINDING 3): a failed queue rewrite still folds the settlement into the ledger', () => {
         assert.ok(sawQueueWrite, 'test did not actually exercise the queue rewrite path');
-        assert.deepStrictEqual(ledFailedWrite.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        assert.deepStrictEqual(ledFailedWrite.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'rel3c settles; rel3d (still-young, unconfirmed) contributes nothing yet');
       });
       check('ledger-fold-recall (FINDING 3): the on-disk queue is untouched after a failed rewrite (old rows all still there)', () => {
@@ -8389,7 +8562,7 @@ async function main() {
       check('ledger-fold-recall (FINDINGS 1+2, corrected pin): a subsequent successful rewrite drains the queue WITHOUT re-settling -- idempotent on serveId', () => {
         assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj3cT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj3cT6), 'utf8') === '',
           'the retried pass must finally consume the queue (rel3c\'s already-settled row is skipped, not re-settled; rel3d finally ages out as a phantom)');
-        assert.deepStrictEqual(ledRetry.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        assert.deepStrictEqual(ledRetry.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'rel3c must NOT settle a second time just because its confirmed row was still sitting on the queue -- avoided is unchanged by the retry');
         assert.strictEqual(ledRetry.openServes.length, 1, 'exactly one receipt -- serveId dedupe means the retry never creates a duplicate');
       });
@@ -8437,7 +8610,7 @@ async function main() {
         fs.writeFileSync = realWriteFileSyncMulti;
       }
       check('ledger-fold-recall (FINDINGS 1+2): three consecutive failed queue rewrites never re-settle the same physical serve', () => {
-        assert.deepStrictEqual(ledMulti.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 },
+        assert.deepStrictEqual(ledMulti.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'still exactly one settle worth of avoided.tokens/serves after 3 failed passes, not 3 (or 4)');
         assert.strictEqual(ledMulti.openServes.length, 1, 'still exactly one receipt -- no duplicate per failed pass');
       });
@@ -8453,7 +8626,7 @@ async function main() {
       const followUpMulti = readEvent('sess-multi', relMulti, new Date(tMulti + 40000).toISOString(), projMulti, { toolUseId: 'fu-multi' });
       const ledMultiFinal = ledgerStoreT6.updateLedger(projMulti, [followUpMulti], util.getConfig(), () => tMulti + 40000 + 100);
       check('ledger-fold-recall (FINDINGS 1+2): once the rewrite succeeds, a net-negative follow-up corrects the single receipt and bumps rejection exactly once', () => {
-        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: PIN_FULL - rereadCost(20000), serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 1 },
+        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: PIN_FULL - rereadCost(20000), serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 },
           'net = 4210 - (380 + a 20000-byte re-read); serves/tierB stay at 1 -- one physical serve, one receipt, one correction');
         assert.ok(ledMultiFinal.avoided.tokens < 0, 'the fixture must actually cross into negative');
         assert.strictEqual(ledMultiFinal.openServes.length, 1);
@@ -9002,7 +9175,7 @@ async function main() {
       // idempotency evidence -- see the dedicated MINOR 3 test block below
       // for the failed-rewrite scenario it exists to fix.
       assert.deepStrictEqual(led4Holdout.holdout, { skips: 1, callTokens: 1200, seenKeys: ['2026-07-28T10:00:00.000Z|sess-4|src/d.js'] });
-      assert.deepStrictEqual(led4Holdout.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led4Holdout.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
 
     // An uncommitted pending row (the state-commit write may simply not have
@@ -9021,14 +9194,14 @@ async function main() {
     ]));
     const led5Early = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 1000);
     check('ledger-fold-recall: an unconfirmed pending row is never treated as a phantom while still young', () => {
-      assert.deepStrictEqual(led5Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led5Early.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5T6), 'utf8').trim().split('\n').filter(Boolean);
       assert.strictEqual(remaining.length, 1, 'the young pending row must stay queued, not be dropped as a phantom');
     });
     fs.appendFileSync(ledgerFoldRecall.eventsPath(proj5T6), jsonl([{ ts: ts5, sessionId: 'sess-5', relPath: rel5, committed: true }]));
     const led5Confirmed = ledgerStoreT6.updateLedger(proj5T6, [], util.getConfig(), () => t5 + 2000);
     check('ledger-fold-recall: a late-arriving confirmation settles IMMEDIATELY, well before the old grace window would have allowed', () => {
-      assert.deepStrictEqual(led5Confirmed.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led5Confirmed.avoided, { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
 
     // A pending row whose confirmation NEVER arrives (a genuine, permanent
@@ -9047,11 +9220,11 @@ async function main() {
     check('ledger-fold-recall: a young never-confirmed row stays retained, not yet judged a phantom', () => {
       const remaining = fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8').trim().split('\n').filter(Boolean);
       assert.strictEqual(remaining.length, 1);
-      assert.deepStrictEqual(ledPastGrace.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(ledPastGrace.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
     const led5b = ledgerStoreT6.updateLedger(proj5bT6, [], util.getConfig(), () => t5b + 24 * 60 * 60 * 1000);
     check('ledger-fold-recall: an uncommitted pending row that NEVER confirms is eventually dropped as a phantom', () => {
-      assert.deepStrictEqual(led5b.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led5b.avoided, { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(proj5bT6, rel5b).rejections, 0);
       assert.ok(!fs.existsSync(ledgerFoldRecall.eventsPath(proj5bT6)) || fs.readFileSync(ledgerFoldRecall.eventsPath(proj5bT6), 'utf8') === '',
         'the permanently-unconfirmed row must eventually be dropped from the queue, not linger forever');
@@ -9064,7 +9237,7 @@ async function main() {
     writeServeRows(proj6T6, ts6, 'sess-6', rel6, 'A', 500, 20);
     const led6 = ledgerStoreT6.updateLedger(proj6T6, [], util.getConfig(), () => Date.parse(ts6) + 10);
     check('ledger-fold-recall: a tier A serve is tallied under tierA, not tierB', () => {
-      assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, partialWins: 0, netNegatives: 0 });
+      assert.deepStrictEqual(led6.avoided, { tokens: 480, serves: 1, tierA: 1, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
     });
 
     // MAX_OPEN_SERVES: past the cap, the OLDEST open serves are evicted
@@ -9220,13 +9393,13 @@ async function main() {
       // too, tokens only -- the fixture's real numbers must survive the
       // projection (and its sum into totals), never silently drop to zero.
       assert.deepStrictEqual(payload.projects[0].avoided,
-        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.deepStrictEqual(payload.projects[0].holdout, { skips: 2, callTokens: 900 });
       assert.deepStrictEqual(payload.totals.avoided,
-        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, partialWins: 0, netNegatives: 0 });
+        { tokens: 3830, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       assert.deepStrictEqual(payload.totals.holdout, { skips: 2, callTokens: 900 });
       assert.deepStrictEqual(Object.keys(payload.projects[0].avoided).sort(),
-        ['netNegatives', 'partialWins', 'serves', 'tierA', 'tierB', 'tokens'],
+        ['netNegatives', 'partialWins', 'serves', 'tierA', 'tierB', 'tierUnknown', 'tokens'],
         'avoided must carry tokens only -- no dollar/cost field');
       assert.deepStrictEqual(Object.keys(payload.projects[0].holdout).sort(), ['callTokens', 'skips'],
         'holdout must carry tokens only -- no dollar/cost field');
@@ -11075,8 +11248,7 @@ async function main() {
       assert.ok(!JSON.stringify(mock3.entries).includes('sk-distilled-secret-123'), 'distilled secret reached the server');
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock3.server.close(r));
   }
 
@@ -11236,8 +11408,7 @@ async function main() {
     });
   } finally {
     process.env.MEMBRIDGE_HOME = HOME_A;
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mockG.server.close(r));
   }
 
@@ -11317,8 +11488,7 @@ async function main() {
       }
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mockRS.server.close(r));
   }
 
@@ -11351,8 +11521,14 @@ async function main() {
       util.saveState(st);
       await teamsync.syncTeams({ project: projRE }); // plaintext push, ask=null (unshared)
       const creds = await teamsync.getAccessToken(util.getConfig());
-      await check('teamsync: reshareSession encrypts the backfilled prompt', async () => {
-        if (!tc.available()) return; // libsodium unavailable in this env — skip as pass
+      // "skip as pass" was the literal comment on the early return this
+      // replaces. libsodium going missing is exactly when an encryption check
+      // must be heard from — a bundle that lost it has shipped here before —
+      // and a silent green is the one outcome that guarantees nobody notices.
+      if (!tc.available()) {
+        skip('teamsync: reshareSession encrypts the backfilled prompt',
+          'libsodium did not load in this environment, so there is no encryption to verify (this is itself worth investigating)');
+      } else await check('teamsync: reshareSession encrypts the backfilled prompt', async () => {
         await tc.ready();
         const teamKey = tc.genTeamKey();
         await teamsync.reshareSession(util.getConfig(), projRE, 'sB', true, { creds, crypto: { teamKey, epoch: 1, teamcrypto: tc } });
@@ -11366,8 +11542,7 @@ async function main() {
         assert.strictEqual(payload2.ask, null, 'scrub left the prompt in the ciphertext');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockRE.server.close(r));
     }
   }
@@ -11404,9 +11579,15 @@ async function main() {
     assert.ok('headline' in without, 'headline key dropped from a headline-less row (mixed-shape batch)');
     assert.strictEqual(without.headline, null);
   });
-  await check('parity: encryptRow seals headline in the ciphertext and nulls it under plaintextOff', async () => {
-    const tc = require('../lib/teamcrypto');
-    if (!tc.available()) return; // libsodium unavailable in this env — skip as pass
+  // Same "skip as pass" early return as the reshareSession check above, and
+  // the same repair: an encryption check that goes green because the crypto
+  // library is absent is the worst available outcome.
+  const tcParity = require('../lib/teamcrypto');
+  if (!tcParity.available()) {
+    skip('parity: encryptRow seals headline in the ciphertext and nulls it under plaintextOff',
+      'libsodium did not load in this environment, so there is no encryption to verify (this is itself worth investigating)');
+  } else await check('parity: encryptRow seals headline in the ciphertext and nulls it under plaintextOff', async () => {
+    const tc = tcParity;
     await tc.ready();
     const teamKey = tc.genTeamKey();
     const row = { ts: 't1', source: 'Claude Code', ask: null, goal: null, decisions: null, gotchas: null, files: [], changes: null, summary: 'the brief', headline: 'The headline', distilled: true };
@@ -11499,8 +11680,7 @@ async function main() {
         assert.strictEqual(got[0].headline, 'The real headline', 'headline not mapped on pull');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockWP.server.close(r));
     }
   }
@@ -11544,8 +11724,7 @@ async function main() {
         assert.ok(arc.rows[0].ts < projArcState.teamEntries[0].ts, 'archive lost the pre-cap tail');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockArc.server.close(r));
     }
   }
@@ -11613,8 +11792,7 @@ async function main() {
           'the pull was skipped because the push threw — teammate activity never arrived');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockDup.server.close(r));
     }
   }
@@ -11684,8 +11862,7 @@ async function main() {
         assert.strictEqual(projBFState.teamPullTs, savedCursor, 'backfill moved the FORWARD cursor');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockBF.server.close(r));
     }
   }
@@ -11738,8 +11915,7 @@ async function main() {
         assert.strictEqual(projDrainState.teamPullTs, savedCursor, 'backfill moved the FORWARD cursor');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockDrain.server.close(r));
     }
   }
@@ -11789,8 +11965,7 @@ async function main() {
         assert.strictEqual(arc.backfill.done, true);
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockTie.server.close(r));
     }
   }
@@ -11855,8 +12030,7 @@ async function main() {
         assert.strictEqual(after, 0, 'an archive-full backfill fetched again');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockCap.server.close(r));
     }
   }
@@ -11918,8 +12092,7 @@ async function main() {
       });
     } finally {
       teamArchiveResume.MAX_ARCHIVE_ROWS = savedCap;
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       await new Promise(r => mockResume.server.close(r));
     }
   }
@@ -11982,8 +12155,7 @@ async function main() {
     } finally {
       if (srvSE) await new Promise(r => srvSE.close(r));
       mockSE.server.close();
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     }
   }
 
@@ -12606,8 +12778,7 @@ async function main() {
     } finally {
       if (srvLV) await new Promise(r => srvLV.close(r));
       mockLV.server.close();
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     }
   }
 
@@ -12733,8 +12904,7 @@ async function main() {
     });
   } finally {
     process.env.MEMBRIDGE_HOME = HOME_A;
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mockS.server.close(r));
   }
 
@@ -13147,8 +13317,7 @@ async function main() {
       assert.ok(!JSON.stringify(mock4.entries).includes('sk-seq-secret-42'), 'secret reached the server');
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock4.server.close(r));
   }
 
@@ -13348,8 +13517,7 @@ async function main() {
     });
   } finally {
     process.env.MEMBRIDGE_HOME = HOME_A;
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     {
       // Restore the suite-wide opt-in for the sections that follow.
       const rc = util.loadUserConfig();
@@ -15155,11 +15323,16 @@ async function main() {
       assert.ok(selected.results.some(hit), 'the un-negated person filter stopped selecting by name');
     });
 
-    check('search filters: exclusion narrows the TOTAL, not just the returned page', () => {
+    // `totalKnownHere`, not `total`: the count is a floor of what this machine
+    // holds and is named so an agent cannot quote it as a team-wide total (see
+    // searchMemory in lib/activity.js). The property here is unchanged and is
+    // the stronger one — the count must describe the FILTERED pool, or it
+    // reports rows the caller was not allowed to see.
+    check('search filters: exclusion narrows the COUNT, not just the returned page', () => {
       const all = mcpMod.searchMemory({ query: 'searchfiltertoken' });
       const excluded = mcpMod.searchMemory({ query: 'searchfiltertoken', author: '!Andrew' });
-      assert.ok(excluded.total < all.total,
-        `excluding a person left the total unchanged (${excluded.total} vs ${all.total}) -- the count would describe rows the reader cannot see`);
+      assert.ok(excluded.totalKnownHere < all.totalKnownHere,
+        `excluding a person left the count unchanged (${excluded.totalKnownHere} vs ${all.totalKnownHere}) -- the count would describe rows the reader cannot see`);
     });
   }
 
@@ -17629,6 +17802,17 @@ async function main() {
     const mkFetch = tag => async () => ({ ok: true, json: async () => ({ tag_name: tag }) });
     const failFetch = () => async () => { throw new Error('offline'); };
 
+    // Scoped opt-in, same shape the counters and assists sections already use.
+    // The prelude sets MEMBRIDGE_UPDATE_LATEST_URL='' (#74), which resolves as
+    // "explicitly disabled" and makes check() return before it ever calls
+    // fetchImpl — so the API/TTL/no-update/offline checks below would all read
+    // { latest: null, updateAvailable: false } from that early return rather
+    // than from what their injected fetch would say. Nothing here can reach a
+    // real host: every send is driven through an injected fetchImpl. Restored
+    // at the end of the section so the prelude's opt-out resumes.
+    const prevUpdateUrl = process.env.MEMBRIDGE_UPDATE_LATEST_URL;
+    delete process.env.MEMBRIDGE_UPDATE_LATEST_URL;
+
     check('update-check: parseVersion + numeric (not lexical) compare', () => {
       assert.deepStrictEqual(uc.parseVersion('v1.2.3'), [1, 2, 3]);
       assert.deepStrictEqual(uc.parseVersion('1.2'), [1, 2, 0]);
@@ -17691,6 +17875,10 @@ async function main() {
       assert.strictEqual(uc.updateCommand('app'), 'curl -fsSL https://membridge.app/install.sh | sh');
       assert.strictEqual(uc.updateCommand('npm'), 'npm install -g @membridgeai/membridge');
     });
+
+    // End of the update-check section's telemetry opt-in.
+    if (prevUpdateUrl === undefined) delete process.env.MEMBRIDGE_UPDATE_LATEST_URL;
+    else process.env.MEMBRIDGE_UPDATE_LATEST_URL = prevUpdateUrl;
   }
 
   // New-device key recovery: a member whose keypair rotated (new machine /
@@ -17977,11 +18165,29 @@ async function main() {
       });
 
       check('feedback: syncOnce increments state.feedback.amendments for real context-file writes', () => {
+        // This used to assert `after >= before` with before === 0, which a
+        // counter that never increments satisfies -- so the check could not
+        // fail. Proven: disabling the increment in lib/scan.js entirely
+        // (`if (false && n > 0) state.feedback.amendments += n`) left the whole
+        // suite at 1315/1315, exit 0. Nothing else covers the counter either,
+        // because the value-moment checks plant `amendments` directly, so the
+        // feature had zero real coverage behind a check named for it.
+        //
+        // The expected number now comes from the pass's OWN reported changes
+        // via prompts.countAmendments (the check above pins that function to
+        // the "updated write to a configured target" rule), so this asserts an
+        // exact figure against the copy of that rule inlined in scan.js.
         util.saveState(withEvents({ firstRunShown: true, valueShown: false, amendments: 0 }));
         const before = util.loadState().feedback.amendments;
-        syncOnce({ project: proj1 }); // proj1 has accumulated events + a real CLAUDE.md target
+        const r = syncOnce({ project: proj1 }); // proj1 has accumulated events + a real CLAUDE.md target
+        const expected = prompts.countAmendments(r.changes, util.getConfig());
+        // Without this the check silently degrades back to proving nothing the
+        // moment the fixture stops writing a context file.
+        assert.ok(expected > 0,
+          `fixture: this pass wrote no context file, so the counter cannot be observed at all (changes: ${JSON.stringify(r.changes)})`);
         const after = util.loadState().feedback.amendments;
-        assert.ok(after >= before, 'amendments must never decrease');
+        assert.strictEqual(after, before + expected,
+          `amendments must count every context-file write this pass made (before ${before}, after ${after}, writes ${expected})`);
       });
     } finally {
       uncap();
@@ -18262,6 +18468,16 @@ async function main() {
       const { port } = mockSrv.address();
       { const rc = util.loadUserConfig(); rc.diagnosticsUrl = `http://127.0.0.1:${port}/diagnostics`; util.saveUserConfig(rc); }
 
+      // Explicit opt-in: the prelude sets MEMBRIDGE_NO_DIAGNOSTICS=1 for the
+      // whole suite, because lib/diagnostics.js derives its endpoint from
+      // lib/backend.json (the live Supabase project) and has no URL env
+      // override, so every child process running syncOnce would otherwise POST
+      // the rich diagnostic payload at production. This is the ONE check that
+      // needs the send to happen, and it has already redirected the endpoint at
+      // a local mock two lines above.
+      const prevNoDiag = process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+      delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+
       try {
         assert.strictEqual(diagnosticsLib.isRecallPausedForProject(scanProj, util.getConfig()), false);
         syncOnce({ project: scanProj });
@@ -18277,6 +18493,8 @@ async function main() {
         ]);
         assert.strictEqual(received.net_tokens, -500);
       } finally {
+        if (prevNoDiag === undefined) delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+        else process.env.MEMBRIDGE_NO_DIAGNOSTICS = prevNoDiag;
         await new Promise(r => mockSrv.close(r));
       }
     });
@@ -18294,6 +18512,17 @@ async function main() {
   // day to diagnose, so each state is pinned individually.
   {
     const counters = require('../lib/counters');
+
+    // Explicit opt-in, scoped to this section. The prelude sets
+    // MEMBRIDGE_NO_DIAGNOSTICS=1 to keep the diagnostics lane off production,
+    // and lib/counters.js shares that switch (counters.js -> diagnostics
+    // .diagnosticsEnabled) — so the send-path checks below would suppress
+    // instead of sending, and three of them proved that by failing the moment
+    // the prelude landed. Nothing here can reach a real host regardless: every
+    // send is driven through an injected fetchImpl stub, and the URLs are
+    // loopback. Restored at the end of the section.
+    const prevNoDiagCounters = process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+    delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
 
     check('counters: one real serve outranks every other signal', () => {
       assert.strictEqual(counters.classifyRecall({ serves: 1, hotPaths: 0, storeEntries: 0, noStructure: 9 }), 'serving');
@@ -18577,7 +18806,7 @@ async function main() {
       assert.deepStrictEqual(workerModule.validate(payload), [], 'a payload over MAX_COUNTERS must still be rejected outright');
     });
 
-    check('mcp-usage: records within the allowlist, honors the kill switch, reads back a 24h window', () => {
+    check('mcp-usage: records within the allowlist, honors the config kill switch, reads back a 24h window', () => {
       // Its own MEMBRIDGE_HOME: section 14 above exercises the real MCP tools
       // through registerTools()'s tracked() wrapper, which writes this same
       // tally file under the shared test home. Isolating the path here is
@@ -18590,12 +18819,71 @@ async function main() {
         mcpUsage.recordToolUse('search_memory', { config: {}, now });
         mcpUsage.recordToolUse('why', { config: {}, now: now - 25 * 3600000 });      // stale
         mcpUsage.recordToolUse('not_a_tool', { config: {}, now });                    // rejected
-        mcpUsage.recordToolUse('recall', { config: { diagnostics: { enabled: false } }, now }); // killed
+        mcpUsage.recordToolUse('recall', { config: { diagnostics: { enabled: false } }, now }); // killed by durable config
         assert.deepStrictEqual(mcpUsage.toolsUsedWithin(24 * 3600000, { now }), ['search_memory']);
       } finally {
         process.env.MEMBRIDGE_HOME = prevHome;
       }
     });
+
+    // #73: the split of MEMBRIDGE_NO_DIAGNOSTICS. Before the split this env
+    // silently stopped recordToolUse from writing, contradicting
+    // lib/diagnostics.js's own docs ("suppresses the NETWORK SEND only") --
+    // a per-session env override was invalidating a persistent file this
+    // session was not going to send anyway. tallyEnabled is CONFIG ONLY;
+    // the env stays send-only.
+    check('mcp-usage: MEMBRIDGE_NO_DIAGNOSTICS is send-only and MUST NOT stop the local tally', () => {
+      const mcpUsage = require('../lib/mcp-usage');
+      const prevHome = process.env.MEMBRIDGE_HOME;
+      const prevEnv = process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+      process.env.MEMBRIDGE_HOME = path.join(ROOT, 'mcp-usage-envsplit');
+      process.env.MEMBRIDGE_NO_DIAGNOSTICS = '1';
+      try {
+        const now = Date.now();
+        mcpUsage.recordToolUse('search_memory', { config: {}, now });
+        // The env was set for THIS single session. A durable config opt-out
+        // isn't in play, so the tally must still record -- if it does not, the
+        // env override has reach it should not, and the next session's counters
+        // send has no 24h data to build a payload out of.
+        assert.deepStrictEqual(mcpUsage.toolsUsedWithin(24 * 3600000, { now }), ['search_memory'],
+          'a per-session send-off env erased a persistent tally file');
+        // The file itself must be on disk under the fresh HOME: the negative
+        // half, so a resolver that silently returns nothing cannot pass this.
+        assert.ok(fs.existsSync(mcpUsage.tallyPath()),
+          'the tally file was not written -- the env override reached the disk after all');
+      } finally {
+        process.env.MEMBRIDGE_HOME = prevHome;
+        if (prevEnv === undefined) delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+        else process.env.MEMBRIDGE_NO_DIAGNOSTICS = prevEnv;
+      }
+    });
+
+    check('diagnostics: tallyEnabled and diagnosticsEnabled diverge exactly where the env is the deciding vote', () => {
+      const d = require('../lib/diagnostics');
+      const prev = process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+      try {
+        // With config OK, the env decides one lane (send off) and does not
+        // reach the other (tally on). This is the whole shape of the split.
+        process.env.MEMBRIDGE_NO_DIAGNOSTICS = '1';
+        assert.strictEqual(d.diagnosticsEnabled({}), false, 'env=1 must stop sends');
+        assert.strictEqual(d.tallyEnabled({}), true, 'env=1 must NOT stop the local tally');
+        // A durable config opt-out reaches both, as it should.
+        delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+        assert.strictEqual(d.diagnosticsEnabled({ diagnostics: { enabled: false } }), false);
+        assert.strictEqual(d.tallyEnabled({ diagnostics: { enabled: false } }), false,
+          'a user\'s durable "no telemetry" choice must reach the disk write too');
+        // No env, config OK: both on.
+        assert.strictEqual(d.diagnosticsEnabled({}), true);
+        assert.strictEqual(d.tallyEnabled({}), true);
+      } finally {
+        if (prev === undefined) delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+        else process.env.MEMBRIDGE_NO_DIAGNOSTICS = prev;
+      }
+    });
+
+    // End of the counters section's telemetry opt-in (see the top of the block).
+    if (prevNoDiagCounters === undefined) delete process.env.MEMBRIDGE_NO_DIAGNOSTICS;
+    else process.env.MEMBRIDGE_NO_DIAGNOSTICS = prevNoDiagCounters;
   }
 
 // ---- wire keys: one rule for monorepo depth AND worktrees (spec §7) ----
@@ -20608,12 +20896,17 @@ const repoRoot = require('../lib/repo-root');
     fs.writeFileSync(locked, body);
     fs.chmodSync(locked, 0o000);
     try {
-      // root reads through any mode, so only assert where the OS denied us.
-      let denied = false;
-      try { fs.readFileSync(locked, 'utf8'); } catch { denied = true; }
-      if (notRoot() && denied) {
+      // The asDir half above runs everywhere; only the unreadable-file half
+      // needs an OS that can deny a read, and its absence is now said out loud
+      // rather than leaving this check quietly half-empty.
+      if (canDenyReads) {
+        let denied = false;
+        try { fs.readFileSync(locked, 'utf8'); } catch { denied = true; }
+        assert.ok(denied, 'fixture: the locked file stayed readable, so the refusal below would prove nothing');
         assert.throws(() => hooks.readSettings(locked), /refusing to touch/i,
           'an unreadable settings file must never read as empty-and-writable');
+      } else {
+        console.log('  skip  hooks: readSettings unreadable-file half — this platform cannot make a file unreadable');
       }
     } finally {
       fs.chmodSync(locked, 0o600);
@@ -20647,20 +20940,38 @@ const repoRoot = require('../lib/repo-root');
   // Rename REPLACES the target, so the new file carries the temp file's mode,
   // not the old file's. Without care, rewriting a settings.json the user had
   // locked down to 0600 silently republishes it at the umask default.
-  check('hooks: writeSettings preserves the existing file mode', () => {
-    const f = path.join(ROOT, 'settings-mode.json');
-    fs.writeFileSync(f, JSON.stringify({ hooks: {} }));
-    fs.chmodSync(f, 0o600);
-    // win32 has no POSIX modes to preserve -- chmod above cannot narrow the
-    // reported 0666, so only assert the preservation where it actually took
-    // effect. The write itself still runs everywhere.
-    const modeApplied = (fs.statSync(f).mode & 0o777) === 0o600;
-    hooks.writeSettings(f, { hooks: { Stop: [] } });
-    if (modeApplied) {
-      assert.strictEqual(fs.statSync(f).mode & 0o777, 0o600,
-        'an atomic rewrite must not widen the permissions the user chose');
-    }
+  //
+  // The mode claim is SEPARATE from the write claim, and registered only where
+  // POSIX modes exist. Both used to live in one check whose single assertion
+  // sat inside `if (modeApplied)` — false on win32 — so on both Windows CI legs
+  // it printed `ok` having asserted nothing at all, neither the mode nor the
+  // write. Now Windows still proves the write, and says out loud that the mode
+  // half did not run.
+  const settingsModeFile = path.join(ROOT, 'settings-mode.json');
+  // Sampled BEFORE writeSettings runs, deliberately. Gating the check on the
+  // mode AFTER the write would make the skip absorb the very failure it
+  // guards: a writeSettings that widened 0600 to 0644 would fail the
+  // condition, skip the check, and report nothing wrong.
+  let fixtureModeApplied = false;
+  check('hooks: writeSettings rewrites the target with the new contents', () => {
+    fs.writeFileSync(settingsModeFile, JSON.stringify({ hooks: {} }));
+    fs.chmodSync(settingsModeFile, 0o600);
+    fixtureModeApplied = (fs.statSync(settingsModeFile).mode & 0o777) === 0o600;
+    hooks.writeSettings(settingsModeFile, { hooks: { Stop: [] } });
+    assert.deepStrictEqual(JSON.parse(read(settingsModeFile)), { hooks: { Stop: [] } },
+      'the atomic rewrite did not land');
   });
+  // win32 has no POSIX modes to preserve: the chmod above cannot narrow the
+  // reported 0666, so there is no preservation to observe.
+  if (fixtureModeApplied) {
+    check('hooks: writeSettings preserves the existing file mode', () => {
+      assert.strictEqual(fs.statSync(settingsModeFile).mode & 0o777, 0o600,
+        'an atomic rewrite must not widen the permissions the user chose');
+    });
+  } else {
+    skip('hooks: writeSettings preserves the existing file mode',
+      'this platform did not apply the 0600 fixture mode (win32 chmod cannot narrow the reported 0666), so there is no preservation to observe');
+  }
 
   // The end-to-end pair. Atomic writes are what make this dangerous -- a
   // rename needs only the DIRECTORY writable, so nothing at the write layer
@@ -20668,7 +20979,7 @@ const repoRoot = require('../lib/repo-root');
   // anything but ENOENT is the only thing standing between an unreadable
   // settings.json and its destruction. If this check ever goes red, do not
   // "fix" it by loosening readSettings.
-  check('hooks: an unreadable settings.json survives setup-hooks even with atomic writes', () => {
+  checkNeedsUnreadable('hooks: an unreadable settings.json survives setup-hooks even with atomic writes', () => {
     const f = path.join(ROOT, 'settings-locked-e2e.json');
     const body = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'their-tool' }] }] } }, null, 2);
     fs.writeFileSync(f, body);
@@ -20676,13 +20987,12 @@ const repoRoot = require('../lib/repo-root');
     try {
       let denied = false;
       try { fs.readFileSync(f, 'utf8'); } catch { denied = true; }
-      if (notRoot() && denied) {
-        const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], {
-          env: { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f }, encoding: 'utf8',
-        });
-        assert.strictEqual(out.status, 1, `expected a refusal exit, got ${out.status}: ${out.stdout}${out.stderr}`);
-        assert.ok(/refusing to touch/i.test(out.stderr), `no refusal message: ${out.stderr}`);
-      }
+      assert.ok(denied, 'fixture: the file stayed readable, so the refusal below would prove nothing');
+      const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], {
+        env: { ...process.env, MEMBRIDGE_CLAUDE_SETTINGS: f }, encoding: 'utf8',
+      });
+      assert.strictEqual(out.status, 1, `expected a refusal exit, got ${out.status}: ${out.stdout}${out.stderr}`);
+      assert.ok(/refusing to touch/i.test(out.stderr), `no refusal message: ${out.stderr}`);
     } finally {
       fs.chmodSync(f, 0o600);
     }
@@ -20709,7 +21019,7 @@ const repoRoot = require('../lib/repo-root');
   // resetting it to an empty object destroys data exactly as surely as
   // misreading a permissions error does, so "the file is there but I can't
   // make sense of it" is not treated as "the file is not there".
-  check('util: loadUserConfig refuses an existing-but-unreadable config, never "missing" (config-destruction bug)', () => {
+  checkNeedsUnreadable('util: loadUserConfig refuses an existing-but-unreadable config, never "missing" (config-destruction bug)', () => {
     const savedHome = process.env.MEMBRIDGE_HOME;
     const home = path.join(ROOT, 'util-config-locked');
     process.env.MEMBRIDGE_HOME = home;
@@ -20727,19 +21037,18 @@ const repoRoot = require('../lib/repo-root');
       try {
         let denied = false;
         try { fs.readFileSync(cfgFile, 'utf8'); } catch { denied = true; }
-        if (notRoot() && denied) {
-          assert.throws(() => util.loadUserConfig(), /refusing to touch/i,
-            'an unreadable config.json must never read as empty-and-writable');
-          // The real caller shape (server.js's toggleProject/saveSettings):
-          // load -> mutate -> save. The throw above must stop this chain
-          // before saveUserConfig ever runs -- a rename only needs the
-          // DIRECTORY writable, so nothing else would stop it overwriting a
-          // locked config.json wholesale.
-          assert.throws(() => {
-            const raw = util.loadUserConfig();
-            util.saveUserConfig({ ...raw, exclude: ['/some/project'] });
-          }, /refusing to touch/i, 'a read-modify-write caller must not reach the save');
-        }
+        assert.ok(denied, 'fixture: the file stayed readable, so the refusal below would prove nothing');
+        assert.throws(() => util.loadUserConfig(), /refusing to touch/i,
+          'an unreadable config.json must never read as empty-and-writable');
+        // The real caller shape (server.js's toggleProject/saveSettings):
+        // load -> mutate -> save. The throw above must stop this chain
+        // before saveUserConfig ever runs -- a rename only needs the
+        // DIRECTORY writable, so nothing else would stop it overwriting a
+        // locked config.json wholesale.
+        assert.throws(() => {
+          const raw = util.loadUserConfig();
+          util.saveUserConfig({ ...raw, exclude: ['/some/project'] });
+        }, /refusing to touch/i, 'a read-modify-write caller must not reach the save');
       } finally {
         fs.chmodSync(cfgFile, 0o600);
       }
@@ -20779,7 +21088,7 @@ const repoRoot = require('../lib/repo-root');
     }
   });
 
-  check('util: loadState refuses an existing-but-unreadable state.json, never resets to fresh (same destruction bug)', () => {
+  checkNeedsUnreadable('util: loadState refuses an existing-but-unreadable state.json, never resets to fresh (same destruction bug)', () => {
     const savedHome = process.env.MEMBRIDGE_HOME;
     const home = path.join(ROOT, 'util-state-locked');
     process.env.MEMBRIDGE_HOME = home;
@@ -20803,17 +21112,16 @@ const repoRoot = require('../lib/repo-root');
       try {
         let denied = false;
         try { fs.readFileSync(stateFile, 'utf8'); } catch { denied = true; }
-        if (notRoot() && denied) {
-          assert.throws(() => util.loadState(), /refusing to touch/i,
-            'an unreadable state.json must never read as fresh-and-writable');
-          // The real read-modify-write shape (lib/scan.js's syncOnce and
-          // friends): load -> mutate -> save. The throw must stop this
-          // before saveState ever runs.
-          assert.throws(() => {
-            const st = util.loadState();
-            util.saveState({ ...st, hooksInstalledVersion: 'x' });
-          }, /refusing to touch/i, 'a read-modify-write caller must not reach the save');
-        }
+        assert.ok(denied, 'fixture: the file stayed readable, so the refusal below would prove nothing');
+        assert.throws(() => util.loadState(), /refusing to touch/i,
+          'an unreadable state.json must never read as fresh-and-writable');
+        // The real read-modify-write shape (lib/scan.js's syncOnce and
+        // friends): load -> mutate -> save. The throw must stop this
+        // before saveState ever runs.
+        assert.throws(() => {
+          const st = util.loadState();
+          util.saveState({ ...st, hooksInstalledVersion: 'x' });
+        }, /refusing to touch/i, 'a read-modify-write caller must not reach the save');
       } finally {
         fs.chmodSync(stateFile, 0o600);
       }
@@ -20941,7 +21249,7 @@ const repoRoot = require('../lib/repo-root');
   // toggleProject is the smaller of the two and exercises the identical
   // shape -- proving IT refuses on an unreadable config is direct evidence
   // the fix reaches the real caller, not just the raw util functions.
-  check('server: toggleProject (a real read-modify-write caller) refuses rather than silently wiping an unreadable config.json', () => {
+  checkNeedsUnreadable('server: toggleProject (a real read-modify-write caller) refuses rather than silently wiping an unreadable config.json', () => {
     const { toggleProject } = require('../lib/server');
     const savedHome = process.env.MEMBRIDGE_HOME;
     const home = path.join(ROOT, 'util-config-caller-locked');
@@ -20959,10 +21267,9 @@ const repoRoot = require('../lib/repo-root');
       try {
         let denied = false;
         try { fs.readFileSync(cfgFile, 'utf8'); } catch { denied = true; }
-        if (notRoot() && denied) {
-          assert.throws(() => toggleProject('/some/project'), /refusing to touch/i,
-            'toggleProject must surface the read failure, not silently write { exclude: [...] } over the whole file');
-        }
+        assert.ok(denied, 'fixture: the file stayed readable, so the refusal below would prove nothing');
+        assert.throws(() => toggleProject('/some/project'), /refusing to touch/i,
+          'toggleProject must surface the read failure, not silently write { exclude: [...] } over the whole file');
       } finally {
         fs.chmodSync(cfgFile, 0o600);
       }
@@ -20973,7 +21280,7 @@ const repoRoot = require('../lib/repo-root');
     }
   });
 
-  check('ledger-store: readLedger refuses an existing-but-unreadable ledger.json, never "missing" (irreplaceable dedupe evidence)', () => {
+  checkNeedsUnreadable('ledger-store: readLedger refuses an existing-but-unreadable ledger.json, never "missing" (irreplaceable dedupe evidence)', () => {
     const store = require('../lib/ledger-store');
     const proj = path.join(ROOT, 'ledger-locked-proj');
     fs.mkdirSync(path.join(proj, memorydb.DIR_NAME), { recursive: true });
@@ -20987,17 +21294,16 @@ const repoRoot = require('../lib/repo-root');
     try {
       let denied = false;
       try { fs.readFileSync(ledgerFile, 'utf8'); } catch { denied = true; }
-      if (notRoot() && denied) {
-        assert.throws(() => store.readLedger(proj), /refusing to touch/i,
-          'an unreadable ledger.json must never read as missing');
-        // updateLedger IS the production read-modify-write (every sync tick,
-        // every project). It must refuse too, rather than folding this
-        // pass's window onto an empty previous ledger and overwriting the
-        // accumulated dedupe evidence -- writeLedger's atomic rename only
-        // needs the directory writable, nothing else stops it.
-        assert.throws(() => store.updateLedger(proj, [], util.getConfig()), /refusing to touch/i,
-          'updateLedger must refuse rather than silently rebuild from an empty fold');
-      }
+      assert.ok(denied, 'fixture: the file stayed readable, so the refusal below would prove nothing');
+      assert.throws(() => store.readLedger(proj), /refusing to touch/i,
+        'an unreadable ledger.json must never read as missing');
+      // updateLedger IS the production read-modify-write (every sync tick,
+      // every project). It must refuse too, rather than folding this
+      // pass's window onto an empty previous ledger and overwriting the
+      // accumulated dedupe evidence -- writeLedger's atomic rename only
+      // needs the directory writable, nothing else stops it.
+      assert.throws(() => store.updateLedger(proj, [], util.getConfig()), /refusing to touch/i,
+        'updateLedger must refuse rather than silently rebuild from an empty fold');
     } finally {
       fs.chmodSync(ledgerFile, 0o600);
     }
@@ -21518,7 +21824,7 @@ const repoRoot = require('../lib/repo-root');
       // would need a fabricated avoided figure, so every avoided field stays
       // exactly zero here even though tokens were demonstrably injected.
       assert.deepStrictEqual(led.avoided,
-        { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 });
+        { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 });
       const proj = savingsPayload().projects.find(x => x.path === tp);
       assert.strictEqual(proj.avoided.tokens, 0);
       assert.ok(proj.notesInjectedTokens > 0);
@@ -21575,15 +21881,27 @@ const repoRoot = require('../lib/repo-root');
     const mcpRegister = require('../lib/mcp-register');
     const claudeBinMod = require('../lib/claude-bin');
 
-    const REAL_AGENT_FILES = [
-      path.join(os.homedir(), '.claude.json'),
-      path.join(os.homedir(), '.codex', 'config.toml'),
-      path.join(os.homedir(), '.cursor', 'mcp.json'),
-    ];
-    const snapshotReal = () => REAL_AGENT_FILES.map(f => {
-      try { return fs.readFileSync(f).toString('base64'); } catch (err) { return `absent:${err.code}`; }
-    });
-    const realBefore = snapshotReal();
+    // #77 REPLACEMENT for the old REAL_AGENT_FILES snapshot. The previous
+    // check snapshotted the developer's real ~/.claude.json / ~/.codex /
+    // ~/.cursor and asserted byte-identity at the end -- but ~/.claude.json
+    // is rewritten every ~minute by any active Claude Code session, and that
+    // read-of-a-live-file made the check flake in a way verify-finding's
+    // PHANTOM verdict cannot see (load-correlated because the load IS Claude
+    // sessions running, not scheduler contention).
+    //
+    // The replacement inverts the assertion. Instead of reading the real
+    // file, the parent logs every child's resolved `os.homedir()` via a
+    // preload module the test owns entirely (test/log-homedir-preload.js).
+    // NODE_OPTIONS carries the -r flag into every recursive spawn, so any
+    // child a fixtureEnv spawns -- and any child THOSE spawn -- logs its
+    // homedir on load. `os.homedir()` reads $HOME on POSIX / $USERPROFILE on
+    // Windows (Node docs), both of which fixtureEnv sets; a child that
+    // ended up under the real home logs the real home. Same claim as the
+    // old check, restated as "look at what the children resolved" instead
+    // of "look at what the real file held".
+    const HOMEDIR_LOG = path.join(W_ROOT, 'homedir-log');
+    const HOMEDIR_PRELOAD = path.join(__dirname, 'log-homedir-preload.js');
+    fs.writeFileSync(HOMEDIR_LOG, ''); // must exist for the preload's appendFileSync
 
     // A stub `claude` that records the argv it was called with. Exit 1 on
     // `mcp get` is the clean-machine answer (nothing registered yet).
@@ -21623,6 +21941,11 @@ const repoRoot = require('../lib/repo-root');
       MEMBRIDGE_CLAUDE_SETTINGS: path.join(home, 'claude-settings.json'),
       MEMBRIDGE_PORT: String(P(46)),
       SHELL: stubShell,
+      // Preload runs in every recursive spawn; see the HOMEDIR_LOG comment
+      // above. `--require` uses = to keep the value one token, so NODE_OPTIONS
+      // stays a well-formed single-flag string on every platform.
+      NODE_OPTIONS: `--require=${HOMEDIR_PRELOAD}${process.env.NODE_OPTIONS ? ' ' + process.env.NODE_OPTIONS : ''}`,
+      MB_HOMEDIR_LOG: HOMEDIR_LOG,
       ...extra,
     });
     const runCli = (home, argv, extraEnv = {}) =>
@@ -21785,10 +22108,19 @@ const repoRoot = require('../lib/repo-root');
         'switching off session summaries removed the MCP server registration');
     });
 
-    check('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it', () => {
-      // The non-negotiable: a silent skip is indistinguishable from the
-      // feature working, which is the exact bug this feature exists to fix.
-      if (probeHit) return; // a real claude on the probe list: cannot produce a miss here
+    // The non-negotiable this check states — "a silent skip is
+    // indistinguishable from the feature working, which is the exact bug this
+    // feature exists to fix" — was true of the check itself. It opened with
+    // `if (probeHit) return;`, so on any machine with claude installed at one
+    // of the fixed probe paths (/opt/homebrew/bin, /usr/local/bin — i.e. every
+    // Homebrew install) it printed `ok` having asserted nothing. CI runners and
+    // this author's machine happen to miss the probe list, which is the only
+    // reason it was ever exercised at all.
+    if (probeHit) {
+      skip('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it',
+        `a real claude binary is on the fixed probe list on this machine, so registration cannot miss here `
+        + `(the check needs a machine where claude is absent from ${claudeBinMod.CANDIDATES.slice(1).join(', ')})`);
+    } else check('mcp-wiring: an agent that cannot be registered is REPORTED in status, with the key that fixes it', () => {
       const home = mkFixture(['.claude']);
       const reg = runCli(home, ['mcp', 'register'], { SHELL: deadShell });
       assert.strictEqual(reg.status, 0, reg.stderr);
@@ -22090,11 +22422,36 @@ const repoRoot = require('../lib/repo-root');
       });
     }
 
-    check('mcp-wiring: not one byte of the real agent configs was touched', () => {
-      // Three files that exist on this machine. Everything above injects HOME,
-      // and this is what proves it.
-      assert.deepStrictEqual(snapshotReal(), realBefore,
-        'a check reached the developer\'s own ~/.claude.json, ~/.codex or ~/.cursor');
+    check('mcp-wiring: every child resolved os.homedir() under the fixture, never the real home', () => {
+      // The #77 replacement for the byte-identity snapshot. The old check
+      // read three of the developer's real files at suite finish and asserted
+      // they were unchanged; that read is exactly what made this section flake
+      // under load. This one owns its own signal.
+      //
+      // Every child spawned via fixtureEnv above logs `os.homedir()` here on
+      // load. On POSIX Node resolves os.homedir() to $HOME; on Windows, to
+      // $USERPROFILE — both set by fixtureEnv. A child under the real home
+      // logs the real home. The proof does not depend on any file the OS keeps
+      // rewriting on its own cadence.
+      const lines = fs.readFileSync(HOMEDIR_LOG, 'utf8').split('\n').filter(Boolean);
+      // Fixture guard: every child in this block runs at least once, so the
+      // log must be non-empty. A silent zero would look identical to a passing
+      // check (the same "assertion cannot fail" defect this repo has been
+      // clearing all week -- see test/suites/runner-reporting.test.js).
+      assert.ok(lines.length > 0,
+        'no child logged a homedir — the preload never ran, so this check proves nothing (fixture broken)');
+      const realHome = os.homedir();
+      const leaks = lines.filter(l => !l.startsWith(W_ROOT) && l === realHome);
+      assert.deepStrictEqual(leaks, [],
+        `${leaks.length} of ${lines.length} child(ren) resolved os.homedir() to the real home instead of the fixture: `
+        + `${JSON.stringify(leaks.slice(0, 3))}`);
+      // The stricter form: every logged homedir must be under the fixture.
+      // Catches redirection to a THIRD path (env unset, resolved via /etc/passwd
+      // fallback, etc.) in addition to the real-home case above.
+      const stray = lines.filter(l => !l.startsWith(W_ROOT));
+      assert.deepStrictEqual(stray, [],
+        `${stray.length} child(ren) resolved os.homedir() to a path outside W_ROOT: `
+        + `${JSON.stringify(stray.slice(0, 3))}`);
     });
 
     try { fs.rmSync(W_ROOT, { recursive: true, force: true }); } catch {}
@@ -22441,8 +22798,7 @@ const repoRoot = require('../lib/repo-root');
           'an owner keeps access after revoking someone else');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
       await new Promise(r => mockAccess.server.close(r));
     }
@@ -22472,6 +22828,13 @@ const repoRoot = require('../lib/repo-root');
   {
     const assistsLedgerStore = require('../lib/ledger-store');
     const mcpUsageLib = require('../lib/mcp-usage');
+
+    // #73 removed the scoped opt-in that used to sit here. Before the split
+    // in lib/diagnostics.js, recordToolUse honoured MEMBRIDGE_NO_DIAGNOSTICS=1
+    // and this whole section (a purely local, in-process tally) had to bounce
+    // the prelude's env to observe anything -- the switch was doing more than
+    // its docs claimed. Now the tally is gated by tallyEnabled (config only),
+    // so a per-session env override does not reach it. Nothing here sends.
 
     check('assists: total equals the sum of its parts, from real ledger fixtures with different per-channel values', () => {
       const ap = path.join(ROOT, 'assists-proj');
@@ -22654,7 +23017,7 @@ const repoRoot = require('../lib/repo-root');
         util.saveState({ version: util.STATE_VERSION, files: {}, projects: { [tp]: { name: 'assists-outside-net', events: [] } } });
         const payload = savingsPayload();
         assert.deepStrictEqual(payload.totals.avoided,
-          { tokens: 0, serves: 0, tierA: 0, tierB: 0, partialWins: 0, netNegatives: 0 },
+          { tokens: 0, serves: 0, tierA: 0, tierB: 0, tierUnknown: 0, partialWins: 0, netNegatives: 0 },
           'nine teammate-note injections must not conjure an avoidance figure that was never earned');
         const assists = apiInsights.assistsFrom(payload);
         assert.strictEqual(assists.byKind.teammateNotes, 9, 'but the assist itself is still counted');
@@ -22663,6 +23026,7 @@ const repoRoot = require('../lib/repo-root');
         process.env.MEMBRIDGE_HOME = prevHome;
       }
     });
+
   }
 
   {
@@ -22807,8 +23171,7 @@ const repoRoot = require('../lib/repo-root');
         assert.ok(!res.body.problems.some(p => p.headline.includes('Owner')));
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
       await new Promise(r => mockInsights.server.close(r));
     }
@@ -22955,8 +23318,7 @@ const repoRoot = require('../lib/repo-root');
         }
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
       await new Promise(r => mockDom.server.close(r));
     }
@@ -23284,6 +23646,15 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(mock17.projectAccess.filter(r => r.member_id === lateCreds.userId).length, 0,
           "a departed member's access rows must not survive them");
         await setDefault(false);
+        // 044: the removal above ROTATED teams.invite_code, so the value
+        // captured from create_team at the top of this fixture is now dead —
+        // that is the whole point of the migration, and it is pinned in
+        // test/suites/removal-durability.test.js. This section is about access
+        // ROWS, not about credential lifetime, so it re-reads the team's
+        // current code and carries on. Every later joinTeam in this fixture
+        // reads t17Team.invite_code too, which is why the capture is refreshed
+        // in place rather than shadowed by a local.
+        t17Team.invite_code = mock17.teams.get(t17Team.team_id).inviteCode;
         process.env.MEMBRIDGE_HOME = homeFor.late;
         await teamsync.joinTeam(util.getConfig(), t17Team.invite_code);
         assert.strictEqual(accessRow(lateCreds.userId).can_see, false,
@@ -23291,63 +23662,80 @@ const repoRoot = require('../lib/repo-root');
         assert.strictEqual(await feedCountFor('late'), 0);
       });
 
-      // ===== 032: the invariant 029 could only ASSUME =====
+      // ===== 032 + 036: the invariant 029 could only ASSUME, and the hole =====
       // 029 §3 says in its own header that "every (member, project) pair has a
       // row" holds "only for as long as callers use the RPC; it is not enforced
-      // anywhere", because `projects_insert` (schema.sql:118) lets a member POST
-      // straight to /rest/v1/projects. Two things established before writing the
-      // migration, both of which the checks below depend on:
+      // anywhere", because the `projects_insert` policy let a member POST
+      // straight to /rest/v1/projects. Two migrations answer that, and both
+      // are under test here:
       //
-      //   * NOTHING IN THE CLIENT TAKES THAT PATH. link_project at
-      //     lib/teamsync.js:1206 is the only writer of public.projects in the
-      //     tree. This mock had no POST route for /rest/v1/projects at all until
-      //     this ticket added one, which is the same fact from another angle.
-      //   * SO THE POST ROUTE HERE IS NOT MODELLING A CLIENT. It models the
-      //     CAPABILITY THE POLICY GRANTS — what a member could do with the anon
-      //     key and their own bearer token. That is the surface under test.
+      //   * 032 adds an AFTER INSERT trigger on public.projects, so the access
+      //     rows are written by the INSERT rather than by the RPC and every
+      //     insert path is covered. mock17.flags.noProjectInsertTrigger
+      //     suppresses it and is how the trigger checks are proven
+      //     non-vacuous — with it set, every one of them fails.
+      //   * 036 DROPS `projects_insert` outright, so the member-reachable path
+      //     is closed as well as covered. That is live: public.projects now has
+      //     `projects_select` only, with RLS still on and the trigger intact.
       //
-      // 032 adds an AFTER INSERT trigger on public.projects so the rows are
-      // written by the INSERT rather than by the RPC, which covers this path
-      // too. mock17.flags.noProjectInsertTrigger suppresses it and is how these
-      // checks are proven non-vacuous — with it set, every one of them fails.
+      // WHY THERE IS STILL A POST ROUTE IN THE MOCK, AND WHY IT IS NOT
+      // MODELLING A CLIENT EITHER WAY. Nothing in the tree POSTs to
+      // public.projects — link_project (lib/teamsync.js:1206) is its only
+      // writer, pinned below — so the route exists purely to reach the two
+      // things a POST can now be:
+      //
+      //   * as a MEMBER (bearer token, `authenticated` role): refused, because
+      //     036 left no INSERT policy to satisfy. This is the surface 029 §3
+      //     flagged, and it is now closed.
+      //   * with the SERVICE-ROLE key (BYPASSRLS): admitted, because row
+      //     security is not applied to that role at all. This stands in for the
+      //     insert paths production still has — link_project's `security
+      //     definer` insert and an operator's insert in the SQL editor — and it
+      //     is what keeps the 032 trigger checks testing the TRIGGER rather
+      //     than accidentally testing a policy.
       //
       // WHAT THESE CANNOT PROVE: the mock is JavaScript. It cannot exercise
-      // PL/pgSQL, trigger ordering, `security definer` rights, or whether the
-      // real project_access_insert policy admits the trigger's write. Those need
-      // the live database. What is under test here is the RULE 032 encodes.
+      // PL/pgSQL, trigger ordering, `security definer` rights, BYPASSRLS, the
+      // absence of an INSERT policy in a real catalog, or whether the real
+      // project_access_insert policy admits the trigger's write. Those need the
+      // live database, and 036's header records the two catalog queries that
+      // settled the RLS half. What is under test here is the RULE each
+      // migration encodes.
       const tokenFor = userId => {
         const hit = [...mock17.sessions.entries()].find(([, id]) => id === userId);
         assert.ok(hit, `no live session for ${userId}`);
         return hit[0];
       };
-      const postProjectDirect = async (userId, row) => {
+      const postProject = async (headers, row) => {
         const r = await fetch(`http://127.0.0.1:${MOCK17_PORT}/rest/v1/projects`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            apikey: 'anon-test',
-            Authorization: `Bearer ${tokenFor(userId)}`,
-          },
+          headers: { 'Content-Type': 'application/json', ...headers },
           body: JSON.stringify(row),
         });
         const text = await r.text();
         return { status: r.status, body: text ? JSON.parse(text) : null };
       };
+      // What a team member can do for themselves: anon key + their own token.
+      const postProjectAsMember = (userId, row) =>
+        postProject({ apikey: 'anon-test', Authorization: `Bearer ${tokenFor(userId)}` }, row);
+      // What survives 036: a writer that bypasses row security entirely.
+      const postProjectBypassingRls = row =>
+        postProject({ apikey: mock17.serviceKey }, row);
       const rowsForProject = projectId =>
         mock17.projectAccess.filter(r => r.project_key === projectId);
 
-      await check('032: a project created by direct POST — never through link_project — still materializes a row for every current member', async () => {
+      await check('032: a project inserted outside link_project still materializes a row for every current member', async () => {
         const before = mock17.projectAccess.length;
-        const res = await postProjectDirect(memberCreds.userId, {
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct', repo_url: 'https://git.test/t17-direct',
           created_by: memberCreds.userId,
         });
-        assert.strictEqual(res.status, 201, `direct POST should be permitted by projects_insert: ${JSON.stringify(res.body)}`);
+        assert.strictEqual(res.status, 201, `an RLS-bypassing insert must land: ${JSON.stringify(res.body)}`);
         const projectId = res.body[0].id;
-        // An ordinary MEMBER created it, not a manager. Under project_access_insert
-        // (024:78, `with check is_team_manager`) they could not write these rows
-        // themselves — the trigger's `security definer` is what makes it possible,
-        // and 029 §3 already depends on exactly that.
+        // created_by is an ordinary MEMBER, not a manager. Under
+        // project_access_insert (024:78, `with check is_team_manager`) they could
+        // not write these rows themselves — the trigger's `security definer` is
+        // what makes it possible, and 029 §3 already depends on exactly that.
         const rows = rowsForProject(projectId);
         assert.strictEqual(rows.length, 3,
           'owner, member and late are all current members, so all three need a row');
@@ -23369,10 +23757,10 @@ const repoRoot = require('../lib/repo-root');
 
       await check("032: the trigger records the project's OWN default, so a closed project stays closed instead of leaning on tier 2", async () => {
         // The catcher for a trigger that hardcodes `true` instead of reading
-        // NEW.default_access. Without this, a directly-created closed project
-        // would materialize three can_see = true rows and be MORE open than one
-        // created through link_project — a fix that inverted the bug.
-        const res = await postProjectDirect(ownerCreds.userId, {
+        // NEW.default_access. Without this, a closed project created off the RPC
+        // path would materialize three can_see = true rows and be MORE open than
+        // one created through link_project — a fix that inverted the bug.
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct-closed', created_by: ownerCreds.userId,
           default_access: false,
         });
@@ -23395,7 +23783,7 @@ const repoRoot = require('../lib/repo-root');
         // a second writer to rows a manager may have set by hand, and flipping
         // the flag would move existing members — the precise behaviour 028/029
         // exist to remove.
-        const res = await postProjectDirect(ownerCreds.userId, {
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct-flip', created_by: ownerCreds.userId,
         });
         assert.strictEqual(res.status, 201);
@@ -23412,38 +23800,118 @@ const repoRoot = require('../lib/repo-root');
         }
       });
 
-      await check('032 does not widen projects_insert: a non-member is refused, and created_by cannot be spoofed', async () => {
-        // Pinning both halves of the policy predicate
-        // (`is_team_member(team_id) and created_by = auth.uid()`), because 032
-        // leaves the policy in place on purpose and a later "cleanup" that
-        // loosened it would otherwise be invisible.
+      await check('036: a member POSTing straight to /rest/v1/projects is refused — unconditionally, because no INSERT policy is left to satisfy', async () => {
+        // THIS CHECK USED TO ASSERT 201. Under `projects_insert` the first
+        // request below satisfied `is_team_member(team_id) and created_by =
+        // auth.uid()` and created a real project row, skipping every check
+        // link_project performs. 036 dropped the policy on the live database, so
+        // the same request now raises 42501 and PostgREST returns 403.
+        //
+        // The point of listing three callers is that the refusal has NO
+        // predicate: it does not depend on membership, on role, or on created_by
+        // agreeing with auth.uid(). A "fix" that reinstated any of those
+        // conditions — which is what recreating the policy would do — fails on
+        // the first two rows here, not the third.
         const outsider = await teamsync.signup(util.getConfig(), 't17-outsider@test.dev', 'pw-t17x', 'Outsider17');
-        const refused = await postProjectDirect(outsider.userId, {
-          team_id: t17Team.team_id, name: 't17-outsider', created_by: outsider.userId,
-        });
-        assert.strictEqual(refused.status, 403, 'a non-member must not be able to create a project in this team');
-        assert.strictEqual(mock17.projects.some(p => p.name === 't17-outsider'), false,
-          'and no project row may survive the refusal');
-
-        const spoofed = await postProjectDirect(memberCreds.userId, {
-          team_id: t17Team.team_id, name: 't17-spoofed', created_by: ownerCreds.userId,
-        });
-        assert.strictEqual(spoofed.status, 403, 'created_by must equal auth.uid(); a member cannot blame the owner');
-        assert.strictEqual(mock17.projects.some(p => p.name === 't17-spoofed'), false);
+        const attempts = [
+          ['an ordinary member, with their own id in created_by (the request that used to succeed)',
+            memberCreds.userId, { name: 't17-post-member', created_by: memberCreds.userId }],
+          ['the team OWNER — role buys nothing, there is no policy to pass',
+            ownerCreds.userId, { name: 't17-post-owner', created_by: ownerCreds.userId }],
+          ['a non-member of the team',
+            outsider.userId, { name: 't17-post-outsider', created_by: outsider.userId }],
+        ];
+        const accessBefore = mock17.projectAccess.length;
+        for (const [who, userId, row] of attempts) {
+          const refused = await postProjectAsMember(userId, { team_id: t17Team.team_id, ...row });
+          assert.strictEqual(refused.status, 403, `${who} must be refused: ${JSON.stringify(refused.body)}`);
+          assert.match(String(refused.body && refused.body.message), /row-level security policy/,
+            'and refused as an RLS violation, not as a validation or membership error');
+          assert.strictEqual(mock17.projects.some(p => p.name === row.name), false,
+            `no project row may survive the refusal (${who})`);
+        }
+        // The refusal is total, not partial: a refused insert cannot have fired
+        // the 032 trigger, so it cannot have left access rows behind either.
+        assert.strictEqual(mock17.projectAccess.length, accessBefore,
+          'a refused insert must not materialize project_access rows');
       });
 
-      await check("032 closes the ACCESS gap and no more: link_project's repo_url dedup is still bypassed by a direct POST", async () => {
-        // Stated so nobody reads 032 as having made the direct path equivalent
-        // to the RPC. It is not. link_project adopts an existing project with a
-        // matching repo_url; a direct POST cannot, because `unique (team_id,
-        // name)` (schema.sql:33) is the only constraint that binds this path.
-        // Two rows for one repository under different names is a REAL remaining
-        // difference — it is the duplicate-project problem, tracked separately,
-        // and it needs a data write to resolve, not a policy change.
+      await check('036 is safe because nothing in the tree takes that path: link_project is the only writer of public.projects', async () => {
+        // The load-bearing half of 036's justification, pinned in the suite
+        // rather than left as a claim in a migration header. If someone later
+        // adds a direct write to `projects` from lib/, they would get a 403 from
+        // a real backend with no explanation; this check fails first and names
+        // the reason.
+        const libFiles = [];
+        (function walk(dir) {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, ent.name);
+            if (ent.isDirectory()) walk(p);
+            else if (ent.name.endsWith('.js')) libFiles.push(p);
+          }
+        })(path.join(__dirname, '..', 'lib'));
+        assert.ok(libFiles.length > 40, `expected to scan the whole of lib/, got ${libFiles.length} files`);
+        // Every PostgREST write in lib/ goes through a rest(config, creds,
+        // METHOD, '<table>...') call — teamsync.js:326 and the identical pair in
+        // api-access.js:27. Collect the table each write targets.
+        const written = new Map();
+        for (const file of libFiles) {
+          const src = fs.readFileSync(file, 'utf8');
+          const re = /'(POST|PATCH|PUT|DELETE)',\s*(?:\/\/[^\n]*\n\s*)?[`'"]([A-Za-z_][A-Za-z0-9_]*)/g;
+          let m;
+          while ((m = re.exec(src))) {
+            if (!written.has(m[2])) written.set(m[2], []);
+            written.get(m[2]).push(`${path.relative(path.join(__dirname, '..'), file)} (${m[1]})`);
+          }
+        }
+        assert.ok(written.size > 0, 'the scan found no PostgREST writes at all, so it is not testing anything');
+        assert.strictEqual(written.has('projects'), false,
+          `lib/ must never write public.projects directly — use the link_project RPC: ${JSON.stringify(written.get('projects'))}`);
+        // And the RPC that does write it is still reached, so the absence above
+        // is "goes through link_project", not "project creation was deleted".
+        assert.ok(written.has('rpc'), 'link_project is called through rest(..., \'POST\', `rpc/${fn}`)');
+        const teamsyncSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'teamsync.js'), 'utf8');
+        const linkCalls = teamsyncSrc.match(/'link_project'/g) || [];
+        assert.strictEqual(linkCalls.length, 1,
+          'link_project is called from exactly one place in lib/teamsync.js; more than one is a second creation path to review');
+      });
+
+      await check('036 leaves the RPC path alone: link_project still creates a project and materializes access rows', async () => {
+        // The other half of safety. 036's header argues from two live catalog
+        // facts (link_project is owned by `postgres` with rolbypassrls = true,
+        // and public.projects has relforcerowsecurity = false) that the RPC's
+        // insert never evaluated `projects_insert` and so cannot be broken by
+        // dropping it. THE MOCK CANNOT VERIFY THAT — it has no RLS engine and no
+        // roles. What it can do is pin that the supported creation path still
+        // works end to end while the direct POST is refused, and catch a "fix"
+        // that routed link_project through the refusing endpoint.
+        process.env.MEMBRIDGE_HOME = homeFor.owner;
+        const PROJECT_C = path.join(ROOT, 't17-project-c');
+        fs.mkdirSync(PROJECT_C, { recursive: true });
+        const stC = util.loadState();
+        stC.projects[PROJECT_C] = { events: [] };
+        util.saveState(stC);
+        const linkC = await teamsync.linkProject(util.getConfig(), PROJECT_C, t17Team.team_id, 'T17Co');
+        assert.ok(linkC && linkC.projectId, 'link_project must still create a project with no INSERT policy present');
+        assert.ok(mock17.projects.some(p => p.id === linkC.projectId), 'and the row must exist');
+        assert.strictEqual(rowsForProject(linkC.projectId).length, 3,
+          'every current member still gets a materialized row on the RPC path');
+      });
+
+      await check("032 closes the ACCESS gap and no more: link_project's repo_url dedup is still bypassed by any non-RPC insert", async () => {
+        // Stated so nobody reads 032 — or 036 — as having made a non-RPC insert
+        // equivalent to the RPC. It is not. link_project adopts an existing
+        // project with a matching repo_url; an insert that goes round it cannot,
+        // because `unique (team_id, name)` (schema.sql:33) is the only constraint
+        // that binds this path. Two rows for one repository under different names
+        // is a REAL remaining difference — it is the duplicate-project problem,
+        // tracked separately, and it needs a data write to resolve, not a policy
+        // change. NOTE 036 DOES NOT FIX IT: the live `membridge` / `Membridge`
+        // pair came from link_project matching on exact name, not from the POST.
         const repo = 'https://git.test/t17-direct';
         const existing = mock17.projects.filter(p => p.teamId === t17Team.team_id && p.repoUrl === repo);
         assert.strictEqual(existing.length, 1, 'precondition: one project already holds this repo_url');
-        const res = await postProjectDirect(ownerCreds.userId, {
+        const res = await postProjectBypassingRls({
           team_id: t17Team.team_id, name: 't17-direct-twin', repo_url: repo, created_by: ownerCreds.userId,
         });
         assert.strictEqual(res.status, 201, 'the unique constraint is on (team_id, name), so a new NAME is accepted');
@@ -23547,23 +24015,38 @@ const repoRoot = require('../lib/repo-root');
 
       // ===== WHERE 033 IS ACTUALLY LOAD-BEARING =====
       // The client's gate above is positive-confirmation only, and
-      // visibleProjectIds (lib/teamsync.js:1092-1112) returns NULL on three
-      // inputs: a thrown request, a non-array body, and — deliberately — an
-      // EMPTY visible set, because [] is genuinely ambiguous between "revoked
-      // from everything", "backend has no project_stats view" and "deployment
-      // misconfigured", and the caller DELETES local data on absence.
+      // visibleProjectIds returns NULL — "inconclusive, skip the gate" —
+      // whenever it cannot answer, because the caller DELETES local data on a
+      // positive answer.
       //
-      // Its own comment names the cost it accepted: "revocation from a member's
-      // ONLY project is not detected here". What it could not know is that the
-      // undetected case was not merely a stale read — pre-033 the backend
-      // ACCEPTED the push, because memory_entries_insert never checked
-      // can_see_project. So a member revoked from every project they could see
-      // (in practice: their only one) skipped the gate, pushed, and the write
-      // landed. No attacker, no stale client, first-party code path.
+      // WHICH INCONCLUSIVE CASE THIS USES, AND WHY IT CHANGED (REV-13). These
+      // three checks were written against the EMPTY visible set: pre-SEC-4,
+      // `[]` was inconclusive, so a member revoked from their only project
+      // skipped the gate, pushed, and (pre-033) the write landed. SEC-4
+      // (1c7ce9f) settled that case — an empty project_stats corroborated by a
+      // live base-projects row now means REVOKED — so the client stops that
+      // push before the backend ever sees it, and this fixture stopped reaching
+      // the code it exists to test. Three checks went red for a REASON THAT WAS
+      // A FIX, which is the most dangerous shape of red there is: nothing was
+      // broken, and the natural repair (weakening the assertions) would have
+      // deleted the backstop's only coverage.
       //
-      // This is the window 033 closes, and 024's own header says this is where
-      // the backstop belongs: "RLS is the backstop if that check is ever
-      // bypassed or wrong, not the only gate."
+      // So the backstop is now reached through the window SEC-4 deliberately
+      // LEAVES open, named in its own commit message: "base empty / all
+      // archived / errored -> inconclusive -> null, unchanged". flags
+      // .failProjectsList faults the corroborating read, exactly as a network
+      // blip or a permissions change on that one endpoint would, and the gate
+      // correctly declines to act on an answer it could not get. The write is
+      // then attempted and 033 — the RLS check on memory_entries_insert — is
+      // the only thing standing between a revoked member and a landed write.
+      // That is what 024's header describes: "RLS is the backstop if that check
+      // is ever bypassed or wrong, not the only gate."
+      //
+      // FALSIFIABILITY (REV-13, proven not asserted): with
+      // flags.noWriteAccessCheck = true — the mock's stand-in for "033 not
+      // applied" — the first of these three checks fails on
+      // `a revoked write must not land`. The repair did not turn these green by
+      // making them undemanding.
       const HOME_SOLE = path.join(ROOT, 'home-t17-sole');
       homeFor.sole = HOME_SOLE;
       portFor.sole = P(84);
@@ -23601,6 +24084,12 @@ const repoRoot = require('../lib/repo-root');
       };
       util.saveState(stS);
       const soleDeniedBefore = mock17.stats.deniedInserts;
+      // The probe cannot answer -> null -> the client gate is skipped, which is
+      // the only state in which the backend backstop is the thing under test.
+      // Held across all three checks below: the second one re-syncs, and a pass
+      // in which the gate CAN answer would stop the refusal recurring for a
+      // different reason than the one being asserted.
+      mock17.flags.failProjectsList = true;
       const rS = await teamsync.syncTeams();
 
       await check('033: an identity revoked from EVERY project slips the client gate, and the backend is what refuses the write', async () => {
@@ -23655,6 +24144,8 @@ const repoRoot = require('../lib/repo-root');
         assert.ok(/discard a link that may be correct/.test(err),
           `unlink must be described as a hazard, not prescribed: ${err}`);
       });
+
+      mock17.flags.failProjectsList = false;
 
       // ===== readAccess must not invent an access list it cannot read =====
       // GET /api/project/access had NO role gate, while the data it reports is
@@ -23719,8 +24210,7 @@ const repoRoot = require('../lib/repo-root');
           'a real access list distinguishes members; a guessed one cannot');
       });
     } finally {
-      delete process.env.MEMBRIDGE_TEAM_URL;
-      delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+      noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
       process.env.MEMBRIDGE_HOME = ORIGINAL_HOME;
       await new Promise(r => mock17.server.close(r));
     }
@@ -24087,33 +24577,160 @@ const repoRoot = require('../lib/repo-root');
     fs.mkdirSync(HOME_RESTART, { recursive: true });
     const env = { ...process.env, MEMBRIDGE_HOME: HOME_RESTART, MEMBRIDGE_PORT: String(RESTART_PORT) };
     const pidFile = path.join(HOME_RESTART, 'membridge.pid');
-    spawnSync(process.execPath, [BIN, 'start'], { env, encoding: 'utf8' });
-    await waitForHttp(`http://127.0.0.1:${RESTART_PORT}/api/status`);
-    const pidBefore = fs.readFileSync(pidFile, 'utf8').trim();
+    const logFile = path.join(HOME_RESTART, 'membridge.log');
 
-    const t0 = Date.now();
-    const restartRes = await fetch(`http://127.0.0.1:${RESTART_PORT}/api/daemon/restart`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-    });
-    const restartBody = await restartRes.json().catch(() => null);
-    const respondMs = Date.now() - t0;
+    // Readiness is waited out on terms the DAEMON controls -- the pid file it
+    // writes on boot, and whether that process is still alive -- not on a fixed
+    // wall clock. The old form was `spawnSync(start)` with its result thrown
+    // away, followed by waitForHttp's flat 15s: on a busy runner that produced
+    // `Error: timeout waiting for .../api/status: fetch failed`, an uncaught
+    // throw which killed the whole monolith mid-run (observed: node 22 on
+    // windows-latest, PR #23, cleared by a re-run) and took every check after
+    // this line with it. It also discarded the only two artifacts that say WHY:
+    // `membridge start`'s own output, and the daemon's log.
+    //
+    // The loop below stops when the daemon decides, not when a clock does: it
+    // gives up early if the process is gone (a real failure -- no point waiting
+    // out a deadline) and otherwise keeps polling while it is alive. The
+    // remaining caps are backstops for the one case the daemon cannot signal:
+    // cmdDaemon writes the pid file BEFORE startServer binds, and startServer
+    // retries EADDRINUSE for ~10s and then gives up permanently while the
+    // process stays alive, so "alive forever, never serving" is reachable.
+    const isAlive = pid => {
+      if (!pid) return false;
+      try { process.kill(Number(pid), 0); return true; } catch { return false; }
+    };
+    const readPidFile = () => { try { return fs.readFileSync(pidFile, 'utf8').trim(); } catch { return ''; } };
+    const logTail = () => {
+      try { return fs.readFileSync(logFile, 'utf8').trimEnd().split('\n').slice(-12).join('\n'); }
+      catch { return '(no daemon log)'; }
+    };
+    const startedDiag = s => (s
+      ? `\`membridge start\`: status=${s.status} signal=${s.signal || 'none'}\n  stdout: ${JSON.stringify((s.stdout || '').trim())}\n  stderr: ${JSON.stringify((s.stderr || '').trim())}`
+      : '(no start command for this wait)');
+    // Resolves { ok, why } -- never throws, so a boot problem is one recorded
+    // FAIL with a diagnosis instead of a crash that truncates the suite.
+    const awaitDaemonReady = async ({ what, started, pidWaitMs = 30000, serveWaitMs = 60000 }) => {
+      const fail = why => ({ ok: false, why: `${what}: ${why}\n  ${startedDiag(started)}\n  pid file: ${readPidFile() || '(missing)'}\n  daemon log tail:\n${logTail()}` });
+      if (started && started.error) return fail(`the start command could not run: ${started.error.message}`);
+      if (started && started.status !== 0) return fail(`\`membridge start\` exited ${started.status}`);
 
-    let pidAfter = pidBefore;
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      try { pidAfter = fs.readFileSync(pidFile, 'utf8').trim(); } catch {}
-      if (pidAfter !== pidBefore) break;
-      await new Promise(r => setTimeout(r, 150));
+      const pidDeadline = Date.now() + pidWaitMs;
+      let pid = readPidFile();
+      while (!pid && Date.now() < pidDeadline) {
+        await new Promise(r => setTimeout(r, 100));
+        pid = readPidFile();
+      }
+      if (!pid) return fail(`no pid file appeared within ${pidWaitMs}ms, so no daemon ever booted`);
+
+      const serveDeadline = Date.now() + serveWaitMs;
+      let lastErr = 'never attempted';
+      while (Date.now() < serveDeadline) {
+        try {
+          // Each probe needs its own timeout, or the loop below never gets to
+          // run: if something is squatting the port that ACCEPTS the connection
+          // and never answers, an untimed fetch waits forever and no deadline,
+          // liveness check or log check is ever reached. Caught by smoking this
+          // helper against a bare net.Server on the port -- it hung for 300s
+          // with serveWaitMs set to 60s.
+          const r = await fetch(`http://127.0.0.1:${RESTART_PORT}/api/status`, { signal: AbortSignal.timeout(3000) });
+          if (r.ok) return { ok: true, pid: readPidFile() };
+          lastErr = `status ${r.status}`;
+        } catch (err) { lastErr = err.message; }
+        // The daemon owns the exit condition: if its process is gone it is
+        // never going to answer, and waiting out the rest of the cap only
+        // delays a failure that is already decided.
+        const current = readPidFile();
+        if (!isAlive(current)) return fail(`the daemon process (pid ${current || pid}) is gone; last probe said "${lastErr}"`);
+        if (/still in use after \d+ retries/.test(logTail())) {
+          return fail(`the daemon gave up binding port ${RESTART_PORT} (something else holds it); last probe said "${lastErr}"`);
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+      return fail(`alive but never served /api/status within ${serveWaitMs}ms; last probe said "${lastErr}"`);
+    };
+
+    const started = spawnSync(process.execPath, [BIN, 'start'], { env, encoding: 'utf8' });
+    const bootedUp = await awaitDaemonReady({ what: 'the daemon under test never became ready', started });
+
+    if (!bootedUp.ok) {
+      // One honest FAIL rather than a throw: the rest of the suite is not
+      // implicated by this daemon failing to boot, and used to die with it.
+      check('POST /api/daemon/restart responds success before the process exits, then a new daemon takes over', () => {
+        assert.fail(bootedUp.why);
+      });
+    } else {
+      const pidBefore = readPidFile();
+
+      const t0 = Date.now();
+      const restartRes = await fetch(`http://127.0.0.1:${RESTART_PORT}/api/daemon/restart`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      });
+      const restartBody = await restartRes.json().catch(() => null);
+      const respondMs = Date.now() - t0;
+
+      // The replacement writes the pid file as its first act, so this waits on
+      // the daemon's own signal; the cap only bounds a replacement that never
+      // starts at all, which the ok:true above already claims it did.
+      let pidAfter = pidBefore;
+      const pidDeadline = Date.now() + 30000;
+      while (Date.now() < pidDeadline) {
+        pidAfter = readPidFile() || pidAfter;
+        if (pidAfter !== pidBefore) break;
+        await new Promise(r => setTimeout(r, 150));
+      }
+      const backUp = await awaitDaemonReady({ what: 'the replacement daemon never became ready' });
+
+      check('POST /api/daemon/restart responds success before the process exits, then a new daemon takes over', () => {
+        assert.strictEqual(restartRes.status, 200, `restart endpoint said: ${JSON.stringify(restartBody)}`);
+        assert.ok(restartBody && restartBody.ok, 'restart response must report ok');
+        // #62 deliberation: this is a WALL-CLOCK MARGIN, and it stays a
+        // wall-clock margin, deliberately. What it protects is a UX contract
+        // rather than an ordering one, and the alternatives all lose:
+        //
+        //   • Ordering via log/hrtime records. The endpoint's structure
+        //     already guarantees `await spawnReplacement()` -> writeHead ->
+        //     res.on('finish') -> scheduleExit; what's at risk is timing, so
+        //     an ordering assertion adds no signal.
+        //
+        //   • `process.kill(pidBefore, 0)` right after the response arrives.
+        //     Does not catch the failure mode. In the regression this margin
+        //     exists to catch -- someone changes spawnReplacement to await
+        //     child READINESS instead of the kernel 'spawn' event -- the
+        //     response STILL arrives before the exit (exit is scheduled from
+        //     res.on('finish'), after the write). The ordering holds; the
+        //     timing doesn't. Also races the 200ms scheduleExit under load.
+        //
+        //   • Daemon reports hrtime.bigint elapsed in the response body.
+        //     Same measurement in a tighter clock. On loopback, respondMs is
+        //     dominated by the daemon's own compute anyway (client-side
+        //     scheduler noise adds tens of ms). Adds a diagnostic field to a
+        //     shipped API response for a bound the 2s margin already clears
+        //     by roughly 10x in observed runs. Real cost, marginal benefit.
+        //
+        //   • Self-calibrating margin (baseline /api/status RTT + 500ms).
+        //     Under CI scheduler starvation two consecutive round trips can
+        //     diverge by several hundred ms — a tight self-calibrated bar
+        //     has more failure modes than one wide fixed bar. Adds
+        //     complexity to a test that has never fired.
+        //
+        // What the margin actually protects: a documented UX property. The
+        // API is "responds success before the process exits", and its client
+        // (the desktop app) shows a spinner while the restart proceeds.
+        // A response taking 5-15s (the shape a "wait for child readiness"
+        // regression would produce -- spawn+bind+first tick under Windows
+        // load) breaks that UX without breaking correctness. Legitimate work
+        // between t0 and response is fork/exec + child 'spawn' event, which
+        // measures 1-3ms on a quiet local machine; even a 100x slowdown under
+        // the worst observed CI load leaves 2000ms as a 5-10x cushion above
+        // the empirical maximum while remaining 2.5-7x below any realistic
+        // regression, so it catches the semantic bug it is meant to catch
+        // without shaving margin the way a tighter number would.
+        assert.ok(respondMs < 2000, `the HTTP response must return promptly, not after the restart completed (took ${respondMs}ms)`);
+        assert.notStrictEqual(pidAfter, pidBefore, 'a new daemon process must take over (pid must change)');
+        assert.ok(backUp.ok, `the dashboard must come back up on the same port after the restart -- ${backUp.why || ''}`);
+      });
     }
-    const backUp = await waitForHttp(`http://127.0.0.1:${RESTART_PORT}/api/status`).then(() => true).catch(() => false);
-
-    check('POST /api/daemon/restart responds success before the process exits, then a new daemon takes over', () => {
-      assert.strictEqual(restartRes.status, 200, `restart endpoint said: ${JSON.stringify(restartBody)}`);
-      assert.ok(restartBody && restartBody.ok, 'restart response must report ok');
-      assert.ok(respondMs < 2000, `the HTTP response must return promptly, not after the restart completed (took ${respondMs}ms)`);
-      assert.notStrictEqual(pidAfter, pidBefore, 'a new daemon process must take over (pid must change)');
-      assert.ok(backUp, 'the dashboard must come back up on the same port after the restart');
-    });
 
     spawnSync(process.execPath, [BIN, 'stop'], { env, encoding: 'utf8' });
   }
@@ -25255,6 +25872,10 @@ const repoRoot = require('../lib/repo-root');
   // See the REAL_CONFIG_PATH / REAL_STATE_PATH comments at the top of this
   // file: these are the actual regression guards, run last so they observe
   // everything the suite did, not just one code path's isolation.
+  // FIRST: a check still in flight here has not asserted yet, and never will
+  // in a way anyone sees — its ok/FAIL line lands after the tally below has
+  // printed and, on failure, exited.
+  checkNothingLeftInFlight();
   check('the suite never wrote to the real (non-MEMBRIDGE_HOME) ~/.membridge/config.json', () => {
     assert.strictEqual(snapshotRealConfig(), realConfigBeforeSuite,
       'the real user config changed during this run -- MEMBRIDGE_HOME isolation leaked');

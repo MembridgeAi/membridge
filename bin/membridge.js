@@ -900,8 +900,28 @@ async function cmdLogin() {
   console.log(`Logged in as ${r.email} (display name: ${r.displayName}).`);
 }
 
-function cmdLogout() {
-  console.log(teamsync.clearCredentials() ? 'Logged out.' : 'Already logged out.');
+// Two outcomes, reported as two (see teamsync.signOut). "Logged out." over a
+// session the backend still honours would be the one sentence a user acts on
+// — and the copy of credentials.json they are worried about would still work.
+// The remedy line is there because "we could not revoke it" is useless without
+// "here is what to do instead".
+async function cmdLogout() {
+  const out = await teamsync.signOut(util.getConfig());
+  if (!out.wasSignedIn) {
+    console.log('Already logged out.');
+    return;
+  }
+  if (out.revoked) {
+    console.log('Logged out. The session was ended on the server too.');
+    return;
+  }
+  console.log('Logged out on this machine ONLY.');
+  console.log(`The session could NOT be ended on the server: ${out.error}`);
+  // Deliberately NOT "try again later": the credentials are gone from this
+  // machine now, so there is nothing left here to revoke WITH. Retrying is
+  // not a remedy, and offering it as one would be the comfortable lie.
+  console.log('A copy of this machine\'s credentials taken before now can still use that session until it expires.');
+  console.log('Changing your account password is the way to end it for certain.');
 }
 
 // One command from invite to member: `membridge join <link-or-token-or-code>`.
@@ -1217,6 +1237,10 @@ async function cmdTeamRepull(config) {
         continue;
       }
       st.projects[key].teamPullTs = null;
+      // The forward cursor is a PAIR — timestamp plus row id (lib/teamsync.js
+      // fetchPullPage). Resetting only the timestamp would leave the id half
+      // describing a position in a page this walk is about to re-read.
+      st.projects[key].teamPullId = null;
       util.saveState(st);
     }
 
@@ -1226,17 +1250,23 @@ async function cmdTeamRepull(config) {
       const r = await teamsync.syncTeams({ project: key });
       for (const e of r.errors) console.log(`  ${name}: ${e}`);
       const proj = (util.loadState().projects || {})[key];
-      const next = proj ? (proj.teamPullTs || null) : null;
+      // Progress is the PAIR moving, not the timestamp moving. A run of rows
+      // pushed in one batch shares one created_at, so a walk through a tie
+      // group larger than a page advances only the id half — real progress
+      // that a timestamp-only comparison reads as a stalled cursor and
+      // abandons, leaving the rest of the tie group unpulled.
+      const next = proj ? (proj.teamPullTs ? `${proj.teamPullTs}#${proj.teamPullId ?? ''}` : null) : null;
+      const shown = proj ? (proj.teamPullTs || null) : null;
       if (!r.changed.includes(key)) break; // a pass that pulled nothing is the end of history
       if (next && next === cursor) {
         // The cursor stopped moving while rows kept arriving: pulling the same
         // page forever would be an infinite loop, so stop and say so rather
         // than spin. Reported, never silently treated as completion.
-        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${next} while rows were still arriving.`);
+        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${shown} while rows were still arriving.`);
         break;
       }
       cursor = next;
-      console.log(`  ${name}: pass ${passes + 1} · cursor now ${cursor || 'start of history'}`);
+      console.log(`  ${name}: pass ${passes + 1} · cursor now ${shown || 'start of history'}`);
     }
     if (passes >= REPULL_MAX_PASSES) console.log(`  ${name}: stopped at the ${REPULL_MAX_PASSES}-pass safety limit; re-run to continue.`);
 

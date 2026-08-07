@@ -113,10 +113,24 @@ the global always-run-everything habits:
   green. The only local check is `cd ui && npx tsc --noEmit`.
 - A suite run counts only if it printed the `N/N checks passed` tally AND
   exited 0. A port-collision crash produces neither, and an agent grepping for
-  "FAIL" will read that crash as a pass.
+  "FAIL" will read that crash as a pass. The runner's own footer used to read
+  that way too — a crashed suite counted as 0/0, so `TOTAL 451/451 checks
+  passed across 26 suites` sat under a run whose largest suite died. It now
+  ends `RESULT FAILED …CRASHED with an UNKNOWN number of checks`, and the
+  phrase "checks passed" never appears in a failed run's verdict.
+  `test/suites/runner-reporting.test.js` holds that line.
 - Broad UI-suite failure sweeps on a loaded laptop are timeouts, not bugs.
   Believe CI. If touching the timeouts: Testing Library's `asyncUtilTimeout`
   and vitest's `testTimeout` must move together.
+- **The suite must opt IN to talking to a real host.** Four lanes ship a baked
+  production default (team sync via `lib/backend.json`, counters, diagnostics
+  derived from the same Supabase project, and the update check at
+  api.github.com), and an EMPTY env var falls through `||` to the baked value —
+  so `MEMBRIDGE_TEAM_URL=''` means production, not "off". `test/no-egress.js` is
+  required first by both preludes: it pins the lanes that have an env override at
+  loopback and blocks any non-loopback `fetch` from the test process. Never
+  `delete process.env.MEMBRIDGE_TEAM_URL` — call `noEgress.resetTeamEnv()`.
+  `test/suites/backend-egress.test.js` holds the line, daemon included.
 - Before trusting weird suite failures, `lsof` the MemBridge ports. A live repo
   daemon or readme-demo squatting a port sends checks to the wrong process.
   **Never kill the squatters**; they belong to Marco or a parallel session.

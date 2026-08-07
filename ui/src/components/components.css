@@ -54,6 +54,47 @@
   .stat-cell:nth-child(4) { animation-delay: 90ms; }
 }
 
+/* LoadingBlock / LoadingRows — see components/LoadingBlock.tsx for why an
+ * absent figure must not render as a zero, and why these are bars.
+ *
+ * Every dimension is in `em`/`ch`, never px: a bar stands in the line box of
+ * the type it replaces, so it has to be sized by that type's own font, not by
+ * a number that happens to match one call site. 0.8em is the x-height-ish
+ * band real text occupies inside its line box — a full 1em bar reads as a
+ * filled row, not as text about to arrive.
+ *
+ * --line2, not --panel2: at --panel2 the bar is invisible on the light
+ * theme's white panels (#F1F5F9 on #FFFFFF), which turns "loading" back into
+ * "blank" for exactly half the users. --line2 is legible on both themes and
+ * still reads as structure rather than as text. */
+.loading-block {
+  display: inline-block;
+  vertical-align: baseline;
+  background: var(--line2);
+  border-radius: var(--r-sm);
+}
+/* 2.5ch: a stat figure is one to four tabular mono digits, so this reads as
+ * "a number is coming" without implying a specific magnitude. */
+.loading-block-value { width: 2.5ch; height: 0.8em; }
+.loading-block-title { width: 14ch; height: 0.85em; }
+.loading-block-short { width: 8ch; height: 0.8em; }
+/* Not 100%: a placeholder as wide as the column implies a sentence that fills
+ * it, and most of these do not. */
+.loading-block-line { width: 60%; max-width: 46ch; height: 0.8em; }
+
+.loading-rows { display: flex; flex-direction: column; }
+.loading-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--line);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .loading-block { animation: pulse-load 1.5s ease-in-out infinite; }
+}
+
 /* RuledRow — a flex row, separated by a hairline only. A quiet hover
  * background is the one texture cue every ruled row in the system shares,
  * so scanning a dense list doesn't rely on hairlines alone. */

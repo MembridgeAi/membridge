@@ -1,6 +1,15 @@
 -- ---------------------------------------------------------------------------
 -- 018 — raise the summary cap to match the wire, and reconcile repo/live drift.
 --
+-- LIVE SHAPE UNVERIFIED AS OF 2026-08-05. §3 reconstructs public.waitlist from
+-- an audit run before this ledger existed; the reading has not been repeated
+-- since. Settle it with:
+--   select column_name, data_type, column_default from information_schema.columns
+--    where table_schema = 'public' and table_name = 'waitlist' order by ordinal_position;
+-- then replace this marker with LIVE SHAPE VERIFIED <date>. Note the file's own
+-- caveat: the audit captured types and nullability but NOT defaults, so the
+-- defaults asserted here are convention rather than observation.
+--
 -- Written after a live-state audit (supabase/AUDIT-live-state.sql) found the
 -- repo and the production database disagreeing in three places. Two of those
 -- are harmless bookkeeping. The first is a live bug that has been silently

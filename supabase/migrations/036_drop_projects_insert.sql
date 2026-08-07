@@ -1,0 +1,102 @@
+-- 036_drop_projects_insert.sql — remove the `projects_insert` policy from
+-- public.projects, closing the direct-POST path into the projects table.
+--
+-- NUMBERING: this was written as 035 while 035 was still free. It is not:
+-- 035_delete_own_entries.sql (self-serve deletion) took that number on master
+-- first, so this file is 036 and its rollback is
+-- supabase/rollback/pre-036-projects-insert.sql. A comment in lib/ or test/
+-- pointing at "035" means the DELETION migration, never this one.
+--
+-- WHY THIS EXISTS. 032 §3 left exactly one question open and named the two
+-- queries that would settle it. They have now been run against the live
+-- database, and both came back the way that makes this drop safe. This file is
+-- that follow-up, and nothing more.
+--
+-- THE MEASUREMENTS, taken live before writing this file:
+--
+--   -- Does link_project's owner bypass RLS?
+--   select p.proname, r.rolname, r.rolbypassrls, r.rolsuper
+--     from pg_proc p join pg_roles r on r.oid = p.proowner
+--    where p.proname = 'link_project' and p.pronamespace = 'public'::regnamespace;
+--   => link_project | postgres | rolbypassrls = true | rolsuper = false
+--
+--   -- Is public.projects force-RLS? (FORCE applies policies to the owner too,
+--   -- which would have changed the answer above.)
+--   select relname, relrowsecurity, relforcerowsecurity
+--     from pg_class where oid = 'public.projects'::regclass;
+--   => projects | relrowsecurity = true | relforcerowsecurity = false
+--
+-- EITHER FACT ALONE SETTLES IT, which is why this is not a close call:
+--
+--   * `rolbypassrls = true` means row security is not applied to that role at
+--     all, unconditionally. A `security definer` function running as postgres
+--     therefore never evaluated `projects_insert` in the first place.
+--   * `relforcerowsecurity = false` means the table OWNER also bypasses RLS on
+--     its own table. Even without BYPASSRLS the definer insert would not have
+--     been checked against any policy.
+--
+-- So the concern 032 §2 recorded — that dropping the policy would convert a
+-- don't-care into a hard dependency on an unverified fact, with total failure
+-- (no member can create a project at all) if the assumption were wrong — does
+-- not apply. Project creation never depended on `projects_insert` and cannot be
+-- broken by removing it. link_project's own insert is unaffected.
+--
+-- WHAT THE DROP ACTUALLY REMOVES. One capability, held by every team member and
+-- used by nothing:
+--
+--   POST /rest/v1/projects
+--   Authorization: Bearer <a member's own token>
+--   { "team_id": "...", "name": "...", "created_by": "<their own user id>" }
+--
+-- Under `projects_insert` that request satisfied
+-- `is_team_member(team_id) and created_by = auth.uid()` and succeeded, creating
+-- a real projects row while skipping every check link_project performs — the
+-- repo_url adoption of an existing project, the archived-project handling, and
+-- the audit trail. With no INSERT policy left on the table and FORCE off but the
+-- caller an ordinary `authenticated` role, that request is now refused
+-- (`new row violates row-level security policy for table "projects"`, 42501,
+-- which PostgREST returns as 403).
+--
+-- Nothing in the tree takes that path. `grep -rn "v1/projects"` over the whole
+-- repo matches only the test mock and the suite; the sole writer of
+-- public.projects in the client is link_project, called once, at
+-- lib/teamsync.js:1206. That was already established in 032 §1 and re-checked
+-- while writing this file.
+--
+-- WHAT THIS DOES NOT FIX. link_project's repo_url dedup matches on exact name,
+-- so two project rows can still describe one repository — the live
+-- `membridge` / `Membridge` pair came from that path, NOT from the direct POST,
+-- and this drop does not touch it. It stays its own ticket. Do not read this
+-- migration as having made the projects table well-behaved; it removed one
+-- unused way in, and the 032 trigger still covers the ways that remain.
+--
+-- WHY THE 032 TRIGGER STAYS. `projects_materialize_access` is verified live and
+-- intact, and it is still the thing that makes 029's invariant a property of the
+-- schema. After this drop the reachable insert paths are link_project's definer
+-- insert and any service-role or SQL-editor insert an operator makes by hand —
+-- all of which bypass RLS and all of which fire the trigger. The trigger moves
+-- from covering a member-reachable hole to being the guard on those paths. It is
+-- not made redundant by this file and must not be dropped alongside it.
+--
+-- RISK CLASS: DDL ONLY, AND SUBTRACTIVE. Drops one policy. Writes no rows,
+-- deletes none, changes no function. Reversible by recreating the policy from
+-- its exact prior body, captured at
+-- supabase/rollback/pre-036-projects-insert.sql.
+--
+-- ALREADY APPLIED, UNIQUELY IN THIS DIRECTORY — READ THIS BEFORE RE-RUNNING.
+-- Unlike 031-034, the drop this file describes was performed by hand on the live
+-- database before the file was written, and verified afterwards: public.projects
+-- now carries `projects_select` only, `relrowsecurity` is still true, the
+-- `projects_materialize_access` trigger is intact, and the 7 projects and 13
+-- project_access rows are unchanged. This file exists so the repo stops
+-- disagreeing with production — the condition 030 and 031 were written to clean
+-- up — not to introduce a change. Re-running it against the live database is a
+-- no-op by construction (`if exists`).
+--
+-- HOW TO APPLY ELSEWHERE — SQL EDITOR ONLY, NEVER `supabase db push` IN THIS
+-- PROJECT, for the reason 031, 032, 033 and 034 all give:
+-- supabase_migrations.schema_migrations holds only two rows, so a push would
+-- attempt every numbered file against a database that already has most of their
+-- effects, including 029 §4's row-writing backfill.
+
+drop policy if exists projects_insert on public.projects;

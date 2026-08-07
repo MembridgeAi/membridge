@@ -36,7 +36,7 @@ content someone revoked is worse than no memory system at all.
 - `app/main.js` and `scripts/` when a ticket names them.
 
 **You do not touch `ui/`.** If a ticket appears to need a client change, stop and hand it back to
-the lead. Do not work around a missing client behaviour by changing what the daemon reports, and
+CTOpus. Do not work around a missing client behaviour by changing what the daemon reports, and
 do not "temporarily" shape a payload to suit a screen.
 
 ## Know what each area is responsible for
@@ -108,6 +108,28 @@ must work under:
 `execute_sql` against live. You write the file and stop; a human applies it. State in your report
 that it is unapplied.
 
+**Write the unapplied stamp so it can expire.** This instruction has a known failure mode, and it
+has already fired: migrations `032`, `033` and `034` each carried a bare `UNAPPLIED AS OF THIS
+COMMIT` header for four releases after a human had applied them, and `claude/ops/queue.md` copied
+the same dead fact into the document that drives the next session — which then budgeted work
+against a hole that was already closed. The rule above manufactures a claim about production that
+nothing is responsible for clearing. So:
+
+- Stamp it with a DATE and the exact query that settles it, never as a bare permanent assertion:
+  `-- UNAPPLIED AS OF 2026-08-05. Verify: select ... from pg_policy where ...` — a dated claim
+  reads as stale on sight; an undated one reads as current forever.
+- Record the same state in `supabase/MIGRATION-STATE.md`, the single ledger, and nowhere else.
+  Do not restate applied/unapplied in `claude/ops/`, in a handoff, or in another migration's
+  header — three copies of a fact drift into three different facts, which is exactly what
+  happened here. Link to the ledger instead.
+- When you are told a migration has since been applied, updating the ledger and the header is
+  part of that ticket, not a follow-up.
+
+`node test/run.js migration-state` enforces the mechanical half of this: every file must carry a
+status line and the ledger must agree with it. It cannot check the claim against production —
+nothing offline can — but it makes an unstamped or self-contradicting migration go red instead of
+sitting there being quietly wrong.
+
 **A migration that writes data is a different risk class from one that replaces a function.**
 Function replacement is reversible by replacing it back. Inserts and deletes are not. Say which
 kind you wrote, and never assume a general "go ahead" covers the data-writing kind.
@@ -129,8 +151,8 @@ cause you disproved has succeeded, not failed.
 
 Specifically do not:
 
-- Widen a ticket because you found something adjacent. Write it up for the lead.
-- Add a dependency without the lead approving it in the ticket.
+- Widen a ticket because you found something adjacent. Write it up for CTOpus.
+- Add a dependency without CTOpus approving it in the ticket.
 - Persist something new to `state.json` to make a feature easier.
 - Add a timer, a daemon, or a background pass that the ticket did not ask for.
 - Change what a payload reports in order to make a screen look right.
@@ -173,7 +195,7 @@ Stage deletions the same way. Before reporting, run `git status --porcelain | gr
 stage whatever prints, then list the staged paths.
 
 **Respect other lanes.** Another teammate may hold files in another worktree. `test/run-tests.js`
-is the usual collision — if the lead tells you it is held, do not touch it, and put new tests in
+is the usual collision — if CTOpus tells you it is held, do not touch it, and put new tests in
 `test/suites/`.
 
 **How you report.** What changed, the diagnosis or failure scenario that justified it, the verify
