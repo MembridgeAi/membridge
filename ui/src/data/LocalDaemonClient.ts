@@ -3,8 +3,8 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, McpRegisterResult,
-  Member, Project, Role, SearchPage, InviteOptions, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, McpRegisterResult,
+  Member, MyData, Project, Role, SearchPage, InviteOptions, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapDayDigests, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -681,6 +681,31 @@ export class LocalDaemonClient implements DataClient {
       objectName: e.objectName ?? null,
       targetName: e.targetName ?? null,
     }))
+  }
+
+  // GET /api/team/my-data. The daemon answers {projects:[], total:0} rather
+  // than an error when this machine is on no team, so there is nothing to
+  // special-case here -- an empty preview is the honest answer to "what of
+  // mine is on the backend" when the answer is nothing.
+  async getMyData(): Promise<MyData> {
+    const r = await get<MyData>(`/api/team/my-data${this.teamParam('?')}`)
+    return { projects: r.projects ?? [], total: r.total ?? 0 }
+  }
+
+  // POST /api/team/delete-my-data. `confirm: 'DELETE'` is the daemon's own
+  // second gate (it answers 400, not 403, without it) and is sent literally
+  // here; it is NOT the user-facing confirmation, which happens in the UI
+  // before this method is ever called.
+  //
+  // teamId is resolved rather than left to the daemon's firstTeamId() fallback
+  // so that a machine on more than one team deletes from the team the user is
+  // actually looking at -- the fallback would silently pick the first.
+  async deleteMyData(projectId?: string | null): Promise<DeleteMyDataResult> {
+    const teamId = this.selectedTeamId() ?? (await this.firstTeam())?.team_id
+    if (!teamId) throw new Error('deleteMyData requires a team, and this machine is not on one.')
+    return post<DeleteMyDataResult>('/api/team/delete-my-data', {
+      teamId, projectId: projectId ?? null, confirm: 'DELETE',
+    })
   }
 
   // GET /api/team/insights (lib/api-insights.js insightsPayload, wired in
