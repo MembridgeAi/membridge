@@ -57,13 +57,21 @@ function readPid() {
     return null;
   }
 }
+// A thrown EPERM means the process EXISTS but this caller lacks the rights to
+// signal it -- which is alive, not dead. Reading it as dead (the old
+// `catch { return false }`) is wrong on Windows in particular: libuv's kill
+// opens the target with PROCESS_TERMINATE, so a pid another process owns can
+// answer EPERM. ESRCH (and anything else) is genuinely not-running. Used by
+// cmdStop/cmdStatus on every platform; no subprocess (an earlier tasklist probe
+// here hung the daemon on a loaded Windows runner). The duplicate-daemon guard
+// in cmdDaemon does NOT rely on this on Windows -- it is gated to POSIX there.
 function isRunning(pid) {
   if (!pid) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    return e && e.code === 'EPERM';
   }
 }
 
@@ -73,11 +81,15 @@ function isRunning(pid) {
 // refuse legitimate starts. Uses `ps -o command=` on unix to read the command
 // line and match `/membridge/i`, which covers `node .../bin/membridge.js daemon`
 // (dev), the npm shim `node .../bin/membridge daemon` (global install), and
-// the Electron-invoked variants. On Windows there is no equivalent one-liner;
-// we conservatively assume a live pid IS MemBridge, so the guard errs toward
-// "refuse to start a second daemon" -- the alternative (two daemons racing
-// state.json, which has no locking) is worse than a rare false-positive
-// refusal that a user can resolve with `membridge stop`.
+// the Electron-invoked variants. On Windows the process image is a generic
+// `node.exe` / `MemBridge.exe`, and reading a process's full command line needs
+// wmic (removed on current Windows) or a PowerShell CIM query (slow, and not
+// guaranteed present) -- both too fragile to gate daemon startup on. So on
+// Windows we conservatively assume a live pid IS MemBridge (isRunning above
+// gets Windows liveness right via the EPERM read), erring toward "refuse to
+// start a second daemon" -- the alternative (two daemons racing state.json,
+// which has no locking) is worse than a rare false-positive refusal a user
+// clears with `membridge stop`.
 function isMembridgeProcess(pid) {
   if (!pid) return false;
   if (process.platform === 'win32') return true;
@@ -188,23 +200,37 @@ function cmdDaemon() {
   // the refusal below still fires for a real duplicate.
   const isRestartHandoff = process.env.MEMBRIDGE_TAKEOVER === '1';
   delete process.env.MEMBRIDGE_TAKEOVER;
-  const existingPid = readPid();
-  if (existingPid && isRunning(existingPid)) {
-    if (isMembridgeProcess(existingPid) && !isRestartHandoff) {
-      const port = config.dashboardPort;
-      console.error(
-        `MemBridge is already running (pid ${existingPid}, dashboard http://127.0.0.1:${port}). ` +
-        `Refusing to start a second daemon -- run \`membridge stop\` first if you meant to restart.`
-      );
-      process.exit(1);
+  // POSIX-only. On Windows this liveness/refusal path is unverified and may hang
+  // daemon startup: build-app's Windows CI shows the second `membridge daemon`
+  // in daemon-pid-race hanging -- empty stdout/stderr, the pid never
+  // overwritten, killed at the 4s timeout with status=null -- so the guard
+  // neither refuses nor takes over, it just stalls. A guard that can wedge
+  // startup is worse than no guard, so it is gated to POSIX until the true cause
+  // is observed on a real Windows env (tracked in task #34). Windows keeps the
+  // pre-0.3.2 behavior: fall through and overwrite the pid (no duplicate
+  // protection, but no hang). Restart handoff still works there -- the
+  // replacement simply takes over unconditionally and the pid changes. The
+  // MEMBRIDGE_TAKEOVER read/delete above stays on every platform (harmless, and
+  // keeps the env from leaking into a child).
+  if (process.platform !== 'win32') {
+    const existingPid = readPid();
+    if (existingPid && isRunning(existingPid)) {
+      if (isMembridgeProcess(existingPid) && !isRestartHandoff) {
+        const port = config.dashboardPort;
+        console.error(
+          `MemBridge is already running (pid ${existingPid}, dashboard http://127.0.0.1:${port}). ` +
+          `Refusing to start a second daemon -- run \`membridge stop\` first if you meant to restart.`
+        );
+        process.exit(1);
+      }
+      if (isRestartHandoff) {
+        util.log(`restart handoff: taking over from daemon pid ${existingPid}`);
+      } else {
+        util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
+      }
+    } else if (existingPid) {
+      util.log(`pid file names dead process ${existingPid}; taking over (stale)`);
     }
-    if (isRestartHandoff) {
-      util.log(`restart handoff: taking over from daemon pid ${existingPid}`);
-    } else {
-      util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
-    }
-  } else if (existingPid) {
-    util.log(`pid file names dead process ${existingPid}; taking over (stale)`);
   }
 
   fs.writeFileSync(util.pidPath(), String(process.pid));
