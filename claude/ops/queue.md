@@ -67,10 +67,36 @@ seconds from install to visible memory. Merges cleanly into `master`.
 ## Waiting on a human (2026-08-05)
 
 - **The PITR/backup retention window, read off the Supabase dashboard.**
-  Migration 035 (self-serve deletion) is applied live and verified, but
   `/security` on the site cannot state how long deleted data persists in
   backups until someone reads the retention number from Settings, Database,
   Backups. Asked of Marco in the 08-05 handoff. One number unblocks the copy.
+
+  > **Correction (2026-08-06).** This bullet used to open "Migration 035
+  > (self-serve deletion) is applied live and verified". That was false, and
+  > it made a real blocker invisible by implying the work behind it had
+  > cleared. Checked against the live database: both RPCs exist, and the
+  > `memory_entries_delete` policy does **not** — 035 is PARTIALLY applied.
+  > Self-serve deletion still works, because `delete_my_entries` is
+  > `security definer` and runs outside RLS.
+  >
+  > The missing policy is **not** a gap to close. `040` revokes the DELETE
+  > privilege and `051` drops this policy on purpose: a DELETE needs both a
+  > grant and a permissive policy, so with no policy RLS denies outright.
+  > Keeping the policy is what would let an accidentally-restored grant
+  > through. Live state confirmed correct on both counts — DELETE on
+  > `memory_entries` is held by `postgres` and `service_role` only.
+  >
+  > Five records of this one area were each wrong in a different direction:
+  > this file, project memory, the b721 report, and three rows of
+  > `supabase/MIGRATION-STATE.md` — including 040 and 051, which their own
+  > stated queries show as applied. **Do not trust any file here about
+  > database state. Run the query.**
+  >
+  > ```sql
+  > select polname from pg_policy where polrelid = 'public.memory_entries'::regclass;
+  > select grantee, privilege_type from information_schema.role_table_grants
+  >  where table_schema='public' and table_name='memory_entries' and privilege_type='DELETE';
+  > ```
 - **Prompt-sharing default sign-off**, from Andrew's Aug 2 brief. Still open.
 
 ## Logged, not scheduled

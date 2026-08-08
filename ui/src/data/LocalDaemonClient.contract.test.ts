@@ -82,6 +82,11 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   setMemberRole: c => c.setMemberRole('m1', 'member'),
   removeMember: c => c.removeMember('m1'),
   getAudit: c => c.getAudit(),
+  getMyData: c => c.getMyData(),
+  // Null (every project in the team) rather than a uuid: it is the shape the
+  // "delete everything of mine" control sends, and the one whose request body
+  // this test can observe reaching the daemon.
+  deleteMyData: c => c.deleteMyData(null),
   getInsights: c => c.getInsights(30),
   getSkeletonStats: c => c.getSkeletonStats(),
   getSettings: c => c.getSettings(),
