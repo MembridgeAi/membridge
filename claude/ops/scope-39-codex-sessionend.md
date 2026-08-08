@@ -127,7 +127,60 @@ carrying the whole quality claim — cannot be designed against real data yet.
 It needs one authenticated session. Building it against synthetic fixtures
 would be designing for a shape nobody has confirmed.
 
-## 4. Design (superseded in part — see §3b before building)
+## 3c. SETTLED — authenticated run, 2026-08-08. §4 is now dead.
+
+The 401 ambiguity in §3b is resolved. Andrew logged in; `codex doctor` reports
+`auth is configured`. I ran a **fully successful** `codex exec` session
+(`019fe249-df2a-7600-8b57-f823fbb11cfa`, agent replied, tokens billed) with a
+correctly-registered SessionEnd hook in `~/.codex/hooks.json`.
+
+**The SessionEnd hook did not fire.** Not a 401 artefact, not a config error —
+the probe was proven working by piping JSON to it directly. So for
+`codex exec` on 0.147.0-alpha.6.5, SessionEnd is not emitted.
+
+**Scope of that claim, precisely:** tested `codex exec` only. The interactive
+TUI may behave differently and I have not tested it. Do not write "Codex never
+fires SessionEnd" anywhere — write "`codex exec` does not".
+
+**`task_complete` is confirmed present on a successful session, and it carries
+more than a marker:**
+
+```json
+{"type":"task_complete","turn_id":"019fe249-…","last_agent_message":"ACKNOWLEDGED",
+ "started_at":1786207920,"completed_at":1786207923,"duration_ms":3577,
+ "time_to_first_token_ms":3433}
+```
+
+`last_agent_message` is the agent's closing text **stated by Codex itself**,
+rather than the adapter's current heuristic of "whichever assistant text we
+happened to see last, if it clears 80 chars". That is a strictly better source
+for the summary the adapter already emits, available today, needing no hook.
+
+**One correction to my own §3b framing, and it matters.** `task_complete` is
+per-**turn**, not per-session — `turn_id`, not `session_id`. A multi-turn
+session emits several. It is an end-of-TURN signal that happens to be last in
+the file when the session is over. So it does not by itself tell you a session
+*ended*; it tells you a turn *completed*. For distillation that is probably
+enough (distil from the final one), but the claim must not be overstated.
+
+**Also observed: the assistant message is double-written too** — as
+`event_msg`/`agent_message` (line 11) and `response_item`/`message` role
+assistant (line 12), exactly the pattern behind the prompt double-capture fix
+(`36a0e08`). It is harmless today only because both branches assign to
+`fileState.lastText` rather than pushing an event. Worth knowing before anyone
+converts that path to emit events.
+
+`session_meta` carries `session_id`, `cwd`, `originator`, `cli_version`,
+`history_mode`, `context_window` — enough provenance without touching SQLite.
+
+**Consequence: drop (a) and (b) entirely.** There is no hook to register and no
+hook entry point to write. The `lib/hooks.js` overlap with the consent/vintage
+lane is zero. What remains of #39 is (c) alone, plus one small independent
+improvement: prefer `task_complete.last_agent_message` over `lastText` for the
+summary, which is a few lines in `extractEvents` and testable against the real
+rollout now captured.
+
+## 4. Design (DEAD — kept as the record of what was considered; see §3b/§3c)
 
 **Three pieces.** The hook must do nothing that can take a second.
 
