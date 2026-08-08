@@ -130,6 +130,15 @@ const memorydb = require('../lib/memorydb');
 const claudeAdapter = require('../lib/adapters/claude-code');
 const codexAdapter = require('../lib/adapters/codex');
 const hooks = require('../lib/hooks');
+// `membridge remove-hooks` (and the Settings toggle, and a declined first-run
+// prompt) now records a REAL opt-out that every reconciler and every hook body
+// honours until something opts back in -- that is the whole of #49. This file
+// is one long sequential story that exercises removal MECHANICS over and over
+// and then keeps asserting on registration, so each removal here re-opts-in
+// the way a user pressing the toggle back on does. Without it the rest of the
+// story would be asserting against a machine that has correctly turned
+// MemBridge off.
+const reOptIn = () => hooks.hookConsent.record('granted', 'test-fixture');
 const redactLib = require('../lib/redact');
 const feed = require('../lib/feed');
 const mcpMod = require('../lib/mcp');
@@ -787,6 +796,14 @@ async function main() {
         'app/vendor/grammars missing — the packaged app cannot load any tree-sitter grammar');
       const vendoredWasm = fs.readdirSync(path.join(appRoot, 'app', 'vendor', 'grammars')).filter(f => f.endsWith('.wasm'));
       assert.ok(vendoredWasm.length >= 4, `expected at least 4 vendored grammar wasm files, found ${vendoredWasm.length}`);
+      // The BPE vocabulary is the same class of asset as the grammars -- not
+      // an npm dependency, resolved relative to lib/ at runtime, so
+      // prepare-app.js has to copy it explicitly. Its absence is quieter than
+      // a missing grammar and therefore worse: lib/bpe.js falls back to
+      // chars/4 without throwing, so the packaged app would report the old
+      // estimator's numbers with nothing anywhere saying so.
+      assert.ok(fs.existsSync(path.join(appRoot, 'app', 'vendor', 'tokenizer', 'claude-v1.json')),
+        'app/vendor/tokenizer/claude-v1.json missing — the packaged app would silently fall back to chars/4');
     });
   }
 
@@ -998,6 +1015,15 @@ async function main() {
     const vendoredWasm = files.filter(f => /^vendor\/grammars\/.*\.wasm$/.test(f.path));
     assert.ok(vendoredWasm.length >= 4,
       `expected at least 4 vendor/grammars/*.wasm entries in the npm tarball, found ${vendoredWasm.length}: ${JSON.stringify(files.map(f => f.path))}`);
+    // The same class of omission, for the BPE vocabulary (measured-savings
+    // spec, Tier 2). It is MORE dangerous than the grammars case, not less:
+    // lib/bpe.js's missing-vocabulary path is a deliberate, silent fallback to
+    // chars/4 that never throws, so an npm install without the vocabulary
+    // would keep working perfectly while every token figure it reported was
+    // the estimator this release exists to replace.
+    const vendoredVocab = files.filter(f => /^vendor\/tokenizer\/.*\.json$/.test(f.path));
+    assert.ok(vendoredVocab.length >= 1,
+      `expected the BPE vocabulary in the npm tarball, found none: ${JSON.stringify(files.map(f => f.path))}`);
   });
   check('F1: the npm tarball ships ui/dist, so an npm-only install has a dashboard', () => {
     // CRITICAL (alpha readiness, F1): package.json's "files" whitelist omitted
@@ -2979,14 +3005,17 @@ async function main() {
     // and toggling distill.enabled installs/removes the Claude Code Stop hook
     // AND records consent — otherwise the first-run popup (needsConsentPrompt)
     // would keep nagging even after the Settings toggle already acted.
-    // hookInstalled is already true here: the daemon force-registers the Stop
-    // hook at boot (hooks.ensureInstalled), so it is present regardless of the
-    // Settings toggle. Disabling still removes it in-session; the next daemon
-    // boot re-registers it (unconditional by design).
+    // hookInstalled is FALSE here, and that is the fix for #48: a daemon boot
+    // no longer force-registers the Stop hook on nobody's say-so. This config
+    // has never answered the consent question (distill.consent is null below),
+    // so hooks.ensureInstalled writes nothing at all and the Settings toggle
+    // underneath is what installs. Disabling removes it AND records the
+    // opt-out, so the next boot no longer puts it back (#49).
     const consentLib = require('../lib/consent');
     const stFresh = await (await fetch(`${base}/api/settings`)).json();
     check('settings: hookInstalled + distill fields are reported', () => {
-      assert.strictEqual(stFresh.hookInstalled, true, 'daemon should auto-register the Stop hook at boot');
+      assert.strictEqual(stFresh.hookInstalled, false,
+        'a launch must not install hooks into a config that was never asked');
       assert.deepStrictEqual(stFresh.distill, { enabled: true, consent: null, minEdits: 1, checkpointEvery: 12 });
     });
     const stDistillOn = await (await post(`${base}/api/settings`, { distill: { enabled: true } })).json();
@@ -3021,6 +3050,12 @@ async function main() {
       assert.strictEqual(stDistillInvalid.distill.minEdits, 3, 'invalid minEdits (0) was accepted');
       assert.strictEqual(stDistillInvalid.distill.checkpointEvery, 7, 'invalid checkpointEvery (non-numeric) was accepted');
     });
+    // Opt back in, explicitly, before the rest of this file exercises hook
+    // registration. The Settings toggle above is a REAL opt-out now (#49): it
+    // records a decision that every reconciler and every hook body honours,
+    // and nothing in the product silently reverses it any more -- that was the
+    // bug. This one line is what a user pressing the toggle back on does.
+    hooks.hookConsent.record('granted', 'test-fixture');
     const stTeamBackend = await (await post(`${base}/api/settings`, {
       team: { url: 'https://selfhost.supabase.co ', anonKey: ' anon-test-key ' },
     })).json();
@@ -7194,17 +7229,21 @@ async function main() {
     assert.strictEqual(recall.REJECTION_LIMIT, 3);
 
     // Deterministic holdout bucket, matching recall.js's own algorithm
-    // exactly: first 4 bytes of sha1(sessionId + relPath), as a uint32, % 100.
-    // Scanned rather than hardcoded, per the brief -- a hardcoded pair would
+    // exactly: first 4 bytes of sha1(sessionId), as a uint32, % 100.
+    // ASSIGNMENT IS PER SESSION (measured-savings spec, Tier 3) -- relPath is
+    // deliberately not in the hash, so a session is wholly in or wholly out.
+    // Scanned rather than hardcoded, per the brief -- a hardcoded id would
     // silently stop testing anything if the hash algorithm ever shifted.
-    const bucketFor = (sid, relPath) =>
-      crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+    const bucketFor = sid =>
+      crypto.createHash('sha1').update(String(sid)).digest().readUInt32BE(0) % 100;
+    assert.strictEqual(bucketFor('sess-x'), recall.holdoutBucket('sess-x'),
+      'this local hash must stay identical to recall.js\'s own');
     let holdoutSid = null;
     for (let i = 0; i < 100000; i++) {
       const candidate = `holdout-session-${i}`;
-      if (bucketFor(candidate, 'src/holdout.js') < recall.HOLDOUT_PCT) { holdoutSid = candidate; break; }
+      if (bucketFor(candidate) < recall.HOLDOUT_PCT) { holdoutSid = candidate; break; }
     }
-    assert.ok(holdoutSid, 'must find a (sessionId, path) pair landing in the 3% holdout bucket');
+    assert.ok(holdoutSid, 'must find a sessionId landing in the 3% holdout bucket');
     const holdoutPath = 'src/holdout.js';
 
     const base = overrides => Object.assign({
@@ -7348,20 +7387,25 @@ async function main() {
     assert.strictEqual(tierAMismatch.serve, false);
 
     // 5. Tier B: a DIFFERENT session read it before, skeleton fresh, and this
-    // call clears 2.25x compression (1200 / 400 = 3x).
+    // call clears 2.25x compression. callTokens for a limit-priced call is
+    // derived from the measured tokens-per-line rate (measured-savings spec,
+    // Tier 2) rather than the old flat 12, so it is read from the estimator
+    // rather than hardcoded -- the ratio is what this case is about.
+    const callB = recall.estimateCallTokens(100, null);
+    assert.ok(callB / 400 >= recall.MIN_COMPRESSION, 'fixture must clear the compression floor');
     const tierB = recall.decide(base({
       sessionId: 'session-y',
-      limit: 100, // callTokens = 1200
+      limit: 100,
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
       storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 400, fileTokens: 2000, rejections: 0 },
       fileStat: { size: 8000, hash: 'HASH1' },
     }));
     assert.strictEqual(tierB.serve, true);
     assert.strictEqual(tierB.tier, 'B');
-    assert.strictEqual(tierB.callTokens, 1200);
+    assert.strictEqual(tierB.callTokens, callB);
     assert.strictEqual(tierB.skeletonTokens, 400);
-    assert.strictEqual(tierB.avoidedTokensOptimistic, 1200 - 400);
-    assert.strictEqual(tierB.pct, Math.round((100 * (1200 - 400)) / 1200));
+    assert.strictEqual(tierB.avoidedTokensOptimistic, callB - 400);
+    assert.strictEqual(tierB.pct, Math.round((100 * (callB - 400)) / callB));
     assert.strictEqual(tierB.savedTokens, undefined, 'savedTokens must not survive under its old name');
 
     // 6. Tier B refused: same shape, but compression falls below 2.25x
@@ -7380,7 +7424,7 @@ async function main() {
     // to APPLY for the floor to be what refuses it -- decide() checks the tier
     // first -- so this fixture carries the read-time hash Tier A needs.
     const underFloor = recall.decide(base({
-      limit: 10, // 10 * 12 = 120 tokens
+      limit: 10, // ~139 tokens under the real tokenizer, well under MIN_CALL_TOKENS
       sessionState: { served: {}, reads: { 'src/file.js': { hash: 'HASH1', ranges: [[1, 2000]] } }, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-x'], reads: 1, lastTs: 't', firstTs: 't', firstSession: 'session-x' } } },
       storeEntry: { skeleton: 'skeleton', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 900, rejections: 0 },
@@ -7466,21 +7510,35 @@ async function main() {
   });
 
   check('recall: MINOR 1 -- estimateCallTokens and everything downstream of it are whole numbers, never fractional', () => {
-    // A no-limit (full-file) call prices callTokens as fileStat.size / 4
-    // (bytes/4 -- see estimateCallTokens's own header for why bytes, not
-    // chars). Any size not a clean multiple of 4 used to leave a fractional
-    // remainder that survived all the way to the terminal string
-    // ('672.75 tokens'), avoided.tokens, and net_tokens. Math.round at the
-    // estimator boundary is enough: skeletonTokens is already
-    // Math.ceil'd by lib/token-estimate.js's estimateTokens, so once
+    // A no-limit (full-file) call prices callTokens from fileStat.size (see
+    // estimateCallTokens's own header for why a stat-derived number, not the
+    // file's contents). A size that does not divide evenly used to leave a
+    // fractional remainder that survived all the way to the terminal string
+    // ('672.75 tokens'), avoided.tokens, and net_tokens. Rounding at the
+    // estimator boundary is enough: skeletonTokens is already whole, so once
     // callTokens is also an integer, every value derived from the two
     // (avoidedTokensOptimistic = callTokens - skeletonTokens, pct) is too.
+    //
+    // The divisor itself is BYTES_PER_TOKEN (measured, measured-savings spec
+    // Tier 2), no longer a bare 4 -- so these expectations are derived from
+    // the constant rather than hardcoded. What is being pinned is the
+    // WHOLENESS of the result, which is what the bug was; a recalibration of
+    // the constant must not require re-deriving this test by hand.
     const recall = require('../lib/recall');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), 673, '2691 / 4 = 672.75, rounds to 673');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 2690 }), 673, '2690 / 4 = 672.5, rounds to 673');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 2689 }), 672, '2689 / 4 = 672.25, rounds to 672');
+    const te = require('../lib/token-estimate');
+    const priced = size => Math.round(size / te.BYTES_PER_TOKEN);
+    const oddSize = 2691;
+    assert.ok(!Number.isInteger(oddSize / te.BYTES_PER_TOKEN), 'fixture size must not divide evenly, or this tests nothing');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: oddSize }), priced(oddSize));
+    assert.strictEqual(Number.isInteger(recall.estimateCallTokens(null, { size: oddSize })), true, 'callTokens must be whole');
+    for (const size of [2691, 2690, 2689, 1, 7, 999983]) {
+      assert.strictEqual(Number.isInteger(recall.estimateCallTokens(null, { size })), true,
+        `a no-limit call on a ${size}-byte file must price whole`);
+    }
     assert.strictEqual(recall.estimateCallTokens(null, { size: 0 }), 0);
-    assert.strictEqual(recall.estimateCallTokens(50, { size: 2691 }), 600, 'a limit-priced call (50*12) is untouched -- always already whole');
+    assert.strictEqual(recall.estimateCallTokens(50, { size: 2691 }), te.estimateTokensFromLines(50),
+      'a limit-priced call is untouched -- always already whole');
+    assert.strictEqual(Number.isInteger(recall.estimateCallTokens(50, { size: 2691 })), true);
 
     const fractional = recall.decide({
       projectPath: '/proj', relPath: 'src/file.js', absPath: '/proj/src/file.js',
@@ -7489,29 +7547,40 @@ async function main() {
       sessionState: { served: {}, interceptions: 0 },
       ledger: { fileReaders: { 'src/file.js': { sessions: ['session-other'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'session-other' } } },
       storeEntry: { skeleton: 'SKELETON_TEXT', contentHash: 'HASH1', skeletonTokens: 50, fileTokens: 673, rejections: 0 },
-      fileStat: { size: 2691, hash: 'HASH1' }, // 2691 / 4 = 672.75
+      fileStat: { size: oddSize, hash: 'HASH1' }, // does not divide evenly
       config: {},
       tracked: true,
     });
     assert.strictEqual(fractional.serve, true);
-    assert.strictEqual(fractional.callTokens, 673, 'callTokens must be rounded, not fractional');
+    assert.strictEqual(fractional.callTokens, priced(oddSize), 'callTokens must be rounded, not fractional');
     assert.strictEqual(Number.isInteger(fractional.avoidedTokensOptimistic), true, 'avoidedTokensOptimistic must be a whole number');
-    assert.strictEqual(fractional.avoidedTokensOptimistic, 623);
+    assert.strictEqual(fractional.avoidedTokensOptimistic, priced(oddSize) - 50);
   });
 
   check('recall: a no-limit call is capped at the Read tool\'s own 2000-line ceiling, never the whole file', () => {
     // Claude Code's Read returns at most ~2000 lines on a no-limit call, so
-    // pricing a bigger file at size/4 claims tokens the read would never have
-    // loaded -- the one estimator bias that pointed in the flattering
-    // direction. The cap is 2000 * 12 (the same tokens-per-line rate the
-    // limit branch already uses), applied ONLY to the no-limit branch: an
-    // explicit limit is the caller's own stated call shape.
+    // pricing a bigger file by its whole size claims tokens the read would
+    // never have loaded -- the one estimator bias that pointed in the
+    // flattering direction. The cap is the token price of 2000 lines (the same
+    // tokens-per-line rate the limit branch already uses), applied ONLY to the
+    // no-limit branch: an explicit limit is the caller's own stated call shape.
+    //
+    // Both rates are measured constants now (measured-savings spec, Tier 2),
+    // so the cap and the boundary are derived from them here rather than
+    // hardcoded -- the invariant is "a huge file prices at the cap and an
+    // ordinary one does not", not the specific integer either happens to be.
     const recall = require('../lib/recall');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 1000000 }), 24000, 'a 1MB file prices at the cap, not 250k');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 96000 }), 24000, 'exactly at the boundary: 96000/4 === the cap');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 95996 }), 23999, 'just under the boundary is untouched');
-    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), 673, 'ordinary files are unaffected');
-    assert.strictEqual(recall.estimateCallTokens(3000, { size: 1000000 }), 36000, 'an explicit limit is never capped -- it is the actual call shape');
+    const te = require('../lib/token-estimate');
+    const cap = te.estimateTokensFromLines(2000);
+    const boundarySize = Math.round(cap * te.BYTES_PER_TOKEN);
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 1000000 }), cap, 'a 1MB file prices at the cap, not by its size');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: boundarySize }), cap, 'exactly at the boundary');
+    assert.ok(recall.estimateCallTokens(null, { size: boundarySize - 400 }) < cap, 'just under the boundary is untouched');
+    assert.strictEqual(recall.estimateCallTokens(null, { size: 2691 }), Math.round(2691 / te.BYTES_PER_TOKEN),
+      'ordinary files are unaffected');
+    assert.strictEqual(recall.estimateCallTokens(3000, { size: 1000000 }), te.estimateTokensFromLines(3000),
+      'an explicit limit is never capped -- it is the actual call shape');
+    assert.ok(recall.estimateCallTokens(3000, { size: 1000000 }) > cap, 'and it may legitimately exceed the cap');
   });
 
   check('recall: decide() refuses unless tracked is the explicit literal true (fail-closed, never intercepts untracked/paused)', () => {
@@ -7569,17 +7638,23 @@ async function main() {
     }
 
     const recallHash = content => crypto.createHash('sha1').update(content).digest('hex');
-    const bucketFor = (sid, relPath) => crypto.createHash('sha1').update(`${sid}${relPath}`).digest().readUInt32BE(0) % 100;
+    const bucketFor = sid => crypto.createHash('sha1').update(String(sid)).digest().readUInt32BE(0) % 100;
     // The holdout is continuous (spec §7.2, rewritten 2026-07-28) -- there is
-    // no age-based window to be inside or outside of any more. Scan for
-    // session ids that land OUTSIDE the 3% holdout bucket for the "normal
-    // serve" scenarios below — deterministic, exactly like lib/recall.js's
-    // own policy test does, never a flaky pick.
+    // no age-based window to be inside or outside of any more -- and it is now
+    // assigned PER SESSION (measured-savings spec, Tier 3), so the path is no
+    // longer part of the choice. Scan for session ids that land OUTSIDE the 3%
+    // holdout bucket for the "normal serve" scenarios below — deterministic,
+    // exactly like lib/recall.js's own policy test does, never a flaky pick.
+    //
+    // relPath stays in the SIGNATURE of these two helpers, unused, purely so
+    // the call sites below keep reading as "a session that will/won't be served
+    // this file". Its value cannot affect the answer any more, which is the
+    // property the holdout-cohort suite asserts directly.
     const recallLib = require('../lib/recall');
     const nonHoldoutSession = (relPath, base) => {
       for (let i = 0; i < 1000; i++) {
         const sid = `${base}-${i}`;
-        if (bucketFor(sid, relPath) >= recallLib.HOLDOUT_PCT) return sid;
+        if (bucketFor(sid) >= recallLib.HOLDOUT_PCT) return sid;
       }
       throw new Error(`could not find a non-holdout session id for ${relPath}`);
     };
@@ -7620,7 +7695,11 @@ async function main() {
       fileReaders: { [relB]: { sessions: ['other-session-b'], reads: 2, lastTs: 't', firstTs: 't', firstSession: 'other-session-b' } },
     });
     const sessB = nonHoldoutSession(relB, 'sess-tierb');
-    const outB = runRecallHook(recallPayload(sessB, fileB, { limit: 100 })); // callTokens = 1200
+    // callTokens for a limit-priced call comes from the measured
+    // tokens-per-line rate (measured-savings spec, Tier 2), so it is read from
+    // the estimator rather than written in as a literal.
+    const callTokens100 = recallLib.estimateCallTokens(100, null);
+    const outB = runRecallHook(recallPayload(sessB, fileB, { limit: 100 }));
 
     check('recall hook: tier B serve prints valid deny JSON with the skeleton and the first-interception terminal line', () => {
       assert.strictEqual(outB.status, 0, outB.stderr);
@@ -7632,7 +7711,9 @@ async function main() {
       assert.strictEqual(hso.hookEventName, 'PreToolUse');
       assert.strictEqual(hso.permissionDecision, 'deny');
       assert.ok(hso.permissionDecisionReason.includes('SKELETON_TEXT_FOR_B'), 'reason lacks the served skeleton');
-      assert.ok(hso.permissionDecisionReason.includes('answered from MemBridge · avoided 96% of this read (1150 tokens)'), `reason lacks the terminal line: ${hso.permissionDecisionReason}`);
+      const avoided100 = callTokens100 - 50; // skeletonTokens for this fixture
+      const pct100 = Math.round((100 * avoided100) / callTokens100);
+      assert.ok(hso.permissionDecisionReason.includes(`answered from MemBridge · avoided ${pct100}% of this read (${avoided100} tokens)`), `reason lacks the terminal line: ${hso.permissionDecisionReason}`);
       assert.ok(!hso.permissionDecisionReason.includes('saved'), 'the word "saved" must never appear in user-facing recall output');
       assert.ok(hso.permissionDecisionReason.startsWith('answered from MemBridge'), 'terminal line must be the FIRST line');
     });
@@ -7661,7 +7742,7 @@ async function main() {
       // followTokens) instead of the old, all-or-nothing savedTokens.
       assert.deepStrictEqual(Object.keys(pending).sort(), ['callTokens', 'committed', 'holdout', 'relPath', 'sessionId', 'skeletonTokens', 'tier', 'ts']);
       assert.strictEqual(pending.tier, 'B');
-      assert.strictEqual(pending.callTokens, 1200);
+      assert.strictEqual(pending.callTokens, callTokens100);
       assert.strictEqual(pending.skeletonTokens, 50);
       assert.strictEqual(pending.holdout, false);
       assert.strictEqual(pending.committed, false, 'the first row is a pending claim, not yet a completed serve');
@@ -7859,7 +7940,7 @@ async function main() {
     const holdoutSession = (relPath, base) => {
       for (let i = 0; i < 1000; i++) {
         const sid = `${base}-${i}`;
-        if (bucketFor(sid, relPath) < recallLib.HOLDOUT_PCT) return sid;
+        if (bucketFor(sid) < recallLib.HOLDOUT_PCT) return sid;
       }
       throw new Error(`could not find a holdout session id for ${relPath}`);
     };
@@ -7961,9 +8042,11 @@ async function main() {
       assert.strictEqual(rows[0].holdout, true);
       assert.strictEqual(rows[0].wouldServe, 'B');
       // PIN (attribution realignment): the holdout row must also carry
-      // callTokens (limit 100 * 12 tokens/line) so the fold can compare the
-      // held-out arm against the served arm on equal footing.
-      assert.strictEqual(rows[0].callTokens, 1200);
+      // callTokens, priced by the SAME estimator the served arm uses, so the
+      // fold can compare the held-out arm against the served arm on equal
+      // footing. Read from the estimator rather than hardcoded -- the two
+      // sides agreeing is the invariant, not the specific integer.
+      assert.strictEqual(rows[0].callTokens, recallLib.estimateCallTokens(100, null));
     });
 
     // L6: events.jsonl is append-only and otherwise unbounded. Past the cap it
@@ -8291,6 +8374,18 @@ async function main() {
       kind: 'read', ts, session: sessionId, toolUseId: opts.toolUseId,
       file: path.join(proj, relPath), tool: 'Read', limit: opts.limit || null, offset: null,
     });
+    // A follow-up read's price comes from the SAME estimator the serve was
+    // priced with (measured-savings spec, Tier 2, which replaced the flat
+    // lines*12 and bytes/4 rates with measured ones). These are derived rather
+    // than written in as literals so this section keeps pinning the settlement
+    // ARITHMETIC -- net = callTokens - (skeletonTokens + followTokens) -- and
+    // not the numeric value of a rate that is expected to be recalibrated.
+    const t6Recall = require('../lib/recall');
+    const followCost = limit => t6Recall.estimateCallTokens(limit, null);
+    const rereadCost = bytes => t6Recall.estimateCallTokens(null, { size: bytes });
+    const FOLLOW_50 = followCost(50);
+    const PIN_FULL = 4210 - 380; // the settled net of the worked example, before any correction
+    const PIN_PARTIAL = PIN_FULL - FOLLOW_50; // after one limit-50 follow-up
 
     // === PIN: the exact worked example from the design doc, driven across
     // four real updateLedger passes over a real events.jsonl. ===
@@ -8322,15 +8417,16 @@ async function main() {
     const led2 = ledgerStoreT6.updateLedger(projPin, [followUpPin1], util.getConfig(), () => tPin + 20);
     requestsBefore.push({ requests: led2.requests, volume: led2.volume, sessions: led2.sessions });
     check('ledger-fold-recall (revisable settlement): a later follow-up CORRECTS a full avoidance down to a partial win', () => {
-      assert.deepStrictEqual(led2.avoided, { tokens: 3230, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 1, netNegatives: 0 });
+      assert.deepStrictEqual(led2.avoided, { tokens: PIN_PARTIAL, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 1, netNegatives: 0 });
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 0, 'a positive net must never bump rejections');
       assert.strictEqual(led2.openServes[0].classified, 'partial');
       assert.deepStrictEqual(led2.openServes[0].correctedBy, ['sess-pin|fu-pin-1|' + path.join(projPin, relPin)]);
     });
 
     // pass 3: a SECOND follow-up (a full re-read, priced off the file's
-    // current byte size: 14440 bytes / 4 = 3610 tokens) pushes cumulative
-    // followTokens to 600+3610=4210 -- net goes negative, and this is the
+    // current byte size, by the measured bytes-per-token rate) pushes
+    // cumulative followTokens past the served net -- so net goes negative,
+    // and this is the
     // FIRST time this serve has crossed into 'negative', so bumpRejection
     // fires exactly once.
     fs.writeFileSync(path.join(projPin, relPin), 'x'.repeat(14440));
@@ -8338,7 +8434,8 @@ async function main() {
     const led3 = ledgerStoreT6.updateLedger(projPin, [followUpPin2], util.getConfig(), () => tPin + 30);
     requestsBefore.push({ requests: led3.requests, volume: led3.volume, sessions: led3.sessions });
     check('ledger-fold-recall (revisable settlement): a second follow-up corrects a partial win down to a net negative, bumping rejection exactly once', () => {
-      assert.deepStrictEqual(led3.avoided, { tokens: -380, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 });
+      assert.deepStrictEqual(led3.avoided, { tokens: PIN_PARTIAL - rereadCost(14440), serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 });
+      assert.ok(led3.avoided.tokens < 0, 'the fixture must actually cross into negative for this case to test anything');
       assert.strictEqual(recallStoreT6.get(projPin, relPin).rejections, 1);
       assert.strictEqual(led3.openServes[0].classified, 'negative');
     });
@@ -8360,7 +8457,7 @@ async function main() {
         assert.ok(requestsBefore[i].volume >= requestsBefore[i - 1].volume, `volume fell at pass ${i + 1}`);
         assert.ok(requestsBefore[i].sessions >= requestsBefore[i - 1].sessions, `sessions fell at pass ${i + 1}`);
       }
-      // avoided.tokens, by deliberate contrast, DID fall (3830 -> 3230 -> -380)
+      // avoided.tokens, by deliberate contrast, DID fall (full -> partial -> negative)
       // -- see lib/ledger-fold.js's header for why that is the one accepted
       // exception, not a regression of the invariant just asserted above.
       assert.ok(led3.avoided.tokens < led2.avoided.tokens && led2.avoided.tokens < led1.avoided.tokens);
@@ -8392,12 +8489,12 @@ async function main() {
     const tAcc = Date.parse(tsAcc);
     writeServeRows(projAcc, tsAcc, 'sess-acc', relAcc, 'B', 4210, 380);
     ledgerStoreT6.updateLedger(projAcc, [], util.getConfig(), () => tAcc + 10);
-    const accRead1 = readEvent('sess-acc', relAcc, '2026-07-28T10:01:00.000Z', projAcc, { toolUseId: 'acc-1', limit: 25 }); // 25*12=300
-    const accRead2 = readEvent('sess-acc', relAcc, '2026-07-28T10:02:00.000Z', projAcc, { toolUseId: 'acc-2', limit: 50 }); // 50*12=600
+    const accRead1 = readEvent('sess-acc', relAcc, '2026-07-28T10:01:00.000Z', projAcc, { toolUseId: 'acc-1', limit: 25 });
+    const accRead2 = readEvent('sess-acc', relAcc, '2026-07-28T10:02:00.000Z', projAcc, { toolUseId: 'acc-2', limit: 50 });
     const ledAcc = ledgerStoreT6.updateLedger(projAcc, [accRead1, accRead2], util.getConfig(), () => tAcc + 20);
     check('ledger-fold-recall-open-serves: two follow-up reads in the same pass both correct and ACCUMULATE, not just the last one', () => {
-      // net = 4210 - (380 + 300 + 600) = 2930
-      assert.strictEqual(ledAcc.avoided.tokens, 2930);
+      // net = 4210 - (380 + both follow-ups), each priced by the estimator
+      assert.strictEqual(ledAcc.avoided.tokens, PIN_FULL - followCost(25) - followCost(50));
       assert.strictEqual(ledAcc.avoided.partialWins, 1);
       assert.strictEqual(ledAcc.openServes[0].correctedBy.length, 2);
     });
@@ -8519,7 +8616,8 @@ async function main() {
       });
 
       // Pass 4: the rewrite finally succeeds AND a net-negative follow-up
-      // (full re-read, no limit -> 20000/4=5000 tokens > 3830) arrives in the
+      // (full re-read, no limit, priced off the file's byte size -- more than
+      // the served net) arrives in the
       // same pass -- must correct the SINGLE surviving receipt to negative
       // and bump rejection exactly once, proving the old per-pass rejection
       // inflation (measured: rejections=5 from one physical serve after 4
@@ -8528,8 +8626,9 @@ async function main() {
       const followUpMulti = readEvent('sess-multi', relMulti, new Date(tMulti + 40000).toISOString(), projMulti, { toolUseId: 'fu-multi' });
       const ledMultiFinal = ledgerStoreT6.updateLedger(projMulti, [followUpMulti], util.getConfig(), () => tMulti + 40000 + 100);
       check('ledger-fold-recall (FINDINGS 1+2): once the rewrite succeeds, a net-negative follow-up corrects the single receipt and bumps rejection exactly once', () => {
-        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: -1170, serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 },
-          'net = 4210 - (380 + 5000); serves/tierB stay at 1 -- one physical serve, one receipt, one correction');
+        assert.deepStrictEqual(ledMultiFinal.avoided, { tokens: PIN_FULL - rereadCost(20000), serves: 1, tierA: 0, tierB: 1, tierUnknown: 0, partialWins: 0, netNegatives: 1 },
+          'net = 4210 - (380 + a 20000-byte re-read); serves/tierB stay at 1 -- one physical serve, one receipt, one correction');
+        assert.ok(ledMultiFinal.avoided.tokens < 0, 'the fixture must actually cross into negative');
         assert.strictEqual(ledMultiFinal.openServes.length, 1);
         assert.strictEqual(ledMultiFinal.openServes[0].classified, 'negative');
         assert.strictEqual(recallStoreT6.get(projMulti, relMulti).rejections, 1,
@@ -8574,7 +8673,7 @@ async function main() {
       const genuinelyLater = readEvent('sess-byts', relByTs, '2026-07-28T10:00:06.000Z', projByTs, { toolUseId: 'fu-byts-late', limit: 50 });
       const ledByTs3 = ledgerStoreT6.updateLedger(projByTs, [genuinelyLater], util.getConfig(), () => tByTsServe + 30);
       check('ledger-fold-recall-open-serves (FINDING 1): a genuinely later read (correct byTs ordering) does correct', () => {
-        assert.strictEqual(ledByTs3.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledByTs3.avoided.tokens, PIN_PARTIAL, 'net = 4210 - (380 + one limit-50 follow-up)');
         assert.strictEqual(ledByTs3.openServes[0].correctedBy.length, 1);
       });
     }
@@ -8607,7 +8706,7 @@ async function main() {
       const followUpFuture = readEvent('sess-future', relFuture, new Date(realNow + 5000).toISOString(), projFuture, { toolUseId: 'fu-future', limit: 50 });
       const ledFuture2 = ledgerStoreT6.updateLedger(projFuture, [followUpFuture], util.getConfig(), () => realNow + 10000);
       check('ledger-fold-recall-open-serves (FINDING 4): a real follow-up shortly after `now` still corrects a clamped receipt', () => {
-        assert.strictEqual(ledFuture2.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12) -- proves the clamped ts is usable as an ordering anchor');
+        assert.strictEqual(ledFuture2.avoided.tokens, PIN_PARTIAL, 'net = 4210 - (380 + one limit-50 follow-up) -- proves the clamped ts is usable as an ordering anchor');
       });
 
       // Once OPEN_SERVE_TTL_MS of REAL wall-clock time has elapsed past the
@@ -8672,7 +8771,8 @@ async function main() {
       });
 
       // File big enough that a full re-read (no limit -> size/4 tokens) alone
-      // pushes net negative in ONE shot: 20000/4=5000 > 3830.
+      // pushes net negative in ONE shot: a 20000-byte re-read prices above
+      // the 3830 that was credited.
       fs.writeFileSync(path.join(projIdem, relIdem), 'x'.repeat(20000));
       const followUpIdem = readEvent('sess-idem', relIdem, '2026-07-28T10:05:00.000Z', projIdem, { toolUseId: 'fu-idem' });
       // This pass sees relIdem's confirmed row STILL on the queue (real fs
@@ -8689,7 +8789,7 @@ async function main() {
         assert.strictEqual(ledIdem2.openServes[0].classified, 'negative');
         assert.strictEqual(recallStoreT6.get(projIdem, relIdem).rejections, 1,
           'exactly ONE bump for one physical follow-up read correcting the one receipt on record');
-        assert.strictEqual(ledIdem2.avoided.tokens, -1170, 'net = 4210 - (380 + 5000); one settle, one correction, no duplicate');
+        assert.strictEqual(ledIdem2.avoided.tokens, PIN_FULL - rereadCost(20000), 'net = 4210 - (380 + a 20000-byte re-read); one settle, one correction, no duplicate');
       });
     }
 
@@ -8712,21 +8812,21 @@ async function main() {
       const followUpEvict = readEvent('sess-evict', relEvict, '2026-07-28T10:05:00.000Z', projEvict, { toolUseId: 'fu-evict', limit: 50 });
       const ledEvict1 = ledgerStoreT6.updateLedger(projEvict, [followUpEvict], util.getConfig(), () => tEvict + 20);
       check('ledger-fold-recall-open-serves (residual setup): the follow-up corrects to a partial win', () => {
-        assert.strictEqual(ledEvict1.avoided.tokens, 3230);
+        assert.strictEqual(ledEvict1.avoided.tokens, PIN_PARTIAL);
         assert.strictEqual(ledEvict1.openServes[0].correctedBy.length, 1);
       });
       // Pass with the follow-up ABSENT from readEvents -- simulating eviction
       // from proj.events' capped window.
       const ledEvict2 = ledgerStoreT6.updateLedger(projEvict, [], util.getConfig(), () => tEvict + 30);
       check('ledger-fold-recall-open-serves (FINDING 2): a correction is not undone once its read is evicted from later passes', () => {
-        assert.strictEqual(ledEvict2.avoided.tokens, 3230, 'the correction must stand -- no un-correct');
+        assert.strictEqual(ledEvict2.avoided.tokens, PIN_PARTIAL, 'the correction must stand -- no un-correct');
         assert.strictEqual(ledEvict2.openServes[0].correctedBy.length, 1, 'correctedBy must not lose the entry either');
       });
       // Pass with the SAME follow-up reappearing (e.g. a re-scan quirk) --
       // correctedBy must still prevent a second application.
       const ledEvict3 = ledgerStoreT6.updateLedger(projEvict, [followUpEvict], util.getConfig(), () => tEvict + 40);
       check('ledger-fold-recall-open-serves (FINDING 2): a re-presented already-applied read does not re-correct', () => {
-        assert.strictEqual(ledEvict3.avoided.tokens, 3230, 'no double-application');
+        assert.strictEqual(ledEvict3.avoided.tokens, PIN_PARTIAL, 'no double-application');
         assert.strictEqual(ledEvict3.openServes[0].correctedBy.length, 1);
       });
     }
@@ -8850,10 +8950,10 @@ async function main() {
     // genuinely distinct same-session, same-ts, same-file follow-up reads
     // onto one key whenever neither carried a toolUseId -- the second read's
     // dedupe check then read "already applied" even though it never was,
-    // silently dropping its followTokens. PIN: two 300/600-token follow-ups
-    // of the same path, same ts, neither with a toolUseId, must accumulate
-    // to the honest net (2930), not the overstated one (3530) a collapsed
-    // key would produce.
+    // silently dropping its followTokens. PIN: two follow-ups (limit 25 and
+    // limit 50) of the same path, same ts, neither with a toolUseId, must
+    // accumulate to the honest net -- not the overstated one a collapsed key
+    // would produce by dropping the second read.
     {
       const projOcc = seedT6Project('t6-correction-key-occurrence-index');
       const relOcc = 'src/occ.js';
@@ -8864,13 +8964,14 @@ async function main() {
       const sameTs = '2026-07-28T10:01:00.000Z';
       // Deliberately NO toolUseId on either -- the exact case FINDING 4
       // covers. opts.toolUseId is left undefined by omitting it.
-      const occRead1 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 25 }); // 25*12=300
-      const occRead2 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 50 }); // 50*12=600
+      const occRead1 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 25 });
+      const occRead2 = readEvent('sess-occ', relOcc, sameTs, projOcc, { limit: 50 });
       const ledOcc = ledgerStoreT6.updateLedger(projOcc, [occRead1, occRead2], util.getConfig(), () => tOcc + 20);
       check('ledger-fold-recall-open-serves (FINDING 4): two toolUseId-less same-ts follow-ups both apply via the occurrence index', () => {
-        // net = 4210 - (380 + 300 + 600) = 2930 -- the honest total, not the
-        // 3530 a collapsed key would produce by dropping the second read.
-        assert.strictEqual(ledOcc.avoided.tokens, 2930);
+        // net = 4210 - (380 + BOTH follow-ups) -- the honest total, not the
+        // larger one a collapsed key would produce by dropping the second read.
+        assert.strictEqual(ledOcc.avoided.tokens, PIN_FULL - followCost(25) - followCost(50));
+        assert.ok(ledOcc.avoided.tokens < PIN_FULL - followCost(50), 'both follow-ups must have been applied, not just one');
         assert.strictEqual(ledOcc.openServes[0].correctedBy.length, 2, 'both reads earned distinct correction keys');
         assert.notStrictEqual(ledOcc.openServes[0].correctedBy[0], ledOcc.openServes[0].correctedBy[1],
           'the occurrence index must make the two keys distinct');
@@ -8880,7 +8981,7 @@ async function main() {
       // stable across passes, not just within one).
       const ledOcc2 = ledgerStoreT6.updateLedger(projOcc, [occRead1, occRead2], util.getConfig(), () => tOcc + 30);
       check('ledger-fold-recall-open-serves (FINDING 4): the occurrence-indexed keys stay stable across a later re-fold -- no double-application', () => {
-        assert.strictEqual(ledOcc2.avoided.tokens, 2930);
+        assert.strictEqual(ledOcc2.avoided.tokens, PIN_FULL - followCost(25) - followCost(50));
         assert.strictEqual(ledOcc2.openServes[0].correctedBy.length, 2);
       });
     }
@@ -8911,7 +9012,7 @@ async function main() {
       assert.strictEqual(Date.parse('2026-07-28T10:00:05Z'), tTieServe, 'test setup must produce a genuine tie, not an off-by-one');
       const ledTie2 = ledgerStoreT6.updateLedger(projTie, [tieRead], util.getConfig(), () => tTieServe + 20);
       check('ledger-fold-recall-open-serves (FINDING 5): a read whose ts TIES the serve\'s ts counts as a follow-up, not a self-reference', () => {
-        assert.strictEqual(ledTie2.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledTie2.avoided.tokens, PIN_PARTIAL, 'net = 4210 - (380 + one limit-50 follow-up)');
         assert.strictEqual(ledTie2.openServes[0].correctedBy.length, 1);
       });
     }
@@ -8953,7 +9054,7 @@ async function main() {
       delete legacyRead.tool;
       const ledGrep3 = ledgerStoreT6.updateLedger(projGrep, [legacyRead], util.getConfig(), () => tGrepServe + 30);
       check('ledger-fold-recall-open-serves (C3 mirror): a legacy no-tool read event still corrects', () => {
-        assert.strictEqual(ledGrep3.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
+        assert.strictEqual(ledGrep3.avoided.tokens, PIN_PARTIAL, 'net = 4210 - (380 + one limit-50 follow-up)');
         assert.strictEqual(ledGrep3.openServes[0].correctedBy.length, 1);
       });
     }
@@ -9016,8 +9117,8 @@ async function main() {
       const rideFollowUp = readEvent('sess-ride', relRide, '2026-07-28T10:00:06.000Z', projRide, { toolUseId: 'fu-ride-1', limit: 50 });
       const ledRide4 = ledgerStoreT6.updateLedger(projRide, ridePass3.concat([rideFollowUp]), util.getConfig(), () => tRideServe + 40000);
       check('ride-along: a correction retro-adjusts billed to the corrected net x rides', () => {
-        assert.strictEqual(ledRide4.avoided.tokens, 3230, 'net = 4210 - (380 + 50*12)');
-        assert.deepStrictEqual(ledRide4.billed, { tokens: 9690 }, 'corrected net 3230 x 3');
+        assert.strictEqual(ledRide4.avoided.tokens, PIN_PARTIAL, 'net = 4210 - (380 + one limit-50 follow-up)');
+        assert.deepStrictEqual(ledRide4.billed, { tokens: PIN_PARTIAL * 3 }, 'corrected net x 3');
       });
     }
 
@@ -9389,22 +9490,38 @@ async function main() {
         fs.writeFileSync(util.statePath(), savedState);
       }
     };
-    const baseLedger = holdout => ({
+    // The gate is computed from the epoch-stamped `comparison` block, NOT from
+    // the lifetime holdout counter it used to read (measured-savings spec,
+    // Tier 3). Those lifetime skips accumulated while the holdout was assigned
+    // per READ, so they are not a control group -- see lib/holdout-epoch.js.
+    // The `holdout` block is still written here, with counts that would have
+    // flipped the OLD gate to sufficient, precisely so these tests fail if
+    // anything starts reading it for this purpose again.
+    const roiLib = require('../lib/roi');
+    const { HOLDOUT_EPOCH: EPOCH } = require('../lib/holdout-epoch');
+    const armOf = (reads, per) => ({ reads, tokens: reads * per, tokensSq: reads * per * per });
+    const baseLedger = comparison => ({
       updatedAt: new Date().toISOString(), sessions: 2, requests: 10, volume: 5000,
       reads: { first: 3, sameSession: 2, crossSession: 5 }, hotPaths: [],
       avoided: { tokens: 3830, serves: 4, tierA: 0, tierB: 4, partialWins: 0, netNegatives: 0 },
-      holdout,
+      holdout: { skips: 500, callTokens: 500000 },
+      comparison,
       seenKeys: [], readKeys: [], sessionIds: ['s1', 's2'], fileReaders: {},
+    });
+    const cmp = (servedReads, withheldReads) => ({
+      epoch: EPOCH, served: armOf(servedReads, 300), withheld: armOf(withheldReads, 3000),
     });
 
     check('savings-gate: below the threshold the payload reports counts and a NULL effect, never a zero', () => {
       const payload = withSavingsLedger('gate-thin',
-        baseLedger({ skips: 2, callTokens: 900 }), () => savingsPayload());
+        baseLedger(cmp(200, 2)), () => savingsPayload());
       const m = payload.measurement;
       assert.ok(m, 'the payload must carry an explicit availability state');
       assert.strictEqual(m.state, 'measuring');
-      assert.strictEqual(m.holdoutCount, 2, 'it reports how much evidence it actually has');
-      assert.strictEqual(m.minHoldoutCount, foldLib.MIN_HOLDOUT_FOR_EFFECT);
+      assert.strictEqual(m.withheldReads, 2, 'it reports how much evidence it actually has');
+      assert.strictEqual(m.servedReads, 200, 'and it reports BOTH arms, not just the scarce one');
+      assert.strictEqual(m.minWithheldReads, roiLib.MIN_WITHHELD_READS);
+      assert.strictEqual(m.minServedReads, roiLib.MIN_SERVED_READS);
       // The distinction this whole gate exists for. `0` is a measured claim
       // that MemBridge saved nothing; `null` is the truthful "not yet known".
       assert.strictEqual(m.effect, null, 'an unmeasured effect must be null');
@@ -9412,27 +9529,56 @@ async function main() {
     });
 
     check('savings-gate: at the threshold boundary the state flips to sufficient', () => {
-      const at = foldLib.MIN_HOLDOUT_FOR_EFFECT;
+      const at = roiLib.MIN_WITHHELD_READS;
       const below = withSavingsLedger('gate-below',
-        baseLedger({ skips: at - 1, callTokens: 900 }), () => savingsPayload());
+        baseLedger(cmp(500, at - 1)), () => savingsPayload());
       assert.strictEqual(below.measurement.state, 'measuring', 'one short of the threshold is still measuring');
       const boundary = withSavingsLedger('gate-at',
-        baseLedger({ skips: at, callTokens: 900 }), () => savingsPayload());
+        baseLedger(cmp(500, at)), () => savingsPayload());
       assert.strictEqual(boundary.measurement.state, 'sufficient', 'the threshold itself is sufficient');
-      assert.strictEqual(boundary.measurement.holdoutCount, at);
+      assert.strictEqual(boundary.measurement.withheldReads, at);
+      assert.ok(boundary.measurement.effect, 'at both thresholds an effect figure is produced');
+    });
+
+    check('savings-gate: BOTH arms gate, and a rich served arm cannot carry a thin withheld one', () => {
+      const payload = withSavingsLedger('gate-served-rich',
+        baseLedger(cmp(100000, roiLib.MIN_WITHHELD_READS - 1)), () => savingsPayload());
+      assert.strictEqual(payload.measurement.state, 'measuring');
+      assert.strictEqual(payload.measurement.effect, null,
+        'a served arm past its threshold must not unlock an effect on its own');
+    });
+
+    check('savings-gate: evidence from the old per-read holdout assignment is never counted', () => {
+      // A ledger carrying a large, thoroughly sufficient-looking comparison
+      // block from the previous epoch. It must read as no evidence at all.
+      const stale = { epoch: EPOCH - 1, served: armOf(50000, 300), withheld: armOf(9000, 3000) };
+      const payload = withSavingsLedger('gate-stale-epoch', baseLedger(stale), () => savingsPayload());
+      assert.strictEqual(payload.measurement.state, 'measuring');
+      assert.strictEqual(payload.measurement.servedReads, 0, 'pre-epoch served evidence leaked in');
+      assert.strictEqual(payload.measurement.withheldReads, 0, 'pre-epoch withheld evidence leaked in');
+      assert.strictEqual(payload.measurement.effect, null);
+      assert.strictEqual(payload.measurement.projectsDroppedForEpoch, 1,
+        'the payload must say it dropped a block rather than silently reporting less data');
     });
 
     check('savings-gate: the availability state rides the wire without disturbing the pinned shapes', () => {
       const payload = withSavingsLedger('gate-shape',
-        baseLedger({ skips: 1, callTokens: 100 }), () => savingsPayload());
+        baseLedger(cmp(10, 1)), () => savingsPayload());
       assert.deepStrictEqual(Object.keys(payload).sort(), ['measurement', 'projects', 'totals'],
         'the /api/savings top-level shape must stay exactly this set');
       assert.deepStrictEqual(Object.keys(payload.measurement).sort(),
-        ['effect', 'holdoutCount', 'minHoldoutCount', 'state']);
+        ['effect', 'epoch', 'kind', 'minServedReads', 'minWithheldReads',
+          'projectsDroppedForEpoch', 'projectsPooled', 'servedReads', 'state', 'withheldReads']);
       // The gate must not smuggle a priced figure onto a payload whose whole
       // rule is tokens only.
       assert.ok(!/inCost|outCost|usd/i.test(JSON.stringify(payload.measurement)),
         'the availability state must never carry a dollar figure');
+      // Nor may the per-project rows start carrying the comparison block: one
+      // project's own sample can never support an effect figure, and putting it
+      // on the wire per project is an invitation to render exactly that.
+      for (const p of payload.projects) {
+        assert.ok(!('comparison' in p), 'the comparison block must not be projected per project');
+      }
     });
 
     check('savings-usd: no dollar figure is written to the ledger ON DISK', () => {
@@ -10311,6 +10457,7 @@ async function main() {
     assert.strictEqual(after.hooks.Stop.length, 2, 'the MemBridge Stop entry was not appended alongside the user entry');
     assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], 'remove-hooks deleted a Stop hook that was never ours');
@@ -10345,6 +10492,7 @@ async function main() {
       assert.strictEqual(after.hooks.Stop.length, 2, `the MemBridge Stop entry was not appended alongside the false-positive user entry: ${falsePositiveCmd}`);
       assert.strictEqual(after.hooks.Stop[1].hooks[0].command, hooks.hookCommand(), 'membridge command missing or not the resolved form');
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       const afterRm = JSON.parse(read(f));
       assert.deepStrictEqual(afterRm.hooks.Stop, [userEntry], `remove-hooks deleted a Stop hook that was never ours: ${falsePositiveCmd}`);
@@ -10489,6 +10637,7 @@ async function main() {
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     assert.strictEqual(after.hooks.PreToolUse[2].matcher, 'Grep|Glob', 'the search hook must register on Grep/Glob, not inherit a foreign matcher');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a hook that was never ours');
@@ -10512,6 +10661,7 @@ async function main() {
     assert.strictEqual(after.hooks.PreToolUse[1].matcher, 'Read', 'the recall hook must register on reads, not inherit the false-positive matcher');
     assert.strictEqual(after.hooks.PreToolUse[1].hooks[0].command, hooks.recallCommand());
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry], 'remove-hooks deleted a false-positive recall-shaped hook that was never ours');
@@ -10842,6 +10992,7 @@ async function main() {
     assert.ok(/Distill:\s+enabled, Claude Code hook installed/.test(out.stdout), `status said: ${out.stdout}`);
   });
   const removeOut = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envHook, encoding: 'utf8' });
+  reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
   const afterRemove = JSON.parse(read(claudeSettings));
   check('distill: remove-hooks strips only membridge entries', () => {
     assert.ok(/Removed the MemBridge hooks/.test(removeOut.stdout), removeOut.stdout);
@@ -10863,6 +11014,7 @@ async function main() {
     const after2 = JSON.parse(read(permFile));
     assert.strictEqual(after2.permissions.allow.filter(r => /membridge/i.test(r)).length, 1, 'rule duplicated on re-run');
     spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     const after3 = JSON.parse(read(permFile));
     const allow3 = ((after3.permissions || {}).allow) || [];
     assert.ok(!allow3.some(r => /membridge/i.test(r)), 'rule not removed by remove-hooks');
@@ -10877,6 +11029,7 @@ async function main() {
     let allow = JSON.parse(read(f)).permissions.allow;
     assert.ok(allow.includes(userRule) && allow.includes(hooks.appendAllowRule()), 'setup should add ours and keep the user rule');
     spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
     assert.ok(allow.includes(userRule), 'remove-hooks deleted a user rule that only contains "membridge"');
     assert.ok(!allow.includes(hooks.appendAllowRule()), 'our append rule should be gone');
@@ -10914,6 +11067,7 @@ async function main() {
     const after = JSON.parse(read(f));
     assert.ok(after.permissions.allow.includes(hooks.appendAllowRule()), 'the real append allow rule was not installed/recognized');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     const allowRm = ((afterRm.permissions || {}).allow) || [];
@@ -10928,6 +11082,7 @@ async function main() {
     const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(out.status, 0, out.stderr);
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
     assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule that was never ours (unanchored notmembridge-hook.js false positive)');
@@ -10940,6 +11095,7 @@ async function main() {
     const out = spawnSync(process.execPath, [BIN, 'setup-hooks'], { env, encoding: 'utf8' });
     assert.strictEqual(out.status, 0, out.stderr);
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const allow = ((JSON.parse(read(f)).permissions || {}).allow) || [];
     assert.ok(allow.includes(userRule), 'remove-hooks deleted a user allow-rule whose substrings merely appear out of order');
@@ -10957,6 +11113,7 @@ async function main() {
     assert.deepStrictEqual(after.permissions.allow.slice(0, rules.length), rules, 'unrelated rule order changed');
     assert.strictEqual(after.permissions.allow[rules.length], hooks.appendAllowRule(), 'our rule not appended after the user rules');
     const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     assert.strictEqual(rm.status, 0, rm.stderr);
     const afterRm = JSON.parse(read(f));
     assert.deepStrictEqual(afterRm.permissions.allow, rules, 'unrelated rules changed or reordered by remove-hooks');
@@ -14431,7 +14588,17 @@ async function main() {
     const recallStoreForMcp = require('../lib/recall-store');
     const eventsFileMcp = path.join(projMcp, '.membridge', 'recall', 'events.jsonl');
     const sessionsDirMcp = path.join(projMcp, '.membridge', 'recall', 'sessions');
-    const bigSrc = Array.from({ length: 40 }, (_, i) => `function f${i}() {\n  doWork();\n  doWork();\n  doWork();\n}\n`).join('');
+    // A file whose BODIES dominate its signatures, which is what a skeleton
+    // actually compresses. The previous fixture was 40 one-line functions, so
+    // its "skeleton" was very nearly the whole file -- it only ever cleared the
+    // 2.25x compression floor because chars/4 undercounted the skeleton's own
+    // cost by roughly half (the elision glyph and the repeated `function fN()
+    // {…}` shape tokenize far more expensively than four characters a token).
+    // Under the real tokenizer that fixture prices at 1.68x and is correctly
+    // refused. Measured across 21 real lib/ files, no genuine file changed
+    // sides at the floor -- mean compression moved 2.31x -> 2.40x -- so this is
+    // a fixture that was never representative, not a policy regression.
+    const bigSrc = Array.from({ length: 40 }, (_, i) => `function f${i}(alphaValue, betaValue) {\n${'  doWork(alphaValue, betaValue);\n'.repeat(10)}}\n`).join('');
     fs.writeFileSync(path.join(projMcp, 'big.js'), bigSrc);
     await recallStoreForMcp.warm(projMcp, [{ file: 'big.js' }], util.getConfig());
 
@@ -16323,6 +16490,7 @@ async function main() {
       });
 
       const pcRemove = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envPc, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       check('commits: remove-hooks strips only the membridge line; a membridge-only hook file is deleted', () => {
         assert.strictEqual(pcRemove.status, 0, pcRemove.stderr);
         assert.ok(/post-commit/.test(pcRemove.stdout), `remove-hooks must report the post-commit cleanup, said: ${pcRemove.stdout}`);
@@ -16345,6 +16513,7 @@ async function main() {
         assert.ok(body.includes('membridge-hook.js'), 'our line must still be appended');
       });
       const mbRemove = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: envPc, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       check('commits: remove-hooks leaves a user line that merely mentions membridge intact', () => {
         assert.strictEqual(mbRemove.status, 0, mbRemove.stderr);
         assert.strictEqual(read(path.join(projHook, '.git', 'hooks', 'post-commit')), userMb,
@@ -17017,6 +17186,7 @@ async function main() {
         'must NOT fall back to .git/hooks when core.hooksPath is set');
     });
     const hpRemove = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env: hpEnv, encoding: 'utf8' });
+    reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
     check('spine: remove-hooks honors core.hooksPath (strips from the configured hooks dir)', () => {
       assert.strictEqual(hpRemove.status, 0, hpRemove.stderr);
       assert.ok(!fs.existsSync(path.join(projHP, '.myhooks', 'post-commit')),
@@ -19465,6 +19635,7 @@ const repoRoot = require('../lib/repo-root');
       assert.strictEqual(countSub(before.hooks.SessionStart, /notes-session-start/), 1, 'setup-hooks did not register the notes SessionStart hook');
       assert.strictEqual(countSub(before.hooks.PostCompact, /notes-post-compact/), 0, 'setup-hooks registered a PostCompact hook that can never deliver');
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       const after = JSON.parse(read(f));
       assert.deepStrictEqual(after.hooks.SessionStart, [mineStart], "remove-hooks left our SessionStart entry behind, or ate the user's");
@@ -25548,6 +25719,7 @@ const repoRoot = require('../lib/repo-root');
         'setup-hooks duplicated the search entry');
       // ...and remove-hooks takes ours out while leaving the user's alone.
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       const afterRm = JSON.parse(read(f));
       assert.deepStrictEqual(afterRm.hooks.PreToolUse, [userEntry],
@@ -25567,6 +25739,7 @@ const repoRoot = require('../lib/repo-root');
       const after = JSON.parse(read(f));
       assert.deepStrictEqual(after.hooks.PreToolUse[0], userEntry, "setup-hooks claimed a hook that was never ours");
       const rm = spawnSync(process.execPath, [BIN, 'remove-hooks'], { env, encoding: 'utf8' });
+      reOptIn(); // see reOptIn: remove-hooks is a real opt-out now (#49)
       assert.strictEqual(rm.status, 0, rm.stderr);
       assert.deepStrictEqual(JSON.parse(read(f)).hooks.PreToolUse, [userEntry],
         'remove-hooks deleted a hook that was never ours');

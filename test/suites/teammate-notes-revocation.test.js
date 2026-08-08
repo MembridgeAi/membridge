@@ -59,7 +59,27 @@ const mcp = require('../../lib/mcp');
 const teamArchive = require('../../lib/team-archive');
 const digest = require('../../lib/digest');
 
-const NOW = '2026-08-04T12:00:00.000Z';
+// The fixture clock is REAL time, not a literal, and it has to be.
+//
+// Every hook reader below is handed `now: NOW` and honours it, so a pinned
+// literal reads fine — but one reader in the chain does not take a clock at
+// all: digest.teamInjectSlice, which get_project_memory's teammate slice is
+// built by (lib/mcp.js), drops any row older than config.teamMaxAgeHours
+// (default 72) against `Date.now()`. Pinned to 2026-08-04, section 7's rows
+// were inside that window for three days and outside it forever after, so the
+// suite's own baseline check ("the fixture serves its teammate row through
+// every row reader") turned into a dated time bomb that went off at
+// 2026-08-07T09:30Z. It said "get_project_memory served no teammate slice"
+// while get_project_memory was working exactly as designed.
+//
+// So the offsets below are what the literals used to be, measured back from
+// now: a pulled row is a FEW HOURS old, which is what a row that just came off
+// the wire is in production, and no run can age it out. Change an offset only
+// with teamMaxAgeHours in mind.
+const HOUR = 3600000;
+const CLOCK = Date.now();
+const iso = msAgo => new Date(CLOCK - msAgo).toISOString();
+const NOW = iso(0);
 const SESSION = 'sess-revocation-1';
 
 // One pulled teammate row, in the STORED shape (lib/teamsync.js's pull renames
@@ -68,7 +88,7 @@ const SESSION = 'sess-revocation-1';
 const TEAM_ROW = {
   author: 'Andrew',
   authorId: '11111111-2222-3333-4444-555555555555',
-  ts: '2026-08-04T09:00:00.000Z',
+  ts: iso(3 * HOUR),
   source: 'Claude Code',
   session: 'their-session',
   ask: 'rework the pull cursor',
@@ -376,7 +396,7 @@ function main() {
     const ARCHIVED = {
       ...TEAM_ROW,
       session: 'their-archived-session',
-      ts: '2026-08-03T08:00:00.000Z',
+      ts: iso(28 * HOUR),
       ask: 'archive-only prompt',
       summary: 'Work that lives only in the durable archive.',
       decisions: 'archivedrevocationtoken is the marker for this row',
@@ -449,7 +469,7 @@ function main() {
     const OWN_ROW = {
       ...TEAM_ROW,
       session: 'their-unlinked-rows-session',
-      ts: new Date(Date.now() - 2 * 3600000).toISOString(), // 2h ago: inside the 72h inject window, real-clock-relative
+      ts: iso(2.5 * HOUR), // real-clock-relative, inside the 72h inject window
       ask: 'rework the pullstamp cursor',
       summary: 'Reworked the pullstamp cursor.',
       decisions: 'the pullstamp cursor is now per project',
@@ -458,9 +478,9 @@ function main() {
       const st = util.loadState();
       st.projects[key] = {
         events: [
-          { ts: '2026-08-04T10:00:00.000Z', source: 'Claude Code', kind: 'prompt', session: 'mine', text: 'trace the cursorbeacon path' },
+          { ts: iso(2 * HOUR), source: 'Claude Code', kind: 'prompt', session: 'mine', text: 'trace the cursorbeacon path' },
           {
-            ts: '2026-08-04T10:05:00.000Z', source: 'Distilled', kind: 'summary', session: 'mine',
+            ts: iso(2 * HOUR - 5 * 60000), source: 'Distilled', kind: 'summary', session: 'mine',
             text: 'The cursorbeacon path is per project now.',
             headline: 'cursorbeacon is per project', goal: '', decisions: '', gotchas: '', highlights: [],
           },

@@ -177,7 +177,11 @@ function EncryptionDetail({ privacy }: { privacy: Settings['privacy'] }) {
       </>
     )
   }
-  return <StateChip tone={tone} glyph={glyph}>end-to-end, ciphertext only</StateChip>
+  // "content sealed", not "ciphertext only": the row's routing envelope
+  // (project, author_id, author_name, ts, source, session) ships in clear so
+  // upserts and threading work -- see docs/ENCRYPTION-SPEC.md §0.1. The old
+  // wording claimed the server holds nothing readable, which is false.
+  return <StateChip tone={tone} glyph={glyph}>end-to-end, content sealed</StateChip>
 }
 
 type ActiveDialog = 'contextFiles' | 'redaction' | 'exclude' | null
@@ -329,7 +333,7 @@ export function SettingsPage() {
       {!soloView && (
         <SettingRow
           label="Team memory encryption"
-          description="End-to-end means teammates' apps decrypt locally and nothing readable is stored on the server. Change it in your config file (team.encrypt, team.plaintextOff), not here."
+          description="End-to-end means teammates' apps decrypt locally and the server cannot read your content. Routing metadata — project, timestamp, session, tool and your display name — travels outside the ciphertext. Change it in your config file (team.encrypt, team.plaintextOff), not here."
           testId="setting-plaintext"
         >
           <EncryptionDetail privacy={settings.privacy} />

@@ -166,6 +166,8 @@ function main() {
   // Stage under app/ itself (not os.tmpdir()) so the final renames stay on
   // one filesystem and are therefore atomic.
   const stage = fs.mkdtempSync(path.join(root, 'app', '.prepare-stage-'));
+  const tokenizerSrc = path.join(root, 'vendor', 'tokenizer');
+  const tokenizerStaged = fs.existsSync(tokenizerSrc);
   try {
     fs.cpSync(path.join(root, 'lib'), path.join(stage, 'lib'), { recursive: true });
 
@@ -183,6 +185,15 @@ function main() {
     // bundle because lib/skeleton.js resolves it relative to its own location
     // at runtime — same rationale as the libsodium closure above.
     if (!vGate) fs.cpSync(vendorSrc, path.join(stage, 'vendor', 'grammars'), { recursive: true });
+
+    // vendor/tokenizer (the BPE vocabulary lib/bpe.js reads) rides along for
+    // exactly the same reason: lib/bpe.js resolves it relative to its own
+    // location at runtime, so a packaged app without it silently falls back to
+    // chars/4 forever. That fallback is deliberate and safe -- it never throws
+    // -- which is precisely what makes omitting it dangerous: the app would
+    // keep working and every token figure it reported would quietly be the
+    // estimator this release replaced, with nothing on screen to say so.
+    if (tokenizerStaged) fs.cpSync(tokenizerSrc, path.join(stage, 'vendor', 'tokenizer'), { recursive: true });
 
     // The built React UI (ui/dist, a Vite build) mirrors to app/ui/dist so
     // lib/server.js's UI_DIST_ROOT — path.join(__dirname, '..', 'ui', 'dist'),
@@ -222,6 +233,8 @@ function main() {
   }
   if (vGate) console.warn(vGate.message);
   else console.log('app/vendor/grammars refreshed from vendor/grammars/');
+  if (tokenizerStaged) console.log('app/vendor/tokenizer refreshed from vendor/tokenizer/');
+  else console.warn('vendor/tokenizer missing — the packaged app will fall back to the chars/4 token estimate, silently.');
   if (uiGate) console.warn(uiGate.message);
   else console.log('app/ui/dist refreshed from ui/dist/');
 

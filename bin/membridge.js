@@ -236,10 +236,21 @@ function cmdDaemon() {
   fs.writeFileSync(util.pidPath(), String(process.pid));
   util.log(`daemon started (pid ${process.pid}, interval ${config.intervalSec}s, v${pkg.version})`);
 
-  // Auto-register the Claude Code Stop hook on every daemon boot, so it lands
-  // however MemBridge was installed (git clone, npm, curl) without a manual
-  // `setup-hooks` step. Silent and fail-open — never blocks the daemon.
-  const { registration } = hooks.ensureInstalled() || {};
+  // Reconcile the Claude Code hooks on every daemon boot, so a consented
+  // install stays current however MemBridge was installed (git clone, npm,
+  // curl). Silent and fail-open — never blocks the daemon.
+  //
+  // It no longer INSTALLS on its own say-so: a machine that has never been
+  // asked, and one that opted out with `remove-hooks`, both get nothing
+  // written (#48/#49). There is no dialog on this path, so say so once in the
+  // log rather than leaving a CLI user wondering why no summaries appear —
+  // silence is what made the old behaviour invisible in the first place.
+  const { registration, consent } = hooks.ensureInstalled() || {};
+  if (registration === 'no-consent') {
+    util.log(consent === 'declined'
+      ? 'Claude Code hooks are turned off for this machine — nothing was written to your settings (`membridge setup-hooks` re-enables them)'
+      : 'Claude Code hooks are not installed and nothing was written to your settings — run `membridge setup-hooks` to enable session summaries, recall and teammate notes');
+  }
 
   const cleanup = () => {
     try {
@@ -275,6 +286,10 @@ function cmdDaemon() {
       // memory from syncing.
       const idx = activity.refreshSearchIndex();
       if (idx && idx.refreshed) util.log(`search index: refreshed ${idx.refreshed} project(s)`);
+      // Logged separately from `refreshed`: this one DELETES rows (a project
+      // that was paused, archived, marked off or removed), and a deletion
+      // nothing records is a deletion nobody can explain afterwards.
+      if (idx && idx.purged) util.log(`search index: purged ${idx.purged} hidden/removed project(s)`);
       teamTick();
       countersTick();
       // Record that a pass completed, so /api/status can report the sync loop's
@@ -385,7 +400,16 @@ function cmdStatus() {
   console.log(`Interval:  ${config.intervalSec}s   Targets: ${util.effectiveTargets(config).join(', ')}`);
   console.log(`Autostart: ${autostart.isEnabled() ? 'enabled' : 'disabled'}`);
   const distillOn = !config.distill || config.distill.enabled !== false;
-  console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'}, Claude Code hook ${hooks.isHookInstalled() ? 'installed' : 'not installed (run \`membridge setup-hooks\`)'}`);
+  // "not installed" now has two very different causes, and a status line that
+  // conflated them would send an opted-out user hunting a bug: nobody has been
+  // asked yet, or they said no and MemBridge is honouring it.
+  const consentState = hooks.hookConsent.state(config);
+  const notInstalled = consentState === 'declined'
+    ? 'not installed (hooks turned off for this machine; `membridge setup-hooks` re-enables)'
+    : 'not installed (run `membridge setup-hooks`)';
+  console.log(`Distill:   ${distillOn ? 'enabled' : 'disabled'}, Claude Code hook ${hooks.isHookInstalled() ? 'installed' : notInstalled}`);
+  printEffectiveHook();
+  printCaptureHealth(config);
   printMcpStatus(config);
   const encOn = ((config.team || {}).encrypt !== false);
   const keyAlerts = Array.isArray(state.keyAlerts) ? state.keyAlerts.length : 0;
@@ -409,6 +433,65 @@ function cmdStatus() {
   }
   if (!captured) printEmptyState(config, running);
   prompts.flushValueMoment(config);
+}
+
+// WHICH copy of MemBridge actually runs when a session stops.
+//
+// `membridge status` reports on the process you just launched; the hook that
+// fires reports to whatever absolute path is in ~/.claude/settings.json. Those
+// are routinely different copies (an installed app plus a dev checkout is the
+// normal developer setup) and until this line existed the difference was
+// inferable only by reading three files by hand. It matters because the
+// registered copy is the one whose prompt, caps and checkpoint rule decide
+// what gets captured — editing the other one changes nothing.
+function printEffectiveHook() {
+  let e;
+  try { e = hooks.effectiveHooks(); } catch { return; }
+  if (!e) return;
+  if (e.error) {
+    console.log(`Hook:      cannot read ${e.file}: ${e.error}`);
+    return;
+  }
+  const stop = e.stop || {};
+  if (!stop.registered) {
+    console.log(`Hook:      no Stop hook registered in ${e.file}`);
+    return;
+  }
+  const version = stop.version ? `v${stop.version}` : 'version unstamped';
+  const note = stop.vintage === 'newer'
+    ? ` — NEWER than this install (v${e.self.version}); do not "update", that is a downgrade`
+    : stop.vintage === 'outdated'
+      ? ` — older than this install (v${e.self.version}); \`membridge setup-hooks\` refreshes it`
+      : '';
+  console.log(`Hook:      Stop runs ${stop.script || '(unparseable command)'} (${version})${note}`);
+  if (stop.wrapper) console.log(`           via wrapper: ${stop.wrapper}`);
+  if (!stop.live) console.log('           WARNING: that command does not resolve — every stop is silently doing nothing');
+  if (stop.script && e.self.script && path.resolve(stop.script) !== path.resolve(e.self.script)) {
+    console.log(`           this install: ${e.self.script} (v${e.self.version}) — NOT the code that runs on a stop`);
+  }
+}
+
+// Did capture actually happen, and when it didn't, WHY.
+//
+// Every silent allow in the Stop hook used to look identical from outside:
+// exit 0, no output. That covered "nothing to capture" and "the daemon is
+// dead so nothing CAN be captured" with one representation, and on this
+// machine 39 of 49 logged stops were silent with no way to tell them apart.
+// lib/hook-stops.js records the distinction; this prints it.
+function printCaptureHealth(config) {
+  let s;
+  try { s = require('../lib/hook-stops').summarize(); } catch { return; }
+  if (!s || !s.stops) return;
+  const last = s.lastCapture
+    ? `${s.lastCapture.ts}${s.lastCapture.verification ? ` (${s.lastCapture.verification})` : ''}`
+    : 'NEVER — no summary line has been written since this log began';
+  console.log(`Capture:   ${s.stops} recorded stop(s), ${s.blocked} asked for a summary; last capture ${last}`);
+  const warn = [];
+  if (s.silentBecauseUnknown) warn.push(`${s.silentBecauseUnknown} stop(s) could not be judged at all (daemon down or state.json stale)`);
+  if (s.incomplete) warn.push(`${s.incomplete} hook run(s) started and never finished (killed, most likely the 10s timeout)`);
+  if (s.unhonoredBlocks) warn.push(`${s.unhonoredBlocks} summary ask(s) never answered by the agent`);
+  for (const w of warn) console.log(`           ${w}`);
+  void config;
 }
 
 // Which AI tools can actually call MemBridge's MCP server, and — the part that
