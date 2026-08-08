@@ -1,5 +1,29 @@
 #!/usr/bin/env node
 'use strict';
+// node:sqlite is required eagerly below (bin -> lib/activity -> lib/search-index),
+// and on Node 22.13-23.x the runtime greets EVERY invocation -- including
+// `--version` and `--help`, the first thing a new user ever runs -- with
+// "(node:NNNN) ExperimentalWarning: SQLite is an experimental feature..." plus a
+// --trace-warnings hint on stderr. It reads as an error. Suppress exactly that
+// one warning, in-process and before any require that could trigger it, rather
+// than: re-exec with --disable-warning (an extra process spawn on every hook
+// invocation, and the flag is missing before 20.11), or a blanket
+// warnings-off node flag in the shebang/shim (swallows the deprecation
+// warnings we DO want users to see, and shebang args don't survive the npm
+// cmd shim on Windows anyway). Everything that is
+// not this one warning passes through untouched. Node >= 24 stopped emitting
+// it, so there the filter simply never matches.
+{
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function (warning, ...rest) {
+    const type = (rest[0] && typeof rest[0] === 'object') ? rest[0].type : rest[0];
+    const isExperimental =
+      (warning != null && warning.name === 'ExperimentalWarning') || type === 'ExperimentalWarning';
+    const text = String((warning != null && warning.message) || warning || '');
+    if (isExperimental && text.includes('SQLite')) return;
+    return emitWarning.apply(process, [warning, ...rest]);
+  };
+}
 // Fast path: the Claude Code Stop hook fires on every session stop and the
 // git post-commit hook on every commit — neither may pay for the full CLI
 // require tree below (server, dashboard, team sync).
