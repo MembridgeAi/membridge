@@ -24,14 +24,18 @@
 // Both directions are pinned below, because a change satisfying one and
 // breaking the other is not a fix — it is the other bug.
 //
-// SCOPE. This covers the hooks-prime reader only. lib/server.js's
-// projectBlockPayload has the same class of defect in the opposite direction
-// and is being fixed on another branch (fix/install-sh-generated-guard,
-// b311125); lib/digest.js's writer is owned by a third (a12c31d). All three
-// resolve this span differently today — see the handover note. Deliberately
-// NOT pinned here: a CLAUDE.md whose PROSE names the markers above the real
-// block, which neither this rule nor the other two handle correctly, because
-// none of them require a structural marker to sit on its own line.
+// SCOPE (ticket #61). Four call sites used to resolve this span independently
+// and three were wrong in different ways. They all go through
+// lib/block-span.js now: the writer (lib/digest.js inject/removeBlock), this
+// hooks-prime dedupe gate, lib/server.js's /api/project/block reader, and
+// scripts/measure-block-cost.js. The other callers' suites are block-markers
+// (writer) and project-block-span (server reader) — a change here that
+// satisfies one caller and breaks another is not a fix.
+//
+// A MARKER MUST OWN ITS LINE, which is what lets the server reader share this
+// rule. Matching mid-line made a CLAUDE.md whose PROSE names the markers
+// resolve to the prose fragment rather than the real block below it; pinned
+// below, because that gap is the reason the span could not be shared before.
 //
 // Run directly, or via `node test/run.js block-span-reads`.
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
@@ -98,6 +102,28 @@ function main() {
       assert.strictEqual(blockSpan.firstBlockSpan('just some notes\n'), null);
       assert.strictEqual(blockSpan.firstBlockSpan(`${digest.BEGIN}\nunclosed\n`), null);
       assert.strictEqual(blockSpan.firstBlockSpan(`${digest.END}\nend before begin\n`), null);
+    });
+
+    // Markers named in PROSE are not markers. Without this the pair mentioned
+    // in the sentence below reads as the block, and — because a real BEGIN
+    // follows it — the span closes at the inline END, returning the prose
+    // between the two mentions as a FABRICATED block. That is what stopped the
+    // /api/project/block reader from sharing this rule (ticket #61).
+    check('markers named mid-line in prose do not count as the block', () => {
+      const text = `# Notes\nWe keep memory between ${digest.BEGIN} and ${digest.END}.\n\n`
+        + `${digest.BEGIN}\nretries cap at 3\n${digest.END}\ntail\n`;
+      assert.strictEqual(blockSpan.firstBlockInner(text).trim(), 'retries cap at 3',
+        'the span resolved to the prose that merely NAMES the markers, so every caller '
+        + 'sharing this rule reports a fabricated block and misses the real one');
+    });
+
+    // The flip side: owning its line is the whole test, so a marker that is
+    // merely indented still counts. Otherwise a hand-tidied CLAUDE.md would
+    // look blockless to the writer, which appends a SECOND block to it.
+    check('an indented marker still owns its line and counts', () => {
+      const text = `  ${digest.BEGIN}\nreal\n  ${digest.END}\n`;
+      assert.strictEqual(blockSpan.firstBlockInner(text).trim(), 'real',
+        'an indented marker stopped counting, so the writer would append a second block');
     });
   }
 
