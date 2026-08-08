@@ -1,4 +1,21 @@
 export type Role = 'owner' | 'admin' | 'member'
+
+/**
+ * What THIS machine transmits to teammates alongside each session summary.
+ *
+ * The daemon's on-disk `config.team.sharePrompts` was historically a boolean
+ * (`true` = share every raw prompt, `false`/missing = share nothing beyond
+ * the distilled summary). The three-value form -- 'off' | 'distilled' |
+ * 'verbatim' -- is the shape the wire settled on so the middle "share the
+ * agent's short intent, not the raw prompt" ground has a name of its own.
+ *
+ * The daemon normalizes disk values (bool, legacy 'on', absent) into these
+ * three strings on the way OUT of `/api/settings`; this client mirrors that
+ * normalization when it reads (some payloads may still be boolean during
+ * the rollout window) and always WRITES one of the three strings. See
+ * settingsMapper.normalizeSharePrompts.
+ */
+export type SharePromptsMode = 'off' | 'distilled' | 'verbatim'
 export type SyncState = { state: 'up-to-date' } | { state: 'behind'; lastSyncedAt: string | null } | { state: 'paused' }
 
 /**
@@ -756,7 +773,7 @@ export interface Settings {
     excludeStale: string[]
   }
   daemon: { running: boolean; port: number | null; version: string; startAtLogin: boolean; intervalSec: number; updateAvailable: string | null }
-  team: { id: string; name: string; role: Role; memberCount: number; inviteCode: string | null } | null
+  team: { id: string; name: string; role: Role; memberCount: number; inviteCode: string | null; sharePrompts: SharePromptsMode } | null
   // creds.userId -- the same identity /api/feed already tags entries with as
   // `self`. Null when signed out/solo. This is the ONLY honest source for
   // "which row is me"; a literal 'me' string is never a real user id.
@@ -838,6 +855,15 @@ export interface AdoptResult {
   /** Adopted WITHOUT their history, because they were deleted on purpose
    *  before (the tombstone `membridge remove` writes). */
   historyWithheld: string[]
+  /** Server-derived count of `adopted`. Declared here for parity with what
+   *  lib/server.js's /api/projects/adopt actually returns and what the CLI
+   *  already consumes (`adoptedCount`); the UI derives from `adopted.length`
+   *  today, so absence is not a regression, but the type used to lie about
+   *  the payload's shape. Optional because an older daemon predates the
+   *  field entirely -- never a fabricated fallback to a length. */
+  adoptedCount?: number
+  /** Server-derived count of `skipped`, same reasoning as `adoptedCount`. */
+  skippedCount?: number
 }
 
 export interface AccessMatrix {

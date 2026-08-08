@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+## 0.3.4 — 2026-08-07
+
+Supersedes the never-released 0.3.3 tag. Ships one wave of prompt-sharing
+privacy work, a security migration, and several correctness fixes. The
+security half depends on SQL that must be applied to the live database —
+`supabase/migrations/054_sec_jamal_01.sql`, with rollback in
+`supabase/rollback/` and a pre-apply snapshot in `claude/ops/`.
+
+### Prompt sharing — safer by default
+
+- **`team.sharePrompts` is now `off` | `distilled` | `verbatim`, defaulting to
+  `distilled` on fresh installs.** Distilled shares the agent's own short
+  intent summary and never the raw prompt. Existing settings are preserved:
+  a legacy `true` maps to `verbatim`, `false` to `off`, and the Settings panel
+  now shows which mode is active — the audit trail a silent boolean never had.
+- **Environment-value redaction.** Any literal value found in a project's own
+  `.env` family (never `.env.example` and friends) is redacted wherever it
+  appears in shared text, emitting `[redacted:env]`. Compiled per project,
+  never written to disk.
+- **Carrier-phrase redaction.** "the staging password is …" now redacts the
+  value and keeps the sentence, emitting `[redacted:phrase]`. Measured to zero
+  false positives across the local corpus after tuning.
+- New `docs/security/redaction-boundary.md` states plainly what each layer
+  catches and what is still not caught.
+
+### Security — needs SQL applied (migration 054)
+
+- **`peek_invite` no longer discloses a team's name for a revoked, expired, or
+  exhausted invite.** The name is returned only when the invite is valid.
+- **`can_see_project` fails closed.** Its terminal fallback was `true`
+  (default-allow) and is now `false`; latent today, closed before a future
+  schema change could open it.
+- **Definer-function surface shrunk.** `projects_materialize_access` is revoked
+  from public/anon/authenticated (its trigger is unaffected), and
+  `is_team_member` / `team_feed` are revoked from anon.
+
+### Correctness and UX
+
+- **A second `membridge daemon` refuses to start over a live one** instead of
+  clobbering the pid file and racing on `state.json`.
+- **Re-adopting a deliberately deleted project now says so in the app** — the
+  Add-project dialog surfaces "history not restored" per folder instead of
+  showing an empty block.
+- **Day cards no longer promote agent narration** ("Now let me look at …") into
+  a day's headline.
+- Removed a duplicated `adoptProjects` in `lib/server.js` that would have made
+  a future edit silently no-op.
+
+### Build
+
+- The app build uploads the signed, notarized artifact **before** the test
+  gate, so a red ship-gate check no longer blocks producing the installer
+  asset.
+
 ## 0.3.3 — 2026-08-05
 
 Nine agent branches assembled into one tree and shipped as one release. The

@@ -575,3 +575,30 @@
   color: var(--text3);
   font-size: 10.5px;
 }
+
+/* The bulk-adopt result summary. Two roles co-occur: the alert-tone skipped
+ * block (already .dialog-error) and this success-with-caveat block for
+ * history-withheld. Amber matches the "attention, not broken" tone used
+ * elsewhere (Private tag, sync warnings) so a re-adopt that landed correctly
+ * does not shout at the user in red. */
+.discover-withheld {
+  margin: 0 0 12px;
+  color: var(--amber);
+  font-size: 11px;
+}
+.discover-report-line {
+  margin: 0 0 4px;
+}
+.discover-report-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.discover-report-list li {
+  padding: 2px 0;
+  line-height: 1.4;
+}
+/* A deep path must wrap inside the dialog rather than widen it. */
+.discover-report-path {
+  overflow-wrap: anywhere;
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { mapSettings } from './settingsMapper'
+import { mapSettings, normalizeSharePrompts } from './settingsMapper'
 import type { Status } from './types'
 
 describe('mapSettings', () => {
@@ -38,7 +38,7 @@ describe('mapSettings', () => {
   it('surfaces the real team name, role, member count and invite code when not solo', () => {
     const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }
     expect(mapSettings(raw, status, team, { viewerId: 'usr_1', inviteCode: 'INV-1', webUrl: null }).team)
-      .toEqual({ id: 't1', name: 'Acme', role: 'owner', memberCount: 3, inviteCode: 'INV-1' })
+      .toEqual({ id: 't1', name: 'Acme', role: 'owner', memberCount: 3, inviteCode: 'INV-1', sharePrompts: 'off' })
   })
   it('surfaces the real daemon port, start-at-login and update fields instead of "not reported"', () => {
     const s = mapSettings(raw, status, null)
@@ -179,6 +179,41 @@ describe('mapSettings', () => {
       const s = mapSettings({ ...raw, recall: { installed: false } }, status, null)
       const recall = s.delivery.find(d => d.id === 'recall')
       expect(recall?.installed).toBe(false)
+    })
+  })
+
+  // Share-prompts: the daemon serves 'off' | 'distilled' | 'verbatim' after
+  // normalizing its on-disk boolean; the client mirrors that normalization
+  // for the rollout window when a mid-migration daemon may still send a
+  // raw boolean. Absence and any unknown value default to 'off' -- the
+  // safest reading, matching the daemon's own `=== true` check.
+  describe('sharePrompts', () => {
+    const team = { team_id: 't1', team_name: 'Acme', role: 'owner' as const, memberCount: 3 }
+
+    it('carries the string form straight through', () => {
+      const s = mapSettings({ ...raw, team: { sharePrompts: 'distilled' } }, status, team)
+      expect(s.team?.sharePrompts).toBe('distilled')
+    })
+    it('reads legacy boolean true as verbatim -- the audit trail for the silent-promotion concern', () => {
+      const s = mapSettings({ ...raw, team: { sharePrompts: true } }, status, team)
+      expect(s.team?.sharePrompts).toBe('verbatim')
+    })
+    it('reads legacy boolean false as off', () => {
+      const s = mapSettings({ ...raw, team: { sharePrompts: false } }, status, team)
+      expect(s.team?.sharePrompts).toBe('off')
+    })
+    it("accepts the legacy string alias 'on' as verbatim", () => {
+      expect(normalizeSharePrompts('on')).toBe('verbatim')
+    })
+    it('defaults to off when the daemon reports no team.sharePrompts at all', () => {
+      const s = mapSettings(raw, status, team)
+      expect(s.team?.sharePrompts).toBe('off')
+    })
+    it('defaults unknown or malformed values to off, never a fabricated middle ground', () => {
+      expect(normalizeSharePrompts(undefined)).toBe('off')
+      expect(normalizeSharePrompts(null)).toBe('off')
+      expect(normalizeSharePrompts(42)).toBe('off')
+      expect(normalizeSharePrompts('yes')).toBe('off')
     })
   })
 

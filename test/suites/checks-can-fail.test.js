@@ -202,7 +202,11 @@ function countAsserts(s) {
 async function main() {
   const files = testFilesInScope();
   const scanned = files.map(f => ({
-    file: path.relative(path.join(TEST_DIR, '..'), f),
+    // Forward-slash it: path.relative yields backslashes on Windows, and the
+    // `s.file === 'test/run-tests.js'` / `startsWith('test/suites/')` checks
+    // below are written with '/'. Without this the scanner finds zero suites on
+    // the Windows CI leg and the "finds every check" gate misfires.
+    file: path.relative(path.join(TEST_DIR, '..'), f).split(path.sep).join('/'),
     raw: fs.readFileSync(f, 'utf8'),
   }));
   for (const s of scanned) s.checks = findChecks(s.raw);

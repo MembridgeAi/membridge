@@ -637,6 +637,12 @@ function isEnabledFlag(value: unknown): value is { enabled: boolean } {
   return typeof value === 'object' && value !== null && typeof (value as { enabled?: unknown }).enabled === 'boolean'
 }
 
+function isSharePromptsPatch(value: unknown): value is { sharePrompts: 'off' | 'distilled' | 'verbatim' } {
+  if (typeof value !== 'object' || value === null) return false
+  const v = (value as { sharePrompts?: unknown }).sharePrompts
+  return v === 'off' || v === 'distilled' || v === 'verbatim'
+}
+
 function optimisticSettings(prev: Settings, key: string, value: unknown): Settings | null {
   if (key === 'startAtLogin' && typeof value === 'boolean') {
     return { ...prev, daemon: { ...prev.daemon, startAtLogin: value } }
@@ -647,6 +653,13 @@ function optimisticSettings(prev: Settings, key: string, value: unknown): Settin
   if (key === 'distill' && isEnabledFlag(value)) {
     const enabled = value.enabled
     return { ...prev, delivery: prev.delivery.map(c => c.id === 'summaries' ? { ...c, enabled } : c) }
+  }
+  // Share-prompts write: setSetting('team', { sharePrompts: '...' }). Only
+  // patches when a real team is present (SharePromptsControl is not rendered
+  // on solo -- if a payload without team.sharePrompts ever slipped through
+  // we would rather do no patch than fabricate one).
+  if (key === 'team' && isSharePromptsPatch(value) && prev.team) {
+    return { ...prev, team: { ...prev.team, sharePrompts: value.sharePrompts } }
   }
   return null
 }

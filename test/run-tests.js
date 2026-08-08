@@ -3071,7 +3071,7 @@ async function main() {
       team: { url: '', anonKey: '' },
     })).json();
     check('settings: self-hosted team backend can reset to default', () => {
-      assert.deepStrictEqual(stTeamBackendReset.team, { url: '', anonKey: '', customBackend: false });
+      assert.deepStrictEqual(stTeamBackendReset.team, { url: '', anonKey: '', customBackend: false, sharePrompts: 'verbatim' });
       const cfg = util.getConfig();
       assert.strictEqual(cfg.team.url, '');
       assert.strictEqual(cfg.team.anonKey, '');
@@ -13481,8 +13481,11 @@ async function main() {
       const r = spawnSync(process.execPath, ['-e', "require(process.argv[1]).ensureConfig()", path.join(__dirname, '..', 'lib', 'util.js')], { env, encoding: 'utf8' });
       assert.strictEqual(r.status, 0, r.stderr);
       const written = JSON.parse(read(path.join(homeNew, 'config.json')));
-      assert.strictEqual(written.team.sharePrompts, true, 'a fresh config did not opt in');
-      assert.strictEqual(util.freshInstallConfig().team.sharePrompts, true, 'freshInstallConfig lost the flag');
+      // Task 5A widened sharePrompts from a boolean to a three-value mode; a
+      // fresh install now ships the DISTILLED default (shares the agent-written
+      // goal, never raw prompts) rather than the old verbatim `true`.
+      assert.strictEqual(written.team.sharePrompts, 'distilled', 'a fresh config did not opt in');
+      assert.strictEqual(util.freshInstallConfig().team.sharePrompts, 'distilled', 'freshInstallConfig lost the flag');
     });
 
     check('privacy: an existing config without the flag is NOT flipped by the shipped defaults', () => {
@@ -13505,13 +13508,16 @@ async function main() {
     check('privacy: CLI team share-prompts toggles the config flag', () => {
       const homeCli = path.join(ROOT, 'home-pg-cli');
       const env = { ...process.env, MEMBRIDGE_HOME: homeCli };
+      // Task 5A: the CLI aliases legacy `on`/`off` onto the three-value mode —
+      // `on` is verbatim (raw prompts), `off` is the string 'off' (not a
+      // boolean), and the confirmation line names the resolved mode.
       const on = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'on'], { env, encoding: 'utf8' });
       assert.strictEqual(on.status, 0, on.stderr);
-      assert.ok(/Prompt sharing ON/.test(on.stdout), `on said: ${on.stdout}`);
-      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, true, 'flag not saved');
+      assert.ok(/Prompt sharing VERBATIM/.test(on.stdout), `on said: ${on.stdout}`);
+      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, 'verbatim', 'flag not saved');
       const off = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'off'], { env, encoding: 'utf8' });
       assert.strictEqual(off.status, 0, off.stderr);
-      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, false, 'flag not cleared');
+      assert.strictEqual(JSON.parse(read(path.join(homeCli, 'config.json'))).team.sharePrompts, 'off', 'flag not cleared');
       const bad = spawnSync(process.execPath, [BIN, 'team', 'share-prompts', 'maybe'], { env, encoding: 'utf8' });
       assert.strictEqual(bad.status, 1, 'invalid value was accepted');
     });
@@ -20413,7 +20419,14 @@ const repoRoot = require('../lib/repo-root');
       assert.ok(fs.statSync(dirInItsPlace).isDirectory(), 'whatever was there must still be there');
     });
 
-    check('mcp-register: a mode-000 codex config is refused, not overwritten', () => {
+    // checkNeedsUnreadable, not check: chmod 000 does not clear READ on Windows
+    // (and root reads through any mode), so the file stays readable there and
+    // the old inline `if (readable) {...} else {...}` took an else that asserted
+    // nothing -- a zero-assertion body, which check-accounting fails outright.
+    // The wrapper registers this only where a file can genuinely be made
+    // unreadable and prints a visible `skip` otherwise, exactly like its five
+    // siblings below.
+    checkNeedsUnreadable('mcp-register: a mode-000 codex config is refused, not overwritten', () => {
       // The consequence, end to end: here the DIRECTORY is writable, so a
       // read-as-empty would rename straight over the user's servers.
       const home = mkHome(['.codex']);
@@ -20421,16 +20434,10 @@ const repoRoot = require('../lib/repo-root');
       const THEIRS = '[mcp_servers.node_repl]\ncommand = "node"\n';
       fs.writeFileSync(file, THEIRS);
       fs.chmodSync(file, 0o000);
-      let readable = true;
-      try { fs.readFileSync(file, 'utf8'); } catch { readable = false; }
-      if (!readable) { // root, and Windows' chmod, cannot produce this
-        const rows = mcpRegister.registerAll(base(home));
-        assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
-        fs.chmodSync(file, 0o600);
-        assert.strictEqual(fs.readFileSync(file, 'utf8'), THEIRS, 'their servers must still be there');
-      } else {
-        fs.chmodSync(file, 0o600);
-      }
+      const rows = mcpRegister.registerAll(base(home));
+      assert.strictEqual(rowFor(rows, 'codex').status, 'failed');
+      fs.chmodSync(file, 0o600);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), THEIRS, 'their servers must still be there');
     });
 
     check('mcp-register: a write that throws costs one agent, never the launch', () => {
@@ -23949,8 +23956,18 @@ const repoRoot = require('../lib/repo-root');
       process.env.MEMBRIDGE_HOME = HOME_WRITER;
       util.ensureConfig();
       {
+        // sharePrompts: 'verbatim' is load-bearing for the "permitted write
+        // must land" probe below, which reads the write by finding its prompt
+        // ask (ALLOWED-WRITE-OPEN) among the pushed rows. This home is created
+        // fresh, and Task 5A (eda6ef5) changed the fresh-install default from
+        // verbatim to 'distilled' — under which entryToRow ships null for ask.
+        // The row still lands, but its ask text would not, so the probe (which
+        // greps for that text) would fail on a purely intended sharing change
+        // rather than on any per-project refusal defect. Opt in explicitly, as
+        // the other homes that assert verbatim asks on pull already do, so the
+        // write stays observable regardless of the default.
         const cfgW = util.loadUserConfig();
-        cfgW.team = { ...(cfgW.team || {}), encrypt: false };
+        cfgW.team = { ...(cfgW.team || {}), encrypt: false, sharePrompts: 'verbatim' };
         util.saveUserConfig(cfgW);
       }
       const writerCreds = await teamsync.signup(util.getConfig(), 't17-writer@test.dev', 'pw-t17w', 'Writer17');

@@ -457,10 +457,19 @@ function main() {
     //
     // A LOCAL entry goes in alongside it, because the danger of pruning at the
     // source is pruning too much: this user's own work must survive an unlink.
+    //
+    // The timestamp is anchored to the REAL clock, not to NOW. teamSlice()
+    // below is mcp.getProjectMemory, which runs the row through
+    // digest.teamInjectSlice — and that slice drops anything older than
+    // teamMaxAgeHours (72h) measured against Date.now(), with no injectable
+    // "now" to override it (unlike the hooks in served(), which take now:NOW).
+    // A row pinned to a fixed past date therefore ages out of the inject window
+    // the moment the wall clock passes that date + 72h and the baseline check
+    // below goes red for a reason unrelated to what it tests. Keep it recent.
     const OWN_ROW = {
       ...TEAM_ROW,
       session: 'their-unlinked-rows-session',
-      ts: iso(2.5 * HOUR),
+      ts: iso(2.5 * HOUR), // real-clock-relative, inside the 72h inject window
       ask: 'rework the pullstamp cursor',
       summary: 'Reworked the pullstamp cursor.',
       decisions: 'the pullstamp cursor is now per project',

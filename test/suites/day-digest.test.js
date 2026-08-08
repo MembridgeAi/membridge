@@ -384,6 +384,93 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------
+  // A second class of harvested filler: agent-narration lead-ins.
+  //
+  // "Now let me look at the digest/memorydb pipeline..." is not an outcome
+  // about a session, it is the agent thinking aloud about what it is about to
+  // do next. Length is NOT the signal — the same shape appears at 30
+  // characters ("Let me check X") and at 200 ("Now let me look at the whole
+  // digest/memorydb pipeline to figure out why the collapse is silently
+  // failing"), so SCAVENGED_STATEMENT_MIN can not catch it. The rule that
+  // catches it is the same one the goal path already applies: an intent is
+  // never promoted into an outcome.
+  //
+  // What matters is the SHAPE — an imperative "let me / let's / let us"
+  // opener, optionally preceded by "OK / Now / First / Alright". Authored
+  // outcome text ("Fixed X.", "Removed Y.", "Confirmed Z.") does not open
+  // this way and must still surface.
+  // -------------------------------------------------------------------------
+
+  check('digest: "Now let me look at..." is agent narration, not a day\'s statement', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', ts: '2026-08-05T10:00:00.000Z',
+        summary: 'Now let me look at the digest/memorydb pipeline to understand why the collapse fails, because the day-card sentence I have on screen does not match the events I can see going in.' }),
+    ]));
+    assert.ok(!/now let me look/i.test(d.text),
+      `agent narration "Now let me look at..." must not surface; got ${JSON.stringify(d.text)}`);
+  });
+
+  check('digest: a short "Let me check X" is the same shape and must not surface either', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', summary: 'Let me check the redaction path first.' }),
+    ]));
+    assert.ok(!/let me check/i.test(d.text),
+      `short intent lead-in has the same shape as a long one; got ${JSON.stringify(d.text)}`);
+  });
+
+  check('digest: "OK, let me now examine..." — the preamble does not change the shape', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', summary: 'OK, let me now examine what happens when the sync loop restarts and both machines already hold the same wire signature.' }),
+    ]));
+    assert.ok(!/let me now examine/i.test(d.text),
+      `intent lead-in dressed with "OK," must not surface; got ${JSON.stringify(d.text)}`);
+  });
+
+  check('digest: "First, let me look at..." — leading discourse markers do not disqualify the check', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', summary: 'First, let me look at how pickSummary handles empty text before I claim anything about the harvester path.' }),
+    ]));
+    assert.ok(!/first, let me look/i.test(d.text),
+      `intent lead-in prefaced with "First," must not surface; got ${JSON.stringify(d.text)}`);
+  });
+
+  check('digest: an OUTCOME headline is not intent-shaped and STILL surfaces', () => {
+    // A one-line, past-tense report of a delivered outcome is exactly what a
+    // day card should say. The fix must not silence these.
+    const d1 = only(digest.buildDayDigests([entry({ session: 'a', headline: 'Fixed the digest lead-in filter' })]));
+    assert.strictEqual(d1.text, 'Fixed the digest lead-in filter');
+    const d2 = only(digest.buildDayDigests([entry({ session: 'b', headline: 'Removed the transfer-ownership menu item' })]));
+    assert.strictEqual(d2.text, 'Removed the transfer-ownership menu item');
+    const d3 = only(digest.buildDayDigests([entry({ session: 'c', headline: 'Confirmed the pid file is never overwritten' })]));
+    assert.strictEqual(d3.text, 'Confirmed the pid file is never overwritten');
+  });
+
+  check('digest: an intent-only session falls through to the next checkpoint that actually reports', () => {
+    // The rule mirrors the acknowledgement path: the intent opener is skipped
+    // and the session's older, real-report checkpoint carries the day.
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', ts: '2026-08-05T09:00:00.000Z',
+        summary: 'Confirmed the pid file is never overwritten by concurrent writes on this machine.' }),
+      entry({ session: 'a', ts: '2026-08-05T10:00:00.000Z',
+        summary: 'Now let me look at the digest/memorydb pipeline to understand why the collapse fails.' }),
+    ]));
+    assert.ok(/pid file/i.test(d.text),
+      `session should fall through to its real-report checkpoint; got ${JSON.stringify(d.text)}`);
+    assert.ok(!/let me/i.test(d.text));
+  });
+
+  check('digest: a day of nothing but agent-narration lead-ins says NOTHING, not narration', () => {
+    const d = only(digest.buildDayDigests([
+      entry({ session: 'a', ts: '2026-08-05T10:00:00.000Z',
+        summary: 'Now let me look at the digest/memorydb pipeline to understand why the collapse fails.' }),
+    ]));
+    assert.strictEqual(d.kind, 'none');
+    assert.strictEqual(d.text, digest.NO_DAY_SUMMARY);
+    assert.strictEqual(d.unstatedSessions, 1,
+      'a skipped intent lead-in has to be counted the same way a skipped acknowledgement is');
+  });
+
+  // -------------------------------------------------------------------------
   // Degrading honestly
   // -------------------------------------------------------------------------
 

@@ -57,11 +57,46 @@ function readPid() {
     return null;
   }
 }
+// A thrown EPERM means the process EXISTS but this caller lacks the rights to
+// signal it -- which is alive, not dead. Reading it as dead (the old
+// `catch { return false }`) is wrong on Windows in particular: libuv's kill
+// opens the target with PROCESS_TERMINATE, so a pid another process owns can
+// answer EPERM. ESRCH (and anything else) is genuinely not-running. Used by
+// cmdStop/cmdStatus on every platform; no subprocess (an earlier tasklist probe
+// here hung the daemon on a loaded Windows runner). The duplicate-daemon guard
+// in cmdDaemon does NOT rely on this on Windows -- it is gated to POSIX there.
 function isRunning(pid) {
   if (!pid) return false;
   try {
     process.kill(pid, 0);
     return true;
+  } catch (e) {
+    return e && e.code === 'EPERM';
+  }
+}
+
+// Best-effort check that a live pid actually belongs to a MemBridge process.
+// Aliveness alone is not enough: the OS reuses pids, and the pid file can name
+// a live process that is not MemBridge -- taking that as a peer would silently
+// refuse legitimate starts. Uses `ps -o command=` on unix to read the command
+// line and match `/membridge/i`, which covers `node .../bin/membridge.js daemon`
+// (dev), the npm shim `node .../bin/membridge daemon` (global install), and
+// the Electron-invoked variants. On Windows the process image is a generic
+// `node.exe` / `MemBridge.exe`, and reading a process's full command line needs
+// wmic (removed on current Windows) or a PowerShell CIM query (slow, and not
+// guaranteed present) -- both too fragile to gate daemon startup on. So on
+// Windows we conservatively assume a live pid IS MemBridge (isRunning above
+// gets Windows liveness right via the EPERM read), erring toward "refuse to
+// start a second daemon" -- the alternative (two daemons racing state.json,
+// which has no locking) is worse than a rare false-positive refusal a user
+// clears with `membridge stop`.
+function isMembridgeProcess(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') return true;
+  try {
+    const r = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    if (r.status !== 0) return false;
+    return /membridge/i.test(r.stdout || '');
   } catch {
     return false;
   }
@@ -135,6 +170,69 @@ function cmdDaemon() {
   util.ensureConfig();
   const config = util.getConfig();
   fs.mkdirSync(util.homeDir(), { recursive: true });
+
+  // Refuse to start a second daemon on top of a running one. Without this
+  // guard, the unconditional pid write below silently overwrites the running
+  // daemon's marker; both keep running, both scribble state.json (which has
+  // NO locking -- see the state-json-cross-process-clobber landmine), and
+  // only one is ever cleaned up by SIGTERM. Classic "flag recording a success
+  // the code never achieved" (state-claiming-unearned-success) -- claiming to
+  // be the daemon without checking whether one already exists.
+  //
+  // Aliveness alone is not enough; pids get reused. isMembridgeProcess()
+  // reads the process command line to distinguish a real peer from a random
+  // program that happened to inherit the pid. A stale pid file (dead process
+  // or live-but-not-MemBridge) falls through to the normal takeover path.
+  //
+  // Deliberately NOT a real lockfile: the plan (locked decision #4) calls for
+  // a liveness check at this scope; a lockfile is a bigger surface.
+  //
+  // Restart handoff exception. `POST /api/daemon/restart` replaces this daemon
+  // by spawning a new `membridge daemon` while the OLD one is still alive (it
+  // must outlive the request long enough to flush the response, then exits
+  // ~200ms later -- see lib/server.js and api-machine.spawnReplacement). To the
+  // replacement that predecessor looks exactly like a duplicate to refuse, so
+  // without a signal the guard below kills the restart and the pid never
+  // changes. spawnReplacement sets MEMBRIDGE_TAKEOVER=1 to authorize THIS boot
+  // to take over a live daemon. It is read once and deleted so it can never
+  // leak into an unrelated child this process later spawns, nor wave through a
+  // genuine second daemon -- a user-run `membridge daemon` never carries it, so
+  // the refusal below still fires for a real duplicate.
+  const isRestartHandoff = process.env.MEMBRIDGE_TAKEOVER === '1';
+  delete process.env.MEMBRIDGE_TAKEOVER;
+  // POSIX-only. On Windows this liveness/refusal path is unverified and may hang
+  // daemon startup: build-app's Windows CI shows the second `membridge daemon`
+  // in daemon-pid-race hanging -- empty stdout/stderr, the pid never
+  // overwritten, killed at the 4s timeout with status=null -- so the guard
+  // neither refuses nor takes over, it just stalls. A guard that can wedge
+  // startup is worse than no guard, so it is gated to POSIX until the true cause
+  // is observed on a real Windows env (tracked in task #34). Windows keeps the
+  // pre-0.3.2 behavior: fall through and overwrite the pid (no duplicate
+  // protection, but no hang). Restart handoff still works there -- the
+  // replacement simply takes over unconditionally and the pid changes. The
+  // MEMBRIDGE_TAKEOVER read/delete above stays on every platform (harmless, and
+  // keeps the env from leaking into a child).
+  if (process.platform !== 'win32') {
+    const existingPid = readPid();
+    if (existingPid && isRunning(existingPid)) {
+      if (isMembridgeProcess(existingPid) && !isRestartHandoff) {
+        const port = config.dashboardPort;
+        console.error(
+          `MemBridge is already running (pid ${existingPid}, dashboard http://127.0.0.1:${port}). ` +
+          `Refusing to start a second daemon -- run \`membridge stop\` first if you meant to restart.`
+        );
+        process.exit(1);
+      }
+      if (isRestartHandoff) {
+        util.log(`restart handoff: taking over from daemon pid ${existingPid}`);
+      } else {
+        util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
+      }
+    } else if (existingPid) {
+      util.log(`pid file names dead process ${existingPid}; taking over (stale)`);
+    }
+  }
+
   fs.writeFileSync(util.pidPath(), String(process.pid));
   util.log(`daemon started (pid ${process.pid}, interval ${config.intervalSec}s, v${pkg.version})`);
 
@@ -976,18 +1074,31 @@ async function cmdTeam() {
     return;
   }
 
-  // Privacy gate: verbatim prompts upload with team sync only when this is on
-  // (summaries and file lists always sync). Local config only, so it works
-  // before login and on unconfigured builds.
+  // Privacy gate. Three modes plus two legacy aliases (`on` → verbatim, `off`
+  // → off) so a script or muscle memory keeps working. Local config only, so
+  // it works before login and on unconfigured builds.
+  //   off        summaries and file lists only, no ask, no goal
+  //   distilled  agent-written goal ships; raw ask does not (fresh-install default)
+  //   verbatim   full ask + goal upload, redacted through the standard pipeline
   if (sub === 'share-prompts') {
-    const v = args[2];
-    if (!['on', 'off'].includes(v)) die('Usage: membridge team share-prompts <on|off>');
+    const rawArg = args[2];
+    // Aliases: keep the historical on/off working, translate to modes.
+    const alias = rawArg === 'on' ? 'verbatim' : rawArg;
+    if (!['off', 'distilled', 'verbatim'].includes(alias)) {
+      die('Usage: membridge team share-prompts <off|distilled|verbatim>\n' +
+          '  off        summaries and file lists only\n' +
+          '  distilled  also share the agent-written goal (default for new installs)\n' +
+          '  verbatim   also share your raw prompts (redacted through the same pipeline)');
+    }
     const raw = util.loadUserConfig();
-    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: v === 'on' };
+    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: alias };
     util.saveUserConfig(raw);
-    console.log(v === 'on'
-      ? 'Prompt sharing ON: future pushes include your (redacted) asks.'
-      : 'Prompt sharing OFF: future pushes upload summaries and file lists only.');
+    const msg = alias === 'off'
+      ? 'Prompt sharing OFF: future pushes upload summaries and file lists only.'
+      : alias === 'distilled'
+      ? 'Prompt sharing DISTILLED: future pushes upload the agent-written goal (no raw prompts).'
+      : 'Prompt sharing VERBATIM: future pushes include your (redacted) raw prompts.';
+    console.log(msg);
     return;
   }
 
@@ -1381,7 +1492,11 @@ Team sync (share project memory with your team, see README):
                            Opt-in and one-shot; safe to interrupt and re-run. If you do
                            interrupt it, a running daemon keeps walking the rest one page
                            per tick.
-  team share-prompts <on|off>  also upload your (redacted) prompts; off = summaries/files only
+  team share-prompts <off|distilled|verbatim>
+                            off        summaries and file lists only
+                            distilled  also share the agent-written goal (default for new installs)
+                            verbatim   also share your raw prompts (redacted through the same pipeline)
+                            legacy: "on" is an alias for verbatim
   team setup ...           advanced: point at your own self-hosted backend
 
 Config: ${util.configPath()}
