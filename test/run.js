@@ -45,7 +45,23 @@ const { spawn } = require('child_process');
 // drawing an unverified block out of forty is the port cross-talk this file
 // claims in its header to have removed. Prove it before believing it:
 //   node -e "const s=require('net').createServer();s.listen(17941,'127.0.0.1');console.log(s.listening)"  // false
-const PORT_BLOCKS = 40;
+// PORT_BLOCKS must stay >= the number of suites spawned in the parallel phase,
+// because that phase is a single Promise.all -- every parallel suite is in
+// flight AT ONCE, not pooled. At 40 blocks against 91 parallel suites the
+// dealer below was guaranteed to hand the same base to more than one live
+// child, and the loser's daemon never came up:
+//   CRASH join-audit ... timeout waiting for http://127.0.0.1:21378/api/status
+// on ubuntu 22, ubuntu 24 and macos 22 of run 31266188042, all on the same
+// port. This was already latent on master (84 parallel suites, same 40 blocks)
+// and passed there only because the colliding pair happened not to bind at the
+// same moment -- a coin flip that this branch's 7 extra suites lost.
+//
+// Ceiling matters: 17900 + 119*100 + 99 = 29899, which stays clear of the
+// ephemeral range on every leg of the matrix (Linux 32768+, macOS/Windows
+// 49152+), so a dealt block can never collide with a kernel-assigned port.
+// The freeBlocks() sweep is 3 sequential binds per block, so 120 blocks costs
+// ~30ms -- still noise next to the run it protects.
+const PORT_BLOCKS = 120;
 function freePort(port) {
   return new Promise(resolve => {
     const s = net.createServer();
@@ -75,12 +91,32 @@ async function freeBlocks() {
 // child still gets a block nobody else in this run holds, and the run says
 // out loud that the block is unverified.
 function blockDealer(free) {
+  // Second tier: the blocks the sweep found BUSY, listed explicitly instead of
+  // being recomputed as `17900 + (i % PORT_BLOCKS) * 100`. That expression
+  // indexed the whole universe of blocks while `free` is a COMPACTED subset of
+  // it, so the moment any block was busy the fallback began re-dealing bases
+  // that had already gone to a live child -- reintroducing, in the code meant
+  // to be the safe path, precisely the collision this file's header claims to
+  // have removed. Dealing free blocks first and busy ones after keeps every
+  // base distinct for as long as blocks exist at all.
+  const freeSet = new Set(free);
+  const busy = [];
+  for (let i = 0; i < PORT_BLOCKS; i++) {
+    const base = 17900 + i * 100;
+    if (!freeSet.has(base)) busy.push(base);
+  }
+  const order = [...free, ...busy];
   let n = 0;
   return name => {
     const i = n++;
-    if (i < free.length) return free[i];
-    const base = 17900 + (i % PORT_BLOCKS) * 100;
-    console.log(`warning: no verified-free port block left for ${name}; using ${base} unverified`);
+    if (i < free.length) return order[i];
+    const base = order[i % order.length];
+    // Two genuinely different warnings. "unverified" means the block was not
+    // provably free but is still this run's alone; "REUSED" means there are
+    // more suites than blocks and cross-talk is now possible, which is a
+    // PORT_BLOCKS problem and must not be read as ordinary noise.
+    const how = i < order.length ? 'unverified' : 'unverified and REUSED (more suites than PORT_BLOCKS)';
+    console.log(`warning: no verified-free port block left for ${name}; using ${base} ${how}`);
     return base;
   };
 }
