@@ -39,6 +39,48 @@ async function main() {
       'the wrong build to everyone using the documented install command.');
   });
 
+  // install.sh IS GENERATED. Every other property in this file, and the
+  // template checks in run-tests.js, are asserted against install.sh.tmpl —
+  // but the file that gets copied to membridge.app and run by `curl | sh` is
+  // install.sh. Nothing tied the two together, so a hand-edit to install.sh
+  // alone was invisible: reverted the quarantine strip's removal, flipped
+  // ELECTRON_RUN_AS_NODE, and the suite still reported 7/7 green. Proven by
+  // mutating install.sh on clean master and watching nothing fail.
+  //
+  // Anchoring install.sh to render(tmpl, pins) makes the two pins the ONLY
+  // degrees of freedom the generated file has, which is the whole contract of
+  // gen-install.js. It also makes every tmpl-only assertion elsewhere
+  // transitively true of the shipped script, so those do not need duplicating.
+  //
+  // Note what this deliberately does NOT prove: that SHA256 is the digest of
+  // the release named by VERSION. Nothing offline can — the digest exists only
+  // in the built zip. Hand-editing VERSION alone still renders identically and
+  // still passes, and that mistake has shipped before (0.2.4-era: a bumped
+  // version against a stale digest made every `curl | sh` install hard-fail the
+  // checksum). The only fix for that half is to never hand-edit: change the
+  // template, rebuild, and re-run gen-install.js.
+  await check('install.sh is exactly what gen-install.js renders from the template', () => {
+    const { renderInstallScript } = require(path.join(ROOT, 'scripts', 'install', 'gen-install.js'));
+    const tmpl = fs.readFileSync(path.join(ROOT, 'scripts', 'install', 'install.sh.tmpl'), 'utf8');
+    const expected = renderInstallScript(tmpl, {
+      version: pinned('VERSION'),
+      sha256: pinned('SHA256'),
+    });
+    // The whole-file strings are megabyte-free but still unreadable in a diff,
+    // so the failure names the first differing LINE rather than dumping both.
+    const a = expected.split('\n');
+    const b = sh.split('\n');
+    let i = 0;
+    while (i < Math.max(a.length, b.length) && a[i] === b[i]) i++;
+    assert.strictEqual(sh, expected,
+      'install.sh has drifted from install.sh.tmpl. It is GENERATED — edit the ' +
+      'template and re-run `node scripts/install/gen-install.js` (after ' +
+      '`npm run dist:mac`); a hand-edit here is silently reverted by the next ' +
+      `release. First difference at line ${i + 1}:\n` +
+      `  from template: ${JSON.stringify(a[i])}\n` +
+      `  in install.sh: ${JSON.stringify(b[i])}`);
+  });
+
   // THE PROPERTY THAT MAKES THE GITHUB LEG UNTRUSTED, and the one whose loss
   // would be silent. Without it the installer takes whatever the release URL
   // returns; with it, replacing a release asset alone is not enough to land
