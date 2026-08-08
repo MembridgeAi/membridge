@@ -50,12 +50,29 @@ const digest = require('../../lib/digest');
 const mcp = require('../../lib/mcp');
 const server = require('../../lib/server');
 
+// A fixed instant, used ONLY for cursors and link metadata below — neither is
+// measured against a clock, so both are safe to pin.
 const NOW = '2026-08-05T12:00:00.000Z';
+// The teammate row's OWN timestamp must be real-clock-relative, and must not
+// use NOW. digest.teamInjectSlice drops rows older than teamMaxAgeHours
+// (lib/digest.js:580, default 72) measured against Date.now(), with no
+// injectable clock. Pinned to 2026-08-05T12:00Z, this suite's precondition --
+// "all four readers serve the stale teammate row before the sweep runs" --
+// passed until 2026-08-08T12:00Z and then failed for everyone, forever, with
+// no code change: the row aged out of the inject window and two of the four
+// readers stopped serving it.
+//
+// That is exactly the defect ab49968 fixed in the section-7 revocation
+// fixture ("anchor teammate-notes fixture to the real clock — time-bomb, not
+// a code regression"). Same window, same cause, one suite it was not applied
+// to. Anything asserting a row is VISIBLE through the inject path has to be
+// relative; a literal is a dated bomb.
+const ROW_TS = new Date(Date.now() - 2 * 3600000).toISOString(); // 2h ago: inside the 72h window
 const SESSION = 'sess-mate';
 // A pushed teammate row in wire shape, with every field the four readers
 // consult — enough for a decision, a file note, a search hit, and a block line.
 const TEAM_ROW = {
-  id: 'r1', ts: NOW, created_at: NOW,
+  id: 'r1', ts: ROW_TS, created_at: ROW_TS,
   author_id: 'mate', author_name: 'Mate', author: 'Mate',
   source: 'Claude Code', session: SESSION,
   project_id: 'proj-stale', project_name: 'stale',
