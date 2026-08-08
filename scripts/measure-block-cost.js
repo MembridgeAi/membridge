@@ -47,8 +47,12 @@ const { execFileSync } = require('child_process');
 // can move or be deleted, and a measurement whose ruler silently changed is
 // worse than one that fails to run.
 const TOKENIZER_REF = 'ad6c9ff';
-const BEGIN = '<!-- membridge:begin -->';
-const END = '<!-- membridge:end -->';
+// Markers and span rule from the one module that owns them, so a measurement
+// of "what the block costs" cannot count a different set of bytes than the
+// writer treats as the block. Resolving it independently used to over-report
+// on a file carrying two pairs: the span ran across both blocks and the user's
+// own lines between them.
+const blockSpan = require('../lib/block-span');
 
 // Pinned expectations for the ruler itself. If the vocabulary ever decodes to
 // different merges these change, and the script stops rather than reporting
@@ -109,10 +113,9 @@ function loadTokenizer(repoRoot) {
 function blockTokensIn(file, countTokens) {
   let s;
   try { s = fs.readFileSync(file, 'utf8'); } catch { return 0; }
-  const b = s.indexOf(BEGIN);
-  const e = s.lastIndexOf(END);
-  if (b === -1 || e <= b) return 0;
-  return countTokens(s.slice(b, e + END.length));
+  const span = blockSpan.firstBlockSpan(s);
+  if (!span) return 0;
+  return countTokens(s.slice(span.begin, span.end));
 }
 
 function main() {

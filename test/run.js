@@ -69,20 +69,46 @@ async function freeBlocks() {
   return free;
 }
 
-// Hand out a DISTINCT block per child, always. Returning undefined (which is
-// what an exhausted generator did) drops the child onto an unverified guess
-// without saying so; if we genuinely run out of verified-free blocks, the
-// child still gets a block nobody else in this run holds, and the run says
-// out loud that the block is unverified.
-function blockDealer(free) {
-  let n = 0;
-  return name => {
-    const i = n++;
-    if (i < free.length) return free[i];
-    const base = 17900 + (i % PORT_BLOCKS) * 100;
-    console.log(`warning: no verified-free port block left for ${name}; using ${base} unverified`);
-    return base;
-  };
+// A block is owned by ONE RUNNING CHILD AT A TIME — the invariant that
+// actually matters, and which counting suites cannot satisfy.
+//
+// The previous dealer handed out one block per suite for the whole run and
+// wrapped with `i % PORT_BLOCKS` when it ran out, while main() spawned every
+// parallel suite at once via Promise.all. With 90 suites and 40 blocks that
+// guaranteed what this file's header claims to have removed: children i and
+// i+40 held the SAME block AND ran simultaneously. Its comment promised "a
+// block nobody else in this run holds"; the arithmetic said otherwise, and CI
+// showed it — 50 "unverified" warnings with ten bases dealt twice, and
+// join-audit and removal-durability timing out waiting for their own daemons
+// on all six legs. Master carried the same over-subscription (48 warnings,
+// duplicate bases) and was green only because the colliding pairs happened
+// not to overlap destructively; ONE added suite was enough to tip it.
+//
+// So the pool bounds concurrency instead of counting suites: one worker per
+// verified-free block, each worker keeping its block for the whole run and
+// pulling the next suite when its child exits. Two children never share a
+// block because there are never more children than blocks. Suites beyond the
+// block count now WAIT rather than collide, which also stops ~90 node
+// processes contending on a 2-core runner.
+function poolWorkers(free) {
+  if (free.length) return free;
+  // Nothing verified free (a machine already saturated): fall back to a single
+  // unverified block. Serialized and loud, rather than parallel and lying.
+  console.log('warning: no verified-free port block available; running suites one at a time on 17900');
+  return [17900];
+}
+
+// Run `suites` across `blocks` workers, at most one child per block, and
+// return results in the suites' original order.
+async function runPooled(suites, blocks) {
+  const results = new Array(suites.length);
+  let next = 0;
+  await Promise.all(blocks.map(async block => {
+    for (let i = next++; i < suites.length; i = next++) {
+      results[i] = await runSuite(suites[i], block);
+    }
+  }));
+  return results;
 }
 
 // Overridable so this orchestrator's own reporting can be tested against
@@ -157,15 +183,17 @@ async function main() {
   // anything else shares the CPU (observed live: redaction's 200-event render
   // at 2.5x its budget with six suites in flight, comfortably green alone).
   // Core runs last for the same reason, and it dominates wall-clock anyway.
-  const takeBlock = blockDealer(await freeBlocks());
+  const blocks = poolWorkers(await freeBlocks());
   const parallel = picked.filter(s => s.name !== 'core' && !s.serial);
   const serial = picked.filter(s => s.name !== 'core' && s.serial);
-  const results = await Promise.all(parallel.map(s => runSuite(s, takeBlock(s.name))));
+  const results = await runPooled(parallel, blocks);
+  // The serial phase and core run with nothing else in flight, so the first
+  // block is free by construction — no need to consume a distinct one.
   for (const s of serial) {
-    results.push(await runSuite(s, takeBlock(s.name)));
+    results.push(await runSuite(s, blocks[0]));
   }
   if (picked.some(s => s.name === 'core')) {
-    results.push(await runSuite(LEGACY, takeBlock(LEGACY.name)));
+    results.push(await runSuite(LEGACY, blocks[0]));
   }
 
   const { lines, exitCode } = summarize(results);
