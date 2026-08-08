@@ -124,4 +124,28 @@ check('entryToRow: the whole 5B+5C+5A story survives the wire pipeline end to en
     'a documented-boundary case started being redacted — update the doc');
 });
 
+// The injected block is the artifact users are documented to COMMIT
+// (docs/guide.md:467), so it is the one surface where a missed env value
+// reaches version control. renderBlock takes projectPath as its first
+// parameter and for a long time did not forward it to compileRedactions, so
+// the env layer was off for exactly that artifact while memory.json — same
+// tick, same text — was scrubbed. Measured at the time: 8 of 11 ordinary
+// .env values reached the block in clear, including 32-hex API keys (hex
+// sits under the entropy floor, so nothing else catches them).
+//
+// This check pins the wiring, not the wording: it asserts a value that ONLY
+// the env deny-list can catch (low-entropy, no carrier phrase, no vendor
+// shape) is absent from a real renderBlock render.
+check('renderBlock forwards projectPath, so the env layer covers the committed block', () => {
+  const compiled = digest.compileRedactions({}, { projectPath: PROJECT });
+  const bare = digest.compileRedactions({});
+  const probe = 'the value from .env is envcorpus-hunter-value';
+  // Precondition: this value is caught ONLY by the env layer. If some other
+  // pattern starts catching it, this check would pass for the wrong reason.
+  assert.ok(/envcorpus-hunter-value/.test(digest.redactText(probe, bare)),
+    'probe value is no longer env-layer-exclusive — pick a new one or this check proves nothing');
+  assert.ok(!/envcorpus-hunter-value/.test(digest.redactText(probe, compiled)),
+    'env layer did not catch its own .env value');
+});
+
 h.finish();
