@@ -18,7 +18,13 @@ describe('FakeDataClient', () => {
 
   it('drives the viewer role in getSettings().team.role from opts.role', async () => {
     const byDefault = new FakeDataClient()
-    expect((await byDefault.getSettings()).team).toEqual({ id: 'team-1', name: 'MemBridge HQ', role: 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' })
+    // Exhaustive on purpose: this literal IS the fake's team shape, so a field
+    // arriving that no test asked for is meant to be noticed. That is exactly
+    // what happened -- adding `sharePrompts` to the fake (d6ddc76) turned all
+    // six CI legs red with no behaviour change. The assertion did its job; it
+    // just never got its other half. 'off' is the daemon's own default, which
+    // is what the fake sets (teamsync gates on `=== true`).
+    expect((await byDefault.getSettings()).team).toEqual({ id: 'team-1', name: 'MemBridge HQ', role: 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q', sharePrompts: 'off' })
     expect((await new FakeDataClient({ role: 'admin' }).getSettings()).team?.role).toBe('admin')
     expect((await new FakeDataClient({ role: 'member' }).getSettings()).team?.role).toBe('member')
   })
