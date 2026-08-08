@@ -5,6 +5,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { FormDialog } from '../../components/FormDialog'
 import { useLeaveTeam, useRenameTeam, useRotateInviteCode } from '../../data/queries'
 import type { Role, Settings } from '../../data/types'
+import { DeleteMyDataDialog } from './DeleteMyDataDialog'
 import { SettingRow } from './SettingRow'
 
 function errorMessage(error: unknown): string {
@@ -70,6 +71,7 @@ export function TeamGroup({ team }: TeamGroupProps) {
   const [confirming, setConfirming] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [rotating, setRotating] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   // The code a rotation just minted. NOT the only place a code is displayed
   // (see inviteCode below) -- it is an override for the window before the
   // refreshed /api/settings read catches up, on the same "the mutation result
@@ -177,6 +179,23 @@ export function TeamGroup({ team }: TeamGroupProps) {
           </button>
         </SettingRow>
       )}
+
+      {/* Deliberately NOT wrapped in isTeamAdmin, unlike the two rows above.
+          Erasing what you wrote is not an administrative act -- see migration
+          035 §1, whose DELETE policy is scoped on author_id alone precisely so
+          that a plain member, an ex-member and someone whose project access
+          was revoked can all still do it. */}
+      <SettingRow
+        label="My data"
+        description="Delete everything you've synced to this team's backend. Your teammates lose these entries too, and it can't be undone."
+        testId="setting-my-data"
+      >
+        <button type="button" className="settings-btn" onClick={() => setDeleting(true)}>
+          Delete my data
+        </button>
+      </SettingRow>
+
+      {deleting && <DeleteMyDataDialog onClose={() => setDeleting(false)} />}
 
       {renaming && <RenameDialog team={team} onClose={() => setRenaming(false)} />}
 

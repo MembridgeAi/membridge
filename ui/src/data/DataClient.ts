@@ -1,6 +1,6 @@
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  InviteOptions, Member, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
+  AccessMatrix, AdoptResult, AuditEvent, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  InviteOptions, Member, MyData, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -141,6 +141,20 @@ export interface DataClient {
   setMemberRole(memberId: string, role: Role): Promise<void>
   removeMember(memberId: string): Promise<void>
   getAudit(limit?: number): Promise<AuditEvent[]>
+
+  // The current user's OWN synced entries as the backend holds them, for the
+  // confirmation screen to state a blast radius before anything is destroyed.
+  // Every member can call both of these: deleting what you wrote is not an
+  // admin action, and gating it on role would strand the people most likely to
+  // want it (see 035 §1 -- an ex-member and a revoked-access member can both
+  // still delete, deliberately).
+  getMyData(): Promise<MyData>
+  // Irreversible. `projectId` null means every project in the team; a uuid
+  // narrows it to one. The daemon requires a literal "DELETE" confirmation
+  // string, which this method supplies -- the UI's own confirmation step is a
+  // separate, earlier gate and must not be skipped on the assumption that this
+  // one is enough.
+  deleteMyData(projectId?: string | null): Promise<DeleteMyDataResult>
 
   getInsights(window: 7 | 30 | 90): Promise<Insights>
 

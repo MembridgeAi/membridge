@@ -160,6 +160,13 @@ which project, and where knowledge is concentrated in one person's head.
 One memory across all of them, so switching tools mid-task doesn't reset
 anything. Adapter config is in [the guide](docs/guide.md#supported-tools).
 
+Capture depth varies by tool. Claude Code's Stop hook can hold a session
+open long enough for the agent to write a summary on purpose. Everywhere
+else — Codex included — MemBridge harvests one from the last chat message
+instead, which carries what the session concluded but not the separate
+intent, decisions and gotchas. See
+[session summaries](docs/guide.md#session-summaries).
+
 <br>
 
 ## Privacy

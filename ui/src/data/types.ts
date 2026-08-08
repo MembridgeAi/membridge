@@ -549,6 +549,38 @@ export interface Invite {
   revoked: boolean
 }
 
+// One project's worth of the CURRENT USER's own synced entries, as the backend
+// holds them (GET /api/team/my-data, served from the my_entry_counts RPC).
+// Deliberately not derived from local state: other machines push to the same
+// account, and a project whose access was revoked under-reports through the
+// normal select path -- so a preview built from this disk would promise to
+// delete less than the delete actually removes.
+export interface MyDataProject {
+  projectId: string
+  name: string
+  /** This machine's local folder for the project, or null when the project was
+   *  only ever synced from another machine. A real and different state from
+   *  "unknown", and what lets the UI name a folder instead of a uuid. */
+  path: string | null
+  entries: number
+  firstTs: string | null
+  lastTs: string | null
+}
+
+export interface MyData {
+  projects: MyDataProject[]
+  total: number
+}
+
+// What a completed deletion actually did. `projects` counts the LOCAL projects
+// that received a deletion watermark, which is NOT the number of projects the
+// backend emptied -- only projects this machine has linked can be marked. Both
+// are surfaced because the gap between them is otherwise invisible.
+export interface DeleteMyDataResult {
+  deleted: number
+  projects: number
+}
+
 export interface AuditEvent {
   id: string
   at: string

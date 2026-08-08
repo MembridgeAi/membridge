@@ -8,8 +8,8 @@ import {
 } from './mappers'
 
 import type {
-  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, Project, Role, SearchPage, Session, SessionPrompt, Settings, SharePromptsMode, SignOutResult, SkeletonStats, Status, StreamEntry,
+  AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
+  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, MyData, Project, Role, SearchPage, Session, SessionPrompt, Settings, SharePromptsMode, SignOutResult, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
@@ -760,6 +760,25 @@ export class FakeDataClient implements DataClient {
   revokeInvite() { return this.guard<void>(undefined) }
   setMemberRole() { return this.guard<void>(undefined) }
   removeMember() { return this.guard<void>(undefined) }
+  // Three projects covering the states the confirmation screen has to render
+  // without lying: one this machine has locally (nameable by folder), one only
+  // ever synced from ANOTHER machine (path null -- the preview still counts it,
+  // because the delete still removes it), and one with a single entry, so the
+  // copy is exercised against a count that must not read "1 entries".
+  getMyData() {
+    return this.guard<MyData>({
+      projects: [
+        { projectId: 'p1', name: 'membridge', path: '/Users/andrew/membridge', entries: 412, firstTs: '2026-06-02T11:20:00Z', lastTs: '2026-08-06T18:04:00Z' },
+        { projectId: 'p2', name: 'checkout-api', path: null, entries: 87, firstTs: '2026-07-14T08:00:00Z', lastTs: '2026-08-01T16:30:00Z' },
+        { projectId: 'p3', name: 'scratch', path: '/Users/andrew/scratch', entries: 1, firstTs: '2026-08-05T09:12:00Z', lastTs: '2026-08-05T09:12:00Z' },
+      ],
+      total: 500,
+    })
+  }
+  // `projects` is deliberately SMALLER than the project count above: p2 has no
+  // local link, so no watermark can land on it. That gap is real and the UI
+  // must not present the two numbers as the same thing.
+  deleteMyData() { return this.guard<DeleteMyDataResult>({ deleted: 500, projects: 2 }) }
   // One row per action family the trail can now record, so the panel's
   // rendering is exercised against real shapes rather than one synthetic
   // event: a project-access change (UUID key, friendly path in objectName),
