@@ -361,9 +361,28 @@ function cmdDaemon() {
   startServer(config.dashboardPort);
 }
 
+// A killed daemon whose parent has not reaped it yet (kill -9, then `start`
+// within the ~1-2s reap window) is a zombie: kill(pid, 0) still succeeds, so
+// isRunning() reads it as alive and cmdStart refuses a perfectly good start.
+// `ps -o stat=` reports state Z for exactly that window, and a LIVE daemon is
+// never state Z, so treating Z as dead cannot weaken the duplicate-daemon
+// guard in cmdDaemon (which is POSIX-gated and, independently, already treats
+// a zombie as stale: its `ps -o command=` probe sees `<defunct>`, not
+// "membridge"). win32 has no zombies and no ps; callers gate on platform.
+function isZombie(pid) {
+  if (!pid || process.platform === 'win32') return false;
+  try {
+    const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+    if (r.status !== 0) return false;
+    return /^Z/.test((r.stdout || '').trim());
+  } catch {
+    return false;
+  }
+}
+
 function cmdStart() {
   const pid = readPid();
-  if (isRunning(pid)) {
+  if (isRunning(pid) && !isZombie(pid)) {
     console.log(`MemBridge is already running (pid ${pid}).`);
     return;
   }
@@ -387,6 +406,13 @@ function cmdStart() {
 function cmdStop() {
   const pid = readPid();
   if (!isRunning(pid)) {
+    // The daemon is gone but its pid file may not be: a crash or kill -9 never
+    // reaches cmdDaemon's cleanup handler. Leaving the stale file means every
+    // later stop/status re-reads a dead pid forever; clear it now so the next
+    // start begins from a clean slate.
+    if (pid) {
+      try { fs.unlinkSync(util.pidPath()); } catch {}
+    }
     console.log('MemBridge is not running.');
     return;
   }

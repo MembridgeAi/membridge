@@ -1,5 +1,5 @@
 'use strict';
-// QA 2026-08-08, ticket 2: what a brand-new user meets at the CLI.
+// QA 2026-08-08, tickets 2 and 3: what a brand-new user meets at the CLI.
 //
 // Ticket 2. bin/membridge.js requires lib/activity eagerly, which requires
 // lib/search-index, which requires node:sqlite at module load. On Node
@@ -14,7 +14,22 @@
 // checks guard against any OTHER startup noise creeping into stderr; run this
 // file directly under a 22.x binary to see the ticket's failure mode.
 //
-// PORT USAGE: none. This file itself opens no listening sockets.
+// Ticket 3a. `membridge stop` against a dead daemon printed "MemBridge is not
+// running." but left the stale pid file behind -- a crash or kill -9 never
+// reaches cmdDaemon's cleanup handler, so the dead pid was re-read forever.
+// stop now clears it.
+//
+// Ticket 3b. Right after kill -9, the dead daemon is a ZOMBIE until its parent
+// reaps it (~1-2s): kill(pid, 0) still succeeds, so cmdStart's isRunning()
+// courtesy check read it as alive and refused with "already running (pid X)".
+// cmdStart now probes `ps -o stat=` (state Z => dead) on POSIX. Creating a
+// real zombie needs a parent that does not reap -- Node/libuv auto-reaps its
+// children, so the fixture uses python3's subprocess (which reaps only on
+// wait/poll) and skips VISIBLY where python3 is absent.
+//
+// PORT USAGE: the zombie check spawns a real daemon via `membridge start`; it
+// gets a fresh ephemeral port from noEgress.freePort() and is SIGKILLed before
+// the check ends. This file itself opens no listening sockets.
 
 const h = require('../harness'); // FIRST: pins MEMBRIDGE_* env before any lib require
 const { check, skip, ROOT, BIN, noEgress } = h;
@@ -88,6 +103,99 @@ async function main() {
       'the SQLite ExperimentalWarning filter is gone from the bin');
   });
 
+  // ---- Ticket 3a: stop clears a stale pid file --------------------------
+
+  {
+    fs.mkdirSync(util.homeDir(), { recursive: true });
+    const dead = deadReapedPid();
+    fs.writeFileSync(util.pidPath(), String(dead));
+    const r = runCli(['stop']);
+    check('`membridge stop` against a dead daemon removes the stale pid file', () => {
+      assert.strictEqual(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+      assert.ok((r.stdout || '').includes('not running'),
+        `expected "not running", got: ${r.stdout}`);
+      assert.ok(!fs.existsSync(util.pidPath()),
+        `stale pid file survived stop: ${util.pidPath()} still names dead pid ${dead}`);
+    });
+  }
+
+  {
+    const r = runCli(['stop']);
+    check('`membridge stop` with no pid file at all stays a clean no-op', () => {
+      assert.strictEqual(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+      assert.ok((r.stdout || '').includes('not running'),
+        `expected "not running", got: ${r.stdout}`);
+    });
+  }
+
+  // ---- Ticket 3b: start is not fooled by a zombie -----------------------
+
+  const zombieCheckName = '`membridge start` right after kill -9 starts, not "already running (pid X)"';
+  if (process.platform === 'win32') {
+    skip(zombieCheckName, 'win32: no zombie process state, isZombie() is POSIX-only by design');
+  } else {
+    const py = spawnSync('python3', ['--version'], { encoding: 'utf8' });
+    if (py.error || py.status !== 0) {
+      skip(zombieCheckName, 'python3 unavailable; cannot fabricate an unreaped zombie (Node auto-reaps its children)');
+    } else {
+      // python3 keeps the killed child unreaped (no wait/poll) for 30s, which
+      // is the zombie window cmdStart must see through. It prints the zombie
+      // pid then holds; the finally below releases it.
+      const holder = spawn('python3', ['-c',
+        'import subprocess, os, sys, time, signal\n' +
+        "p = subprocess.Popen(['sleep', '300'])\n" +
+        'os.kill(p.pid, signal.SIGKILL)\n' +
+        'time.sleep(0.3)\n' +
+        'print(p.pid, flush=True)\n' +
+        'time.sleep(30)\n',
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      let daemonPid = null;
+      try {
+        const zombiePid = await new Promise((resolve, reject) => {
+          let buf = '';
+          const t = setTimeout(() => reject(new Error('zombie fixture timed out')), 10000);
+          holder.stdout.on('data', d => {
+            buf += d;
+            if (buf.includes('\n')) { clearTimeout(t); resolve(parseInt(buf, 10)); }
+          });
+          holder.on('exit', () => reject(new Error('zombie fixture exited early')));
+        });
+        assert.ok(zombiePid > 0, 'no zombie pid from fixture');
+        // Sanity: the pid must look ALIVE to kill(0) -- that is the whole trap.
+        let looksAlive = true;
+        try { process.kill(zombiePid, 0); } catch { looksAlive = false; }
+
+        fs.mkdirSync(util.homeDir(), { recursive: true });
+        fs.writeFileSync(util.pidPath(), String(zombiePid));
+        const port = await noEgress.freePort();
+        const r = runCli(['start'], { MEMBRIDGE_PORT: String(port) });
+
+        // The daemon cmdStart detached really does boot; find it so the
+        // finally can kill it whether or not the assertions below pass.
+        const deadline = Date.now() + 6000;
+        while (Date.now() < deadline) {
+          let onDisk = null;
+          try { onDisk = parseInt(fs.readFileSync(util.pidPath(), 'utf8'), 10); } catch {}
+          if (onDisk && onDisk !== zombiePid) { daemonPid = onDisk; break; }
+          await new Promise(res => setTimeout(res, 150));
+        }
+
+        check(zombieCheckName, () => {
+          assert.ok(looksAlive,
+            'fixture failure: zombie pid already reaped before start ran, the check proved nothing');
+          assert.ok(!(r.stdout || '').includes('already running'),
+            `start refused against a zombie:\n${r.stdout}`);
+          assert.ok((r.stdout || '').includes('daemon started'),
+            `start did not report starting:\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+          assert.ok(daemonPid, 'daemon never wrote its own pid over the zombie\'s');
+        });
+      } finally {
+        if (daemonPid) { try { process.kill(daemonPid, 'SIGKILL'); } catch {} }
+        try { fs.unlinkSync(util.pidPath()); } catch {}
+        try { holder.kill('SIGKILL'); } catch {}
+      }
+    }
+  }
 }
 
 main().then(() => h.finish()).catch(err => {
