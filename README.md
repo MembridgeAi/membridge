@@ -187,7 +187,7 @@ team — and the team layer is opt-in per project.
 | --- | --- |
 | **macOS** (Apple Silicon) | `curl -fsSL https://membridge.app/install.sh \| sh` — installs the menu-bar app |
 | **macOS** (Intel), **Windows**, **Linux** | `npm i -g @membridgeai/membridge && membridge start` |
-| **Headless / CI boxes** | Same npm install; `membridge start` runs the daemon with no UI |
+| **Headless / CI boxes** | Same npm install; `membridge start` runs the daemon and serves the full dashboard at `127.0.0.1:7437` — reach it over an SSH port-forward (`ssh -L 7437:127.0.0.1:7437 <box>`) or stick to the CLI |
 
 Then `membridge status` to confirm, or open the dashboard at
 `http://127.0.0.1:7437`. `membridge enable-autostart` makes it run at login.
