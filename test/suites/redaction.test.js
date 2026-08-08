@@ -1749,6 +1749,84 @@ async function main() {
     assert.ok(out.includes('[redacted:jwt]'), 'expected the jwt marker');
   });
 
+  // NEAR-MISS CORPUS.
+  //
+  // Every shape in this file was, until now, only ever tested against its own
+  // happy-path sample — which is exactly why the bugs existed: `AKIA…` was
+  // pinned, so nobody noticed `ASIA…` fell off the end of the character class,
+  // and `PGPASSWORD=x` was pinned, so nobody noticed `{"password": "x"}` could
+  // not match because the separator could not cross the `"` between key and
+  // colon. A pattern proved only by the string it was written from proves
+  // nothing about its boundary.
+  //
+  // So: each case below sits ONE CHARACTER off a string that already passes.
+  // The `hit` group must redact; the `miss` group must survive untouched,
+  // because a pattern that eats ordinary prose is its own kind of data loss.
+  check('redact: near-miss corpus — one character off a match, both directions', () => {
+    const compiled = digest.compileRedactions({});
+    const red = t => digest.redactText(t, compiled);
+
+    // Must be caught. Each is a sibling of an already-pinned shape.
+    const hits = [
+      ['ASIA STS key',      'AKIA'.replace('AKIA', 'ASIA') + 'ABCDEFGHIJKLMNOP'],
+      ['ABIA key',          'ABIA' + 'ABCDEFGHIJKLMNOP'],
+      ['ACCA key',          'ACCA' + 'ABCDEFGHIJKLMNOP'],
+      ['xoxc browser token','xoxc-1234567890-abcdefghij'],
+      ['xoxd cookie token', 'xoxd-1234567890-abcdefghij'],
+    ];
+    for (const [label, secret] of hits) {
+      const out = red(`value ${secret} here`);
+      assert.ok(!out.includes(secret), `${label}: survived redaction`);
+    }
+
+    // The JSON-key form, which the separator widening is what fixes. The
+    // quoted-name variants are each one quote away from the bare form.
+    for (const src of [
+      '{"password": "hunter2corgi"}',
+      "{'password': 'hunter2corgi'}",
+      '{"api_key":"hunter2corgi"}',
+      'password = "hunter2corgi"',
+      'PGPASSWORD=hunter2corgi',
+    ]) {
+      const out = red(src);
+      assert.ok(!out.includes('hunter2corgi'), `JSON/assignment form leaked: ${src} -> ${out}`);
+    }
+
+    // Idempotence: re-redacting must not nest or double-wrap a marker. The
+    // guard that prevents this is a negative lookahead one character wide.
+    const once = red('{"password": "hunter2corgi"}');
+    assert.strictEqual(red(once), once, 're-redaction was not idempotent');
+    assert.ok(!/\[redacted:[^\]]*\[redacted:/.test(once), 'markers nested');
+
+    // The opening quote of the VALUE must survive, or the output stops being
+    // parseable JSON — the widening absorbs the NAME's quote only.
+    assert.ok(once.includes('"[redacted:secret-assignment]"'),
+      `value quotes were swallowed: ${once}`);
+
+    // Defence in depth, pinned deliberately: `xoxz-` is NOT a real Slack
+    // prefix and the slack-token pattern rightly ignores it — but a
+    // random-looking body that long still clears the entropy bar, so the
+    // backstop catches it anyway. Recorded as a hit so a future narrowing of
+    // the backstop cannot quietly remove the second layer.
+    assert.ok(!red('xoxz-1234567890-abcdefghij').includes('1234567890-abcdefghij'),
+      'the entropy backstop no longer covers an unrecognised token prefix');
+
+    // Must NOT be caught: one character off in the harmless direction.
+    const misses = [
+      'AKIA1234',                       // too short to be a key
+      'AKIASHORT',                      // right prefix, wrong body length
+      'akia1234567890123456',           // lowercase: not an AWS key
+      'xoxz-token-here',                // wrong prefix AND low entropy
+      'the password field is empty',    // prose, skip-listed
+      'the token is set',               // prose, skip-listed
+      'discussing password policy',     // no assignment at all
+      'oauth_url=https://example.com',  // "auth" inside a word, not a secret
+    ];
+    for (const src of misses) {
+      assert.strictEqual(red(src), src, `over-redacted harmless text: ${src}`);
+    }
+  });
+
   check('redact: memory.md and memory.json redact prompt, checkpoint, and todo item', () => {
     const mem = read(path.join(projRed, '.membridge', 'memory.md'));
     const db = read(path.join(projRed, '.membridge', 'memory.json'));
