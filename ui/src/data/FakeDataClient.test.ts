@@ -18,7 +18,13 @@ describe('FakeDataClient', () => {
 
   it('drives the viewer role in getSettings().team.role from opts.role', async () => {
     const byDefault = new FakeDataClient()
-    expect((await byDefault.getSettings()).team).toEqual({ id: 'team-1', name: 'MemBridge HQ', role: 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q' })
+    // Deliberately toEqual, not toMatchObject: this is the one assertion that
+    // pins the EXACT shape of Settings.team, so a field added to the fixture
+    // without a matching type change fails here. sharePrompts is listed
+    // because it is required on the type (types.ts Settings.team) and the
+    // fixture defaults it to 'off' to match the daemon -- keeping it exhaustive
+    // is the point, so do not relax this to a partial match.
+    expect((await byDefault.getSettings()).team).toEqual({ id: 'team-1', name: 'MemBridge HQ', role: 'owner', memberCount: 3, inviteCode: 'INV-7F3K9Q', sharePrompts: 'off' })
     expect((await new FakeDataClient({ role: 'admin' }).getSettings()).team?.role).toBe('admin')
     expect((await new FakeDataClient({ role: 'member' }).getSettings()).team?.role).toBe('member')
   })
