@@ -606,6 +606,90 @@ function createMockSupabase() {
       const sessionless = visible.filter(e => !e.session).length;
       return json(res, 200, [{ entries: visible.length, sessions: named.size + sessionless }]);
     }
+    // 055_team_insights_rollup.sql. The six Insights BREAKDOWNS, aggregated
+    // here rather than folded by the client from a 2,000-row capped page walk.
+    //
+    // Same predicate rule as team_feed_counts above, for the same reason, and
+    // it now binds three functions: team_feed, team_feed_counts and this. An
+    // aggregate is a disclosure — "4,812 entries, one contributor, project Foo"
+    // leaks even with no row content attached — so if the feed's access rules
+    // change, all three change together.
+    //
+    // Returns a jsonb OBJECT, not a row set: the real function's return type is
+    // scalar jsonb and PostgREST hands that back directly. A mock wrapping it
+    // in an array would let a client that mishandles the scalar shape pass
+    // locally and fail against Postgres.
+    if (fn === 'team_insights_rollup') {
+      const visible = !isMember(body.p_team, userId) ? [] : entries
+        .filter(e => projectTeam(e.project_id) === body.p_team)
+        .filter(e => !(projects.find(p => p.id === e.project_id) || {}).archivedAt)
+        .filter(e => canSeeProject(e.project_id, userId));
+      const win = visible
+        .filter(e => !body.p_since || tsCmp(e.ts, body.p_since) >= 0)
+        .filter(e => !body.p_until || tsCmp(e.ts, body.p_until) <= 0);
+      // count(distinct session) + count(*) filter (where session is null) —
+      // 027's expression, which lib/api-insights.js's sessionKeyOf mirrors.
+      // Session-less rows are their own one-off unit rather than merging into
+      // one, and all three group-bys below must use it or the page shows a
+      // headline session count that contradicts the numbers underneath it.
+      const sessionsOf = list =>
+        new Set(list.filter(e => e.session).map(e => e.session)).size
+        + list.filter(e => !e.session).length;
+      const groupBy = (list, keyOf) => {
+        const out = new Map();
+        for (const e of list) {
+          const k = keyOf(e);
+          if (k === null || k === undefined) continue;
+          if (!out.has(k)) out.set(k, []);
+          out.get(k).push(e);
+        }
+        return out;
+      };
+      // array_agg(... order by ts desc))[1] — the freshest display snapshot of
+      // a name that may have several spellings inside one window. Missing on a
+      // fixture row means null, never undefined: the caller maps a missing name
+      // to "Unknown", and undefined would vanish through JSON instead.
+      const newestBy = (list, field) =>
+        [...list].sort((a, b) => tsCmp(b.ts, a.ts))[0][field] || null;
+      const byAuthor = [...groupBy(win, e => e.author_id || null)].map(([author_id, list]) => ({
+        author_id, entries: list.length, sessions: sessionsOf(list),
+      }));
+      const byProject = [...groupBy(win, e => e.project_id)].map(([project_id, list]) => ({
+        project_id,
+        // `p.name` off the join, exactly as team_feed supplies it above —
+        // entries do not carry a project name of their own.
+        project_name: (projects.find(p => p.id === project_id) || {}).name || null,
+        sessions: sessionsOf(list),
+        // count(distinct author_id) ignores NULLs, so a project whose rows
+        // carry no author reports ZERO contributors and never reaches the
+        // concentration warning — rather than one "Unknown" person.
+        people: new Set(list.filter(e => e.author_id).map(e => e.author_id)).size,
+        recent_author_name: newestBy(list, 'author_name'),
+      }));
+      // The `Distilled -> Codex` fold happens INSIDE the grouping, exactly as
+      // the migration's `case when source = 'Distilled' then 'Codex'` does.
+      // Folding after the group-by would double-count a session that emitted
+      // rows under both spellings.
+      const bySource = [...groupBy(win, e => (e.source === 'Distilled' ? 'Codex' : (e.source || '')))]
+        .map(([tool, list]) => ({ tool, sessions: sessionsOf(list) }));
+      // UNBOUNDED by the window, deliberately: this answers "when did we last
+      // hear from this person", and bounding it to the fetch is what made a
+      // teammate quiet for five weeks read as "0 entries shared in the last Nd".
+      const lastShared = [...groupBy(visible, e => e.author_id || null)].map(([author_id, list]) => ({
+        author_id,
+        ts: pgTimestamptz([...list].sort((a, b) => tsCmp(b.ts, a.ts))[0].ts),
+      }));
+      const earliest = visible.length
+        ? pgTimestamptz([...visible].sort((a, b) => tsCmp(a.ts, b.ts))[0].ts)
+        : null;
+      return json(res, 200, {
+        by_author: byAuthor,
+        by_project: byProject,
+        by_source: bySource,
+        last_shared: lastShared,
+        earliest_ts: earliest,
+      });
+    }
     if (fn === 'archive_project') {
       const teamId = projectTeam(body.p_project);
       if (!isManager(teamId, userId)) return json(res, 403, { message: 'only a team owner or admin can delete a project for the team' });

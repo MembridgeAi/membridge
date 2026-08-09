@@ -2,7 +2,15 @@
 -- landed as ONE migration so Marco can apply or roll back as a unit.
 --
 -- ===========================================================================
--- UNAPPLIED AS OF 2026-08-06. Verify per finding:
+-- APPLIED — verified against production 2026-08-08 by running all three queries
+-- below and confirming each finding's own criterion. Results: (1) peek_invite
+-- nulls `team_name` on an invalid invite; (2) can_see_project's terminal arm is
+-- `false`; (3) has_function_privilege('anon', ...) returns `false`. This header
+-- previously read "UNAPPLIED AS OF 2026-08-06" while production already had the
+-- migration — a stale claim in a file Marco applies by hand, top to bottom.
+-- Re-running it would have been harmless here (create-or-replace plus a revoke),
+-- but a runbook wrong about one row has lost its authority over the next.
+-- Verify per finding:
 --   1. peek_invite name leak:
 --        select prosrc from pg_proc where proname = 'peek_invite';
 --      Applied when the body carries a `case when ... then t.name else null end`
