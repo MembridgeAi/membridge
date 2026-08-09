@@ -46,6 +46,7 @@ function stubTeam(rows, opts = {}) {
   const restore = {
     getAccessToken: teamsync.getAccessToken, listTeams: teamsync.listTeams,
     listMembers: teamsync.listMembers, teamFeedCounts: teamsync.teamFeedCounts,
+    teamInsightsRollup: teamsync.teamInsightsRollup,
     teamFeed: teamsync.teamFeed,
   };
   const SELF = opts.selfId || 'me';
@@ -60,6 +61,11 @@ function stubTeam(rows, opts = {}) {
   teamsync.listTeams = async () => [{ team_id: 'T', name: 'T', role: 'owner' }];
   teamsync.listMembers = async () => members;
   teamsync.teamFeedCounts = async () => (opts.exact === false ? null : { sessions: 0, entries: rows.length });
+  // null = "this backend predates 055_team_insights_rollup.sql", which forces
+  // the paged fallback. That is deliberate and is what this whole suite is
+  // about: it documents how the payload behaves when the breakdowns really are
+  // capped. The uncapped rollup path is insights-rollup.test.js's subject.
+  teamsync.teamInsightsRollup = async () => null;
   teamsync.teamFeed = async (config, teamId, o = {}) => {
     calls.push({ since: o.since || null, until: o.until || null,
       before: o.beforeCreatedAt || null, limit: o.limit });
@@ -202,21 +208,43 @@ async function main() {
     } finally { stub.restore(); }
   });
 
-  await check('an UNTRUNCATED fetch still quotes the full requested lookback in concentration', async () => {
-    // The other direction: coveredDays must not narrow a claim that was in fact
-    // exhaustive. Regression guard against a rewrite that always uses the smaller.
+  await check('an UNTRUNCATED fetch quotes the WINDOW in concentration, not the whole fetch span', async () => {
+    // THIS CHECK USED TO ASSERT `in the last 60d` AND THAT WAS WRONG. Its
+    // intent was right and is kept: truncation must not narrow a claim that
+    // was in fact exhaustive. But it fixed the wrong number, because the
+    // concentration group is built from `current` — rows inside the WINDOW —
+    // while the fetch spans priorStart..now, which is two windows. Quoting the
+    // fetch span claimed 60 days of exclusivity from 30 days of rows.
+    //
+    // Not a theoretical gap. Demonstrated against the pre-change module with
+    // this exact fixture: Alice's row sits in the fetched set at 45d, and the
+    // payload still published "only Bob has worked on this project in the last
+    // 60d". A false sentence naming a real person, on the NORMAL untruncated
+    // path, with the disproof sitting in memory at the time.
+    //
+    // So the rule is `min(windowDays, coveredDays)`: never wider than the rows
+    // the group was built from, and never wider than what was actually read.
     const now = Date.now();
-    const rows = [{ id: 'r1', ts: new Date(now - 3 * DAY).toISOString(),
-      created_at: new Date(now - 3 * DAY).toISOString(), author_id: 'me', author_name: 'Me',
-      project_id: 'P1', project_name: 'One-owner' }];
+    const rows = [
+      // 45 days ago — inside the 60d fetch, OUTSIDE the 30d window.
+      { id: 'r0', ts: new Date(now - 45 * DAY).toISOString(),
+        created_at: new Date(now - 45 * DAY).toISOString(), author_id: 'alice', author_name: 'Alice',
+        project_id: 'P1', project_name: 'One-owner', session: 's0' },
+      { id: 'r1', ts: new Date(now - 3 * DAY).toISOString(),
+        created_at: new Date(now - 3 * DAY).toISOString(), author_id: 'me', author_name: 'Me',
+        project_id: 'P1', project_name: 'One-owner', session: 's1' },
+    ];
     const stub = stubTeam(rows);
     try {
       const out = await apiInsights.insightsPayload({}, 30, {}, 'T');
-      assert.strictEqual(out.truncated, false);
+      assert.strictEqual(out.truncated, false, 'precondition: the fetch was exhaustive');
+      assert.strictEqual(out.coveredDays, 60, 'precondition: it still covered both windows');
       const c = out.concentration.find(x => x.projectName === 'One-owner');
-      assert.ok(c);
-      assert.match(c.detail, /in the last 60d/,
-        `a complete 30d fetch reaches priorStart..now = 60d: "${c.detail}"`);
+      assert.ok(c, `expected a concentration row, got ${JSON.stringify(out.concentration)}`);
+      assert.match(c.detail, /in the last 30d/,
+        `the sentence may only claim the window the group was built from: "${c.detail}"`);
+      assert.doesNotMatch(c.detail, /in the last 60d/,
+        `Alice worked on this project 45d ago and her row was fetched: "${c.detail}"`);
     } finally { stub.restore(); }
   });
 

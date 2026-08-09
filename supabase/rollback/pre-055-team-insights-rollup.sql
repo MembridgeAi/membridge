@@ -1,0 +1,32 @@
+-- ---------------------------------------------------------------------------
+-- Rollback for 055_team_insights_rollup.sql.
+--
+-- NOT a captured "before" state, and it does not need to be. 055 CREATES a new
+-- function; it replaces nothing, so the state before it is simply "the function
+-- does not exist" and undoing it is a drop. Every other file in this directory
+-- captures a live object's prior definition because the migration overwrote
+-- one — there was nothing here to overwrite.
+--
+-- Verified read-only on 2026-08-08: `team_insights_rollup` is absent from
+-- production. Confirm before running this, so a later migration that reuses the
+-- name is not dropped by mistake:
+--
+--   select proname, pronargs from pg_proc where proname = 'team_insights_rollup';
+--
+-- WHAT THIS CANNOT UNDO: nothing, and that is a real property rather than a
+-- disclaimer. 055 writes no rows, alters no table, and touches no policy, so
+-- there is no data change to reverse. Dropping the function returns the schema
+-- to exactly its prior shape.
+--
+-- WHAT IT COSTS: any client already calling the function starts getting
+-- PGRST202 ("Could not find the function"). lib/api-insights.js treats exactly
+-- that as "this backend predates 055" and falls back to the paged fetch, so the
+-- screen degrades to its old capped-but-honest behaviour (`truncated: true`)
+-- rather than erroring. Roll back freely; no client release has to be pulled
+-- with it.
+--
+-- Lives outside supabase/migrations/ on purpose, so nothing applies it by
+-- accident while working down the apply order.
+-- ---------------------------------------------------------------------------
+
+drop function if exists public.team_insights_rollup(uuid, timestamptz, timestamptz);

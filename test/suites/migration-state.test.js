@@ -375,6 +375,74 @@ async function main() {
       + 'The two lists are the same fact written twice; either both know about a migration or neither does.');
   });
 
+  // --- the ACL treadmill (ticket #18) --------------------------------------
+  //
+  // `create or replace` cannot change a function's RETURNS TABLE column list,
+  // so every function here that gains a column has to be dropped and recreated
+  // — and **a drop resets the ACL to the Postgres default, EXECUTE to PUBLIC.**
+  // `team_feed` went through that four times after 010 correctly revoked it
+  // (013, 014, 017, 025), and each time it silently shipped PUBLIC-callable
+  // again. Nothing in the repo said so, and the one file that looked like it
+  // fixed this (054:201) revoked from `anon`, which holds no direct grant and
+  // so was a no-op.
+  //
+  // GUARDED IS DERIVED, NOT HARDCODED. A function counts as guarded once ANY
+  // migration has revoked it from PUBLIC — the repo's own history is the
+  // evidence for what is supposed to be private, so this cannot go stale the
+  // way a hand-kept list would. Adding a new definer function with its revoke
+  // enrols it automatically.
+  //
+  // WHAT THIS GATE CANNOT DO, and it is the dominant risk in this project:
+  // it reads the repo. A statement pasted straight into the Supabase SQL editor
+  // and never committed escapes it completely, which is how much of this schema
+  // actually got here. It narrows the recurrence that DID happen four times; it
+  // does not make the rule self-enforcing, and a green run here is not evidence
+  // about production.
+  const ACL_RULE_FLOOR = 56; // the rule starts at 056; earlier files are history
+
+  const flat = f => fs.readFileSync(path.join(MIGRATIONS, f), 'utf8').replace(/\s+/g, ' ');
+  const createsIn = src =>
+    [...src.matchAll(/create\s+(?:or\s+replace\s+)?function\s+public\.(\w+)\s*\(/gi)].map(m => m[1]);
+  const revokedFromPublicIn = src =>
+    [...src.matchAll(/revoke\s+execute\s+on\s+function\s+public\.(\w+)\s*\([^)]*\)\s*from\s+([^;]*);/gi)]
+      .filter(m => /\bpublic\b/i.test(m[2])).map(m => m[1]);
+  const grantedIn = src =>
+    [...src.matchAll(/grant\s+execute\s+on\s+function\s+public\.(\w+)\s*\([^)]*\)\s*to\s+([^;]*);/gi)]
+      .map(m => m[1]);
+
+  await check('recreating a guarded definer function re-issues its revoke and grant', () => {
+    const guarded = new Set();
+    for (const f of files) revokedFromPublicIn(flat(f)).forEach(fn => guarded.add(fn));
+    assert.ok(guarded.size, 'no function is revoked from PUBLIC anywhere — this check cannot be right');
+
+    const offenders = [];
+    for (const f of files) {
+      if (Number(f.match(/^(\d{3})/)[1]) < ACL_RULE_FLOOR) continue;
+      const src = flat(f);
+      const revoked = new Set(revokedFromPublicIn(src));
+      const granted = new Set(grantedIn(src));
+      for (const fn of new Set(createsIn(src))) {
+        if (!guarded.has(fn)) continue;
+        const gaps = [];
+        if (!revoked.has(fn)) gaps.push('no `revoke execute ... from public`');
+        // The grant is not optional either, and for a forward-looking reason: a
+        // drop discards EVERY grant, so a file carrying only a revoke restores
+        // nothing and leaves the next person to recreate the function with an
+        // incomplete template. 042 makes the same point about can_see_project —
+        // "revoking without this grant would break every read it guards."
+        if (!granted.has(fn)) gaps.push('no paired `grant execute ... to authenticated`');
+        if (gaps.length) offenders.push(`${f}: public.${fn} — ${gaps.join('; ')}`);
+      }
+    }
+    assert.deepStrictEqual(offenders, [],
+      'these migrations create a function that this repo has elsewhere taken off the PUBLIC grant, '
+      + 'without re-issuing it:\n  ' + offenders.join('\n  ')
+      + '\n\nA drop+create resets the ACL to EXECUTE to PUBLIC, so the function ships public-callable '
+      + 'and nothing in the repo records it. That happened to team_feed four times (013, 014, 017, 025). '
+      + 'Put BOTH statements in the same file as the create: a drop discards every grant, so a file '
+      + 'carrying only a revoke restores nothing and hands the next person an incomplete template.');
+  });
+
   h.finish();
 }
 
