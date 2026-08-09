@@ -216,6 +216,7 @@ boxes and terminal-first teammates aren't second-class.
 | `membridge remove [--project <path>]` | Strip injected memory blocks |
 | `membridge enable-autostart` / `disable-autostart` | Run at login |
 | `membridge setup-hooks` / `remove-hooks` | Session summary + recall hooks |
+| `membridge git-filter <on\|off\|status>` | Keep the injected block out of git (on by default, set up by `setup-hooks`) |
 | `membridge signup` / `login` / `logout` | Team account |
 | `membridge join <link-or-code>` | Accept an invite (creates the account if needed) |
 | `membridge team create` / `invite` / `revoke-invite` | Create a team, manage invites |
@@ -243,6 +244,17 @@ network.
 **Will it mess up my existing `CLAUDE.md` / `AGENTS.md`?** No. Only the content
 between the `<!-- membridge -->` markers is rewritten, and removing the block
 restores your file exactly.
+
+**Won't the block churn my git history?** No — `membridge setup-hooks`
+installs a git *clean filter* that strips the block on the way into the index,
+so it never reaches a commit: `git diff` is empty for it and a merge cannot
+conflict on it, while the file on disk keeps the block for your AI tools. Your
+own lines in the file are tracked exactly as before. Teammates without
+MemBridge are unaffected — git ignores a filter it has no config for. Turn it
+off with `membridge git-filter off`. Two things to know: `git status` may still
+mark the file when a rewrite changes its byte length (git compares sizes there,
+not content — the diff stays empty and the next `git add` clears it), and a
+checkout that rewrites a context file leaves it blockless until the next sync.
 
 **Does my whole team need it installed?** Everyone whose AI activity should
 sync runs MemBridge. People who just want to watch can use the web workspace

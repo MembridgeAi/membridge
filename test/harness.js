@@ -42,6 +42,15 @@ process.env.MEMBRIDGE_CLAUDE_DIR = path.join(ROOT, 'claude-projects');
 process.env.MEMBRIDGE_CODEX_DIR = path.join(ROOT, 'codex-sessions');
 process.env.MEMBRIDGE_INTERVAL = '3600';
 delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not leak into settings tests
+// The developer's (and CI's) GLOBAL git config is a real, unowned file that
+// product code now writes to: hooks.ensureInstalled() configures the memory
+// block's clean filter there, and that runs on every daemon boot — which the
+// daemon-spawning suites trigger by design. These are git's OWN redirects, not
+// a test-only branch, so the code under test takes its normal path and lands
+// somewhere throwaway. A suite that needs its own git identity still sets
+// GIT_AUTHOR_*/GIT_COMMITTER_* itself, exactly as before.
+process.env.GIT_CONFIG_GLOBAL = path.join(ROOT, 'gitconfig-global');
+process.env.GIT_CONFIG_SYSTEM = path.join(ROOT, 'gitconfig-system');
 
 // Same safety net as run-tests.js: never strand ROOT (it contains .membridge
 // markers the real daemon would treat as tracked-project evidence).

@@ -40,6 +40,7 @@ const activity = require('../lib/activity');
 const notes = require('../lib/teammate-notes');
 const notesStore = require('../lib/teammate-notes-store');
 const prompts = require('../lib/prompts');
+const gitBlockStrip = require('../lib/git-block-strip');
 const pkg = require('../package.json');
 
 const args = process.argv.slice(2);
@@ -718,6 +719,93 @@ function cmdMcpUnregister() {
   console.log('Re-register anytime with: membridge mcp register');
 }
 
+// ---------------------------------------------------------------------------
+// `membridge git-filter <on|off|status>` — keep the injected memory block out
+// of git while leaving it on disk. Why a clean filter and not .gitignore or
+// --skip-worktree, and why `required` stays false, is in lib/git-block-strip.js.
+//
+// Two halves, and only ONE of them can be shared with a teammate: the
+// .gitattributes line travels with the repo but does nothing on a machine that
+// has not configured the filter, so the `git config` half has to run per
+// machine. That is why `on` is also run by `setup-hooks` (below) rather than
+// left as a thing the user must discover.
+
+// The enable itself lives in lib/git-block-strip.js (ensureEnabled), shared
+// with the launch path in hooks.ensureInstalled — one implementation, so the
+// CLI and the app cannot drift apart again. What lives HERE is only the prose,
+// and the rule that the prose may never say "on" over a state the code did not
+// reach: `wrote` and `current` are the only outcomes that earn it.
+function gitFilterLine(r) {
+  if (r.state === 'failed') {
+    return `Git filter (keeps the memory block out of git): NOT enabled — ${r.error}. Retry with \`membridge git-filter on\`.`;
+  }
+  if (r.state === 'off') {
+    return 'Git filter: left off, because you turned it off. Turn it back on with: membridge git-filter on';
+  }
+  const where = `${r.marked} newly marked, ${r.already} already marked${r.failed ? `, ${r.failed} not writable` : ''}`;
+  return `Git filter (the memory block stops entering git — no diff, no merge conflicts on it — while staying on disk untouched): on, .gitattributes across ${r.repos.length} tracked repo(s) — ${where}. Turn off with: membridge git-filter off`;
+}
+
+function cmdGitFilter() {
+  const sub = args[1] || 'status';
+  if (sub === 'on') {
+    // force: an explicit `on` overrides a previous `off` AND takes the filter
+    // over from another MemBridge install. The launch path does neither.
+    const r = gitBlockStrip.ensureEnabled({ force: true, only: opt('--project') });
+    console.log(gitFilterLine(r));
+    if (r.state === 'failed') process.exit(1);
+    gitBlockStrip.setPreference(true);
+    // Three things a user WILL hit, said up front rather than discovered.
+    console.log('  `git diff` is now empty for the block, and a merge can no longer conflict on it.');
+    console.log('  `git status` can still show the file as modified when a rewrite changes its byte length — that is git comparing sizes, not content; the diff stays empty and the next `git add` clears it with nothing staged.');
+    console.log('  A checkout that rewrites a context file leaves it with no block until the next sync puts one back.');
+    console.log('  A context file already COMMITTED with a block still carries it in history; the next commit of that file drops it.');
+    console.log('  Teammates without MemBridge are unaffected: git ignores a filter it has no config for, and the file keeps its full content for them.');
+    return;
+  }
+  if (sub === 'off') {
+    const r = gitBlockStrip.unconfigureFilter();
+    if (!r.ok) die(`Could not turn the git filter off: ${r.error}`);
+    // Recorded ONLY after git actually stopped naming the filter. Written
+    // second on purpose: a preference saying "off" over a config that is still
+    // live would be a stored answer contradicting the machine.
+    gitBlockStrip.setPreference(false);
+    console.log(r.removed
+      ? 'Git filter off. The memory block is stored in git again from the next `git add` on.'
+      : 'Git filter was not configured on this machine — nothing to turn off.');
+    console.log(`The \`.gitattributes\` lines are left in place; without the config above they do nothing (remove the "${gitBlockStrip.attrLineFor('CLAUDE.md')}" lines by hand if you want them gone).`);
+    console.log('MemBridge will not turn it back on by itself; `membridge git-filter on` is the only thing that does.');
+    return;
+  }
+  if (sub === 'status') {
+    // What git says, then what the user asked for — two separate facts, and
+    // reporting them as one is how "it says on but nothing happens" happens.
+    const current = gitBlockStrip.configuredCommand();
+    console.log(current ? `Git filter: ON  (${gitBlockStrip.CLEAN_KEY} = ${current})` : `Git filter: OFF (${gitBlockStrip.CLEAN_KEY} is not set)`);
+    if (current && !gitBlockStrip.isCommandLive(current)) {
+      console.log('  BUT that command\'s script is not on disk, so git is silently storing the block anyway. `membridge git-filter on` repoints it.');
+    } else if (current && current !== gitBlockStrip.filterCommand()) {
+      console.log(`  NOTE: that points at a different MemBridge install than this one (${gitBlockStrip.filterCommand()}). It still works; \`membridge git-filter on\` takes it over.`);
+    }
+    const pref = gitBlockStrip.preference();
+    if (pref === false) console.log('  You turned it off (config.gitFilter.enabled = false), so launches will not re-enable it.');
+    const config = util.getConfig();
+    const targets = util.effectiveTargets(config);
+    for (const key of gitBlockStrip.trackedGitRepos()) {
+      const missing = targets.filter(t => {
+        try {
+          return !fs.readFileSync(path.join(key, '.gitattributes'), 'utf8').split(/\r?\n/).some(l => gitBlockStrip.isOurAttrLine(l, t));
+        } catch {
+          return true;
+        }
+      });
+      console.log(`  ${key}: ${missing.length ? `not marked for ${missing.join(', ')}` : 'marked'}`);
+    }
+    return;
+  }
+  die('Usage: membridge git-filter <on|off|status> [--project <path>]');
+}
+
 // `membridge update` — check GitHub for a newer release and update in place.
 // `--check` only reports (never runs anything). For npm installs we run the
 // upgrade inline; for the macOS app we PRINT the one-liner instead of running
@@ -1372,6 +1460,13 @@ Distillation (agent-written session summaries, see README):
                       summaries) AND a git post-commit hook in every tracked
                       repo (instant commit->session provenance capture)
   remove-hooks        remove the MemBridge hooks (your other hooks are kept)
+  git-filter <on|off|status> [--project <path>]
+                      keep the injected memory block out of git: it stops
+                      reaching the index, so \`git diff\` is empty for it and a
+                      merge cannot conflict on it, while the block stays on
+                      disk exactly as it is for every AI tool that reads it.
+                      \`setup-hooks\` turns this on; \`off\` removes the git
+                      config on this machine. \`status\` shows where it stands.
   hook stop           the Stop hook itself (invoked by Claude Code, not by you)
   hook post-commit    the git hook itself (invoked by git, not by you)
   hook recall         the PreToolUse recall hook itself (answers a repeat
@@ -1443,6 +1538,15 @@ const commands = {
   hook: cmdHook,
   'setup-hooks': () => {
     console.log(hooks.setupHooks());
+    // The machine-level setup step for the git clean filter, enabled without
+    // a prompt (product decision, 2026-08-08) because the churn it removes is
+    // something a user experiences long before they would go looking for a
+    // setting. One line, in the same voice as the hook lines above, naming the
+    // off switch — and it says "NOT enabled" when git config failed.
+    //
+    // NOT forced: someone who ran `git-filter off` and then re-runs setup-hooks
+    // gets their answer respected and told so, rather than silently overridden.
+    console.log(gitFilterLine(gitBlockStrip.ensureEnabled()));
     const raw = util.loadUserConfig();
     if (!raw.distill) raw.distill = {};
     if (raw.distill.consent !== 'granted') {
@@ -1450,6 +1554,7 @@ const commands = {
       util.saveUserConfig(raw);
     }
   },
+  'git-filter': cmdGitFilter,
   // `remove-hooks` is the documented "take MemBridge back out of my tools"
   // command, so it also strips the MCP registration — uninstalling must leave
   // nothing of ours behind in anyone's config.
