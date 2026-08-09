@@ -63,11 +63,18 @@ function deltaNote(delta: number | null): string | undefined {
 // seen against a current backend.
 const CAP_NOTE = 'approximate — this MemBridge server is out of date'
 
-// For a figure that is a floor because the feed fetch stopped short, rather
-// than because the server is old. Separate from CAP_NOTE on purpose: the fix
-// for CAP_NOTE is upgrading the backend, and upgrading does NOT extend the
-// feed fetch -- it only makes the two headline counts exact.
-const COVERAGE_NOTE = 'a floor — part of the window was unread'
+// For a figure that is a lower bound because the feed fetch stopped short,
+// rather than because the server is old. Separate from CAP_NOTE on purpose:
+// the fix for CAP_NOTE is upgrading the backend, and upgrading does NOT extend
+// the feed fetch -- it only makes the two headline counts exact.
+//
+// Says "minimum", the same word the truncation banner directly above it uses,
+// and not "a floor". Two words for one idea, six inches apart, reads as two
+// different measurements the reader now has to reconcile -- and "floor" is a
+// borrowed maths term where "minimum" is the plain one. Same for "unread",
+// which described our fetch loop rather than the reader's situation. If the
+// banner's wording ever changes, this changes with it.
+const COVERAGE_NOTE = 'a minimum — some days are not included'
 
 // Shown wherever a figure reads "pending" (a fresh install whose ledger has
 // nothing yet): names what it's waiting on so it doesn't read as stuck.
@@ -201,15 +208,15 @@ function LRow({ name, sub, value, reason, href }: { name: string; sub?: string; 
  * cap. Until this existed, a window that was cut short looked exactly like one
  * that was honoured: picking 90 days on a team with real history produced the
  * same page as picking 30, because both saturate the same cap, and nothing on
- * screen said the extra 60 days were never read.
+ * screen said the extra 60 days were absent.
  *
  * TWO CASES, chosen by whether the current window itself is short.
  *
  *   * `coveredDays < windowDays` -- the current window is CUT. The reader is
- *     looking at rows from the last `coveredDays` days when they asked for
- *     the last `windowDays`. Everything on the page is a floor of a genuinely
- *     truncated view. This is the ticket's headline case ("30 days requested,
- *     12 days reached") and the sentence names both numbers.
+ *     looking at the last `coveredDays` days when they asked for the last
+ *     `windowDays`. Everything on the page is a floor of a genuinely truncated
+ *     view. This is the headline case ("Showing 12 of the 30 days you asked
+ *     for") and the sentence names both numbers.
  *
  *   * `coveredDays >= windowDays` (but still truncated) -- the current window
  *     is whole and the PRIOR one is short, so the year-over-year figure
@@ -222,33 +229,61 @@ function LRow({ name, sub, value, reason, href }: { name: string; sub?: string; 
  * is how the two names drift when the daemon later diverges them, and picking
  * one per site + citing the other in a comment is the discipline (see #79
  * commit body).
+ *
+ * COPY RULE, and the reason this reads the way it does. The first version of
+ * this notice explained the DAEMON ("the team feed stopped at its page limit,
+ * and it reads newest first") to a reader who has no idea what a team feed or
+ * a page limit is, and then called every figure "a floor". None of those are
+ * words the audience owns. The rewrite states the reader's situation instead:
+ * how much of their range they got, that the numbers are minimums, and that a
+ * quiet-looking teammate may simply have worked in the part that is absent.
+ * Nothing here may name our plumbing again -- if a sentence needs the words
+ * page, fetch, rows, feed or read to make sense, it is explaining the wrong
+ * thing.
  */
+
+/** "5 days", but "1 day". Both counts this notice prints can legitimately be
+ *  1 (a fetch that reached a single day; a single absent day at the boundary),
+ *  and "1 days" inside a notice whose whole job is to be trusted about
+ *  precision is the wrong place to be sloppy. */
+function days(n: number): string {
+  return `${n} ${n === 1 ? 'day' : 'days'}`
+}
+
 function TruncationNotice({ windowDays, coveredDays }: { windowDays: number; coveredDays: number }) {
   const currentWindowCut = coveredDays < windowDays
+  const absentDays = windowDays - coveredDays
   return (
     <div className="insights-truncated" role="status" data-testid="insights-truncated">
-      {/* Glyph and words in one run, same rule StateChip follows: the amber
-          tint must not be the only thing carrying "attention" here. */}
+      {/* No ⚠. Everywhere else in this app that glyph means something is
+          broken and wants the reader's hands (not registered, hook not
+          installed, last sync failed, encryption keys stale). Nothing is
+          wrong here -- the page is reporting the size of what it can see --
+          and leading with the alarm glyph made the first reading of this
+          banner "Insights is broken". The amber container still earns the
+          eye; the heading sentence, not the tint, carries the meaning. */}
       {currentWindowCut ? (
         <>
           <p className="insights-truncated-head">
-            ⚠ {windowDays} days requested, {coveredDays} days reached
+            Showing {coveredDays} of the {days(windowDays)} you asked for
           </p>
           <p className="insights-truncated-body">
-            The team feed stopped at its page limit, and it reads newest first — so the oldest {windowDays - coveredDays}
-            {' '}days of what you asked for were never read. Every figure here, including who looks quiet, is a floor
-            over the {coveredDays} days that were.
+            There is more activity here than MemBridge can load at once, so the oldest {days(absentDays)}
+            {' '}{absentDays === 1 ? 'is' : 'are'} not included. Every number below is a minimum rather than a
+            total — and a teammate can look quiet here simply because their work fell in the days this view
+            does not include.
           </p>
         </>
       ) : (
         <>
           <p className="insights-truncated-head">
-            ⚠ The comparison against the previous {windowDays} days is capped
+            The comparison with the previous {days(windowDays)} is unavailable
           </p>
           <p className="insights-truncated-body">
-            The last {windowDays} days are complete, but the fetch stopped {coveredDays} days back — so the
-            trend against the previous {windowDays} days is unavailable, and any teammate who last shared
-            more than {coveredDays} days ago is not visible here.
+            The last {days(windowDays)} are complete, but MemBridge could only go back {days(coveredDays)} in
+            all — not far enough to cover the {days(windowDays)} before that, so those comparisons are left
+            blank. A teammate whose last activity was more than {days(coveredDays)} ago does not appear here
+            either.
           </p>
         </>
       )}
@@ -527,15 +562,23 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
               and a new problem is far likelier to be another read of the same
               capped feed than a local certainty. Over-qualifying is visible
               and recoverable; a false accusation about a named colleague is
-              neither. */}
+              neither.
+
+              The hint below is the highest-stakes sentence on this screen: it
+              is read inches from a named colleague, and it decides whether the
+              reader walks away thinking that person has gone quiet. So it
+              names both readings and puts the innocent one first, in words the
+              reader owns -- not "unread data", which describes our fetch loop
+              and leaves "has Sarah stopped working" as the only interpretation
+              the reader can actually form. */}
           {insights.truncated ? (
             <ProblemGroup
               testId="problems-unconfirmed"
               tone="unconfirmed"
               title="Can't tell"
-              hint="the window was cut short, so silence here may be unread data"
+              hint="silence here may be days that are not included, not a teammate who has gone quiet"
               problems={insights.problems}
-              emptyNote="Nobody looked quiet in the part that was read."
+              emptyNote="Nobody looked quiet in the days this view includes."
             />
           ) : (
             <>
