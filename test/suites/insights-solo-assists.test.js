@@ -52,12 +52,17 @@ function stubTeamContext(opts) {
   const restore = {
     getAccessToken: teamsync.getAccessToken, listTeams: teamsync.listTeams,
     listMembers: teamsync.listMembers, teamFeedCounts: teamsync.teamFeedCounts,
+    teamInsightsRollup: teamsync.teamInsightsRollup,
     teamFeed: teamsync.teamFeed,
   };
   teamsync.getAccessToken = async () => opts.creds || null;
   teamsync.listTeams = async () => opts.teams || [];
   teamsync.listMembers = async () => opts.members || [];
   teamsync.teamFeedCounts = async () => ({ sessions: 0, entries: 0 });
+  // These checks are about the SOLO/empty payload, which never reaches either
+  // aggregation path. Stubbed to the pre-055 answer so the suite cannot start
+  // making a real network call if the branch above ever changes.
+  teamsync.teamInsightsRollup = async () => null;
   teamsync.teamFeed = async () => [];
   return () => Object.assign(teamsync, restore);
 }

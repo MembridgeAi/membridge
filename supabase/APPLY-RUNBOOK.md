@@ -20,22 +20,26 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 038 | Invite redemption claims a use atomically | `agent-sec` | no |
 | 039 | `team_audit.created_at` stamped by the database | `agent-sec` | no |
 | 040 | DELETE on `memory_entries` revoked from ordinary clients | `agent-sec` | no |
-| 041 | `project_stats` carries `archived_at` | `agent-backend2` | no |
-| 042 | Definer-function grants + `is_team_member_uid` caller check | `agent-sec` | no |
-| 043 | Blanket table grants revoked on three internal tables | `agent-sec` | no |
-| 044 | Removal rotates the standing invite code | `agent-removal` | no |
-| 045 | Leaving a team rotates the standing invite code | `agent-removal` | no |
-| 046 | Joining a team writes an audit row | `agent-removal` | no |
+| 041 | `project_stats` carries `archived_at` | `agent-backend2` | yes |
+| 042 | Definer-function grants + `is_team_member_uid` caller check | `agent-sec` | yes |
+| 043 | Blanket table grants revoked on three internal tables | `agent-sec` | yes |
+| 044 | Removal rotates the standing invite code | `agent-removal` | yes |
+| 045 | Leaving a team rotates the standing invite code | `agent-removal` | yes |
+| 046 | Joining a team writes an audit row | `agent-removal` | yes |
 | 047 | Two scoped Postgres roles for the ops panel | `agent-sec` | no |
 | 048 | `ops_audit.via_role` — records the verified credential beside the self-reported actor | `agent-sec` | no |
-| 049 | Records a voluntary departure in the audit trail | `agent-removal` | no |
-| 050 | Stops the audit trail pinning a deleted account open | `agent-removal` | no |
-| 051 | Drops the now-vestigial `memory_entries_delete` policy | `agent-sec` | no |
+| 049 | Records a voluntary departure in the audit trail | `agent-removal` | yes |
+| 050 | Stops the audit trail pinning a deleted account open | `agent-removal` | yes |
+| 051 | Drops the now-vestigial `memory_entries_delete` policy | `agent-sec` | yes |
 | 052 | Account-deletion FK actions on five uncontested constraints — PARKED, see `docs/ACCOUNT-DELETION.md` §6 | `agent-deletion` | no |
 | 053 | `team_members_list` carries `deleted_at`, so soft-deleted accounts stop receiving team keys | `agent-deletion` | no |
-| 054 | Three definer-surface findings from the jamal audit: `peek_invite` name leak on revoked/expired/exhausted tokens, `can_see_project` latent terminal-`true`, and `projects_materialize_access` PUBLIC grant | `agent-sec-jamal-01` | no |
+| 054 | Three definer-surface findings from the jamal audit: `peek_invite` name leak on revoked/expired/exhausted tokens, `can_see_project` latent terminal-`true`, and `projects_materialize_access` PUBLIC grant | `agent-sec-jamal-01` | yes |
 
-**Next free number: 054.**
+| 055 | `team_insights_rollup` — the Insights BREAKDOWNS (per-person, top projects, by-tool, concentration, silent-teammate) counted in the database instead of folded from a 2,000-row capped fetch | `agent-insights-agg` | no |
+
+| 056 | `team_feed` off the default PUBLIC grant that four drop+create migrations kept restoring, with the paired grant that stops the revoke being an outage | `agent-insights-agg` | no |
+
+**Next free number: 057.**
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
@@ -61,18 +65,20 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 2 | `038_invite_redeem_atomic.sql` | Makes an invite's "max uses" limit actually hold when two people redeem at the same moment. |
 | 3 | `039_team_audit_created_at.sql` | Stops an admin from writing audit-log entries with a false timestamp. |
 | 4 | `040_revoke_memory_entries_delete.sql` | Stops a signed-in user deleting their own shared memory straight through the API without it being recorded. |
-| 5 | `042_definer_function_hardening.sql` | Takes three database functions off the public key, and stops one of them answering questions about teams you are not in. |
-| 6 | `043_revoke_blanket_table_grants.sql` | Removes a leftover blanket permission on three internal tables, including the one holding unredeemed invite tokens. |
-| 7 | `041_project_stats_carry_archived.sql` | Lets the team hub show archived projects instead of silently dropping them. *(backend lane)* |
-| 8 | `044_removal_rotates_invite_code.sql` | Removing someone from a team also changes the team's standing invite code, so they cannot walk back in with it. *(removal lane)* |
-| 9 | `045_leave_rotates_invite_code.sql` | Same, for someone who leaves voluntarily. *(removal lane)* |
-| 10 | `046_audit_member_joined.sql` | Records in the audit trail when somebody joins a team. *(removal lane)* |
-| 11 | `049_audit_member_left.sql` | Records in the audit trail when somebody leaves a team, as the mirror of 046. *(removal lane)* |
-| 12 | `050_team_audit_actor_set_null.sql` | Stops those audit rows from making a member's account undeletable. **Must not be left behind — see below.** *(removal lane)* |
-| 13 | `051_drop_memory_entries_delete_policy.sql` | Removes a database rule that no longer does anything, and would quietly start doing something again if a permission were ever restored. |
+| ~~5~~ | `042_definer_function_hardening.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (all three functions clean of PUBLIC/anon); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~6~~ | `043_revoke_blanket_table_grants.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (no acl entry names anon or authenticated); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~7~~ | `041_project_stats_carry_archived.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (view def carries `archived_at`); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~8~~ | `044_removal_rotates_invite_code.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`remove_member` rotates `invite_code`); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~9~~ | `045_leave_rotates_invite_code.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`leave_team` rotates `invite_code`); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~10~~ | `046_audit_member_joined.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`team_members_audit_join` present); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~11~~ | `049_audit_member_left.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`team_members_audit_leave` present); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~12~~ | `050_team_audit_actor_set_null.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`confdeltype = n`); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
+| ~~13~~ | `051_drop_memory_entries_delete_policy.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (policy returns no rows); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
 | 14 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
 | 15 | `053_team_members_list_deleted_at.sql` | Lets a client tell a soft-deleted account from a live one, so a departed member stops receiving team encryption keys. Independent of everything above — any order, on its own. *(deletion lane)* |
-| 16 | `054_sec_jamal_01.sql` | Closes three definer-surface findings from the jamal audit: `peek_invite` stops returning a team name for revoked/expired/exhausted invites, `can_see_project`'s latent terminal-`true` becomes `false`, and `projects_materialize_access` is revoked from PUBLIC/anon/authenticated. Independent of everything above — any order, on its own. *(sec lane)* |
+| ~~16~~ | `054_sec_jamal_01.sql` | **ALREADY APPLIED — SKIP.** Verified against production 2026-08-08 with all three of the file's own queries; see the 054 row in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Left in this table rather than deleted so the numbering stays legible and so it is obvious this was checked rather than dropped. Do not paste it. *(sec lane)* |
+| 17 | `055_team_insights_rollup.sql` | Makes the per-person and per-project numbers on Insights real totals instead of a quarter-short sample, and stops the screen naming somebody as a project's only contributor on the strength of an incomplete read. Adds a new function, touches nothing existing — any order, on its own, and safe to apply before or after the client ships. *(insights lane)*
+| 18 | `056_team_feed_revoke_public.sql` | Stops `team_feed` being callable by PUBLIC. No data is exposed today — `is_team_member` denies a null identity — so this is defence in depth, not a live leak. **Apply in the same session as 055.** Self-verifying: it raises rather than silently doing nothing. *(insights lane)* |
 
 **`052_account_deletion_fk_actions.sql` is deliberately NOT in this table.** It
 is parked pending a product decision — see `docs/ACCOUNT-DELETION.md` section 6

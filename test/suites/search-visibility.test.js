@@ -12,11 +12,19 @@
 //
 //    There are two halves to this and BOTH are tested here, because they fail
 //    independently: a predicate at query time (a stale row can never be
-//    served, whatever is on disk) and a purge at freshen time (the index does
-//    not grow forever with rows nothing can reach). The predicate is the
-//    safety property; the purge is hygiene. A purge alone would leave every
-//    row servable in the window before the next freshen, and any future
-//    reader that skips the freshener.
+//    served, whatever is on disk) and a purge (the index does not grow forever
+//    with rows nothing can reach). The predicate is the SAFETY property; the
+//    purge is HYGIENE, and they are not interchangeable.
+//
+//    A purge alone is not enough — it would leave every row servable in the
+//    window before it runs, and to any future reader that skips the freshener.
+//    Nor does the purge even attempt to cover every case: it runs at delete
+//    time (lib/server.js purgeSearchIndex) with searchIndex.pruneUntracked as
+//    a backstop, and pruneUntracked deliberately spares projects that are
+//    merely PAUSED or marked `.membridge-off`, since those are projects the
+//    user still has. Their rows stay on disk on purpose. The predicate is the
+//    only thing making that safe, which is precisely why it is tested against
+//    the index directly rather than through the freshener.
 //
 // 2. DATE BOUNDS. `since`/`until` were lexical prefix compares — the stored
 //    timestamp sliced to the argument's length and string-compared. That is
@@ -128,22 +136,42 @@ async function main() {
   });
 
   // --- half one: the purge (hygiene) ---
-  check('search visibility: rows for a hidden project are purged from the index', () => {
-    // freshenIndex only ever iterated the TRACKED set, so the moment a project
-    // left that set its rows were never revisited again — the index grew
-    // forever with rows nothing could reach. The searches above have all run
-    // the freshener by now.
+  check('search visibility: a project this machine no longer has is reaped; a merely hidden one is NOT', () => {
+    // This check used to assert that all three hidden projects lost their rows,
+    // because the purge lived in freshenIndex and keyed on the TRACKED set.
+    // That placement was retired in favour of searchIndex.pruneUntracked, which
+    // keys on state.projects — because the tracked set excludes paused and
+    // archived projects, and reaping those destroys the searchable memory of a
+    // project the user still has and expects back when they unpause it.
+    //
+    // So the three controls now split into two genuinely different cases, and
+    // the split is the thing worth pinning:
+    //
+    //   vis-gone   — deleted, so out of state.projects entirely. Reaped.
+    //   vis-off    — a `.membridge-off` marker. Still the user's project.
+    //   vis-paused — config.exclude. Still the user's project.
+    //
+    // Retaining rows for the latter two is DELIBERATE, not a leak, and it is
+    // safe only because of the predicate asserted in half two below: the rows
+    // sit on disk unreachable. The three checks above already prove they serve
+    // nothing. Do not "fix" this by reaping them — that is the bug, not the fix.
     const db = idx.open();
     try {
-      for (const name of ['vis-off', 'vis-paused', 'vis-gone']) {
-        const p = projectAt(name);
-        const n = db.prepare('select count(*) as n from entries where project = ?').get(p).n;
-        assert.strictEqual(n, 0, `${name} still has ${n} row(s) in the search index`);
-        assert.strictEqual(idx.projectFingerprint(db, p), null,
-          `${name} kept its fingerprint, so a re-add would look already-fresh and never refill`);
+      const rows = name => db.prepare('select count(*) as n from entries where project = ?')
+        .get(projectAt(name)).n;
+
+      assert.strictEqual(rows('vis-gone'), 0,
+        'a project deleted from state.projects kept its rows — pruneUntracked did not reap it');
+      assert.strictEqual(idx.projectFingerprint(db, projectAt('vis-gone')), null,
+        'vis-gone kept its fingerprint, so a re-add would look already-fresh and never refill');
+
+      for (const name of ['vis-off', 'vis-paused']) {
+        assert.ok(rows(name) > 0,
+          `${name} lost its rows: a hidden-but-still-present project must keep its memory ` +
+          'so unpausing restores it — only the query predicate may hide it');
       }
-      assert.ok(db.prepare('select count(*) as n from entries where project = ?')
-        .get(projectAt('vis-open')).n > 0, 'the purge took the visible project too');
+
+      assert.ok(rows('vis-open') > 0, 'the reap took the visible project too');
     } finally {
       idx.close(db);
     }

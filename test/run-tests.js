@@ -35,6 +35,16 @@ process.env.MEMBRIDGE_CLAUDE_DIR = path.join(ROOT, 'claude-projects');
 process.env.MEMBRIDGE_CODEX_DIR = path.join(ROOT, 'codex-sessions');
 process.env.MEMBRIDGE_INTERVAL = '3600'; // daemon ticks once at boot, then stays quiet
 delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not leak into settings tests
+// The developer's (and CI's) GLOBAL git config is a real, unowned file that
+// product code now writes to: hooks.ensureInstalled() configures the memory
+// block's clean filter there (lib/git-block-strip.js), and this suite calls
+// ensureInstalled() directly in its auto-register section. These are git's OWN
+// redirects, not a test-only branch, so the code under test takes its normal
+// `git config --global` path and lands somewhere throwaway. Duplicated in
+// test/harness.js for the split suites, alongside the MEMBRIDGE_* vars above
+// and for the same reason.
+process.env.GIT_CONFIG_GLOBAL = path.join(ROOT, 'gitconfig-global');
+process.env.GIT_CONFIG_SYSTEM = path.join(ROOT, 'gitconfig-system');
 
 // Safety net for the incident below: ROOT's own fixtures include a real
 // `.membridge/` marker directory (setupFixtures' proj1), which is exactly

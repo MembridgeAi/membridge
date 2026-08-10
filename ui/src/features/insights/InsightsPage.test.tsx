@@ -127,9 +127,9 @@ describe('InsightsPage against a backend predating migration 027', () => {
 // sentence the payload permitted.
 //
 // With #79 the wire now carries `coveredDays` (== lookbackDays), the actual
-// reach of the fetch, so the notice moves from "something was cut" to "30
-// days requested, N days reached." The two truncation shapes have to be told
-// apart:
+// reach of the fetch, so the notice moves from "something was cut" to
+// "Showing N of the 30 days you asked for." The two truncation shapes have to
+// be told apart:
 //   - `coveredDays < windowDays` -- the current window itself is short. The
 //     ticket's headline case.
 //   - `coveredDays >= windowDays` (but still truncated) -- the current window
@@ -150,17 +150,80 @@ describe('Insights when the current window itself was cut short', () => {
     ...over,
   })
 
-  it('names both the requested and reached ranges, in days', async () => {
+  it('names both the requested and the covered range, in days', async () => {
     renderWith(await clientServing(await cut()), <InsightsPage />)
 
     const notice = await screen.findByTestId('insights-truncated')
     // The actionable sentence: what you asked for, and what you got. Both
     // numbers, both units, no "some part of it was cut" hedge.
-    expect(notice).toHaveTextContent(/30 days requested, 12 days reached/)
-    // The missing span is stated as the arithmetic difference so a scanner
+    expect(notice).toHaveTextContent(/Showing 12 of the 30 days you asked for/)
+    // The absent span is stated as the arithmetic difference so a scanner
     // can see how big the gap is without doing the subtraction themselves.
-    expect(notice).toHaveTextContent(/oldest 18 days/)
-    expect(notice).toHaveTextContent(/floor over the 12 days that were/)
+    expect(notice).toHaveTextContent(/oldest 18 days are not included/)
+    // The load-bearing half, and the reason this banner exists: the figures
+    // are minimums, and a quiet-looking teammate may be an artefact of the
+    // part that is absent rather than a person who has gone quiet.
+    expect(notice).toHaveTextContent(/Every number below is a minimum/)
+    expect(notice).toHaveTextContent(/a teammate can look quiet here/)
+  })
+
+  // The banner is the one surface on this page whose whole job is to be
+  // trusted about precision, so it does not get to print "1 days". Both counts
+  // it renders can be 1; this is the one the current-window branch can reach.
+  it('renders a single absent day as "1 day"', async () => {
+    renderWith(await clientServing(await cut({ lookbackDays: 29, coveredDays: 29 })), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    expect(notice).toHaveTextContent(/Showing 29 of the 30 days you asked for/)
+    expect(notice).toHaveTextContent(/the oldest 1 day is not included/)
+    expect(notice.textContent).not.toMatch(/1 days/)
+  })
+
+  // Every other ⚠ in this app marks something broken that wants the reader's
+  // hands (hook not installed, last sync failed, keys stale). A window that
+  // reports its own size is neither, and leading with the alarm glyph made the
+  // first reading of this banner "Insights is broken".
+  it('does not dress a reported limit as an alarm', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+
+    const notice = await screen.findByTestId('insights-truncated')
+    expect(notice.textContent).not.toMatch(/⚠/)
+    // ...and it stays an advisory, not an alert, for a screen reader too.
+    expect(notice).toHaveAttribute('role', 'status')
+  })
+
+  // THE SCREEN, not one element. Every one of these words got here the same
+  // way: someone described the daemon to a reader who has no model of it. They
+  // arrived in three different components (the truncation banner, a stat note,
+  // a section hint), which is why this asserts over the whole rendered page
+  // rather than the banner it started in -- the next one will land somewhere
+  // none of us is looking.
+  //
+  // Bare "read" is deliberately NOT banned: "a file a past session already
+  // read" is the user's own domain and the right word for it. What is banned
+  // is our vocabulary for our own plumbing.
+  const DAEMON_WORDS = /page limit|newest first|team feed|floor|unread|never read/i
+
+  it('explains the reader\'s situation rather than the daemon\'s, everywhere on the page', async () => {
+    renderWith(await clientServing(await cut()), <InsightsPage />)
+    await screen.findByTestId('insights-truncated')
+
+    // Covers the banner, the members-syncing note ("a minimum — some days are
+    // not included") and the Can't-tell hint in one pass.
+    expect(document.body.textContent).not.toMatch(DAEMON_WORDS)
+  })
+
+  // The empty variant renders copy the assertion above never reaches, and it
+  // is the sentence a reader sees when the page has nothing to accuse anyone
+  // of -- the one place it would be easiest to overclaim.
+  it('keeps the empty Can\'t-tell note honest and jargon-free', async () => {
+    renderWith(await clientServing(await cut({ problems: [] })), <InsightsPage />)
+
+    const unconfirmed = await screen.findByTestId('problems-unconfirmed')
+    // Says what it can see, and does not promote that into "nothing is wrong".
+    expect(unconfirmed).toHaveTextContent('Nobody looked quiet in the days this view includes.')
+    expect(document.body.textContent).not.toMatch(DAEMON_WORDS)
+    expect(document.body.textContent).not.toMatch(/Nothing is broken right now/i)
   })
 
   it('names the window the reader actually chose', async () => {
@@ -168,7 +231,7 @@ describe('Insights when the current window itself was cut short', () => {
     await screen.findByTestId('insights-truncated')
     await userEvent.click(screen.getByRole('button', { name: '90 days' }))
     expect(await screen.findByTestId('insights-truncated'))
-      .toHaveTextContent(/90 days requested, 12 days reached/)
+      .toHaveTextContent(/Showing 12 of the 90 days you asked for/)
   })
 
   // The part that matters. "Nothing has arrived from Sarah" is drawn from the
@@ -180,7 +243,11 @@ describe('Insights when the current window itself was cut short', () => {
     const unconfirmed = await screen.findByTestId('problems-unconfirmed')
     expect(within(unconfirmed).getByText(/Nothing has arrived from Sarah/)).toBeInTheDocument()
     expect(unconfirmed).toHaveTextContent(/Unconfirmed/)
-    expect(unconfirmed).toHaveTextContent(/silence here may be unread data/)
+    // The hint next to Sarah's name has to offer the innocent reading, in
+    // words that survive being read by someone who has never met this app.
+    // Naming only the doubt ("silence here may be unread data") left "Sarah
+    // stopped working" as the only conclusion a reader could actually draw.
+    expect(unconfirmed).toHaveTextContent('silence here may be days that are not included, not a teammate who has gone quiet')
 
     // The accusing frame is gone entirely -- both the "nothing is reaching the
     // team" heading and its inverse claim that nothing is wrong.
@@ -227,30 +294,30 @@ describe('Insights when the current window itself was cut short', () => {
     expect(screen.queryByText(/out of date/)).toBeNull()
   })
 
-  // The counterpart, and the reason this is not simply "drop the floor mark":
+  // The counterpart, and the reason this is not simply "drop the ≥ marks":
   // members-syncing is NOT one of the database-counted figures. `ok` is
   // derived from the fetched pages, so a short fetch really can undercount it
-  // and `exact` says nothing about it either way. It keeps its floor mark on
-  // exactly the same payload the assertion above requires to be unmarked.
+  // and `exact` says nothing about it either way. It keeps its ≥ on exactly
+  // the same payload the assertion above requires to be unmarked.
   // BOUNDARY, found by mutation. `coveredDays < windowDays` survived being
   // changed to `<=`, which means nothing pinned the case where the fetch
   // reached EXACTLY the window asked for. Under `<=` that reads as a cut
-  // window and announces "the oldest 0 days were never read" -- the page
+  // window and announces "the oldest 0 days are not included" -- the page
   // claiming it is less certain than it is, which is the same defect as
   // claiming more certainty, just in the flattering direction.
   it('does not call the window cut when the fetch reached exactly the window asked for', async () => {
     renderWith(await clientServing(await cut({ lookbackDays: 30, coveredDays: 30 })), <InsightsPage />)
 
     const notice = await screen.findByTestId('insights-truncated')
-    // Not the requested/reached phrasing: nothing of the current window was missed.
-    expect(notice.textContent).not.toMatch(/30 days requested/)
+    // Not the "showing N of the 30" phrasing: nothing of the current window was missed.
+    expect(notice.textContent).not.toMatch(/of the 30 days you asked for/)
     expect(notice.textContent).not.toMatch(/oldest 0 days/)
     // The honest reading at this boundary: the window is whole, the PRIOR one
     // is what got capped.
-    expect(notice).toHaveTextContent(/comparison against the previous 30 days is capped/)
+    expect(notice).toHaveTextContent(/comparison with the previous 30 days is unavailable/)
   })
 
-  it('marks members-syncing as a floor instead of counting people out', async () => {
+  it('marks members-syncing as a minimum instead of counting people out', async () => {
     renderWith(await clientServing(await cut()), <InsightsPage />)
 
     // Anchored on loaded content: the loading frame renders the same four stat
@@ -259,7 +326,10 @@ describe('Insights when the current window itself was cut short', () => {
     await screen.findByTestId('insights-truncated')
     const cell = screen.getByText('members syncing').closest('.stat-cell')
     expect(cell).toHaveTextContent('≥2/3')
-    expect(cell).toHaveTextContent(/a floor/)
+    // The whole note, not a fragment: it has to say BOTH that the figure is a
+    // lower bound and why, in the same words the banner above it uses. An
+    // assertion on "a minimum" alone would survive the note losing its reason.
+    expect(cell).toHaveTextContent('a minimum — some days are not included')
     // `ok` can only be undercounted by a short fetch, so the missing member
     // must not be reported as a person who has gone quiet.
     expect(cell).not.toHaveTextContent(/haven't shared recently/)
@@ -310,14 +380,14 @@ describe('Insights when only the prior window was cut short', () => {
     renderWith(await clientServing(await capped()), <InsightsPage />)
 
     const notice = await screen.findByTestId('insights-truncated')
-    // Not the "requested / reached" phrasing -- that would read as growth
-    // ("30 requested, 42 reached") when the actual fact is a capped delta.
-    expect(notice.textContent).not.toMatch(/30 days requested/)
-    expect(notice).toHaveTextContent(/comparison against the previous 30 days is capped/)
+    // Not the "showing N of the 30" phrasing -- that would read as growth
+    // ("showing 42 of the 30 days") when the actual fact is a capped delta.
+    expect(notice.textContent).not.toMatch(/of the 30 days you asked for/)
+    expect(notice).toHaveTextContent(/comparison with the previous 30 days is unavailable/)
     // Reassures on the current window itself, which is the fact the reader
     // most needs to know before deciding whether to trust the figures below.
     expect(notice).toHaveTextContent(/last 30 days are complete/)
-    expect(notice).toHaveTextContent(/stopped 42 days back/)
+    expect(notice).toHaveTextContent(/only go back 42 days/)
   })
 
   it('still demotes the silent-teammate sentence, because the sentence reads over the same rows', async () => {

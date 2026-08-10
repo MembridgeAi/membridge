@@ -91,8 +91,11 @@
  * --amber-dim tint is 2.93-3.19:1 in the light theme (fails 1.4.3 outright at
  * this size), against 14.77-16.11 for --text and 6.37-6.95 for --text2 on the
  * same surface. --amber survives here only as the 1px border, which carries no
- * information the words do not -- the ⚠ in the heading is the non-colour half
- * of the signal. */
+ * information the words do not: the heading sentence states the whole fact on
+ * its own ("Showing 12 of the 30 days you asked for"), so nothing here is
+ * carried by colour. It used to lead with a ⚠ as the non-colour half of the
+ * signal, and that glyph is deliberately gone -- everywhere else in this app it
+ * means broken and actionable, and this notice is neither. */
 .insights-truncated {
   margin: var(--sp-3) var(--sp-4) 0;
   padding: var(--sp-3);
