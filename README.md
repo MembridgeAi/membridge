@@ -5,7 +5,7 @@
 <h1 align="center">MemBridge</h1>
 
 <p align="center">
-  <b>Shared memory for Claude Code, Codex, Cursor and every other AI coding agent on your team.</b><br>
+  <b>Shared memory for Claude Code, Codex, Cursor and the other AI coding agents on your team.</b><br>
   <sub>Your teammates' agents already know what yours figured out.</sub>
 </p>
 
@@ -30,10 +30,10 @@
 
 ---
 
-MemBridge is a menu-bar app and CLI for teams that code with AI. A tiny local
+MemBridge is a menu-bar app and CLI for teams that code with AI. A local
 daemon watches the session logs your tools already write, distills each one
-into a small per-project memory, and gets it to everyone else's agents — at
-startup, mid-session, and on demand over MCP.
+into a per-project memory, and gets it to everyone else's agents: at startup,
+mid-session, and on demand over MCP.
 
 ```sh
 curl -fsSL https://membridge.app/install.sh | sh
@@ -41,7 +41,7 @@ curl -fsSL https://membridge.app/install.sh | sh
 
 <p align="center"><sub><code>local-first · no account · no API keys · about two minutes</code></sub></p>
 
-<p align="center"><sub>The one-liner is macOS (Apple Silicon). Everywhere else: <code>npm i -g @membridgeai/membridge &amp;&amp; membridge start</code> — see <a href="#install">Install</a>.</sub></p>
+<p align="center"><sub>The one-liner is macOS (Apple Silicon). Everywhere else: <code>npm i -g @membridgeai/membridge &amp;&amp; membridge start</code>. See <a href="#install">Install</a>.</sub></p>
 
 <br>
 
@@ -54,26 +54,25 @@ the team. Next time you open the project, your Claude Code already knows.
 
 > ### Why this is worth a daemon
 >
-> We measured how much re-orientation actually costs. Across **6,104 real agent
-> sessions from 310 developers**, the median developer spends **31% of their
-> tokens** getting an agent back up to speed in code it has already seen — and
-> most of that ground was already covered by somebody else on the team.
+> We measured what re-orientation costs. Across **6,104 real agent sessions
+> from 310 developers**, the median developer spends **31% of their tokens**
+> getting an agent back up to speed in code it has already seen.
 >
-> — [The Context Ledger](https://membridge.app/context-ledger/), our open study
+> From [The Context Ledger](https://membridge.app/context-ledger/), our open study
 
 <br>
 
 ## Three moments, one of them is ours alone
 
 Most memory tools stop at writing a file. The useful part is what happens
-*after* the session has already started — and months later, when nobody
+*after* the session has already started, and months later when nobody
 remembers who made the call.
 
 | When | What happens |
 | :-- | :-- |
-| **01 · At startup**<br><sub>Every session opens briefed</sub> | What the team's agents worked out is written into the instruction files your agents already read — `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` — attributed by person. Nobody writes a doc. Nobody re-explains the architecture. |
-| **02 · Mid-session**<br><sub>Nobody else does this</sub> | Your agent opens a file a teammate's agent made a call about, and that call enters the *running* session. Once, exactly when it matters. No doc, no Slack, no human relaying it. |
-| **03 · On demand**<br><sub>Scoped to your team's real work</sub> | A ranked search over what every agent on the team has actually done, exposed over MCP so any agent can query it directly. The useful answer is usually months old. |
+| **01 · At startup**<br><sub>Every session opens briefed</sub> | What the team's agents worked out is written into the instruction files your agents already read: `CLAUDE.md` and `AGENTS.md`, plus `GEMINI.md` and others if you turn them on. Attributed by person, so nobody writes a doc and nobody re-explains the architecture. |
+| **02 · Mid-session**<br><sub>Nobody else does this</sub> | Your agent opens a file a teammate's agent made a call about, and that call enters the *running* session. Once, at the moment it matters, with nobody relaying it. |
+| **03 · On demand**<br><sub>Scoped to your team's real work</sub> | A ranked search over what every agent on the team has done, exposed over MCP so any agent can query it directly. The useful answer is usually months old. |
 
 <br>
 
@@ -96,10 +95,11 @@ andrew owns the pricing service; ask before touching rate tables    ← new
 
 ## Ask the question you'd have interrupted someone with
 
-Not keyword matching over a digest. `search_memory` ranks across the decisions
-people made, the gotchas they hit, what they were trying to do and the files
-they touched — filterable by teammate, project, file or date, over your team's
-full synced history.
+`search_memory` searches the full entries, not a digest of them. It ranks
+across the decisions people made, the gotchas they hit, what they were trying
+to do and the files they touched, weighting a decision someone wrote down above
+prose harvested from a transcript. Filter by teammate, project, file or date,
+across your team's whole synced history.
 
 ```
 search_memory("auth rotation")                                    · via MCP
@@ -113,8 +113,8 @@ search_memory("auth rotation")                                    · via MCP
   rotation invalidation got unmanageable.
 ```
 
-Ranked by relevance, not recency — cross-teammate overlap has no recency
-correlation, so work from months ago surfaces when it answers the question.
+Ranked by relevance, not recency, so work from months ago surfaces when it
+answers the question.
 
 **Provenance, too.** `membridge why <file>` lists the AI sessions that edited a
 file, newest first; add `:<line>` to trace a single line to the one session
@@ -122,7 +122,7 @@ behind it.
 
 ```
 $ membridge why lib/teamsync.js
-Why lib/teamsync.js — 2 session(s), newest first:
+Why lib/teamsync.js: 2 session(s), newest first:
 
 2026-07-29 09:14 · marco · Claude Code
   Ask: Find out why team sync is broken and fix it
@@ -154,16 +154,16 @@ which project, and where knowledge is concentrated in one person's head.
 | **Claude Code** | Built in | Reads `~/.claude/projects` transcripts, writes `CLAUDE.md` |
 | **Codex** (OpenAI) | Built in | Reads `~/.codex/sessions` rollouts, writes `AGENTS.md` |
 | **Gemini CLI** | Custom adapter | Point an adapter at its logs, add `GEMINI.md` to targets |
-| **Cursor, opencode, Copilot CLI, …** | Custom adapter | Any tool that logs sessions as JSONL — no code required |
-| **Claude Desktop, and any MCP client** | Built in | `membridge mcp` — registered automatically at install |
+| **Cursor, opencode, Copilot CLI, …** | Custom adapter | Any tool that logs sessions as JSONL. No code required |
+| **Claude Desktop, and any MCP client** | Built in | `membridge mcp`, registered automatically at install |
 
 One memory across all of them, so switching tools mid-task doesn't reset
 anything. Adapter config is in [the guide](docs/guide.md#supported-tools).
 
 Capture depth varies by tool. Claude Code's Stop hook can hold a session
 open long enough for the agent to write a summary on purpose. Everywhere
-else — Codex included — MemBridge harvests one from the last chat message
-instead, which carries what the session concluded but not the separate
+else, Codex included, MemBridge harvests one from the last chat message
+instead. That carries what the session concluded, but not the separate
 intent, decisions and gotchas. See
 [session summaries](docs/guide.md#session-summaries).
 
@@ -171,8 +171,8 @@ intent, decisions and gotchas. See
 
 ## Privacy
 
-Everything starts local. No cloud, no account, no API keys until you join a
-team — and the team layer is opt-in per project.
+Your work stays local. No cloud, no account, no API keys until you join a
+team, and the team layer is opt-in per project.
 
 - **End-to-end encrypted.** Your asks, summaries, decisions, gotchas, file paths
   and change notes are secretbox-encrypted with a per-team key sealed to each
@@ -186,13 +186,21 @@ team — and the team layer is opt-in per project.
   than degrading to plaintext.
 - **Secret redaction.** AWS, GitHub, Google, Slack, OpenAI and Anthropic keys,
   tokens and private paths are scrubbed before anything leaves your machine.
-- **Your prompts stay local** by default. Your source code is never
-  transmitted — only distilled summaries.
+- **Your verbatim prompts stay on your machine.** A new install shares a
+  scrubbed one-line goal per session and nothing else of what you typed;
+  `membridge team share-prompts off` stops that too. Your source code is never
+  transmitted, only distilled summaries.
 - **Per-project access control**, roles (owner / admin / member), and a 30-day
   audit trail. Tick a cell to grant or revoke. Project access is enforced by
   server-side database rules, **not** by encryption — one team key spans every
   project, so revoking a project does not withhold a key. Removing someone from
   the **team** is different and does rotate the key. [Spec §0.2–0.3](docs/ENCRYPTION-SPEC.md).
+
+Two things do leave the machine without team sync. MemBridge sends anonymous
+usage counters tied to a random install id, and asks GitHub every six hours
+whether a newer release exists. The counters carry no code, file names, project
+names or account. Turn them off with `MEMBRIDGE_NO_DIAGNOSTICS=1` or
+`diagnostics.enabled: false` in your config.
 
 <br>
 
@@ -200,7 +208,7 @@ team — and the team layer is opt-in per project.
 
 | Platform | How |
 | --- | --- |
-| **macOS** (Apple Silicon) | `curl -fsSL https://membridge.app/install.sh \| sh` — installs the menu-bar app |
+| **macOS** (Apple Silicon) | `curl -fsSL https://membridge.app/install.sh \| sh` (installs the menu-bar app) |
 | **macOS** (Intel), **Windows**, **Linux** | `npm i -g @membridgeai/membridge && membridge start` |
 | **Headless / CI boxes** | Same npm install; `membridge start` runs the daemon and serves the full dashboard at `127.0.0.1:7437` — reach it over an SSH port-forward (`ssh -L 7437:127.0.0.1:7437 <box>`) or stick to the CLI |
 
@@ -253,26 +261,25 @@ network.
 between the `<!-- membridge -->` markers is rewritten, and removing the block
 restores your file exactly.
 
-**Won't the block churn my git history?** No — `membridge setup-hooks`
-installs a git *clean filter* that strips the block on the way into the index,
-so it never reaches a commit: `git diff` is empty for it and a merge cannot
-conflict on it, while the file on disk keeps the block for your AI tools. Your
-own lines in the file are tracked exactly as before. Teammates without
-MemBridge are unaffected — git ignores a filter it has no config for. Turn it
-off with `membridge git-filter off`. Two things to know: `git status` may still
-mark the file when a rewrite changes its byte length (git compares sizes there,
-not content — the diff stays empty and the next `git add` clears it), and a
+**Won't the block churn my git history?** No. `membridge setup-hooks` installs
+a git *clean filter* that strips the block on the way into the index, so it
+never reaches a commit: `git diff` is empty for it and a merge cannot conflict
+on it, while the file on disk keeps the block for your AI tools. Your own lines
+in the file are tracked exactly as before. Teammates without MemBridge are
+unaffected, because git ignores a filter it has no config for. Turn it off with
+`membridge git-filter off`. Two things to know: `git status` may still mark the
+file when a rewrite changes its byte length (git compares sizes there, not
+content, so the diff stays empty and the next `git add` clears it), and a
 checkout that rewrites a context file leaves it blockless until the next sync.
 
 **Does my whole team need it installed?** Everyone whose AI activity should
 sync runs MemBridge. People who just want to watch can use the web workspace
 from a browser.
 
-**How much overhead does it add?** Near zero. It reads only the bytes appended
-since the last pass, sleeps between syncs (60s default), and its runtime
-dependency list is deliberately short: encryption (`libsodium-wrappers`), code
-parsing (`web-tree-sitter`), and the MCP server (`@modelcontextprotocol/sdk`,
-`zod`).
+**How much overhead does it add?** It reads only the bytes appended since the
+last pass and sleeps between syncs (60s default). Four runtime dependencies:
+encryption (`libsodium-wrappers`), code parsing (`web-tree-sitter`), and the
+MCP server (`@modelcontextprotocol/sdk`, `zod`).
 
 **What happens when someone leaves?** Remove them in Members. That rotates the
 team key to a new epoch sealed only to the remaining members, so they cannot
@@ -291,12 +298,12 @@ key to withhold. See the [encryption spec](docs/ENCRYPTION-SPEC.md) §0.2.
 
 ## Docs
 
-**[The full guide →](docs/guide.md)** — install options, the dashboard tour,
-session summaries and the Stop hook, team sync and privacy, self-hosting,
+**[The full guide →](docs/guide.md)** covers install options, the dashboard
+tour, session summaries and the Stop hook, team sync and privacy, self-hosting,
 configuration, custom adapters, and development docs.
 
 - [Encryption spec](docs/ENCRYPTION-SPEC.md) · [Auth setup](docs/AUTH-SETUP.md) · [Changelog](CHANGELOG.md)
-- [The Context Ledger](https://membridge.app/context-ledger/) — the study behind the 31% number
+- [The Context Ledger](https://membridge.app/context-ledger/), the study behind the 31% number
 - This page also has an animated twin at [docs/readme.html](docs/readme.html)
 
 ## Contributing
