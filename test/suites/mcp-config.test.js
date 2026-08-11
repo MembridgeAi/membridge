@@ -485,6 +485,68 @@ async function main() {
     }
   }
 
+  // ---- a per-user prefix that is NOT on PATH (the shape that shipped) ----
+  //
+  // The bug, on a real machine: `claude` lived at ~/.npm-global/bin/claude, a
+  // prefix npm's own permissions guide tells users to create and which the user
+  // had not added to PATH. `command -v claude` in a LOGIN shell therefore
+  // exited 1 -- the query cannot see a directory PATH does not contain, and
+  // being a login shell does not change that -- and the probe list did not
+  // carry the prefix either. resolveClaudeBin returned null, the registrar
+  // recorded skipped/no-binary, and MemBridge's MCP server was registered
+  // nowhere while a working `claude` sat on disk.
+  {
+    const mcpRegister = require('../../lib/mcp-register');
+
+    check('claude-bin: an npm user-prefix install is probed even when the shell cannot see it', () => {
+      // The exact failure: the shell query answers nothing, because the prefix
+      // is off PATH. Only the probe list can rescue this.
+      const wanted = path.join(os.homedir(), '.npm-global', 'bin', 'claude');
+      assert.ok(
+        claudeBin.CANDIDATES.includes(wanted),
+        'npm\'s documented user prefix (~/.npm-global/bin) must be probed: it is off PATH by default, '
+        + 'so the login-shell query structurally cannot find a claude installed there',
+      );
+    });
+
+    check('claude-bin: Claude Code\'s own local-install target is probed', () => {
+      assert.ok(
+        claudeBin.CANDIDATES.includes(path.join(os.homedir(), '.claude', 'local', 'claude')),
+        '`claude migrate-installer` writes here and does not touch PATH',
+      );
+    });
+
+    // The structural half. A no-binary miss used to be PERMANENT: nothing in
+    // the fingerprint described whether a binary could be found, so the gate in
+    // ensureRegistered recomputed an identical string forever and answered
+    // 'current' without retrying. Installing Claude Code afterwards changed
+    // nothing until the MemBridge version did.
+    check('mcp-register: the fingerprint changes when a claude binary appears', () => {
+      const before = mcpRegister.registrationFingerprint({
+        config: {}, env: {}, firstCandidate: () => '',
+      });
+      const after = mcpRegister.registrationFingerprint({
+        config: {}, env: {}, firstCandidate: () => '/somewhere/bin/claude',
+      });
+      assert.notStrictEqual(
+        before, after,
+        'a binary appearing on disk must reopen the gate; otherwise a no-binary skip is permanent '
+        + 'and installing Claude Code later never re-registers',
+      );
+    });
+
+    check('mcp-register: the fingerprint is stable when nothing changed', () => {
+      const a = mcpRegister.registrationFingerprint({ config: {}, env: {}, firstCandidate: () => '/x/claude' });
+      const b = mcpRegister.registrationFingerprint({ config: {}, env: {}, firstCandidate: () => '/x/claude' });
+      assert.strictEqual(a, b, 'the gate must still close when nothing moved, or every launch pays a reconcile');
+    });
+
+    check('mcp-register: firstCandidate reports the probe hit, and nothing when there is none', () => {
+      assert.strictEqual(mcpRegister.firstCandidate(() => false), '');
+      assert.strictEqual(mcpRegister.firstCandidate(p => p === claudeBin.CANDIDATES[1]), claudeBin.CANDIDATES[1]);
+    });
+  }
+
   h.finish();
 }
 
