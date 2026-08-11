@@ -77,11 +77,16 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   renameTeam: c => c.renameTeam('team-1', 'Acme AI'),
   rotateInviteCode: c => c.rotateInviteCode('team-1'),
   getInvites: c => c.getInvites(),
-  createInviteLink: c => c.createInviteLink('team-1'),
+  createInviteLink: c => c.createInviteLink('team-1', { expiresDays: 7, maxUses: 1 }),
   revokeInvite: c => c.revokeInvite('i1'),
   setMemberRole: c => c.setMemberRole('m1', 'member'),
   removeMember: c => c.removeMember('m1'),
   getAudit: c => c.getAudit(),
+  getMyData: c => c.getMyData(),
+  // Null (every project in the team) rather than a uuid: it is the shape the
+  // "delete everything of mine" control sends, and the one whose request body
+  // this test can observe reaching the daemon.
+  deleteMyData: c => c.deleteMyData(null),
   getInsights: c => c.getInsights(30),
   getSkeletonStats: c => c.getSkeletonStats(),
   getSettings: c => c.getSettings(),

@@ -1,4 +1,9 @@
 'use strict';
+// NOT_RUN_BY_CI: an opt-in comparison harness that cannot run in CI at all —
+// it needs a checkout of the reference Python implementation (MEMBRIDGE_REF),
+// python3 on PATH, and REAL sessions under the developer's own
+// ~/.claude/projects. Run by hand when changing ledger arithmetic.
+//
 // Runs the JS ledger and the reference Python implementation over the SAME
 // local transcripts and compares. Opt-in:
 //   MEMBRIDGE_REF=/path/to/token-spend-analysis node test/ledger-equivalence.js

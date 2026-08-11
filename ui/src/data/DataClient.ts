@@ -1,6 +1,6 @@
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  AccessMatrix, AdoptResult, AuditEvent, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
+  InviteOptions, Member, MyData, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -91,8 +91,11 @@ export interface DataClient {
   // state, not a failure, and callers MUST say so (silence there reads as a
   // rejected sign-up).
   signUp(credentials: { displayName: string; email: string; password: string }): Promise<{ needsConfirmation: boolean; email: string }>
-  // POST /api/team/logout -- clears this machine's stored credentials.
-  signOut(): Promise<void>
+  // POST /api/team/logout -- clears this machine's stored credentials AND asks
+  // the backend to end the session. The two can disagree, which is why this
+  // resolves a result instead of void: a caller that renders a clean "signed
+  // out" over `revoked: false` is making a security claim nothing supports.
+  signOut(): Promise<SignOutResult>
   // POST /api/team/create. Resolves the created team's id and its standing
   // invite code (lib/teamsync.js createTeam returns { team_id, invite_code }).
   createTeam(name: string): Promise<{ id: string; inviteCode: string | null }>
@@ -112,11 +115,46 @@ export interface DataClient {
   // cloudflare/ops-dashboard's own JOIN_BASE + token construction works --
   // since settings.webUrl is null on a build with no hosted join page
   // configured (self-hosted, empty lib/backend.json).
-  createInviteLink(teamId: string): Promise<{ token: string }>
+  /**
+   * Mints a single-purpose invite token.
+   *
+   * `options` is REQUIRED, not optional, and that is the fix. POST
+   * /api/team/invite has always accepted expiresDays and maxUses; this client
+   * posted { teamId } alone, and on the daemon absent used to mean null --
+   * "never expires, unlimited uses". Every invite the app ever minted was
+   * permanent (agent-sec cff17e3). The daemon now defaults an omitted value to
+   * 7 days / single use (INV-1, lib/server.js INVITE_DEFAULT_EXPIRES_DAYS /
+   * INVITE_DEFAULT_MAX_USES) -- pending tightening to 24h per the 2026-08-05
+   * product decision in claude/ops/decisions.md ("Invite links default to
+   * single-use, 24-hour expiry"; not yet implemented, see queue.md item 7) --
+   * but leaving the argument optional here would let a caller silently go
+   * back to not deciding, and the SCREEN is what should decide, since the
+   * screen is what tells the user what they are handing out.
+   *
+   * `maxUses: 0` and `expiresDays: 0` are the daemon's deliberate opt-out,
+   * meaning "no limit" -- distinct from omitting the field. That opt-out is
+   * how the "generate a shareable link" override works: it is a caller
+   * explicitly choosing no limit, not an omission being read as one.
+   */
+  createInviteLink(teamId: string, options: InviteOptions): Promise<{ token: string }>
   revokeInvite(inviteId: string): Promise<void>
   setMemberRole(memberId: string, role: Role): Promise<void>
   removeMember(memberId: string): Promise<void>
   getAudit(limit?: number): Promise<AuditEvent[]>
+
+  // The current user's OWN synced entries as the backend holds them, for the
+  // confirmation screen to state a blast radius before anything is destroyed.
+  // Every member can call both of these: deleting what you wrote is not an
+  // admin action, and gating it on role would strand the people most likely to
+  // want it (see 035 §1 -- an ex-member and a revoked-access member can both
+  // still delete, deliberately).
+  getMyData(): Promise<MyData>
+  // Irreversible. `projectId` null means every project in the team; a uuid
+  // narrows it to one. The daemon requires a literal "DELETE" confirmation
+  // string, which this method supplies -- the UI's own confirmation step is a
+  // separate, earlier gate and must not be skipped on the assumption that this
+  // one is enough.
+  deleteMyData(projectId?: string | null): Promise<DeleteMyDataResult>
 
   getInsights(window: 7 | 30 | 90): Promise<Insights>
 

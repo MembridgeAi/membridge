@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { FEED_SESSION_PARAM, daySessionHref, useRawSearch } from '../../app/routes'
 import { isSameLocalDay, localDayKey, weekdayMonthDay } from '../../data/localTime'
 import { useFeed, useMembers, useProjects, useStatus } from '../../data/queries'
@@ -362,7 +363,47 @@ export function FeedPage() {
 
   const projects = projectsQuery.data ?? []
   const members = membersQuery.data ?? []
-  const tools = statusQuery.data?.tools ?? []
+  // T-81: the tool filter used to list `status.tools`, which is the tools the
+  // daemon has SPOTTED on disk (types.ts) -- a first-run machine where the
+  // daemon has seen Codex on disk but nothing has synced yet listed Codex in
+  // the dropdown, and selecting it emptied the feed. Match the dropdown to
+  // "tools that have ever fired on this machine": distinct `tool` values
+  // across the entries the feed has actually loaded this session, plus the
+  // currently-selected filter (so the reader can always see and un-select
+  // whatever they filtered to, even when that filter narrowed the entries to
+  // only that tool).
+  //
+  // Monotonic across the page's lifetime: a tool that fired earlier this
+  // session stays available in the dropdown even if the current filter has
+  // narrowed the entries away from it, so filtering does not shrink the list
+  // of things you can switch to. This is state, not a per-render derivation,
+  // because feedQuery.data is refetched per filter and derivations off it
+  // would collapse the second you narrowed the filter.
+  //
+  // The daemon-reported `status.tools` list is deliberately NOT used. It is
+  // "tools spotted on this machine" -- includes tools whose binary sits on
+  // disk but whose sessions have never reached MemBridge, which is exactly
+  // the useless-filter case this ticket is about.
+  const [everFiredTools, setEverFiredTools] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    if (entries.length === 0) return
+    setEverFiredTools(prev => {
+      const next = new Set(prev)
+      let changed = false
+      for (const e of entries) {
+        if (e.tool && !next.has(e.tool)) {
+          next.add(e.tool)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [entries])
+  const tools = useMemo(() => {
+    const set = new Set(everFiredTools)
+    if (source) set.add(source)
+    return [...set].sort()
+  }, [everFiredTools, source])
 
   const hasEntries = entries.length > 0
   const firstLoadFailed = feedQuery.isError && !hasEntries
@@ -401,6 +442,15 @@ export function FeedPage() {
           {tools.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
       </div>
+
+      {/* The gate on isLoading was already right — "Nothing yet." never
+          appeared over a loading feed. What was missing is the other half:
+          nothing appeared AT ALL. The body was empty from 87ms to 1,402ms
+          (measured), so the screen read as a Feed that had finished loading and
+          found nothing, which is the same wrong conclusion by omission. */}
+      {feedQuery.isLoading && (
+        <LoadingRows rows={4} label="Loading the feed" testId="feed-loading" />
+      )}
 
       {!feedQuery.isLoading && dayGroups.length === 0 && (
         <p className="feed-empty-note">Nothing yet.</p>

@@ -1,0 +1,41 @@
+-- ---------------------------------------------------------------------------
+-- Rollback for 056_team_feed_revoke_public.sql.
+--
+-- Restores the ONE thing 056 changes: PUBLIC's EXECUTE grant on team_feed.
+--
+-- The pre-056 ACL, read out of production with `aclexplode` on 2026-08-08:
+--
+--   grantee          privilege
+--   -  (PUBLIC)      EXECUTE     <- 056 removes this; this file puts it back
+--   authenticated    EXECUTE     <- predates 056. LEAVE IT ALONE.
+--   postgres         EXECUTE
+--   service_role     EXECUTE
+--
+-- **This file deliberately does NOT touch `authenticated`.** An earlier draft
+-- revoked it, on the mistaken belief that 056's grant had introduced it — that
+-- belief came from tracing repo history rather than reading the live ACL, and
+-- production disagreed. Revoking it here would have removed a grant that
+-- existed before 056 and taken the team feed down for every signed-in user:
+-- a "rollback" strictly worse than the thing it was undoing. Recorded rather
+-- than quietly deleted, because the reasoning error is the interesting part.
+--
+-- READ THIS BEFORE RUNNING IT. Rolling 056 back re-opens the PUBLIC grant this
+-- project has a standing advisor warning about. It exists because a rollback
+-- must exist, not because it is a good idea. Nothing in the client requires it:
+-- 056 changes no signature and no behaviour for a signed-in caller, so there is
+-- no client release to pull alongside it.
+--
+-- Verify you are back where you started:
+--   select a.grantee::regrole::text as grantee, a.privilege_type
+--     from pg_proc p, aclexplode(p.proacl) a
+--    where p.oid = 'public.team_feed(uuid, timestamptz, bigint, integer, uuid,
+--                   uuid, text, timestamptz, timestamptz)'::regprocedure;
+--   -- grantee '-' is PUBLIC. Seeing it again means the rollback took, and
+--   -- `authenticated` must still be listed alongside it.
+--
+-- Lives outside supabase/migrations/ so nothing applies it by accident.
+-- ---------------------------------------------------------------------------
+
+grant execute on function public.team_feed(
+  uuid, timestamptz, bigint, integer, uuid, uuid, text, timestamptz, timestamptz)
+  to public;

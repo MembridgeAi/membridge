@@ -95,4 +95,41 @@ describe('add project without ever typing a path', () => {
     const dialog = await open(new FakeDataClient({ discovered: [] }))
     expect(await within(dialog).findByText(/already being watched/i)).toBeInTheDocument()
   })
+
+  // A re-adopt of a project the user deleted on purpose comes back with the
+  // path in historyWithheld: the folder IS watched again, but the injected
+  // memory block will land empty for it. The CLI already prints this; before
+  // this test the dialog swallowed it and closed, so the user saw an empty
+  // block and had no reason offered for it.
+  it('names the folders whose earlier memory was withheld so an empty block is explained', async () => {
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'adoptProjects').mockResolvedValue({
+      adopted: ['/Users/x/polycopy', '/Users/x/site'],
+      skipped: [],
+      historyWithheld: ['/Users/x/polycopy'],
+    })
+    const dialog = await open(client)
+    await userEvent.click(await within(dialog).findByRole('button', { name: /add 2 projects/i }))
+    const notice = await within(dialog).findByRole('status')
+    expect(notice.textContent).toMatch(/previously deleted/i)
+    expect(notice.textContent).toMatch(/\/Users\/x\/polycopy/)
+    // site was adopted normally: its path must NOT be listed in the
+    // withheld notice, otherwise "withheld" stops meaning anything.
+    expect(notice.textContent).not.toMatch(/\/Users\/x\/site/)
+  })
+
+  it('keeps the dialog open when history is withheld so the reason stays on screen', async () => {
+    const onClose = vi.fn()
+    const client = new FakeDataClient()
+    vi.spyOn(client, 'adoptProjects').mockResolvedValue({
+      adopted: ['/Users/x/polycopy', '/Users/x/site'],
+      skipped: [],
+      historyWithheld: ['/Users/x/polycopy'],
+    })
+    renderWith(client, <AddProjectDialog onClose={onClose} />)
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.click(await within(dialog).findByRole('button', { name: /add 2 projects/i }))
+    await within(dialog).findByRole('status')
+    expect(onClose).not.toHaveBeenCalled()
+  })
 })

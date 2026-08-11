@@ -98,7 +98,13 @@
 -- or `or replace` (011 §1's note), so each is dropped then created — the
 -- convention every policy change here follows, and what makes this re-runnable.
 --
--- UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any database.
+-- APPLIED — LIVE. Verified against the running database on 2026-08-05, in the
+-- audit that also confirmed 030, 032 and 034. This line previously read
+-- "UNAPPLIED AS OF THIS COMMIT. Nothing here has been run against any
+-- database." That was true when written and false since. Corrected in place
+-- because a stale applied-status marker is not a harmless nit: anyone reasoning
+-- about what the backend actually enforces reads it and concludes these write
+-- policies are not in force.
 
 -- ---------------------------------------------------------------------------
 -- 1. INSERT. Adds the third conjunct only; the first two are restated verbatim
@@ -146,9 +152,43 @@ create policy memory_entries_update on public.memory_entries
 -- ---------------------------------------------------------------------------
 -- 3. WHAT THIS DOES NOT TOUCH, ON PURPOSE.
 --
---   * DELETE. memory_entries has no delete policy at all, and RLS defaults
---     closed, so nobody can delete through the API today. Adding one here to
---     "be consistent" would OPEN a capability that does not exist. Left alone.
+--   * DELETE. Left alone by THIS migration — but the reason given here was
+--     wrong, and the correction matters more than the omission did.
+--
+--     This paragraph used to read: "memory_entries has no delete policy at all,
+--     and RLS defaults closed, so nobody can delete through the API today.
+--     Adding one here to 'be consistent' would OPEN a capability that does not
+--     exist." That is FALSE against the live database, and was already false or
+--     about to be when it was written. Production carries
+--
+--         memory_entries_delete  for delete using (author_id = auth.uid())
+--
+--     — no is_team_member, no can_see_project. Deleting through the API is a
+--     shipped, deliberate feature (self-serve erasure of your own entries), not
+--     an absent capability.
+--
+--     WHERE IT IS DESCRIBED. That policy is written down in
+--     035_delete_own_entries.sql, which at the time of this correction lives on
+--     branch agent-backend2 and has NOT merged to master. So on master the repo
+--     still does not describe the running database: a backend rebuilt from
+--     supabase/ alone loses the policy, and anyone reasoning about deletion
+--     authorization from master reaches the wrong conclusion. Merging 035 is
+--     what closes that gap; this comment only stops 033 from actively asserting
+--     the opposite in the meantime.
+--
+--     KNOWN TENSION, NOT RESOLVED HERE. The next bullet below, and 029, say a
+--     departed member's contributions are "deliberately never deleted". 035 §1
+--     deliberately scopes the delete policy on author_id ALONE so that someone
+--     who has LEFT the team or been REVOKED can still erase their own writes —
+--     precisely the people the other predicates would strand. Both positions
+--     are argued; they are not consistent with each other, and which one wins is
+--     a product call rather than something a migration comment should settle.
+--     Flagged for that decision, unchanged.
+--
+--     RESIDUAL GAP worth naming while the above is being decided: 035's audit
+--     row is written by the delete_my_entries RPC, so a caller who issues a
+--     direct PostgREST DELETE against memory_entries satisfies the policy and
+--     leaves no team_audit trace at all.
 --   * A member's OWN already-published rows in a project they have since been
 --     revoked from. Those stay in the table and stay visible to everyone who
 --     can see the project. Revocation is forward-looking here, exactly as it is

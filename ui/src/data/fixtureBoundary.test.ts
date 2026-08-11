@@ -1,0 +1,336 @@
+import { describe, it, expect } from 'vitest'
+import * as mappers from './mappers'
+import { FakeDataClient } from './FakeDataClient'
+
+/**
+ * THE FIXTURE/MAPPER BOUNDARY.
+ *
+ * Every screen in this app reads domain objects that the real client builds by
+ * putting a raw daemon payload through a mapper in mappers.ts. FakeDataClient
+ * — which is what every component test reads — originally skipped that step
+ * and authored the domain objects itself.
+ *
+ * That is a whole layer the tests route around, and it fails silently in both
+ * directions:
+ *
+ *   - A field the mapper DROPS stays visible in the fixture, so every test
+ *     passes while the app renders nothing. This is how #59's `preFixLocal`
+ *     would have disappeared; it was caught only because a dedicated mapper
+ *     unit test happened to be written for it.
+ *   - A field the mapper CANNOT FILL looks populated in the fixture, so the
+ *     UI gets built around data that does not exist. This one was real:
+ *     `Member.email` was authored as 'andrew@acme.dev' here while mapMember
+ *     hardcoded '', and MemberRow shipped a permanently blank address line
+ *     that no test could see.
+ *
+ * The rule: if a mapper exists for a type, the fixture authors the RAW wire
+ * shape and runs it through that mapper. Then a dropped field fails a
+ * component test the same way it fails in the app.
+ *
+ * This file is the ledger of how far that has been applied. It is not
+ * decoration: the inventory test below fails when a mapper is added to
+ * mappers.ts without being classified, so the boundary cannot quietly grow a
+ * new hole. An entry in OUTSTANDING is a known gap with a stated reason — a
+ * TODO with a test behind it, not an exemption.
+ */
+
+// Mappers whose fixture path goes through the real mapper. This is now every
+// mapper in mappers.ts, which makes the inventory check below a guarantee
+// rather than a ledger of known holes: there is no classification a new mapper
+// can quietly join.
+const CROSSED = ['mapFeedEntry', 'mapLiveSession', 'mapMember', 'mapProjectRow', 'mapSession', 'mapStreamEntry'] as const
+
+// Mappers the fixture still bypasses, with why. Adding an entry here is a
+// deliberate statement that a boundary was left open, and it needs a reason
+// good enough to write down. Prefer converting the fixture.
+const OUTSTANDING: Record<string, string> = {
+  mapDayDigest:
+    'The FakeDataClient.getFeed transport deliberately returns dayDigests: [] '
+    + '(FakeDataClient.ts around the guard<FeedPage> return), exercising the '
+    + 'no-digest daemon shape every client must degrade to. Tests that need a '
+    + 'digest supply it by mocking getFeed with a hand-built object, so this '
+    + 'single-row mapper never sees fixture data. Converting the fixture would '
+    + 'mean either baking canonical digests into every fake feed or having the '
+    + 'fixture stop exercising the empty case, and the empty case is the one '
+    + 'that has actually broken twice.',
+  mapDayDigests:
+    'Same reason as mapDayDigest above -- getFeed returns dayDigests: [] on '
+    + 'the fake path on purpose, so this batch wrapper never runs against '
+    + 'fixture input either. Both entries belong here as long as the fake '
+    + 'transport stays digest-free.',
+}
+
+describe('the FakeDataClient/mapper boundary', () => {
+  // The guard that makes the hole non-extensible. A new mapper lands in
+  // neither list and this fails, forcing whoever adds it to say which it is.
+  it('classifies every mapper as either crossed or explicitly outstanding', () => {
+    const exported = Object.keys(mappers)
+      .filter(k => k.startsWith('map') && typeof (mappers as Record<string, unknown>)[k] === 'function')
+      .sort()
+
+    const classified = [...CROSSED, ...Object.keys(OUTSTANDING)].sort()
+
+    // Named rather than counted, so the failure says WHICH mapper is
+    // unclassified instead of only that the totals disagree.
+    expect(exported).toEqual(classified)
+  })
+
+  it('gives every outstanding gap a stated reason rather than a bare name', () => {
+    for (const [name, reason] of Object.entries(OUTSTANDING)) {
+      expect(reason.length, `${name} is listed as outstanding with no reason`).toBeGreaterThan(40)
+    }
+  })
+
+  // The behavioural half: proves the Member path really does cross the
+  // mapper, rather than merely being listed as if it does. If teamMembers()
+  // ever goes back to authoring Member literals, this fails.
+  describe('members really are mapper output, not hand-authored objects', () => {
+    it('carries no field the mapper cannot produce', async () => {
+      const members = await new FakeDataClient().getMembers()
+      const reference = mappers.mapMember(
+        { user_id: 'x', display_name: 'X', role: 'member', joined_at: null },
+        { projectCount: 0, lastSharedAt: null },
+      )
+      // Key-for-key identical to what the mapper emits. An `email` invented by
+      // the fixture — the actual bug this closed — shows up here as an extra
+      // key, whatever plausible value it was given.
+      for (const m of members) {
+        expect(Object.keys(m).sort()).toEqual(Object.keys(reference).sort())
+      }
+    })
+
+    it('carries the fields the mapper does produce, including ones added late', async () => {
+      const members = await new FakeDataClient().getMembers()
+      // preFixLocal is the #59 field, and the one that would have been
+      // dropped at the mapper's object literal without anything noticing.
+      for (const m of members) {
+        expect(m.preFixLocal).toBeDefined()
+        expect(typeof m.preFixLocal.entries).toBe('number')
+      }
+      // The fixture still has to be USEFUL after crossing the mapper: the two
+      // #59 cases must survive the round trip, or component tests lose the
+      // ability to tell a real zero from an unreachable one.
+      expect(members.find(m => m.name === 'Andrew')?.preFixLocal).toEqual({ entries: 7, projects: 2 })
+      expect(members.find(m => m.name === 'Sarah')?.preFixLocal).toEqual({ entries: 0, projects: 0 })
+    })
+  })
+
+  // mapProjectRow has FOUR derived fields, and the fixture used to state all
+  // four as literals. Each assertion below is a value the fixture no longer
+  // authors -- break the derivation and these fail, which is the whole point.
+  describe('projects really are mapper output, with the derived fields derived', () => {
+    it('derives sync state from the row own timestamps, not from an authored literal', async () => {
+      const projects = await new FakeDataClient().getProjects()
+      const membridge = projects.find(p => p.name === 'membridge')!
+      const sublease = projects.find(p => p.name === 'sublease')!
+
+      // lastActivity === lastSync, so zero lag, so inside the grace period.
+      expect(membridge.sync).toEqual({ state: 'up-to-date' })
+      // ~6 days of lag against a 2-interval grace: behind, and it reports the
+      // sync it is behind FROM.
+      expect(sublease.sync).toEqual({ state: 'behind', lastSyncedAt: '2026-07-23T10:00:00Z' })
+    })
+
+    it('derives shared from the presence of a team link', async () => {
+      const team = await new FakeDataClient().getProjects()
+      expect(team.find(p => p.name === 'membridge')!.shared).toBe(true)
+      expect(team.find(p => p.name === 'sublease')!.shared).toBe(false)
+      // Solo has no team link on any row, so nothing is shared -- and this is
+      // the flag T-78's whole solo audit keys on.
+      const solo = await new FakeDataClient({ solo: true }).getProjects()
+      expect(solo.find(p => p.name === 'membridge')!.shared).toBe(false)
+    })
+
+    it('derives latestSummary from the feed page rather than stating it', async () => {
+      const projects = await new FakeDataClient().getProjects()
+      expect(projects.find(p => p.name === 'membridge')!.latestSummary).toEqual({
+        text: 'Hook ownership now decided by durability, not who ran last',
+        author: 'Andrew',
+        at: '2026-07-29T19:00:00Z',
+      })
+      // A project whose feed rows carry no text gets null FROM the mapper.
+      const archived = await new FakeDataClient({ withArchived: true }).getProjects()
+      expect(archived.find(p => p.name === 'old-prototype')!.latestSummary).toBeNull()
+    })
+
+    it('derives recentAuthorIds from feed rows that actually carry an author id', async () => {
+      const projects = await new FakeDataClient().getProjects()
+      // The summary row deliberately has authorId null (the realistic case),
+      // so Andrew is the summary's author WITHOUT appearing here.
+      expect(projects.find(p => p.name === 'membridge')!.recentAuthorIds).toEqual(['me', 'andrew', 'sarah'])
+      expect(projects.find(p => p.name === 'sublease')!.recentAuthorIds).toEqual(['me'])
+    })
+
+    it('filters one shared feed page per project, the way the real client does', async () => {
+      const projects = await new FakeDataClient({ withArchived: true }).getProjects()
+      // sublease's summary must not leak onto membridge, and vice versa --
+      // both come out of the same array handed to every mapProjectRow call.
+      expect(projects.find(p => p.name === 'sublease')!.latestSummary?.text)
+        .toBe('Listing flow validates addresses before payment')
+      expect(projects.find(p => p.name === 'deleted-folder')!.latestSummary).toBeNull()
+    })
+  })
+
+  // mapSession is pure normalization: every field is `raw.x || default`. That
+  // makes it the easiest mapper for a fixture to drift away from unnoticed --
+  // author a Session directly and you silently skip every default the app
+  // relies on, so a payload the daemon really sends (sparse, with nulls and
+  // absent arrays) is never exercised.
+  // The three feed-shaped mappers all derive their two most-read fields --
+  // `outcome` via outcomeOf (headline first, else the summary's clipped first
+  // sentence) and `intent` via intentOf (goal before ask). Stating those as
+  // literals meant neither rule was ever exercised by a component test.
+  describe('feed, stream and live rows really are mapper output', () => {
+    it('derives outcome from the headline, and leaves it empty when there is none', async () => {
+      const page = await new FakeDataClient().getFeed({ author: null, project: null, source: null }, { limit: 50, before: null })
+      const withHeadline = page.entries.find(e => e.session === 's-f2')!
+      expect(withHeadline.outcome).toBe('Hook ownership now decided by durability, not who ran last.')
+      // No headline and no summary -> empty, from the mapper, not written as ''.
+      expect(page.entries.find(e => e.session === 's-f1')!.outcome).toBe('')
+    })
+
+    it('derives intent from goal, and null when there is neither goal nor ask', async () => {
+      const page = await new FakeDataClient().getFeed({ author: null, project: null, source: null }, { limit: 50, before: null })
+      expect(page.entries.find(e => e.session === 's-f4')!.intent).toBe('fix the port collision in the test suite')
+      expect(page.entries.find(e => e.session === 's-f5')!.intent).toBeNull()
+    })
+
+    it('gives every entry the mapper composite id, not a hand-written one', async () => {
+      const page = await new FakeDataClient().getFeed({ author: null, project: null, source: null }, { limit: 50, before: null })
+      // session|ts. FeedPage dedupes on this and DayCard keys on it, so it has
+      // to be the real thing rather than a fixture-only label.
+      expect(page.entries.find(e => e.session === 's-f1')!.id).toBe('s-f1|2026-07-29T20:36:00Z')
+    })
+
+    it('normalizes the brief fields the fixture no longer states', async () => {
+      const stream = await new FakeDataClient().getProjectStream('/Users/x/membridge')
+      // These used to come from an emptyBrief() spread in the fixture. They now
+      // come from the mapper, which is where they come from in the app.
+      expect(stream[0].decisions).toBeNull()
+      expect(stream[0].gotchas).toBeNull()
+      expect(stream[0].changes).toEqual([])
+      // Mutation testing killed the version of this test that stopped above.
+      // `!!e.distilled` -> `!e.distilled` survived, because nothing asserted
+      // the boolean passthroughs at all -- and those two are exactly what
+      // tells an UNDECRYPTABLE row apart from an un-summarized one downstream
+      // (both arrive with an empty outcome).
+      expect(stream[0].distilled).toBe(true)
+      expect(stream[0].undecryptable).toBe(false)
+      expect(stream[0].self).toBe(false)
+    })
+
+    it('derives a live session id from its session, and a null outcome before any headline', async () => {
+      const live = await new FakeDataClient().getLiveSessions()
+      expect(live.map(l => l.id)).toEqual(['s1', 's2'])
+      // outcomeOf(...) || null -- a session still working has no outcome yet.
+      expect(live[0].outcome).toBeNull()
+      expect(live[0].tool).toBe('Codex')
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // APPLICATION STATES THE FIXTURES CAN PRODUCE.
+  //
+  // Same class of hole as a mapper the fixtures route around: a state they
+  // cannot express is a screen no test protects. Signed-out was one of these
+  // -- FakeDataClient reported `authenticated: true` forever, so the view a
+  // user sees at the moment they are trying to establish whether their session
+  // is over could not be rendered in a test at all, and that view now carries a
+  // security warning.
+  //
+  // These assertions are the inventory. Each one is a state a screen exists
+  // for; if one starts failing, a screen has quietly become untestable.
+  // ---------------------------------------------------------------------
+  describe('the fixtures can express the states screens are written for', () => {
+    it('signed out, reached by signing out rather than only by construction', async () => {
+      const c = new FakeDataClient()
+      expect((await c.getTeamAccount()).authenticated).toBe(true)
+      await c.signOut()
+      // The TRANSITION, not just the constructor option. This is what makes
+      // the signed-out view reachable from a test that starts signed in.
+      expect((await c.getTeamAccount()).authenticated).toBe(false)
+      expect((await c.getTeamAccount()).teams).toEqual([])
+    })
+
+    it('signed back in again, so the round trip is coverable', async () => {
+      const c = new FakeDataClient({ authenticated: false })
+      expect((await c.getTeamAccount()).authenticated).toBe(false)
+      await c.signIn({ email: 'a@b.dev', password: 'pw' })
+      expect((await c.getTeamAccount()).authenticated).toBe(true)
+    })
+
+    it('signed in but on no team', async () => {
+      const account = await new FakeDataClient({ solo: true }).getTeamAccount()
+      expect(account.authenticated).toBe(true)
+      expect(account.teams).toEqual([])
+    })
+
+    it('no projects at all, coherently -- including an empty project stream', async () => {
+      const c = new FakeDataClient({ empty: true })
+      expect(await c.getProjects()).toEqual([])
+      // The incoherent combination this used to produce: zero projects, yet a
+      // populated stream, because getProjectStream ignored both its argument
+      // and `empty`.
+      expect(await c.getProjectStream('/Users/x/membridge')).toEqual([])
+    })
+
+    it('a project that exists but has no sessions of its own', async () => {
+      // Reachable from the fixture now rather than only by stubbing the
+      // method: sublease carries no stream rows.
+      expect(await new FakeDataClient().getProjectStream('/Users/x/sublease')).toEqual([])
+      expect((await new FakeDataClient().getProjectStream('/Users/x/membridge')).length).toBe(1)
+    })
+
+    it('a daemon that is not running', async () => {
+      const status = await new FakeDataClient({ health: { state: 'stalled', lastTickAt: null, lastTickError: null, staleForSec: 900 } }).getStatus()
+      expect(status.running).toBe(false)
+    })
+
+    it('a daemon that cannot be reached at all', async () => {
+      await expect(new FakeDataClient({ failWith: 'daemon unreachable' }).getStatus()).rejects.toThrow(/daemon unreachable/)
+    })
+  })
+
+  describe('sessions really are mapper output', () => {
+    it('normalizes a sparse payload rather than trusting the fixture to be complete', async () => {
+      const s = await new FakeDataClient().getSession('s-f1')
+      // Arrays are guaranteed present by the mapper, never undefined -- the
+      // session page maps over all four without guarding.
+      expect(Array.isArray(s!.files)).toBe(true)
+      expect(Array.isArray(s!.changes)).toBe(true)
+      expect(Array.isArray(s!.checkpoints)).toBe(true)
+      expect(Array.isArray(s!.prompts)).toBe(true)
+      // Absent optional text normalizes to null, not undefined.
+      expect(s!.decisions).toBeNull()
+      expect(s!.gotchas).toBeNull()
+    })
+
+    // WRITTEN AGAINST MUTATION SURVIVORS. The test above asserts the SHAPE of a
+    // sparse payload and nothing else, so every `raw.x || null` and
+    // `Array.isArray(x) ? x : []` in mapSession survived being broken: a
+    // fallback that always fires still produces null and still produces an
+    // array, and `expect(Array.isArray(files)).toBe(true)` cannot tell `[]`
+    // from the real list. Asserting the type where the value is the point is
+    // the subtler cousin of the fixture routing around the mapper.
+    //
+    // This asserts a POPULATED session, where the mutated and unmutated values
+    // differ.
+    it('carries real values through, not merely values of the right shape', async () => {
+      const s = (await new FakeDataClient().getSession('s-f2'))!
+      expect(s.files).toEqual(['lib/hooks.js', 'test/run-tests.js'])
+      expect(s.decisions).toBe('Durability beats recency because a crashed run must not steal the hook.')
+      expect(s.gotchas).toBe('settings.json rewrites drop unknown keys, so merge before writing.')
+      expect(s.summary).toBe('Hook ownership now decided by durability, not who ran last.')
+      expect(s.headline).toBe('Hook ownership now decided by durability, not who ran last.')
+      expect(s.projectPath).toBe('/Users/x/membridge')
+      expect(s.authorId).toBe('andrew')
+      // The prompt chain's own normalization, which had the same hole.
+      expect(s.prompts[0].ts).toBe('2026-07-29T20:00:00Z')
+      expect(s.prompts[0].files).toEqual(['lib/hooks.js'])
+    })
+
+    it('still resolves an unknown id to null rather than a blank session', async () => {
+      expect(await new FakeDataClient().getSession('nope')).toBeNull()
+    })
+  })
+})

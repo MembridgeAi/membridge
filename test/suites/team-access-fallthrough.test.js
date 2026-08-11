@@ -148,8 +148,7 @@ async function main() {
         'the restored project never published its held entries');
     });
   } finally {
-    delete process.env.MEMBRIDGE_TEAM_URL;
-    delete process.env.MEMBRIDGE_TEAM_ANON_KEY;
+    h.noEgress.resetTeamEnv(); // NOT `delete`: an absent env var falls through to the BAKED production backend
     await new Promise(r => mock.server.close(r));
   }
 

@@ -1,10 +1,11 @@
 import { useMemo } from 'react'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { weekdayMonthDay } from '../../data/localTime'
 import { groupLiveSessions } from '../../data/mappers'
 import { relativeAgo } from '../../data/relativeTime'
-import { useLiveSessions, useProjects, useSkeletonStats, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
+import { useLiveSessions, useProjects, useSkeletonStats, useSoloView, useStatus, useSyncAll, useSyncProject } from '../../data/queries'
 import type { LiveSession, Project, SkeletonStats } from '../../data/types'
 import { LiveEntry } from './LiveEntry'
 import { ProjectRow } from './ProjectRow'
@@ -85,6 +86,10 @@ export function TodayPage() {
   const skeletonQuery = useSkeletonStats()
   const syncProject = useSyncProject()
   const syncAll = useSyncAll()
+  // T-78: the SURFACE gate for team language. See useSoloView doc. Called
+  // here, alongside every other hook, because rules-of-hooks requires the
+  // call to run before any conditional return below.
+  const soloView = useSoloView()
 
   const liveSessions = liveQuery.data ?? []
   // Perf (spec §7): Today re-renders every 10s poll tick. Without this
@@ -123,21 +128,44 @@ export function TodayPage() {
   // as a ledger with nothing in it -- never a guessed number.
   const skeleton: SkeletonStats = skeletonQuery.data ?? { available: false }
 
+  // Each figure is withheld until the query that answers IT has answered --
+  // per query, not per page. `isPending` is react-query's "no data and none
+  // has arrived yet"; it is false once data lands AND false on a failed first
+  // load (which the blocking branch above has already handled) and on a failed
+  // refetch over cached data, so this can never leave a bar pulsing forever
+  // over an error the user cannot see.
+  //
+  // The figures this gates were previously computed from `?? []` / `?? {
+  // available: false }` fallbacks, which is how a ten-project install came to
+  // read "0 sessions · last 24h" for as long as /api/feed took. The fallbacks
+  // stay -- they are what the derivations below need in order to be pure --
+  // but their OUTPUT is no longer presented as a measurement.
+  const liveKnown = !liveQuery.isPending
+  const projectsKnown = !projectsQuery.isPending
+  const statusKnown = !statusQuery.isPending
+  // Not `skeleton.available`: that is the ledger's own answer ("nothing
+  // recorded yet", rendered as the literal word `pending`), which is a fact
+  // about the ledger. This is a fact about the request. Collapsing them would
+  // report our own ignorance as the ledger's.
+  const skeletonKnown = !skeletonQuery.isPending
+
   // liveGroups.length, never liveSessions.length (Fix 4): the "Happening
   // now" rows below render GROUPED person+project goals, and mappers.ts's
   // contract is that the count and the dots are one set -- a person with two
   // sessions on one goal is one row, so they are one in this count too.
+  const liveNowStat: StatItem = { value: liveKnown ? String(liveGroups.length) : null, label: 'live now' }
+  const sessionsStat: StatItem = { value: projectsKnown ? String(sessionsLast24h(projects)) : null, label: 'sessions · last 24h' }
   const stats: StatItem[] = solo
     ? [
-        { value: String(liveGroups.length), label: 'live now' },
-        { value: String(sessionsLast24h(projects)), label: 'sessions · last 24h' },
-        { value: skeletonPercentLabel(skeleton), label: 'repeat opens answered by memory' },
+        liveNowStat,
+        sessionsStat,
+        { value: skeletonKnown ? skeletonPercentLabel(skeleton) : null, label: 'repeat opens answered by memory' },
       ]
     : [
-        { value: String(liveGroups.length), label: 'live now' },
-        { value: String(sessionsLast24h(projects)), label: 'sessions · last 24h' },
-        { value: String(updatesShared(projects)), label: 'updates shared' },
-        { value: lastTeamSyncLabel(teamLastSync), label: 'last team sync' },
+        liveNowStat,
+        sessionsStat,
+        { value: projectsKnown ? String(updatesShared(projects)) : null, label: 'updates shared' },
+        { value: statusKnown ? lastTeamSyncLabel(teamLastSync) : null, label: 'last team sync' },
       ]
 
   return (
@@ -175,15 +203,30 @@ export function TodayPage() {
       <section>
         <div className="section-label">Happening now</div>
         <div className="live-list">
-          {liveGroups.length === 0 && <p className="today-empty-note">Nothing happening right now.</p>}
-          {liveGroups.map(group => <LiveEntry key={group.id} group={group} />)}
+          {/* "Nothing happening right now." is an ANSWER, and it was being
+              given before the question had been asked. Two placeholder rows
+              rather than one: a strip that draws a single row and then grows
+              to three moves everything below it, and this section sits above
+              the project list. */}
+          {!liveKnown
+            ? <LoadingRows rows={2} label="Loading what's happening now" testId="live-loading" />
+            : liveGroups.length === 0
+              ? <p className="today-empty-note">Nothing happening right now.</p>
+              : liveGroups.map(group => <LiveEntry key={group.id} group={group} />)}
         </div>
       </section>
 
       <section>
         <div className="section-label">Projects · this week</div>
         <div className="project-list">
-          {projects.length === 0 ? (
+          {/* The worst of the three. "No projects yet. Sync your first project
+              to see it here." is FIRST-RUN copy: it tells an established user
+              their setup is gone and instructs them to redo it, and it was on
+              screen for as long as getProjects() took -- 1.4s measured,
+              because that call awaits /api/feed alongside /api/projects. */}
+          {!projectsKnown ? (
+            <LoadingRows rows={3} label="Loading this week's projects" testId="projects-loading" />
+          ) : projects.length === 0 ? (
             <p className="today-empty-note">No projects yet. Sync your first project to see it here.</p>
           ) : weekProjects.length === 0 ? (
             <p className="today-empty-note">No project activity in the last 7 days.</p>
@@ -195,6 +238,7 @@ export function TodayPage() {
                 memberNames={memberNames}
                 onSyncProject={syncProject.mutate}
                 syncPending={syncProject.isPending && syncProject.variables === project.path}
+                soloView={soloView}
               />
             ))
           )}

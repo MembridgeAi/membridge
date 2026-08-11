@@ -1,0 +1,36 @@
+-- Rollback for 046_audit_member_joined.sql.
+--
+-- OUTSIDE supabase/migrations/ ON PURPOSE so nothing applies it by accident —
+-- same placement and reasoning as the other files in this directory.
+--
+-- 046 created ONE function and ONE trigger and nothing else. There was no
+-- prior version of either to capture: nothing named audit_member_joined
+-- existed before it, and public.team_members carried no triggers at all
+-- (`grep -rn "create trigger" supabase/` finds exactly one row-level trigger
+-- in the whole schema, 032's projects_materialize_access on public.projects;
+-- 031's is an EVENT trigger, a different object that this does not touch). So
+-- this is a plain drop rather than a restore, and nothing had to be read out
+-- of the live system to write it.
+--
+-- Independent of pre-044 and pre-045: 046 touches neither remove_member,
+-- leave_team nor my_teams, and they touch neither the function nor the
+-- trigger. Any subset can be rolled back on its own.
+--
+-- WHAT IT CANNOT UNDO: the member-joined rows already written stay written.
+-- team_audit has no delete policy and this file adds none — the trail is
+-- append-only end to end (024 §5, restated by 025 §5), which is the property
+-- that makes it worth having. Removing rows from it is not a rollback step,
+-- it is tampering, and if those rows genuinely must go it is a deliberate
+-- manual act by someone who has read this paragraph.
+--
+-- WHAT IT WILL DO, so it is not run casually: return the trail to a state
+-- where the one event that records somebody GAINING access to the team's
+-- memory cannot be recorded at all. Joins resume being invisible — not
+-- logged-and-hidden, but never written, because the client path that used to
+-- attempt it was removed as dead code in the same commit that added 046 and
+-- is not restored by this file. An admin auditing the team after a leak would
+-- see invite churn and no arrivals, which is the state this migration exists
+-- to end.
+
+drop trigger if exists team_members_audit_join on public.team_members;
+drop function if exists public.audit_member_joined();

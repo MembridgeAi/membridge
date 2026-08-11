@@ -256,6 +256,75 @@ async function main() {
     }
   }
 
+  // --- Finding 3: the header pill's sync time is an AGGREGATE, and aggregates
+  // are where a wrong answer hides best ---
+  //
+  // From a mutation survivor: `node test/mutate.js --target lib/server.js
+  // --mode ops --lines 382-463 --suites core` left this alive --
+  //
+  //   if (proj.lastSync && (!lastSync || proj.lastSync > lastSync))   // real
+  //   if (proj.lastSync || (!lastSync || proj.lastSync > lastSync))   // mutant
+  //
+  // -- through the split suites AND the monolith. The mutant turns "newest
+  // across all projects" into "whatever the last project iterated says", and
+  // lets a project that has NEVER synced overwrite the aggregate with
+  // undefined. What renders from it is the header pill: "Synced · Nh ago".
+  //
+  // This repo has been bitten by exactly this field before: syncOnce({})
+  // iterates only DIRTY projects, so a clean project's lastSync froze and the
+  // "behind" badge latched (fixed in aa40d70). A stale sync time is not
+  // cosmetic here -- it is the one number a user checks to decide whether
+  // their teammates are seeing their work.
+  {
+    // Restore whatever the earlier sections left behind: this plants projects
+    // into the shared state, and the leak guards in finish() run after it.
+    const saved = util.loadState();
+    try {
+      const st = util.loadState();
+      st.projects = {
+        '/agg/never-synced': { events: [] },                              // no lastSync at all
+        '/agg/oldest': { events: [], lastSync: '2026-07-01T00:00:00.000Z' },
+        '/agg/newest': { events: [], lastSync: '2026-07-20T00:00:00.000Z' },
+        // LAST in iteration order, and deliberately NOT the newest. A payload
+        // that reports "the last one seen" passes every check that only ever
+        // plants an ascending series.
+        '/agg/middle-but-last': { events: [], lastSync: '2026-07-10T00:00:00.000Z' },
+      };
+      util.saveState(st);
+
+      check('status: lastSync is the NEWEST project sync, not the last one iterated', () => {
+        const s = server.statusPayload();
+        assert.strictEqual(s.lastSync, '2026-07-20T00:00:00.000Z',
+          `the header pill would render the wrong project's sync time (got ${JSON.stringify(s.lastSync)})`);
+      });
+
+      check('status: a project that has NEVER synced cannot blank the aggregate', () => {
+        // The half the ordering check cannot see. With the never-synced project
+        // iterated FIRST, an aggregate that assigns unconditionally takes its
+        // undefined and the pill reads "never synced" over a machine that has.
+        const st2 = util.loadState();
+        st2.projects = {
+          '/agg/never-synced': { events: [] },
+          '/agg/real': { events: [], lastSync: '2026-07-20T00:00:00.000Z' },
+        };
+        util.saveState(st2);
+        const s = server.statusPayload();
+        assert.strictEqual(s.lastSync, '2026-07-20T00:00:00.000Z',
+          `a never-synced project blanked the aggregate (got ${JSON.stringify(s.lastSync)})`);
+      });
+
+      check('status: with no project ever synced, lastSync is null rather than a fabricated time', () => {
+        const st3 = util.loadState();
+        st3.projects = { '/agg/a': { events: [] }, '/agg/b': { events: [] } };
+        util.saveState(st3);
+        assert.strictEqual(server.statusPayload().lastSync, null,
+          'an unsynced machine must say so, not invent a timestamp');
+      });
+    } finally {
+      util.saveState(saved);
+    }
+  }
+
   h.finish();
 }
 

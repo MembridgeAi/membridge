@@ -40,6 +40,7 @@ const activity = require('../lib/activity');
 const notes = require('../lib/teammate-notes');
 const notesStore = require('../lib/teammate-notes-store');
 const prompts = require('../lib/prompts');
+const gitBlockStrip = require('../lib/git-block-strip');
 const pkg = require('../package.json');
 
 const args = process.argv.slice(2);
@@ -57,11 +58,46 @@ function readPid() {
     return null;
   }
 }
+// A thrown EPERM means the process EXISTS but this caller lacks the rights to
+// signal it -- which is alive, not dead. Reading it as dead (the old
+// `catch { return false }`) is wrong on Windows in particular: libuv's kill
+// opens the target with PROCESS_TERMINATE, so a pid another process owns can
+// answer EPERM. ESRCH (and anything else) is genuinely not-running. Used by
+// cmdStop/cmdStatus on every platform; no subprocess (an earlier tasklist probe
+// here hung the daemon on a loaded Windows runner). The duplicate-daemon guard
+// in cmdDaemon does NOT rely on this on Windows -- it is gated to POSIX there.
 function isRunning(pid) {
   if (!pid) return false;
   try {
     process.kill(pid, 0);
     return true;
+  } catch (e) {
+    return e && e.code === 'EPERM';
+  }
+}
+
+// Best-effort check that a live pid actually belongs to a MemBridge process.
+// Aliveness alone is not enough: the OS reuses pids, and the pid file can name
+// a live process that is not MemBridge -- taking that as a peer would silently
+// refuse legitimate starts. Uses `ps -o command=` on unix to read the command
+// line and match `/membridge/i`, which covers `node .../bin/membridge.js daemon`
+// (dev), the npm shim `node .../bin/membridge daemon` (global install), and
+// the Electron-invoked variants. On Windows the process image is a generic
+// `node.exe` / `MemBridge.exe`, and reading a process's full command line needs
+// wmic (removed on current Windows) or a PowerShell CIM query (slow, and not
+// guaranteed present) -- both too fragile to gate daemon startup on. So on
+// Windows we conservatively assume a live pid IS MemBridge (isRunning above
+// gets Windows liveness right via the EPERM read), erring toward "refuse to
+// start a second daemon" -- the alternative (two daemons racing state.json,
+// which has no locking) is worse than a rare false-positive refusal a user
+// clears with `membridge stop`.
+function isMembridgeProcess(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') return true;
+  try {
+    const r = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    if (r.status !== 0) return false;
+    return /membridge/i.test(r.stdout || '');
   } catch {
     return false;
   }
@@ -135,6 +171,69 @@ function cmdDaemon() {
   util.ensureConfig();
   const config = util.getConfig();
   fs.mkdirSync(util.homeDir(), { recursive: true });
+
+  // Refuse to start a second daemon on top of a running one. Without this
+  // guard, the unconditional pid write below silently overwrites the running
+  // daemon's marker; both keep running, both scribble state.json (which has
+  // NO locking -- see the state-json-cross-process-clobber landmine), and
+  // only one is ever cleaned up by SIGTERM. Classic "flag recording a success
+  // the code never achieved" (state-claiming-unearned-success) -- claiming to
+  // be the daemon without checking whether one already exists.
+  //
+  // Aliveness alone is not enough; pids get reused. isMembridgeProcess()
+  // reads the process command line to distinguish a real peer from a random
+  // program that happened to inherit the pid. A stale pid file (dead process
+  // or live-but-not-MemBridge) falls through to the normal takeover path.
+  //
+  // Deliberately NOT a real lockfile: the plan (locked decision #4) calls for
+  // a liveness check at this scope; a lockfile is a bigger surface.
+  //
+  // Restart handoff exception. `POST /api/daemon/restart` replaces this daemon
+  // by spawning a new `membridge daemon` while the OLD one is still alive (it
+  // must outlive the request long enough to flush the response, then exits
+  // ~200ms later -- see lib/server.js and api-machine.spawnReplacement). To the
+  // replacement that predecessor looks exactly like a duplicate to refuse, so
+  // without a signal the guard below kills the restart and the pid never
+  // changes. spawnReplacement sets MEMBRIDGE_TAKEOVER=1 to authorize THIS boot
+  // to take over a live daemon. It is read once and deleted so it can never
+  // leak into an unrelated child this process later spawns, nor wave through a
+  // genuine second daemon -- a user-run `membridge daemon` never carries it, so
+  // the refusal below still fires for a real duplicate.
+  const isRestartHandoff = process.env.MEMBRIDGE_TAKEOVER === '1';
+  delete process.env.MEMBRIDGE_TAKEOVER;
+  // POSIX-only. On Windows this liveness/refusal path is unverified and may hang
+  // daemon startup: build-app's Windows CI shows the second `membridge daemon`
+  // in daemon-pid-race hanging -- empty stdout/stderr, the pid never
+  // overwritten, killed at the 4s timeout with status=null -- so the guard
+  // neither refuses nor takes over, it just stalls. A guard that can wedge
+  // startup is worse than no guard, so it is gated to POSIX until the true cause
+  // is observed on a real Windows env (tracked in task #34). Windows keeps the
+  // pre-0.3.2 behavior: fall through and overwrite the pid (no duplicate
+  // protection, but no hang). Restart handoff still works there -- the
+  // replacement simply takes over unconditionally and the pid changes. The
+  // MEMBRIDGE_TAKEOVER read/delete above stays on every platform (harmless, and
+  // keeps the env from leaking into a child).
+  if (process.platform !== 'win32') {
+    const existingPid = readPid();
+    if (existingPid && isRunning(existingPid)) {
+      if (isMembridgeProcess(existingPid) && !isRestartHandoff) {
+        const port = config.dashboardPort;
+        console.error(
+          `MemBridge is already running (pid ${existingPid}, dashboard http://127.0.0.1:${port}). ` +
+          `Refusing to start a second daemon -- run \`membridge stop\` first if you meant to restart.`
+        );
+        process.exit(1);
+      }
+      if (isRestartHandoff) {
+        util.log(`restart handoff: taking over from daemon pid ${existingPid}`);
+      } else {
+        util.log(`pid file names live but non-MemBridge process ${existingPid}; taking over (stale)`);
+      }
+    } else if (existingPid) {
+      util.log(`pid file names dead process ${existingPid}; taking over (stale)`);
+    }
+  }
+
   fs.writeFileSync(util.pidPath(), String(process.pid));
   util.log(`daemon started (pid ${process.pid}, interval ${config.intervalSec}s, v${pkg.version})`);
 
@@ -620,6 +719,93 @@ function cmdMcpUnregister() {
   console.log('Re-register anytime with: membridge mcp register');
 }
 
+// ---------------------------------------------------------------------------
+// `membridge git-filter <on|off|status>` — keep the injected memory block out
+// of git while leaving it on disk. Why a clean filter and not .gitignore or
+// --skip-worktree, and why `required` stays false, is in lib/git-block-strip.js.
+//
+// Two halves, and only ONE of them can be shared with a teammate: the
+// .gitattributes line travels with the repo but does nothing on a machine that
+// has not configured the filter, so the `git config` half has to run per
+// machine. That is why `on` is also run by `setup-hooks` (below) rather than
+// left as a thing the user must discover.
+
+// The enable itself lives in lib/git-block-strip.js (ensureEnabled), shared
+// with the launch path in hooks.ensureInstalled — one implementation, so the
+// CLI and the app cannot drift apart again. What lives HERE is only the prose,
+// and the rule that the prose may never say "on" over a state the code did not
+// reach: `wrote` and `current` are the only outcomes that earn it.
+function gitFilterLine(r) {
+  if (r.state === 'failed') {
+    return `Git filter (keeps the memory block out of git): NOT enabled — ${r.error}. Retry with \`membridge git-filter on\`.`;
+  }
+  if (r.state === 'off') {
+    return 'Git filter: left off, because you turned it off. Turn it back on with: membridge git-filter on';
+  }
+  const where = `${r.marked} newly marked, ${r.already} already marked${r.failed ? `, ${r.failed} not writable` : ''}`;
+  return `Git filter (the memory block stops entering git — no diff, no merge conflicts on it — while staying on disk untouched): on, .gitattributes across ${r.repos.length} tracked repo(s) — ${where}. Turn off with: membridge git-filter off`;
+}
+
+function cmdGitFilter() {
+  const sub = args[1] || 'status';
+  if (sub === 'on') {
+    // force: an explicit `on` overrides a previous `off` AND takes the filter
+    // over from another MemBridge install. The launch path does neither.
+    const r = gitBlockStrip.ensureEnabled({ force: true, only: opt('--project') });
+    console.log(gitFilterLine(r));
+    if (r.state === 'failed') process.exit(1);
+    gitBlockStrip.setPreference(true);
+    // Three things a user WILL hit, said up front rather than discovered.
+    console.log('  `git diff` is now empty for the block, and a merge can no longer conflict on it.');
+    console.log('  `git status` can still show the file as modified when a rewrite changes its byte length — that is git comparing sizes, not content; the diff stays empty and the next `git add` clears it with nothing staged.');
+    console.log('  A checkout that rewrites a context file leaves it with no block until the next sync puts one back.');
+    console.log('  A context file already COMMITTED with a block still carries it in history; the next commit of that file drops it.');
+    console.log('  Teammates without MemBridge are unaffected: git ignores a filter it has no config for, and the file keeps its full content for them.');
+    return;
+  }
+  if (sub === 'off') {
+    const r = gitBlockStrip.unconfigureFilter();
+    if (!r.ok) die(`Could not turn the git filter off: ${r.error}`);
+    // Recorded ONLY after git actually stopped naming the filter. Written
+    // second on purpose: a preference saying "off" over a config that is still
+    // live would be a stored answer contradicting the machine.
+    gitBlockStrip.setPreference(false);
+    console.log(r.removed
+      ? 'Git filter off. The memory block is stored in git again from the next `git add` on.'
+      : 'Git filter was not configured on this machine — nothing to turn off.');
+    console.log(`The \`.gitattributes\` lines are left in place; without the config above they do nothing (remove the "${gitBlockStrip.attrLineFor('CLAUDE.md')}" lines by hand if you want them gone).`);
+    console.log('MemBridge will not turn it back on by itself; `membridge git-filter on` is the only thing that does.');
+    return;
+  }
+  if (sub === 'status') {
+    // What git says, then what the user asked for — two separate facts, and
+    // reporting them as one is how "it says on but nothing happens" happens.
+    const current = gitBlockStrip.configuredCommand();
+    console.log(current ? `Git filter: ON  (${gitBlockStrip.CLEAN_KEY} = ${current})` : `Git filter: OFF (${gitBlockStrip.CLEAN_KEY} is not set)`);
+    if (current && !gitBlockStrip.isCommandLive(current)) {
+      console.log('  BUT that command\'s script is not on disk, so git is silently storing the block anyway. `membridge git-filter on` repoints it.');
+    } else if (current && current !== gitBlockStrip.filterCommand()) {
+      console.log(`  NOTE: that points at a different MemBridge install than this one (${gitBlockStrip.filterCommand()}). It still works; \`membridge git-filter on\` takes it over.`);
+    }
+    const pref = gitBlockStrip.preference();
+    if (pref === false) console.log('  You turned it off (config.gitFilter.enabled = false), so launches will not re-enable it.');
+    const config = util.getConfig();
+    const targets = util.effectiveTargets(config);
+    for (const key of gitBlockStrip.trackedGitRepos()) {
+      const missing = targets.filter(t => {
+        try {
+          return !fs.readFileSync(path.join(key, '.gitattributes'), 'utf8').split(/\r?\n/).some(l => gitBlockStrip.isOurAttrLine(l, t));
+        } catch {
+          return true;
+        }
+      });
+      console.log(`  ${key}: ${missing.length ? `not marked for ${missing.join(', ')}` : 'marked'}`);
+    }
+    return;
+  }
+  die('Usage: membridge git-filter <on|off|status> [--project <path>]');
+}
+
 // `membridge update` — check GitHub for a newer release and update in place.
 // `--check` only reports (never runs anything). For npm installs we run the
 // upgrade inline; for the macOS app we PRINT the one-liner instead of running
@@ -817,8 +1003,28 @@ async function cmdLogin() {
   console.log(`Logged in as ${r.email} (display name: ${r.displayName}).`);
 }
 
-function cmdLogout() {
-  console.log(teamsync.clearCredentials() ? 'Logged out.' : 'Already logged out.');
+// Two outcomes, reported as two (see teamsync.signOut). "Logged out." over a
+// session the backend still honours would be the one sentence a user acts on
+// — and the copy of credentials.json they are worried about would still work.
+// The remedy line is there because "we could not revoke it" is useless without
+// "here is what to do instead".
+async function cmdLogout() {
+  const out = await teamsync.signOut(util.getConfig());
+  if (!out.wasSignedIn) {
+    console.log('Already logged out.');
+    return;
+  }
+  if (out.revoked) {
+    console.log('Logged out. The session was ended on the server too.');
+    return;
+  }
+  console.log('Logged out on this machine ONLY.');
+  console.log(`The session could NOT be ended on the server: ${out.error}`);
+  // Deliberately NOT "try again later": the credentials are gone from this
+  // machine now, so there is nothing left here to revoke WITH. Retrying is
+  // not a remedy, and offering it as one would be the comfortable lie.
+  console.log('A copy of this machine\'s credentials taken before now can still use that session until it expires.');
+  console.log('Changing your account password is the way to end it for certain.');
 }
 
 // One command from invite to member: `membridge join <link-or-token-or-code>`.
@@ -873,18 +1079,31 @@ async function cmdTeam() {
     return;
   }
 
-  // Privacy gate: verbatim prompts upload with team sync only when this is on
-  // (summaries and file lists always sync). Local config only, so it works
-  // before login and on unconfigured builds.
+  // Privacy gate. Three modes plus two legacy aliases (`on` → verbatim, `off`
+  // → off) so a script or muscle memory keeps working. Local config only, so
+  // it works before login and on unconfigured builds.
+  //   off        summaries and file lists only, no ask, no goal
+  //   distilled  agent-written goal ships; raw ask does not (fresh-install default)
+  //   verbatim   full ask + goal upload, redacted through the standard pipeline
   if (sub === 'share-prompts') {
-    const v = args[2];
-    if (!['on', 'off'].includes(v)) die('Usage: membridge team share-prompts <on|off>');
+    const rawArg = args[2];
+    // Aliases: keep the historical on/off working, translate to modes.
+    const alias = rawArg === 'on' ? 'verbatim' : rawArg;
+    if (!['off', 'distilled', 'verbatim'].includes(alias)) {
+      die('Usage: membridge team share-prompts <off|distilled|verbatim>\n' +
+          '  off        summaries and file lists only\n' +
+          '  distilled  also share the agent-written goal (default for new installs)\n' +
+          '  verbatim   also share your raw prompts (redacted through the same pipeline)');
+    }
     const raw = util.loadUserConfig();
-    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: v === 'on' };
+    raw.team = { ...(raw.team && typeof raw.team === 'object' ? raw.team : {}), sharePrompts: alias };
     util.saveUserConfig(raw);
-    console.log(v === 'on'
-      ? 'Prompt sharing ON: future pushes include your (redacted) asks.'
-      : 'Prompt sharing OFF: future pushes upload summaries and file lists only.');
+    const msg = alias === 'off'
+      ? 'Prompt sharing OFF: future pushes upload summaries and file lists only.'
+      : alias === 'distilled'
+      ? 'Prompt sharing DISTILLED: future pushes upload the agent-written goal (no raw prompts).'
+      : 'Prompt sharing VERBATIM: future pushes include your (redacted) raw prompts.';
+    console.log(msg);
     return;
   }
 
@@ -1134,6 +1353,10 @@ async function cmdTeamRepull(config) {
         continue;
       }
       st.projects[key].teamPullTs = null;
+      // The forward cursor is a PAIR — timestamp plus row id (lib/teamsync.js
+      // fetchPullPage). Resetting only the timestamp would leave the id half
+      // describing a position in a page this walk is about to re-read.
+      st.projects[key].teamPullId = null;
       util.saveState(st);
     }
 
@@ -1143,17 +1366,23 @@ async function cmdTeamRepull(config) {
       const r = await teamsync.syncTeams({ project: key });
       for (const e of r.errors) console.log(`  ${name}: ${e}`);
       const proj = (util.loadState().projects || {})[key];
-      const next = proj ? (proj.teamPullTs || null) : null;
+      // Progress is the PAIR moving, not the timestamp moving. A run of rows
+      // pushed in one batch shares one created_at, so a walk through a tie
+      // group larger than a page advances only the id half — real progress
+      // that a timestamp-only comparison reads as a stalled cursor and
+      // abandons, leaving the rest of the tie group unpulled.
+      const next = proj ? (proj.teamPullTs ? `${proj.teamPullTs}#${proj.teamPullId ?? ''}` : null) : null;
+      const shown = proj ? (proj.teamPullTs || null) : null;
       if (!r.changed.includes(key)) break; // a pass that pulled nothing is the end of history
       if (next && next === cursor) {
         // The cursor stopped moving while rows kept arriving: pulling the same
         // page forever would be an infinite loop, so stop and say so rather
         // than spin. Reported, never silently treated as completion.
-        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${next} while rows were still arriving.`);
+        console.log(`  ${name}: stopped — the pull cursor stopped advancing at ${shown} while rows were still arriving.`);
         break;
       }
       cursor = next;
-      console.log(`  ${name}: pass ${passes + 1} · cursor now ${cursor || 'start of history'}`);
+      console.log(`  ${name}: pass ${passes + 1} · cursor now ${shown || 'start of history'}`);
     }
     if (passes >= REPULL_MAX_PASSES) console.log(`  ${name}: stopped at the ${REPULL_MAX_PASSES}-pass safety limit; re-run to continue.`);
 
@@ -1231,6 +1460,13 @@ Distillation (agent-written session summaries, see README):
                       summaries) AND a git post-commit hook in every tracked
                       repo (instant commit->session provenance capture)
   remove-hooks        remove the MemBridge hooks (your other hooks are kept)
+  git-filter <on|off|status> [--project <path>]
+                      keep the injected memory block out of git: it stops
+                      reaching the index, so \`git diff\` is empty for it and a
+                      merge cannot conflict on it, while the block stays on
+                      disk exactly as it is for every AI tool that reads it.
+                      \`setup-hooks\` turns this on; \`off\` removes the git
+                      config on this machine. \`status\` shows where it stands.
   hook stop           the Stop hook itself (invoked by Claude Code, not by you)
   hook post-commit    the git hook itself (invoked by git, not by you)
   hook recall         the PreToolUse recall hook itself (answers a repeat
@@ -1268,7 +1504,11 @@ Team sync (share project memory with your team, see README):
                            Opt-in and one-shot; safe to interrupt and re-run. If you do
                            interrupt it, a running daemon keeps walking the rest one page
                            per tick.
-  team share-prompts <on|off>  also upload your (redacted) prompts; off = summaries/files only
+  team share-prompts <off|distilled|verbatim>
+                            off        summaries and file lists only
+                            distilled  also share the agent-written goal (default for new installs)
+                            verbatim   also share your raw prompts (redacted through the same pipeline)
+                            legacy: "on" is an alias for verbatim
   team setup ...           advanced: point at your own self-hosted backend
 
 Config: ${util.configPath()}
@@ -1298,6 +1538,15 @@ const commands = {
   hook: cmdHook,
   'setup-hooks': () => {
     console.log(hooks.setupHooks());
+    // The machine-level setup step for the git clean filter, enabled without
+    // a prompt (product decision, 2026-08-08) because the churn it removes is
+    // something a user experiences long before they would go looking for a
+    // setting. One line, in the same voice as the hook lines above, naming the
+    // off switch — and it says "NOT enabled" when git config failed.
+    //
+    // NOT forced: someone who ran `git-filter off` and then re-runs setup-hooks
+    // gets their answer respected and told so, rather than silently overridden.
+    console.log(gitFilterLine(gitBlockStrip.ensureEnabled()));
     const raw = util.loadUserConfig();
     if (!raw.distill) raw.distill = {};
     if (raw.distill.consent !== 'granted') {
@@ -1305,6 +1554,7 @@ const commands = {
       util.saveUserConfig(raw);
     }
   },
+  'git-filter': cmdGitFilter,
   // `remove-hooks` is the documented "take MemBridge back out of my tools"
   // command, so it also strips the MCP registration — uninstalling must leave
   // nothing of ours behind in anyone's config.

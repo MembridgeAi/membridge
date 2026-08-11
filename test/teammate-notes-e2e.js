@@ -1,4 +1,29 @@
 'use strict';
+// NOT_RUN_BY_CI: a manual demonstration harness, not coverage. CI runs
+// `node test/run.js` and nothing else, which discovers test/suites/*.test.js
+// plus test/run-tests.js — never this file. Run it by hand:
+//     node test/teammate-notes-e2e.js        (~1.3s, 22 checks, passes today)
+//
+// AND IT IS NOT A COVERAGE GAP EITHER, which is the part worth knowing before
+// anyone "fixes" this by wiring it into CI. Scored as a mutation runner
+// (`node test/mutate.js --cmd "node test/teammate-notes-e2e.js"`) against the
+// two regions the header below claims it uniquely covers:
+//
+//   lib/teamsync.js pull mapping   this file: 0 killed / 8
+//                                  discovered suites: 6 killed / 8 (no core)
+//   lib/teammate-notes-store.js    this file: 0 killed / 9
+//                                  core: 5 killed BY ASSERTION
+//
+// Zero mutants killed that the suites do not already kill, and far fewer
+// overall — in the file it is named after. Wiring it into CI would buy
+// wall-clock and no discrimination. Its value is what its name says: watching
+// the real pipeline work end to end, with real subprocesses, before
+// dogfooding. Keep it for that; do not count it as coverage.
+//
+// The claim below — that it catches what "no fixture-fed test could see" — was
+// true of the bug it was written for (Task 6's author rename). It is not a
+// statement about the suite as it stands today, and the numbers above are.
+//
 // End-to-end proof for live teammate decisions
 // (docs/superpowers/specs/2026-07-28-live-teammate-decisions-design.md,
 // plan Task 12).

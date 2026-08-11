@@ -61,8 +61,23 @@ alter table public.team_audit enable row level security;
 -- set search_path = public, same shape as is_team_member.
 --
 -- `create policy` has no `if not exists`/`or replace` (see 011_backend_
--- hardening.sql §1's note), so every policy below is dropped first, then
--- created — safe to re-run this file.
+-- hardening.sql §1's note). This file USED to drop each policy first and then
+-- create it, and called that "safe to re-run". It was not: four of these
+-- policies have since been tightened by later migrations (project_access_select
+-- by 025, project_access_insert/update by 037, team_audit_insert by 025), and a
+-- drop-then-create re-run would have reverted every one of them silently.
+--
+-- Each create is now guarded on pg_policies instead, the convention 009:72-77
+-- established. Re-running this file is genuinely safe now: on a database that
+-- already has these policies — which is all of them — every branch is a no-op,
+-- and the tightened definitions survive untouched.
+--
+-- THE GENERAL RULE, worth more than this one file: a migration must never DROP
+-- a policy it did not introduce. Only the migration currently holding the
+-- newest definition of a policy may drop-then-create it; once a later migration
+-- supersedes it, the older file has to become a guarded create or it is a
+-- regression waiting for someone to paste it. Enforced by
+-- test/suites/invite-lifetime-hardening.test.js.
 -- ---------------------------------------------------------------------------
 
 -- project_access: any team member may read it (so a member can see who else
@@ -70,30 +85,64 @@ alter table public.team_audit enable row level security;
 -- SAME gate the Node route (lib/api-access.js) checks independently before
 -- ever attempting the write — RLS is the backstop if that check is ever
 -- bypassed or wrong, not the only gate.
-drop policy if exists project_access_select on public.project_access;
-create policy project_access_select on public.project_access
-  for select using (public.is_team_member(team_id));
+-- GUARDED, NOT DROP-AND-RECREATE — see the note at the head of the policy
+-- section. Four of the policies this file introduced have since been tightened
+-- by LATER migrations (project_access_select by 025, insert and update by 037),
+-- so a drop-then-create here is a loaded gun: re-running this file, which its
+-- own header invites, would silently restore the weaker predicate and take the
+-- hardening with it. The guard makes each create a no-op on any database that
+-- already has the policy, which is every database this file has ever run on.
+-- Convention borrowed from 009:72-77, which established it and which later
+-- migrations stopped following.
+do $$
+begin
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'project_access' and policyname = 'project_access_select') then
+    create policy project_access_select on public.project_access
+      for select using (public.is_team_member(team_id));
+  end if;
 
-drop policy if exists project_access_insert on public.project_access;
-create policy project_access_insert on public.project_access
-  for insert with check (public.is_team_manager(team_id));
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'project_access' and policyname = 'project_access_insert') then
+    create policy project_access_insert on public.project_access
+      for insert with check (public.is_team_manager(team_id));
+  end if;
 
-drop policy if exists project_access_update on public.project_access;
-create policy project_access_update on public.project_access
-  for update using (public.is_team_manager(team_id)) with check (public.is_team_manager(team_id));
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'project_access' and policyname = 'project_access_update') then
+    create policy project_access_update on public.project_access
+      for update using (public.is_team_manager(team_id)) with check (public.is_team_manager(team_id));
+  end if;
 
-drop policy if exists project_access_delete on public.project_access;
-create policy project_access_delete on public.project_access
-  for delete using (public.is_team_manager(team_id));
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'project_access' and policyname = 'project_access_delete') then
+    create policy project_access_delete on public.project_access
+      for delete using (public.is_team_manager(team_id));
+  end if;
+end $$;
 
 -- team_audit: readable and insertable by owner/admin only. No update or
 -- delete policy at all — no policy means no access (RLS defaults closed) —
 -- so the trail can never be edited or pruned through the API, only ever
 -- appended to.
-drop policy if exists team_audit_select on public.team_audit;
-create policy team_audit_select on public.team_audit
-  for select using (public.is_team_manager(team_id));
+-- GUARDED for the same reason, and this is the instance that mattered most:
+-- 025:144 tightened team_audit_insert to
+-- `is_team_manager(team_id) and actor_id = auth.uid()`, closing actor forgery.
+-- Re-running the old drop-then-create below would have reopened it — letting a
+-- manager file audit rows naming any member as the actor, which readAudit then
+-- renders under that member's name. The guard is what stops a re-paste of this
+-- file from quietly undoing 025.
+do $$
+begin
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'team_audit' and policyname = 'team_audit_select') then
+    create policy team_audit_select on public.team_audit
+      for select using (public.is_team_manager(team_id));
+  end if;
 
-drop policy if exists team_audit_insert on public.team_audit;
-create policy team_audit_insert on public.team_audit
-  for insert with check (public.is_team_manager(team_id));
+  if not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename = 'team_audit' and policyname = 'team_audit_insert') then
+    create policy team_audit_insert on public.team_audit
+      for insert with check (public.is_team_manager(team_id));
+  end if;
+end $$;

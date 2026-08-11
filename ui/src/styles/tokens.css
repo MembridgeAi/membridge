@@ -1,6 +1,45 @@
+/*
+ * TEXT RAMP AND WCAG CONTRAST (T-49/T-69/T-75)
+ *
+ * The three text tiers are a CONTRAST contract, not a palette. Every value
+ * below is chosen so the tier clears 4.5:1 (WCAG 1.4.3, normal text) against
+ * the WORST of the three surfaces it can land on -- which is --panel2 in both
+ * themes, and which is reachable on tier 2 through base.css's global
+ * `button:hover { background: var(--panel2) }`, not only through a panel.
+ *
+ * 4.5:1 and not 3:1, everywhere: the large-text exemption needs 18.66px bold
+ * or 24px regular, and every one of the ~104 --text3 declarations in this app
+ * sits at 9-12px. There is no tier-3 usage that qualifies.
+ *
+ * `theme.test.ts` computes these ratios from THIS FILE and fails below the
+ * threshold, so the contract is enforced rather than remembered. If you are
+ * changing a value here and that test fails, the test is right.
+ *
+ * What was wrong before (measured, both by token math and by walking the live
+ * DOM in a visible browser):
+ *   dark  --text3 #5B6B84   3.20-3.48:1   FAIL
+ *   light --text2 #64748B   4.34:1 on --panel2 only, i.e. every button hover
+ *   light --text3 #94A3B8   2.34-2.56:1   FAIL, the worst in the app
+ *
+ * Surfaces are not a lever and were checked first: lightening light --panel2
+ * all the way to pure white moves tier 3 from 2.34 to 2.56. The text had to
+ * move.
+ *
+ * WHAT THIS COSTS. Perceptual separation between tiers 2 and 3 narrows (dark
+ * dL* 21.7 -> 12.2, light 18.1 -> 11.6). That number overstates the visible
+ * effect, and the reason is worth keeping: the ramp is not carrying the
+ * hierarchy on its own -- size, weight and mono-vs-sans do most of it, and
+ * tiers 2 and 3 almost never sit adjacent at the same size. Rendered on real
+ * screens the hierarchy survives intact. The light theme does read heavier;
+ * that was a deliberate, reviewed trade, on the grounds that what the old
+ * light theme had was not airiness but illegibility (`not captured` and the
+ * file paths on the session page were faint enough to read as a render fault).
+ */
 :root {
   --bg: #0B1120; --panel: #0E1526; --panel2: #111A2E;
-  --text: #F1F5F9; --text2: #94A3B8; --text3: #5B6B84;
+  /* --text3 lightened from #5B6B84 (3.20:1 on --panel2). Tier 2 is untouched
+     in dark: #94A3B8 is already 6.76:1 on the worst surface. */
+  --text: #F1F5F9; --text2: #94A3B8; --text3: #758398;
   --line: #1E293B; --line2: #334155;
   /* Hover fill for rows, cards and disclosure headers. NOT a surface tier:
      --bg/--panel/--panel2 are where things sit, --hover is what a pointer
@@ -76,15 +115,20 @@
 }
 :root[data-theme="light"] {
   --bg: #FAFAFA; --panel: #FFFFFF; --panel2: #F1F5F9;
-  /* --text2 is #55637A, not the slate-500 #64748B it started as, because it
-     has to clear AA on --hover as well as at rest. On --hover it measured
-     3.63:1 at the old value; it is 4.65:1 now. At rest on --panel it was
-     4.76:1 -- passing, but close enough to the 4.5:1 floor that any surface
-     added between it and white would have failed -- and is 6.08:1 now.
-     There is no way to fix this from the hover side: holding #64748B at
-     4.5:1 needs a fill of Y >= 0.943, i.e. #F9F9F9, which is no hover at
-     all. Dark mode already passes (5.28:1 on --hover) and is unchanged. */
-  --text: #0F172A; --text2: #55637A; --text3: #94A3B8;
+  /* BOTH muted tiers move here, and tier 2 has to. A conformant tier 3 on a
+     near-white surface must be DARKER than the old tier 2 (#64748B was only
+     just over the line on --bg and under it on --panel2), so leaving tier 2
+     where it was would have inverted the ramp. Tier 2 -> #485464 also fixes
+     its own single real failure: the button:hover surface, where twelve
+     10.5px .settings-btn labels sat at 4.34:1 and are now 7.03:1.
+
+     The feed rework reached the same tier-2 conclusion from the other side --
+     #64748B measured 3.63:1 on --hover, and there is no fix from the hover
+     side, since holding it at 4.5:1 needs a fill of Y >= 0.943 (#F9F9F9),
+     which is no hover at all. #485464 is darker than the #55637A that branch
+     had settled on, so it clears the hover case too and that value is gone.
+     Dark mode already passes (5.28:1 on --hover) and is unchanged. */
+  --text: #0F172A; --text2: #485464; --text3: #66707F;
   --line: #E2E8F0; --line2: #CBD5E1;
   --hover: #D9E2EC;
   --accent: #0052FF; --accent2: #4D7CFF; --accent-dim: rgba(0,82,255,.06);

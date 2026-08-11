@@ -174,6 +174,26 @@ export function SearchPage() {
   const asked = query.trim().length > 0
   const anyFilter = !!(author || project || source || hideMine)
 
+  // #59. The picked person's unreachable local history, or null when there is
+  // none to report. This is the difference between "Andrew has done nothing"
+  // and "some of Andrew's work is here but this filter cannot see it" -- two
+  // states that produced a byte-identical empty page until the daemon started
+  // reporting preFixLocal.
+  //
+  // Gated on `entries > 0`, never on the field's presence: the daemon always
+  // sends it and mapMember fills a missing one with an explicit zero, so a
+  // presence check would fire on every member and put a repull hint under
+  // every empty search. A genuine zero must keep reading as a plain "nothing
+  // found" -- trading a silent wrong answer for a permanent false alarm is
+  // not a fix.
+  //
+  // `author`, not `effectiveAuthor`: this is about a PERSON the reader chose
+  // from the picker. effectiveAuthor also carries Hide-mine's negated form
+  // ('!<id>'), which is a filter across everyone-but-one and has no single
+  // member for this count to be about.
+  const pickedPerson = author ? members.find(m => m.id === author) ?? null : null
+  const personGap = pickedPerson && pickedPerson.preFixLocal.entries > 0 ? pickedPerson : null
+
   function clearFilters() {
     applyState({ author: '', project: '', source: '', hideMine: false })
   }
@@ -232,11 +252,19 @@ export function SearchPage() {
         )}
       </div>
 
-      {/* Resting state: never "no results" for a search nobody ran. */}
+      {/* Resting state: never "no results" for a search nobody ran.
+          T-78: the reference copy claimed "your teammates', and the archive
+          going back further than the feed does" on every install -- but a
+          solo user has neither teammates NOR a team archive, and reading that
+          line as a promise about what search sees would send them looking for
+          rows that structurally cannot exist. `solo` here is the SAME flag
+          the filter row and Hide-mine below already gate on -- there is
+          nothing to filter by person on a solo machine either. */}
       {!asked && (
         <p className="search-resting">
-          Ranked across every project on this machine — your sessions, your teammates', and the
-          archive going back further than the feed does.
+          {solo
+            ? 'Ranked across every project on this machine — your own sessions across every tool that captures here.'
+            : 'Ranked across every project on this machine — your sessions, your teammates\', and the archive going back further than the feed does.'}
         </p>
       )}
 
@@ -271,7 +299,30 @@ export function SearchPage() {
       {asked && !searchQuery.isError && !searchQuery.isPending && total === 0 && (
         <div className="search-empty">
           <p className="search-empty-title">No matches for "{query}".</p>
-          {anyFilter ? (
+          {/* #59, and it takes precedence over the generic filter advice
+              below: "clearing filters searches every project" is true but
+              would send the reader to widen a search whose narrow form was
+              never actually answered. The specific reason comes first, and
+              Clear filters is still offered underneath it as the other way
+              out. Phrased as a limit on what the FILTER could reach, never as
+              a fact about the person -- the whole defect being fixed is a
+              claim about someone's work made from rows nobody read. */}
+          {personGap ? (
+            <>
+              <p className="search-empty-hint" data-testid="search-prefix-gap">
+                This may be undercounting {personGap.name}. {personGap.preFixLocal.entries}{' '}
+                {personGap.preFixLocal.entries === 1 ? 'entry' : 'entries'} of theirs on this machine,
+                across {personGap.preFixLocal.projects}{' '}
+                {personGap.preFixLocal.projects === 1 ? 'project' : 'projects'}, were saved before
+                MemBridge recorded who wrote them — so filtering by a person cannot reach them. Run{' '}
+                <code className="mono">membridge team repull</code> to re-fetch those projects and
+                attribute them, then search again.
+              </p>
+              <button type="button" className="search-clear search-empty-clear" onClick={clearFilters}>
+                Clear filters
+              </button>
+            </>
+          ) : anyFilter ? (
             <>
               <p className="search-empty-hint">
                 Filters are narrowing this search. Clearing them searches every project on this machine.

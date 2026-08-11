@@ -44,7 +44,7 @@ Layout:
 
 **You own `ui/` and nothing else.** You do not edit `lib/`, `bin/`, or
 `scripts/`. If a ticket appears to require a daemon change, stop and hand it
-back to the lead. Do not reach across the boundary, and do not work around a
+back to CTOpus. Do not reach across the boundary, and do not work around a
 missing endpoint by faking data in the client.
 
 ## Know what each screen is for
@@ -167,7 +167,7 @@ Specifically **do not**:
 - Build a roadmap or BYOK surface. Cut on purpose, will be rejected.
 - Flesh out a screen that is deliberately a placeholder, unless the ticket says
   otherwise. Ask, do not assume.
-- Add a dependency without the lead approving it in the ticket.
+- Add a dependency without CTOpus approving it in the ticket.
 - Widen a ticket because you found something adjacent. Write it up instead.
 
 ## House rules for the code you write
@@ -215,7 +215,7 @@ node scripts/verify-finding.js --ui <test file> --runs 3
 Exit `0` is **CONFIRMED**, failed every isolated run, real. Exit `3` is
 **PHANTOM**, it passed alone and the failure was machine load: do not file it,
 do not "fix" the code, drop it and move on. Exit `4` is **FLAKY**, genuinely
-nondeterministic: escalate to the lead, do not guess at a fix.
+nondeterministic: escalate to CTOpus, do not guess at a fix.
 
 Fixing code to satisfy a PHANTOM is the single worst outcome available to this
 team: it breaks working software to silence a measurement error.
@@ -231,7 +231,7 @@ team: it breaks working software to silence a measurement error.
 4. The primary flow on the screen is reachable by keyboard, and focus goes
    somewhere sensible.
 5. You have described the before and after in words a non-designer can check.
-6. Anything you found and deliberately did not do is written up for the lead.
+6. Anything you found and deliberately did not do is written up for CTOpus.
 
 ## Standing orders
 
@@ -254,7 +254,7 @@ run `node test/run.js` with no arguments, and never `cd ui && npx vitest run`
 with no file argument, unless a human explicitly asks.
 
 **Scope discipline.** Do the ticket. If you find something else worth doing,
-write it up for the lead as a new ticket rather than widening your diff.
+write it up for CTOpus as a new ticket rather than widening your diff.
 
 **How you report.** Every time you finish a unit of work, post: what you
 changed, the diagnosis that justified it, the verify commands you ran and their

@@ -83,6 +83,41 @@
   color: var(--red);
   font-size: 12px;
 }
+/* The "this window was cut short" notice. Amber-tinted rather than red: the
+ * page is not broken and the reader did nothing wrong -- a stated limit on what
+ * was read, in the same register as team.css's .team-multi.
+ *
+ * Text is --text/--text2, never --amber. Measured: --amber as TEXT on its own
+ * --amber-dim tint is 2.93-3.19:1 in the light theme (fails 1.4.3 outright at
+ * this size), against 14.77-16.11 for --text and 6.37-6.95 for --text2 on the
+ * same surface. --amber survives here only as the 1px border, which carries no
+ * information the words do not: the heading sentence states the whole fact on
+ * its own ("Showing 12 of the 30 days you asked for"), so nothing here is
+ * carried by colour. It used to lead with a ⚠ as the non-colour half of the
+ * signal, and that glyph is deliberately gone -- everywhere else in this app it
+ * means broken and actionable, and this notice is neither. */
+.insights-truncated {
+  margin: var(--sp-3) var(--sp-4) 0;
+  padding: var(--sp-3);
+  background: var(--amber-dim);
+  border: 1px solid var(--amber);
+  border-radius: var(--r);
+}
+.insights-truncated-head {
+  margin: 0 0 var(--sp-1);
+  color: var(--text);
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+.insights-truncated-body {
+  margin: 0;
+  color: var(--text2);
+  font-size: var(--fs-sm);
+  /* A sentence, so it needs a readable measure rather than the full page
+     width -- the two-column body below is 1200px+ wide. */
+  max-width: 74ch;
+}
+
 .insights-restricted,
 .insights-loading-note {
   margin: 0;

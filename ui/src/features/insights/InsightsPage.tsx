@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'wouter'
 import { projectHref } from '../../app/routes'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { StatStrip, type StatItem } from '../../components/StatStrip'
 import { useDataClient } from '../../data/DataClientProvider'
 import { useInsights, useSettings, useStatus } from '../../data/queries'
@@ -62,6 +63,19 @@ function deltaNote(delta: number | null): string | undefined {
 // seen against a current backend.
 const CAP_NOTE = 'approximate — this MemBridge server is out of date'
 
+// For a figure that is a lower bound because the feed fetch stopped short,
+// rather than because the server is old. Separate from CAP_NOTE on purpose:
+// the fix for CAP_NOTE is upgrading the backend, and upgrading does NOT extend
+// the feed fetch -- it only makes the two headline counts exact.
+//
+// Says "minimum", the same word the truncation banner directly above it uses,
+// and not "a floor". Two words for one idea, six inches apart, reads as two
+// different measurements the reader now has to reconcile -- and "floor" is a
+// borrowed maths term where "minimum" is the plain one. Same for "unread",
+// which described our fetch loop rather than the reader's situation. If the
+// banner's wording ever changes, this changes with it.
+const COVERAGE_NOTE = 'a minimum — some days are not included'
+
 // Shown wherever a figure reads "pending" (a fresh install whose ledger has
 // nothing yet): names what it's waiting on so it doesn't read as stuck.
 const PENDING_NOTE = 'No data yet — fills in as your tools run'
@@ -98,6 +112,15 @@ export function buildCsv(insights: Insights): string {
     // silently stops summing. When this is true every count below is a
     // lower bound, because the feed fetch stopped at its page cap.
     toCsvRow(['feed_truncated', insights.truncated ? 'true' : 'false']),
+    // T-71: the actual reach of the paged fetch, in days. On an untruncated
+    // fetch this equals window * 2; on a truncated fetch it shrinks to the
+    // floor the fetch hit. Carried as its own numeric row (not folded into a
+    // decoration on window_days) so a spreadsheet can compare requested vs
+    // reached without parsing a string. Named `feed_covered_days` to match
+    // `feed_truncated` above rather than the daemon's internal `lookbackDays`,
+    // which is the SAME NUMBER (#79 commit body) -- one name here, one name
+    // there, no helper across them.
+    toCsvRow(['feed_covered_days', insights.coveredDays]),
     toCsvRow(['sessions', insights.sessions.count]),
     toCsvRow(['members_syncing_ok', insights.membersSyncing.ok]),
     toCsvRow(['members_syncing_total', insights.membersSyncing.total]),
@@ -119,7 +142,14 @@ export function buildCsv(insights: Insights): string {
     ...insights.topProjects.map(p => toCsvRow([p.name, p.sessions, p.people])),
     '',
     toCsvRow(['problem_severity', 'headline', 'scale']),
-    ...insights.problems.map(p => toCsvRow([p.severity, p.headline, p.scale])),
+    // The severity column follows the SCREEN, not the wire. Every problem is
+    // an absence claim about a named person built from the paged feed, so when
+    // that feed stopped short the page shows them as unconfirmed -- and this
+    // file is the copy that gets forwarded to the person it names. Exporting
+    // `broken` here while the screen says "can't tell" would let the export
+    // out-claim the app it came from. `feed_truncated` above is the same fact
+    // stated once; this states it per row, where the accusation is.
+    ...insights.problems.map(p => toCsvRow([insights.truncated ? 'unconfirmed' : p.severity, p.headline, p.scale])),
   ]
   return lines.join('\n')
 }
@@ -173,6 +203,159 @@ function LRow({ name, sub, value, reason, href }: { name: string; sub?: string; 
   )
 }
 
+/**
+ * Shown only when the payload admits the team-feed fetch stopped at its page
+ * cap. Until this existed, a window that was cut short looked exactly like one
+ * that was honoured: picking 90 days on a team with real history produced the
+ * same page as picking 30, because both saturate the same cap, and nothing on
+ * screen said the extra 60 days were absent.
+ *
+ * TWO CASES, chosen by whether the current window itself is short.
+ *
+ *   * `coveredDays < windowDays` -- the current window is CUT. The reader is
+ *     looking at the last `coveredDays` days when they asked for the last
+ *     `windowDays`. Everything on the page is a floor of a genuinely truncated
+ *     view. This is the headline case ("Showing 12 of the 30 days you asked
+ *     for") and the sentence names both numbers.
+ *
+ *   * `coveredDays >= windowDays` (but still truncated) -- the current window
+ *     is whole and the PRIOR one is short, so the year-over-year figure
+ *     (delta) is what got capped. The daemon nulls those deltas already, but
+ *     the reader should still know why the trend cell is empty.
+ *
+ * `coveredDays` is what the notice quotes; `lookbackDays` is the same integer
+ * under the daemon's own name and reads as "in the last Nd" inside a problem's
+ * scale line. Kept separate on purpose: a helper that abstracts across them
+ * is how the two names drift when the daemon later diverges them, and picking
+ * one per site + citing the other in a comment is the discipline (see #79
+ * commit body).
+ *
+ * COPY RULE, and the reason this reads the way it does. The first version of
+ * this notice explained the DAEMON ("the team feed stopped at its page limit,
+ * and it reads newest first") to a reader who has no idea what a team feed or
+ * a page limit is, and then called every figure "a floor". None of those are
+ * words the audience owns. The rewrite states the reader's situation instead:
+ * how much of their range they got, that the numbers are minimums, and that a
+ * quiet-looking teammate may simply have worked in the part that is absent.
+ * Nothing here may name our plumbing again -- if a sentence needs the words
+ * page, fetch, rows, feed or read to make sense, it is explaining the wrong
+ * thing.
+ */
+
+/** "5 days", but "1 day". Both counts this notice prints can legitimately be
+ *  1 (a fetch that reached a single day; a single absent day at the boundary),
+ *  and "1 days" inside a notice whose whole job is to be trusted about
+ *  precision is the wrong place to be sloppy. */
+function days(n: number): string {
+  return `${n} ${n === 1 ? 'day' : 'days'}`
+}
+
+function TruncationNotice({ windowDays, coveredDays }: { windowDays: number; coveredDays: number }) {
+  const currentWindowCut = coveredDays < windowDays
+  const absentDays = windowDays - coveredDays
+  return (
+    <div className="insights-truncated" role="status" data-testid="insights-truncated">
+      {/* No ⚠. Everywhere else in this app that glyph means something is
+          broken and wants the reader's hands (not registered, hook not
+          installed, last sync failed, encryption keys stale). Nothing is
+          wrong here -- the page is reporting the size of what it can see --
+          and leading with the alarm glyph made the first reading of this
+          banner "Insights is broken". The amber container still earns the
+          eye; the heading sentence, not the tint, carries the meaning. */}
+      {currentWindowCut ? (
+        <>
+          <p className="insights-truncated-head">
+            Showing {coveredDays} of the {days(windowDays)} you asked for
+          </p>
+          <p className="insights-truncated-body">
+            There is more activity here than MemBridge can load at once, so the oldest {days(absentDays)}
+            {' '}{absentDays === 1 ? 'is' : 'are'} not included. Every number below is a minimum rather than a
+            total — and a teammate can look quiet here simply because their work fell in the days this view
+            does not include.
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="insights-truncated-head">
+            The comparison with the previous {days(windowDays)} is unavailable
+          </p>
+          <p className="insights-truncated-body">
+            The last {days(windowDays)} are complete, but MemBridge could only go back {days(coveredDays)} in
+            all — not far enough to cover the {days(windowDays)} before that, so those comparisons are left
+            blank. A teammate whose last activity was more than {days(coveredDays)} ago does not appear here
+            either.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+// The four stat labels, and the two section headings the loading frame below
+// reuses, hoisted so the frame and the loaded page cannot drift apart. A
+// loading strip that shows three cells for a page that renders four, or a
+// heading that changes wording when the data lands, is a layout jump plus a
+// second reading of the same page.
+const STAT_SESSIONS = 'sessions'
+const STAT_ASSISTS = 'times memory helped'
+const STAT_SYNCING = 'members syncing'
+const STAT_SHARED = 'memory entries shared'
+const SECT_PEOPLE = 'Activity by person'
+const SECT_MEMORY = 'How well shared memory is working'
+
+// Four labelled cells with no figures. Not a zero in sight: GET
+// /api/team/insights takes 3.6-4.0s on a real install (measured), and for all
+// of it this page used to render an empty <div> and then a bare "Loading…"
+// with no frame at all.
+const LOADING_STATS: StatItem[] = [STAT_SESSIONS, STAT_ASSISTS, STAT_SYNCING, STAT_SHARED]
+  .map(label => ({ value: null, label }))
+
+interface InsightsHeaderProps {
+  teamLabel: string | null
+  windowDays: WindowDays
+  onWindowChange: (w: WindowDays) => void
+  /** Omitted while the payload is in flight. There is nothing to export yet,
+   *  and an absent control is honest where a disabled one is a dead button --
+   *  the same call TodayPage makes about its missing whole-account digest. */
+  onExport?: () => void
+}
+
+/** Title, team label, window selector, export. Shared by the loading frame
+ *  and the loaded page so the header does not move when the data lands.
+ *
+ *  The window selector stays LIVE during loading on purpose: a 30-day window
+ *  that takes four seconds is exactly when a reader wants to ask for 7
+ *  instead, and disabling the control would make them wait out an answer they
+ *  have already decided against. */
+function InsightsHeader({ teamLabel, windowDays, onWindowChange, onExport }: InsightsHeaderProps) {
+  return (
+    <div className="insights-header">
+      <h1 className="insights-title">Insights</h1>
+      {teamLabel && <span className="mono insights-count">{teamLabel}</span>}
+      <div className="insights-header-actions">
+        <div className="seg" role="group" aria-label="Time window">
+          {WINDOWS.map(w => (
+            <button
+              key={w}
+              type="button"
+              aria-pressed={w === windowDays}
+              className={w === windowDays ? 'seg-btn seg-btn-on' : 'seg-btn'}
+              onClick={() => onWindowChange(w)}
+            >
+              {w} days
+            </button>
+          ))}
+        </div>
+        {onExport && (
+          <button type="button" className="insights-btn-ghost" onClick={onExport}>
+            Export CSV
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 interface InsightsContentProps {
   windowDays: WindowDays
   onWindowChange: (w: WindowDays) => void
@@ -199,10 +382,27 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
       </div>
     )
   }
+  // The whole page frame, immediately, with bars where the figures will be.
+  // This branch used to be a bare "Loading…" paragraph with no header, no stat
+  // strip and no columns, so the 3.6-4.0s GET /api/team/insights was spent on
+  // a screen that carried neither the answer nor the shape of it -- and then
+  // the entire layout arrived at once.
   if (!insightsQuery.data) {
     return (
       <div className="insights-page">
-        <p className="insights-loading-note">Loading…</p>
+        <InsightsHeader teamLabel={teamLabel} windowDays={windowDays} onWindowChange={onWindowChange} />
+        <StatStrip items={LOADING_STATS} />
+        <div className="insights-cols">
+          <div className="insights-colL">
+            <div className="insights-sect">{SECT_PEOPLE}</div>
+            <LoadingRows rows={3} label="Loading activity by person" testId="insights-people-loading" />
+            <div className="insights-sect">{SECT_MEMORY}</div>
+            <LoadingRows rows={2} label="Loading how well shared memory is working" />
+          </div>
+          <div className="insights-colR">
+            <LoadingRows rows={3} label="Loading problems" testId="insights-problems-loading" />
+          </div>
+        </div>
       </div>
     )
   }
@@ -211,74 +411,104 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
   const broken = insights.problems.filter(p => p.severity === 'broken')
   const minor = insights.problems.filter(p => p.severity === 'minor')
 
+  // T-84. The two headline counts are floors only when BOTH bits say so, and
+  // the bits are not interchangeable:
+  //   `exact`     -- the counts came from the database (027_team_feed_counts)
+  //                  rather than from summing fetched rows, so they are true
+  //                  totals at any window size.
+  //   `truncated` -- the paged FEED FETCH hit its cap, which floors everything
+  //                  built from those pages.
+  // A database-counted total stays the real number however short the fetch
+  // was, so `truncated` alone marked exact figures as lower bounds -- the
+  // mirror image of the wire bug that masked feedTruncated behind
+  // `truncated && !exact` for four releases (3b0a97f).
+  //
+  // "≥" on a number that is in fact exact is not a safe hedge; it is a
+  // different wrong answer, and one that invites the reader to assume the
+  // truth is higher than it is.
+  //
+  // Applies to THESE TWO CELLS ONLY. membersSyncing below is not database-
+  // counted -- see its own comment.
+  const countsAreFloors = insights.truncated && !insights.exact
+
   const stats: StatItem[] = [
     {
-      value: countValue(insights.sessions.count, insights.truncated),
-      label: 'sessions',
-      note: insights.truncated ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
+      value: countValue(insights.sessions.count, countsAreFloors),
+      label: STAT_SESSIONS,
+      // CAP_NOTE names an out-of-date server, which is only true in this same
+      // combination -- see its own doc. When the counts are exact and the feed
+      // was merely cut, the delta is null and trendNote yields no note at all;
+      // the truncation notice above the strip is what explains the gap, and it
+      // does so without calling an exact figure approximate.
+      note: countsAreFloors ? CAP_NOTE : trendNote(insights.sessions.deltaPct, windowDays),
     },
     {
       value: assistsHeadlineValue(insights.assists),
-      label: 'times memory helped',
+      label: STAT_ASSISTS,
       // Unlike the windowed cells around it, this is cumulative: assistsFrom
       // (lib/api-insights.js) sums savingsPayload's per-project ledger totals
       // with no window filter, so the honest scope is all time, not windowDays.
       note: insights.assists.available ? 'all time' : PENDING_NOTE,
     },
     {
-      value: `${insights.membersSyncing.ok}/${insights.membersSyncing.total}`,
-      label: 'members syncing',
+      // `ok` counts members with a row in the fetched window, so a fetch that
+      // stopped short can only ever UNDERCOUNT it -- which makes the plain
+      // fraction read as a diagnosis of the people it left out.
+      //
+      // T-84: gated on `truncated` ALONE, deliberately unlike the two count
+      // cells either side of it. `exact` describes the two database-counted
+      // headline figures (027_team_feed_counts) and says nothing about this
+      // one -- it is derived from the fetched pages, so it is a genuine floor
+      // whenever the fetch was cut, exact counts or not.
+      value: `${countValue(insights.membersSyncing.ok, insights.truncated)}/${insights.membersSyncing.total}`,
+      label: STAT_SYNCING,
       // "ok" = members who have shared into the window; the rest we can only
       // observe as quiet, never diagnose as broken (their machine is not
-      // visible from here), so the unequal note states what we can see.
-      note: insights.membersSyncing.ok === insights.membersSyncing.total
-        ? 'all healthy'
-        : `${insights.membersSyncing.total - insights.membersSyncing.ok} haven't shared recently`,
+      // visible from here), so the unequal note states what we can see. Under
+      // truncation we cannot even say that much: "1 hasn't shared recently" is
+      // a claim about a person built from a window that was never fully read.
+      note: insights.truncated
+        ? COVERAGE_NOTE
+        : insights.membersSyncing.ok === insights.membersSyncing.total
+          ? 'all healthy'
+          : `${insights.membersSyncing.total - insights.membersSyncing.ok} haven't shared recently`,
     },
     {
-      value: countValue(insights.entriesShared.count, insights.truncated),
-      label: 'memory entries shared',
-      note: insights.truncated ? CAP_NOTE : deltaNote(insights.entriesShared.delta),
+      // Same pair of bits as the sessions cell above, same reason.
+      value: countValue(insights.entriesShared.count, countsAreFloors),
+      label: STAT_SHARED,
+      note: countsAreFloors ? CAP_NOTE : deltaNote(insights.entriesShared.delta),
     },
   ]
 
   return (
     <div className="insights-page">
       {daemonError && <DaemonErrorBanner className="insights-error" error={daemonError.error} />}
-      <div className="insights-header">
-        <h1 className="insights-title">Insights</h1>
-        {teamLabel && <span className="mono insights-count">{teamLabel}</span>}
-        <div className="insights-header-actions">
-          <div className="seg" role="group" aria-label="Time window">
-            {WINDOWS.map(w => (
-              <button
-                key={w}
-                type="button"
-                aria-pressed={w === windowDays}
-                className={w === windowDays ? 'seg-btn seg-btn-on' : 'seg-btn'}
-                onClick={() => onWindowChange(w)}
-              >
-                {w} days
-              </button>
-            ))}
-          </div>
-          <button type="button" className="insights-btn-ghost" onClick={() => exportCsv(insights)}>
-            Export CSV
-          </button>
-        </div>
-      </div>
+      <InsightsHeader
+        teamLabel={teamLabel}
+        windowDays={windowDays}
+        onWindowChange={onWindowChange}
+        onExport={() => exportCsv(insights)}
+      />
+
+      {/* Above the figures, not below them: it changes how every number on the
+          page should be read, so it cannot be a footnote they scroll past.
+          Sized from `insights.window` rather than the selector's state -- the
+          notice is a statement about THIS payload, and the two can only ever
+          drift apart in the direction of naming a window the data is not for. */}
+      {insights.truncated && <TruncationNotice windowDays={insights.window} coveredDays={insights.coveredDays} />}
 
       <StatStrip items={stats} />
 
       <div className="insights-cols">
         <div className="insights-colL">
           <div className="insights-sect">
-            Activity by person <span className="insights-hint">sessions · summaries shared</span>
+            {SECT_PEOPLE} <span className="insights-hint">sessions · summaries shared</span>
           </div>
           <PersonBars people={insights.perPerson} />
 
           <div className="insights-sect">
-            How well shared memory is working <span className="insights-hint">last {windowDays} days</span>
+            {SECT_MEMORY} <span className="insights-hint">last {windowDays} days</span>
           </div>
           <div className="skeleton-panel" data-testid="skeleton-panel">
             <div className="lrow" role="row">
@@ -313,8 +543,49 @@ function InsightsContent({ windowDays, onWindowChange, teamLabel }: InsightsCont
         </div>
 
         <div className="insights-colR">
-          <ProblemGroup testId="problems-broken" severity="broken" title="Broken" hint="nothing is reaching the team" problems={broken} emptyNote="Nothing is broken right now." />
-          <ProblemGroup testId="problems-minor" severity="minor" title="Minor" hint="isolated, no action needed" problems={minor} emptyNote="No minor issues." />
+          {/* THE ONE CLAIM ON THIS PAGE THAT NAMES A PERSON, and it is drawn
+              from the same fetch the cap truncates. lib/api-insights.js builds
+              `problems` from silentTeammateProblems and nothing else, so every
+              problem here is "nothing has arrived from <name>", derived from
+              rows the fetch may simply never have reached. A teammate who
+              shared 40 days into a 90-day window that only reached back 12
+              days produces a byte-identical payload to one who has genuinely
+              gone quiet -- so under truncation this section cannot be Broken
+              ("nothing is reaching the team" is exactly what is unestablished)
+              and it cannot be empty-noted "Nothing is broken right now"
+              either. Both are the same defect the rest of this page was just
+              fixed for: an unknown rendered as an answer.
+
+              Deliberately ALL problems rather than only the ones whose id
+              starts with `silent:`. Matching on the id shape would silently
+              restore full confidence to any future problem the daemon adds,
+              and a new problem is far likelier to be another read of the same
+              capped feed than a local certainty. Over-qualifying is visible
+              and recoverable; a false accusation about a named colleague is
+              neither.
+
+              The hint below is the highest-stakes sentence on this screen: it
+              is read inches from a named colleague, and it decides whether the
+              reader walks away thinking that person has gone quiet. So it
+              names both readings and puts the innocent one first, in words the
+              reader owns -- not "unread data", which describes our fetch loop
+              and leaves "has Sarah stopped working" as the only interpretation
+              the reader can actually form. */}
+          {insights.truncated ? (
+            <ProblemGroup
+              testId="problems-unconfirmed"
+              tone="unconfirmed"
+              title="Can't tell"
+              hint="silence here may be days that are not included, not a teammate who has gone quiet"
+              problems={insights.problems}
+              emptyNote="Nobody looked quiet in the days this view includes."
+            />
+          ) : (
+            <>
+              <ProblemGroup testId="problems-broken" tone="broken" title="Broken" hint="nothing is reaching the team" problems={broken} emptyNote="Nothing is broken right now." />
+              <ProblemGroup testId="problems-minor" tone="minor" title="Minor" hint="isolated, no action needed" problems={minor} emptyNote="No minor issues." />
+            </>
+          )}
 
           <div className="insights-sect">
             Knowledge concentration <span className="insights-hint">who is the only one who has touched a project</span>
@@ -382,7 +653,24 @@ export function InsightsPage() {
 
   const ready = statusQuery.data !== undefined && settingsQuery.data !== undefined
   if (!ready) {
-    return <div className="insights-page" />
+    // Was `<div className="insights-page" />` -- a literally empty element, so
+    // the window was blank while getSettings() fanned out to /api/settings +
+    // /api/status + /api/team (measured: ~250ms, dominated by /api/team).
+    //
+    // Deliberately NOT the full frame InsightsContent's loading branch uses:
+    // this runs BEFORE the role check below, and the window selector and stat
+    // labels are the authorized page's furniture. A member who typed this URL
+    // must not watch the admin page assemble itself and then be told no. The
+    // title is the exception, and it is not a leak -- it is the app answering
+    // "where am I" about a route the user chose.
+    return (
+      <div className="insights-page">
+        <div className="insights-header">
+          <h1 className="insights-title">Insights</h1>
+        </div>
+        <LoadingRows rows={3} label="Loading insights" testId="insights-outer-loading" />
+      </div>
+    )
   }
 
   const role = settingsQuery.data?.team?.role ?? null
@@ -398,9 +686,18 @@ export function InsightsPage() {
   const authorized = onTeam && client.capabilities.teamAdminSupported && isTeamAdmin
 
   if (!authorized) {
+    // T-78 item 14: a signed-out or teamless user reading "Insights is
+    // available to team owners and admins" was told about a permission tier
+    // that has no meaning for them yet -- the honest sentence is that
+    // Insights is a team surface. The role-restricted case (a signed-in
+    // member, not an owner/admin) keeps its original wording, since for that
+    // reader the permission tier IS the answer.
+    const message = onTeam
+      ? 'Insights is available to team owners and admins.'
+      : 'Insights is a team surface. It becomes available once you join or create a team.'
     return (
       <div className="insights-page">
-        <p className="insights-restricted">Insights is available to team owners and admins.</p>
+        <p className="insights-restricted">{message}</p>
       </div>
     )
   }

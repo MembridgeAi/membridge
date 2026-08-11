@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
+import { LoadingRows } from '../../components/LoadingBlock'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
   useCreateInviteLink, useCreateTeam, useJoinTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
@@ -82,6 +83,17 @@ function SignInCard({ configured }: { configured: boolean }) {
       <p className="team-signed-out" role="status">
         You are signed out. Team sync, shared memory and invites all need an account.
       </p>
+      {/* T-78 item 9: name that solo works, on the surface the rail's Team
+          link lands on. Without this, a fresh install reaches this screen and
+          reads "you are signed out" as a defect state rather than as the
+          onboarding step it is -- there was no "solo mode is fine" pitch
+          anywhere in the app. Deliberately a short sentence, not a splash
+          screen, so an actual invitee is not made to scroll past a marketing
+          block. */}
+      <p className="team-note">
+        MemBridge works solo too — your memory stays on this machine either way. Sign in only if you
+        want to share it with a team.
+      </p>
       <h2 className="team-card-title" id="team-auth-heading">
         {mode === 'signup' ? 'Create an account' : 'Sign in'}
       </h2>
@@ -98,13 +110,21 @@ function SignInCard({ configured }: { configured: boolean }) {
           with no password and could not sign in here at all while this card
           was email-only. A plain anchor, not a fetch: /team/oauth/github is a
           302 into GitHub's consent screen, and the daemon's callback page
-          finishes the exchange and links back here. */}
+          finishes the exchange and links back here.
+
+          T-78 item 11: the note used to read "Use this if you set your
+          account up from a MemBridge invite page — that flow is GitHub-only,
+          so your account has no password to type below." A first-time user
+          who never saw an invite page could not decode any part of that
+          sentence, and it also failed to name what "Continue with GitHub" IS
+          for them (the fastest path in). Restated as what the button does,
+          with the invitee-specific fact moved behind a "why?" hint that the
+          reader does not need to understand in order to click. */}
       <a className="team-btn team-btn-oauth" href="/team/oauth/github">
         Continue with GitHub
       </a>
       <p className="team-note">
-        Use this if you set your account up from a MemBridge invite page — that flow is GitHub-only,
-        so your account has no password to type below.
+        The fastest way in. Uses your GitHub account, no password to set or remember.
       </p>
 
       {/* Uncontrolled on purpose: the password lives in the DOM field for the
@@ -220,6 +240,16 @@ export function TeamPage() {
 
   const [share, setShare] = useState<Share | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  // The backend's wording for a revocation that did NOT happen, held here
+  // rather than in the mutation, because it has to survive the re-render into
+  // the signed-out view -- that is the only screen the user sees afterwards.
+  const [revokeFailure, setRevokeFailure] = useState<string | null>(null)
+  // Mirrors lib/server.js's INVITE_DEFAULT_EXPIRES_DAYS / INVITE_DEFAULT_MAX_USES.
+  // The screen states them and SENDS them rather than letting the daemon fill in
+  // an omitted field: an invite the user cannot see the terms of is how every
+  // invite this app minted ended up permanent (agent-sec cff17e3).
+  const [expiresDays, setExpiresDays] = useState(7)
+  const [maxUses, setMaxUses] = useState(1)
 
   // Only the "Copied" confirmation fades; the value itself stays on screen so
   // the viewer can always see exactly what was shared.
@@ -238,10 +268,16 @@ export function TeamPage() {
   const team = (selectedId ? account?.teams.find(t => t.id === selectedId) : undefined) ?? account?.teams[0] ?? null
   const webUrl = account?.webUrl ?? null
   const inviteCode = team ? account?.inviteCode ?? null : null
-  // A real link needs both a hosted join page and a team to mint against;
-  // without a webUrl the control degrades to the standing code rather than
-  // producing a URL nothing can redeem.
-  const canMintLink = !!(webUrl && team)
+  // create_invite is manager-gated on the daemon, so an ordinary member who
+  // clicked this got a 403 -- an affordance whose only possible outcome is an
+  // error, which reads as the app being broken rather than as a permission
+  // they do not have. The "copy the standing code instead" fallback is NOT the
+  // consolation prize: handing that code to ordinary members is the hole the
+  // security lane closed, so the whole affordance goes rather than degrading.
+  const canInvite = team ? team.role === 'owner' || team.role === 'admin' : false
+  // A real link also needs a hosted join page to mint against; without a
+  // webUrl there is no URL anything could redeem.
+  const canMintLink = !!(webUrl && team && canInvite)
 
   async function present(kind: 'link' | 'code', value: string, copy: boolean) {
     if (!copy) {
@@ -266,7 +302,7 @@ export function TeamPage() {
     setActionError(null)
     if (webUrl && teamId) {
       try {
-        const { token } = await mintInvite.mutateAsync(teamId)
+        const { token } = await mintInvite.mutateAsync({ teamId, expiresDays, maxUses })
         // The hosted join page reads its token from location.hash
         // (cloudflare/join/public/index.html), so the redeemable link is
         // `<webUrl>/#<token>` -- the same shape the Members page mints.
@@ -296,8 +332,12 @@ export function TeamPage() {
   async function handleSignOut() {
     setActionError(null)
     setShare(null)
+    setRevokeFailure(null)
     try {
-      await signOut.mutateAsync()
+      const out = await signOut.mutateAsync()
+      // Only when the backend did NOT confirm. `revoked` is never inferred
+      // from the absence of an error, so this is the one honest trigger.
+      if (!out.revoked) setRevokeFailure(out.revokeError || 'the server did not confirm it')
     } catch (err) {
       setActionError(errorMessage(err))
     }
@@ -325,7 +365,31 @@ export function TeamPage() {
           flashing "you are signed out" at someone who is signed in would be
           the same lie this page exists to remove, just pointing the other
           way. */}
-      {!account && <p className="team-loading">Loading…</p>}
+      {/* The gate itself was already right, and its comment states the rule
+          this whole sweep is about. Only the rendering changes: a bare
+          "Loading…" line where the account card will be, replaced with
+          placeholder rows that hold that card's shape. */}
+      {!account && <LoadingRows rows={2} label="Loading your account" testId="team-loading" />}
+
+      {/* Sign-out is two outcomes and this is the one the screen used to hide.
+          The local credential file is always deleted -- that is why the user is
+          looking at the sign-in card -- but the SESSION may still be alive on
+          the backend, and any copy of the credentials taken before now keeps
+          working until it expires.
+
+          Deliberately no "try again": the credentials are gone from this
+          machine, so there is nothing left to revoke WITH, and offering a retry
+          would name a remedy that cannot work. Matches the CLI's wording for
+          the same outcome (bin/membridge.js cmdLogout), so the two surfaces
+          cannot tell the user different things about the same event. */}
+      {revokeFailure && (
+        <p className="team-revoke-warning" role="alert" data-testid="signout-not-revoked">
+          ⚠ Signed out on this machine only. The session could not be ended on the server:
+          {' '}{revokeFailure}. A copy of this machine’s credentials taken before now can still
+          use that session until it expires. Changing your account password is the way to end
+          it for certain.
+        </p>
+      )}
 
       {account && !account.authenticated && <SignInCard configured={account.configured} />}
 
@@ -395,7 +459,54 @@ export function TeamPage() {
                 You are the {roleLabel(team.role)}
                 {memberCountLabel(team.memberCount) && ` · ${memberCountLabel(team.memberCount)}`}
               </p>
-              {(canMintLink || inviteCode) && (
+              {/* The terms of the link BEFORE it is minted, because the token
+                  goes straight to the clipboard -- there is no confirmation
+                  step where a user could otherwise discover what they just
+                  handed out. Every invite this app minted before agent-sec
+                  cff17e3 was permanent and unlimited, and nothing on screen
+                  ever said so or offered a way to change it.
+
+                  Only for the LINK path: `inviteCode` is the standing team
+                  code, long-lived and unlimited-use by design, and these
+                  bounds do not apply to it. */}
+              {/* Not silence. A member who finds no control cannot tell whether
+                  inviting is missing, broken, or simply not theirs, so the page
+                  says which. It does NOT name the owner and admins here: the
+                  People list immediately below already names every member with
+                  their role, and a second copy of that answer is one that can
+                  disagree with the first. Pointing at it is the version that
+                  cannot drift. */}
+              {team && !canInvite && (
+                <p className="team-note" data-testid="invite-manager-only">
+                  Only the team’s owner and admins can invite people. You can see who they are in
+                  the People list below.
+                </p>
+              )}
+              {canMintLink && (
+                <div className="team-invite-bounds">
+                  <label htmlFor="invite-expires">Expires</label>
+                  <select
+                    id="invite-expires" value={String(expiresDays)}
+                    onChange={e => setExpiresDays(Number(e.target.value))}
+                  >
+                    <option value="1">in 1 day</option>
+                    <option value="7">in 7 days</option>
+                    <option value="30">in 30 days</option>
+                    {/* 0 is the daemon's explicit opt-out, not an omission. */}
+                    <option value="0">never</option>
+                  </select>
+                  <label htmlFor="invite-uses">Uses</label>
+                  <select
+                    id="invite-uses" value={String(maxUses)}
+                    onChange={e => setMaxUses(Number(e.target.value))}
+                  >
+                    <option value="1">once</option>
+                    <option value="5">up to 5 times</option>
+                    <option value="0">unlimited</option>
+                  </select>
+                </div>
+              )}
+              {canInvite && (canMintLink || inviteCode) && (
                 <div className="team-actions">
                   <button
                     type="button" className="team-btn team-btn-primary"

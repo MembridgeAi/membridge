@@ -12,7 +12,25 @@
 // would churn every line number in a file teammates have in-flight branches
 // against; sections migrate out of it into test/suites/ instead, and the
 // legacy prelude dies when the last section leaves.
-const assert = require('assert');
+// FIRST of all: no suite talks to a real host unless it says so. The four baked
+// production defaults, and why an empty env var is not a way to turn them off,
+// are documented in test/no-egress.js. This was missing here entirely -- the
+// counters opt-out existed only in run-tests.js's setupFixtures, so all 26
+// split suites ran with counters, diagnostics and TEAM SYNC pointed at the
+// live backend.
+const noEgress = require('./no-egress');
+noEgress.install();
+
+// SECOND, and before any `require('assert')` anywhere: a check that makes no
+// assertion cannot fail, and prints `ok` all the same. check-accounting.js
+// hands every test/ file a counting copy of assert and turns a zero-assertion
+// check into a FAIL. Its header documents the four live instances that made
+// this necessary, and — more importantly — the three shapes it still cannot
+// catch. Shared with run-tests.js so the gate covers both runners.
+const accounting = require('./check-accounting');
+accounting.install();
+
+const assert = require('assert'); // the counting copy, via install() above
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -24,6 +42,15 @@ process.env.MEMBRIDGE_CLAUDE_DIR = path.join(ROOT, 'claude-projects');
 process.env.MEMBRIDGE_CODEX_DIR = path.join(ROOT, 'codex-sessions');
 process.env.MEMBRIDGE_INTERVAL = '3600';
 delete process.env.ANTHROPIC_API_KEY; // a real key on the dev machine must not leak into settings tests
+// The developer's (and CI's) GLOBAL git config is a real, unowned file that
+// product code now writes to: hooks.ensureInstalled() configures the memory
+// block's clean filter there, and that runs on every daemon boot — which the
+// daemon-spawning suites trigger by design. These are git's OWN redirects, not
+// a test-only branch, so the code under test takes its normal path and lands
+// somewhere throwaway. A suite that needs its own git identity still sets
+// GIT_AUTHOR_*/GIT_COMMITTER_* itself, exactly as before.
+process.env.GIT_CONFIG_GLOBAL = path.join(ROOT, 'gitconfig-global');
+process.env.GIT_CONFIG_SYSTEM = path.join(ROOT, 'gitconfig-system');
 
 // Same safety net as run-tests.js: never strand ROOT (it contains .membridge
 // markers the real daemon would treat as tracked-project evidence).
@@ -41,6 +68,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 // Real-file leak guards (see the incident history in run-tests.js): snapshot
 // before any fixture code runs, assert at finish(). The state guard keys off
 // the 'membridge-test-' ROOT prefix above — keep the two in sync.
+//
+// KNOWN_READS_UNOWNED_FILE: ~/.membridge/config.json — leak-detection snapshot. Rare-writer file (only when a user runs membridge signup/login), so external-writer flake is not the practical concern mcp-wiring's ~/.claude.json is. Cannot use a fixture: the whole point is to prove no fixture leaked into the real path. See test/suites/tests-own-their-state.test.js.
+// KNOWN_READS_UNOWNED_FILE: ~/.membridge/state.json — same, for the state file. Detected leak = a fixture path ended up in the real user's state (see the incident history in run-tests.js's top-of-file comment).
 const REAL_CONFIG_PATH = path.join(os.homedir(), '.membridge', 'config.json');
 function snapshotRealConfig() {
   try { return fs.readFileSync(REAL_CONFIG_PATH, 'utf8'); } catch { return null; }
@@ -59,57 +89,46 @@ function realStateLeakedFixtureKeys() {
 // run-tests.js, so concurrent suites — or a suite next to a live daemon —
 // land on disjoint blocks) ----
 const PORT_BASE = (() => {
-  // test/run.js assigns each concurrent suite a distinct verified-free block;
-  // the pid-based probe below is the fallback for running a suite directly.
+  // test/run.js assigns each concurrent suite a distinct verified-free block.
   const assigned = Number(process.env.MEMBRIDGE_TEST_PORT_BASE || '');
   if (Number.isFinite(assigned) && assigned >= 17900) return assigned;
-  const net = require('net');
-  const free = port => {
-    try {
-      const s = net.createServer();
-      s.listen(port, '127.0.0.1');
-      const r = s.listening;
-      s.close();
-      return r;
-    } catch { return false; }
-  };
-  const start = 17900 + ((process.pid % 40) * 100);
-  for (let i = 0; i < 40; i++) {
-    const base = 17900 + (((start - 17900) / 100 + i) % 40) * 100;
-    if (free(base + 41) && free(base + 96) && free(base + 99)) return base;
-  }
-  return start;
+  // Running this suite DIRECTLY: the block is derived from the pid and is not
+  // verified free. There used to be a probe loop here that claimed to verify
+  // it; the probe read `server.listening` synchronously after
+  // `listen(port, '127.0.0.1')`, which is always false because that overload
+  // defers through a DNS lookup, so it reported every port busy, every block
+  // failed, and this returned the same unverified pid guess it returns now —
+  // while reading like a checked answer. The keeper bind below is the only
+  // real signal, and it warns when the block is already taken.
+  return 17900 + ((process.pid % 40) * 100);
 })();
 const P = n => PORT_BASE + n;
 
-// RESERVE the block for this process's lifetime by holding base+99 (checks
-// above probe it). Probing alone reserves nothing: a suite may not bind its
-// first real server for minutes, and a second run starting in that window
-// would adopt the same block and cross-talk — observed live as two concurrent
-// runs corrupting each other's results in both directions. +99 is above the
-// highest offset any suite binds (+96). unref() so the keeper never holds the
-// process open; a bind error just means no reservation, never a crash.
+// RESERVE the block for this process's lifetime by holding base+99 (test/run.js
+// probes it before handing the block out). A suite may not bind its first real
+// server for minutes, and a second run starting in that window would adopt the
+// same block and cross-talk — observed live as two concurrent runs corrupting
+// each other's results in both directions. +99 is above the highest offset any
+// suite binds (+96). unref() so the keeper never holds the process open; a bind
+// error is not fatal, but it is the one hard evidence that this block is
+// already in use, so it is said out loud rather than swallowed.
 {
   const net = require('net');
   const keeper = net.createServer();
-  keeper.on('error', () => {});
+  keeper.on('error', () => {
+    process.stderr.write(`warning: port block ${PORT_BASE} is already held by another run; this suite may cross-talk with it\n`);
+  });
   keeper.listen(PORT_BASE + 99, '127.0.0.1');
   keeper.unref();
 }
 
 const results = [];
 // Supports both sync and async fn; async callers must `await check(...)`.
-function check(name, fn) {
-  const onOk = () => { results.push([name, null]); console.log(`  ok    ${name}`); };
-  const onErr = err => { results.push([name, err]); console.log(`  FAIL  ${name}\n        ${err.message}`); };
-  try {
-    const ret = fn();
-    if (ret && typeof ret.then === 'function') return ret.then(onOk, onErr);
-    onOk();
-  } catch (err) {
-    onErr(err);
-  }
-}
+// A check that makes no assertion FAILS; one still in flight at finish() is
+// named rather than silently dropped; checkNoThrow() is the documented way to
+// mean "the assertion is that this does not throw"; skip() is the way to say
+// a precondition was not met, out loud. See test/check-accounting.js.
+const { check, checkNoThrow, skip, checkNothingLeftInFlight } = accounting.createCheck(results);
 
 const jsonl = lines => lines.map(l => JSON.stringify(l)).join('\n') + '\n';
 const read = f => fs.readFileSync(f, 'utf8');
@@ -166,6 +185,11 @@ const BIN = path.join(__dirname, '..', 'bin', 'membridge.js');
 // format ("N/M checks passed") is load-bearing — test/run.js greps for it to
 // tell "green" from "crashed before the summary printed".
 function finish() {
+  // FIRST, before anything else is tallied: a check still in flight here has
+  // not asserted yet, and never will in a way anyone sees — its own ok/FAIL
+  // line lands after this function has printed the total and, on failure,
+  // exited.
+  checkNothingLeftInFlight();
   check('the suite never wrote to the real (non-MEMBRIDGE_HOME) ~/.membridge/config.json', () => {
     assert.strictEqual(snapshotRealConfig(), realConfigBeforeSuite,
       'the real user config changed during this run -- MEMBRIDGE_HOME isolation leaked');
@@ -184,7 +208,10 @@ function finish() {
 
 module.exports = {
   ROOT, P, PORT_BASE, BIN,
-  check, results, finish,
+  check, checkNoThrow, skip, results, finish,
+  assert, // the counting copy; suites that `require('assert')` get it anyway
+  assertionsMade: accounting.assertionsMade,
+  noEgress,
   jsonl, read, readSource, count, notRoot, realCanon,
   startJsonMock, waitForHttp, post, httpGet, httpPost,
 };

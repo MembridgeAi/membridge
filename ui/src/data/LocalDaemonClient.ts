@@ -3,8 +3,8 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  Member, Project, Role, SearchPage, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
+  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, McpRegisterResult,
+  Member, MyData, Project, Role, SearchPage, InviteOptions, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
   dedupeLiveSessions, feedQueryString, mapDayDigests, mapFeedEntry, mapLiveSession, mapMember, mapProjectRow,
@@ -113,6 +113,10 @@ async function postReadingError<T>(pathAndQuery: string, body?: unknown): Promis
 // meaningfully stale data.
 const REQUEST_CACHE_TTL_MS = 5000
 
+// requestCache key for GET /api/live-sessions. Named rather than inlined
+// because invalidateFeedCache() has to clear the same key from a second place.
+const LIVE_SESSIONS_KEY = 'live-sessions'
+
 // Where the chosen team is remembered between sessions.
 const SELECTED_TEAM_KEY = 'membridge.selectedTeam'
 
@@ -204,8 +208,12 @@ export class LocalDaemonClient implements DataClient {
   // syncProject/syncAll can add events the cached feed page doesn't have yet;
   // clearing here (rather than waiting out the TTL) keeps the post-sync read
   // honest without reintroducing a duplicate-fetch window on every render.
+  // LIVE_SESSIONS_KEY is cleared alongside: a sync can bring a teammate's row
+  // into the live window, and that read is cached under its own key rather
+  // than the 'feed:' prefix (see getLiveSessions).
   private invalidateFeedCache(): void {
     this.requestCache.deleteMatching('feed:')
+    this.requestCache.deleteMatching(LIVE_SESSIONS_KEY)
   }
 
   // ONE cached read of GET /api/team, shared by getSettings (which only wants
@@ -333,9 +341,17 @@ export class LocalDaemonClient implements DataClient {
     return { needsConfirmation: !!r.needsConfirmation, email: r.email }
   }
 
-  async signOut(): Promise<void> {
-    await postReadingError<{ authenticated: boolean }>('/api/team/logout')
+  async signOut(): Promise<SignOutResult> {
+    const r = await postReadingError<{ authenticated: boolean; revoked?: boolean; revokeError?: string | null }>('/api/team/logout')
     this.requestCache.clear()
+    // `revoked` FAILS CLOSED to false. A daemon too old to send the field has
+    // not revoked anything -- it only deleted the local file -- so treating a
+    // missing field as success would restore exactly the false assurance this
+    // reports. Defaulting the other way is the security-relevant direction.
+    return {
+      revoked: r.revoked === true,
+      revokeError: r.revoked === true ? null : (r.revokeError ?? null),
+    }
   }
 
   // postReadingError, not post: every reason a join fails is a sentence the
@@ -394,9 +410,51 @@ export class LocalDaemonClient implements DataClient {
     return rows.map(row => mapProjectRow(row, f.entries, status?.intervalSec))
   }
 
+  /**
+   * The "Happening now" strip's own endpoint: GET /api/live-sessions.
+   *
+   * WHY NOT feed() ANY MORE. This routed through the private feed() helper
+   * above, which means the strip that says who is working right now dragged the
+   * entire merged local+team feed page onto FIRST PAINT of the landing route,
+   * and then re-dragged it every 10s for as long as the window stayed open
+   * (useLiveSessions() is a LIVE query, queries.ts). Measured on Marco's
+   * install, same method both sides:
+   *
+   *   /api/feed?limit=100   850ms, 2 backend round trips, 184,882 bytes/100 entries
+   *   /api/live-sessions     39ms, 0 backend round trips,   4,668 bytes/1 row
+   *
+   * The 39ms holds whether the backend answers in 0ms or 250ms, because
+   * liveSessionsPayload is synchronous by construction -- a polled read cannot
+   * make a round trip. That is the property being bought here; the byte count
+   * is a side effect.
+   *
+   * NOT A NARROWER ANSWER. Teammates still appear (served from the cache the
+   * team sync already wrote), and the rows come out of the same unfiltered
+   * buildEntries the feed uses, so an intent shown in this strip can never
+   * disagree with the same session on the Feed screen.
+   *
+   * NO FALLBACK TO feed() ON 404, on purpose. The daemon serves this bundle
+   * (app/main.js loads the dashboard over HTTP from the daemon itself), so the
+   * UI and the endpoint ship together and cannot skew. A silent fallback would
+   * buy nothing real and would hide the one failure worth seeing: the strip
+   * quietly going back to an 850ms polled request would look like a fixed
+   * screen that is slow again for no reason.
+   *
+   * Cache key is NOT under the 'feed:' prefix -- this is a different endpoint
+   * with a different payload -- but invalidateFeedCache() clears it too, since
+   * a sync can produce live rows this read has already cached.
+   */
   async getLiveSessions(): Promise<LiveSession[]> {
-    const f = await this.feed()
-    return dedupeLiveSessions(f.entries).map(mapLiveSession)
+    const payload = await this.requestCache.get(LIVE_SESSIONS_KEY, () =>
+      get<{ sessions?: RawFeedEntry[] }>('/api/live-sessions'))
+    // Array-checked rather than trusted, same as every other payload at this
+    // boundary: an absent `sessions` must read as "nobody is working right
+    // now", never throw over the whole landing route.
+    const rows = Array.isArray(payload.sessions) ? payload.sessions : []
+    // dedupeLiveSessions stays even though the endpoint already folds one row
+    // per (author, session): the strip's grouping contract belongs to this
+    // client, not to whichever endpoint happens to feed it.
+    return dedupeLiveSessions(rows).map(mapLiveSession)
   }
 
   async getProjectStream(projectPath: string): Promise<StreamEntry[]> {
@@ -577,8 +635,12 @@ export class LocalDaemonClient implements DataClient {
   // (teamsync.inviteUrl -- the CLI/app/settings consumer), not the hash-based
   // shape the Members-page UI needs, so only the token is taken here; the
   // caller builds `${webUrl}/#${token}` itself.
-  async createInviteLink(teamId: string): Promise<{ token: string }> {
-    const inv = await post<{ token: string }>('/api/team/invite', { teamId })
+  // INV-1: the caller always decides now -- see DataClient.ts's
+  // createInviteLink header for why `options` is required rather than
+  // optional. Passing 0 for either field is the explicit opt-out that
+  // restores the old unlimited behaviour (lib/server.js's asLimit).
+  async createInviteLink(teamId: string, options: InviteOptions): Promise<{ token: string }> {
+    const inv = await post<{ token: string }>('/api/team/invite', { teamId, expiresDays: options.expiresDays, maxUses: options.maxUses })
     return { token: inv.token }
   }
 
@@ -619,6 +681,31 @@ export class LocalDaemonClient implements DataClient {
       objectName: e.objectName ?? null,
       targetName: e.targetName ?? null,
     }))
+  }
+
+  // GET /api/team/my-data. The daemon answers {projects:[], total:0} rather
+  // than an error when this machine is on no team, so there is nothing to
+  // special-case here -- an empty preview is the honest answer to "what of
+  // mine is on the backend" when the answer is nothing.
+  async getMyData(): Promise<MyData> {
+    const r = await get<MyData>(`/api/team/my-data${this.teamParam('?')}`)
+    return { projects: r.projects ?? [], total: r.total ?? 0 }
+  }
+
+  // POST /api/team/delete-my-data. `confirm: 'DELETE'` is the daemon's own
+  // second gate (it answers 400, not 403, without it) and is sent literally
+  // here; it is NOT the user-facing confirmation, which happens in the UI
+  // before this method is ever called.
+  //
+  // teamId is resolved rather than left to the daemon's firstTeamId() fallback
+  // so that a machine on more than one team deletes from the team the user is
+  // actually looking at -- the fallback would silently pick the first.
+  async deleteMyData(projectId?: string | null): Promise<DeleteMyDataResult> {
+    const teamId = this.selectedTeamId() ?? (await this.firstTeam())?.team_id
+    if (!teamId) throw new Error('deleteMyData requires a team, and this machine is not on one.')
+    return post<DeleteMyDataResult>('/api/team/delete-my-data', {
+      teamId, projectId: projectId ?? null, confirm: 'DELETE',
+    })
   }
 
   // GET /api/team/insights (lib/api-insights.js insightsPayload, wired in

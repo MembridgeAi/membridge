@@ -4,15 +4,16 @@ import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
 import { readEncryption } from '../../components/encryptionState'
 import { useDataClient } from '../../data/DataClientProvider'
-import { useOpenConfigFile, useSetSetting, useSettings, useStatus } from '../../data/queries'
+import { useOpenConfigFile, useSetSetting, useSettings, useSoloView, useStatus } from '../../data/queries'
 import { absoluteTime, relativeAgo } from '../../data/relativeTime'
-import type { DeliveryChannel, HooksVersionStatus, Settings } from '../../data/types'
+import type { DeliveryChannel, HooksVersionStatus, Settings, SharePromptsMode } from '../../data/types'
 import { ContextFilesDialog } from './ContextFilesDialog'
 import { DaemonGroup } from './DaemonGroup'
 import { EditListDialog } from './EditListDialog'
 import { ExcludedFoldersDialog } from './ExcludedFoldersDialog'
 import { McpRegisterControl } from './McpRegisterControl'
 import { SettingRow } from './SettingRow'
+import { SharePromptsControl } from './SharePromptsControl'
 import { TeamGroup } from './TeamGroup'
 import { UpdateHooksControl } from './UpdateHooksControl'
 import './settings.css'
@@ -199,6 +200,9 @@ export function SettingsPage() {
   const statusQuery = useStatus()
   const setSetting = useSetSetting()
   const openConfigFile = useOpenConfigFile()
+  // T-78: hides the Team memory encryption row on solo. Called here, above
+  // any conditional return below, per rules-of-hooks.
+  const soloView = useSoloView()
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null)
 
   // Full error page only for a first-load failure (no data at all); a failed
@@ -314,13 +318,50 @@ export function SettingsPage() {
        * row's job is to let him SEE the state, not to change it here; the
        * config file is deliberately the only way in, and "Open config file"
        * above is how you get there. */}
-      <SettingRow
-        label="Team memory encryption"
-        description="End-to-end means teammates' apps decrypt locally and nothing readable is stored on the server. Change it in your config file (team.encrypt, team.plaintextOff), not here."
-        testId="setting-plaintext"
-      >
-        <EncryptionDetail privacy={settings.privacy} />
-      </SettingRow>
+      {/* T-78: Team memory encryption is the ONE Privacy row that describes
+          team behaviour ("teammates' apps decrypt locally") and names the two
+          config keys (team.encrypt, team.plaintextOff) that only mean
+          something once a team exists. On a solo (or signed-out) install both
+          are noise: there is no team to encrypt for, and pointing at those
+          keys hands the user two variables to search their config for with no
+          value. Hidden entirely, matching the ticket's rule that the
+          surface goes AWAY on solo rather than saying "n/a". */}
+      {!soloView && (
+        <SettingRow
+          label="Team memory encryption"
+          description="End-to-end means teammates' apps decrypt locally and nothing readable is stored on the server. Change it in your config file (team.encrypt, team.plaintextOff), not here."
+          testId="setting-plaintext"
+        >
+          <EncryptionDetail privacy={settings.privacy} />
+        </SettingRow>
+      )}
+      {/* Share-prompts is a MACHINE preference (what this daemon transmits to
+          teammates on top of each summary), so it sits in Privacy next to
+          encryption -- both answer "what leaves this machine". Hidden on
+          solo for the same reason the encryption row is: with no team to
+          transmit to, the control is noise, not a choice.
+          Wired via the same setSetting mutation every other Settings write
+          uses; the key is 'team' with a nested `{sharePrompts}` value so the
+          daemon's PUT /api/settings body reads {team: {sharePrompts: '...'}}
+          -- see optimisticSettings in data/queries.ts for the cache patch,
+          and settingsMapper.normalizeSharePrompts for the read side (which
+          accepts the legacy boolean shape too). */}
+      {!soloView && settings.team && (
+        <SharePromptsControl
+          value={settings.team.sharePrompts}
+          pending={setSetting.isPending}
+          error={setSetting.isError
+            ? `Couldn't change Share prompts. ${errorMessage(setSetting.error)}`
+            : null}
+          onChange={(next: SharePromptsMode) => {
+            // mutateAsync so SharePromptsControl can await the write and
+            // roll its local selection back on rejection -- mutate() alone
+            // is fire-and-forget and would leave the radio one click ahead
+            // of reality.
+            return setSetting.mutateAsync({ key: 'team', value: { sharePrompts: next } })
+          }}
+        />
+      )}
       <SettingRow
         label="Redaction patterns"
         description="Built-in key, token and credential shapes, plus your own"

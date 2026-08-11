@@ -37,7 +37,14 @@
 -- --- audit -----------------------------------------------------------------
 create table if not exists public.ops_audit (
   id bigint generated always as identity primary key,
-  actor text not null,                 -- verified Access email, never client-supplied
+  -- The Access email the CALLER claims. This comment used to read "verified
+  -- Access email, never client-supplied", which is true of the Worker and false
+  -- of the column: `actor` arrives as the `p_actor` argument to ops_log, so at
+  -- the database layer it is composed by whoever holds the credential. It is
+  -- trustworthy exactly insofar as the caller is the Worker. See 048 for the
+  -- full analysis of why it cannot be made verifiable here, and `via_role`
+  -- below for the identity-adjacent fact that IS checked rather than received.
+  actor text not null,
   action text not null,
   target_team uuid references public.teams (id) on delete set null,
   detail jsonb not null default '{}'::jsonb,

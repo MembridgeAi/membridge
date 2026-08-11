@@ -2,6 +2,146 @@
 
 ## Unreleased
 
+## 0.3.4 — 2026-08-07
+
+Supersedes the never-released 0.3.3 tag. Ships one wave of prompt-sharing
+privacy work, a security migration, and several correctness fixes. The
+security half depends on SQL that must be applied to the live database —
+`supabase/migrations/054_sec_jamal_01.sql`, with rollback in
+`supabase/rollback/` and a pre-apply snapshot in `claude/ops/`.
+
+### Prompt sharing — safer by default
+
+- **`team.sharePrompts` is now `off` | `distilled` | `verbatim`, defaulting to
+  `distilled` on fresh installs.** Distilled shares the agent's own short
+  intent summary and never the raw prompt. Existing settings are preserved:
+  a legacy `true` maps to `verbatim`, `false` to `off`, and the Settings panel
+  now shows which mode is active — the audit trail a silent boolean never had.
+- **Environment-value redaction.** Any literal value found in a project's own
+  `.env` family (never `.env.example` and friends) is redacted wherever it
+  appears in shared text, emitting `[redacted:env]`. Compiled per project,
+  never written to disk.
+- **Carrier-phrase redaction.** "the staging password is …" now redacts the
+  value and keeps the sentence, emitting `[redacted:phrase]`. Measured to zero
+  false positives across the local corpus after tuning.
+- New `docs/security/redaction-boundary.md` states plainly what each layer
+  catches and what is still not caught.
+
+### Security — needs SQL applied (migration 054)
+
+- **`peek_invite` no longer discloses a team's name for a revoked, expired, or
+  exhausted invite.** The name is returned only when the invite is valid.
+- **`can_see_project` fails closed.** Its terminal fallback was `true`
+  (default-allow) and is now `false`; latent today, closed before a future
+  schema change could open it.
+- **Definer-function surface shrunk.** `projects_materialize_access` is revoked
+  from public/anon/authenticated (its trigger is unaffected), and
+  `is_team_member` / `team_feed` are revoked from anon.
+
+### Correctness and UX
+
+- **A second `membridge daemon` refuses to start over a live one** instead of
+  clobbering the pid file and racing on `state.json`.
+- **Re-adopting a deliberately deleted project now says so in the app** — the
+  Add-project dialog surfaces "history not restored" per folder instead of
+  showing an empty block.
+- **Day cards no longer promote agent narration** ("Now let me look at …") into
+  a day's headline.
+- Removed a duplicated `adoptProjects` in `lib/server.js` that would have made
+  a future edit silently no-op.
+
+### Build
+
+- The app build uploads the signed, notarized artifact **before** the test
+  gate, so a red ship-gate check no longer blocks producing the installer
+  asset.
+
+## 0.3.3 — 2026-08-05
+
+Nine agent branches assembled into one tree and shipped as one release. The
+security half depends on SQL that must be applied to the live database —
+`supabase/APPLY-RUNBOOK.md` walks through it in order.
+
+### Security — closes real holes, needs SQL applied
+
+- **Project access is scoped to its own team (migration 037).** A row written
+  under Team A could previously grant or revoke access to a project in Team B.
+  Writes are now refused unless the project belongs to the writing team.
+- **Invite redemption is atomic (038).** A single-use invite could admit two
+  people if they redeemed at the same moment. Fixed with a conditional update
+  that either claims a use or refuses.
+- **Removal and departure rotate the standing invite code (044, 045).** A
+  removed member could walk back in with an invite link they still held. Now
+  the code rotates on their way out and outstanding links revoke.
+- **Join and leave now write an audit row (046, 049).** The one event
+  recording somebody GAINING access to team memory had never landed. And an
+  audit row no longer keeps an account undeletable (050 makes actor_id a
+  SET NULL FK).
+- **Definer functions no longer answer for teams you are not in (042).**
+  Along with tighter grants on can_see_project, team_feed_counts and
+  set_project_access_default.
+- **Server-side timestamps (039), removed direct DELETE on memory_entries
+  (040), revoked blanket table grants on three internal tables (043),
+  removed a vestigial delete policy (051), and 031's RLS guardrail now
+  fails closed** — creation of a table without RLS is refused, not logged.
+
+### Revocation and recall
+
+- **Revocation survives a state.json rebuild** via a new append-only
+  `lib/revocation-ledger.js`. `loadState` used to discard state.json on a
+  version bump; the flag that gates teammate content on two on-disk caches
+  went with it. New ledger lives outside state.json, so revocation persists.
+- **Revocation detected from a member's only shared project.** A member who
+  loses their only shared project stopped receiving that project's rows but
+  the local cache kept serving them.
+- **Tier A recall works in the real path.** Was inert before; the hook only
+  recorded a hash on a store hit, so the tier could never bootstrap. Now
+  records on every read, keyed by delivered window, and refuses to claim a
+  serve it cannot prove was in scope.
+
+### Product
+
+- **Invite defaults are now single-use with a lifetime.** The daemon defaults
+  a missing `expiresDays`/`maxUses` to 7 days / 1 use rather than "never
+  expires / unlimited" — the shape every invite the app has ever minted had.
+  A 24-hour tightening plus a UI override toggle is scheduled as queue.md
+  item 7.
+- **Soft-deleted accounts stop receiving team encryption keys** (migration
+  053). `team_members_list` carries `deleted_at` and clients skip deleted
+  members.
+- **Feed shows a placeholder while the first page is in flight** rather than
+  a blank body that reads as "nothing yet".
+- **The tool filter lists tools that have actually fired here**, not tools
+  the daemon has spotted on disk. Selecting a spotted-but-silent tool no
+  longer empties the feed.
+- **Admin access grid stops showing a deleted project as visible to
+  everyone.** `readAccess` no longer guesses a `default_access` value when
+  the backend row is missing — it refuses.
+
+### Test infrastructure
+
+- **The full suite is a ship gate, not a development-loop tool** — the split
+  into `test/suites/*.test.js` continues, and a mutation runner
+  (`test/mutate.js`) with three modes (ops, stub, guard) landed.
+- **Silent-shape merge hazards are now caught by
+  `test/suites/merge-shadowing.test.js`** — duplicate route handlers,
+  duplicate returns, duplicate exports, duplicate migration numbers.
+- **Migration registry gate** (`test/suites/migration-state.test.js`) fails
+  on any migration file with no row in the ledger, and on any ledger row
+  the apply order does not mention.
+
+### CLAUDE.md churn
+
+- **The injected block footer is derived from newest activity, not the wall
+  clock**, so the tracked file stops churning on every sync. Follow-up work
+  to hide the region from git entirely is scheduled as queue.md item 6.
+
+### Not in this release
+
+- Migrations 052 (account-deletion FK actions) and 047/048 (ops panel
+  scoped roles + audit column) are on disk but not scheduled. 052 needs a
+  product decision, 047/048 need a Worker deploy — see the runbook.
+
 ## 0.3.2 — 2026-08-05
 
 - **Fixed: the desktop app said it was not running.** 0.3.1 replaced a status

@@ -5,7 +5,7 @@
 // document.hidden and blanked the dashboard mid screen-recording).
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDataClient } from './DataClientProvider'
-import type { AccessMatrix, DeleteProjectResult, FeedFilters, Role, Settings } from './types'
+import type { AccessMatrix, DeleteProjectResult, FeedFilters, InviteOptions, Role, Settings } from './types'
 
 const LIVE = { refetchInterval: 10_000, refetchIntervalInBackground: false } as const
 
@@ -192,6 +192,42 @@ export function useSettings() {
 export function useTeamAccount() {
   const c = useDataClient()
   return useQuery({ queryKey: ['teamAccount'], queryFn: () => c.getTeamAccount(), staleTime: STANDARD_STALE_MS })
+}
+
+/**
+ * "Should this surface speak team-language at all?" Every affirmative team
+ * surface -- SHARED/PRIVATE tags, "N shared" counts, team-sync chips, team
+ * encryption -- is HIDDEN when this returns true, because on a solo install
+ * those assertions are drawn from noise: a stray `.membridge/team.json` in the
+ * working directory (someone else's clone, an old worktree, a repo cloned from
+ * a team member's fork) marks the project as team-linked on the daemon side,
+ * and every downstream screen then renders team language a user with no team
+ * has no context for. The one commit's-worth-of-gating half of T-78 is this
+ * hook plus its call sites.
+ *
+ * The rule is exactly what T-78 named: `status.solo === true` OR the account
+ * is not authenticated. Deliberately NOT distinguishing "genuinely solo" from
+ * "team member with no rows yet" -- both should see solo language for a stray
+ * team-labelled project. This is DIFFERENT from Shell.tsx's `onTeam`
+ * (settings.team !== null): that answers "does this identity own a team",
+ * which is the right gate for showing team NAV but the wrong one for
+ * suppressing team CLAIMS about a stray-linked project, since a real owner
+ * whose linked projects all happen to sit outside a multi-member team still
+ * reports `solo: true` and should still not see "1 shared" quoted about a
+ * project that just happens to carry a foreign team.json.
+ *
+ * Loading defaults to `true` (solo view). The failure mode this ticket exists
+ * to fix is TEAM language rendered without evidence; defaulting to solo means
+ * a flash-of-noise is empty rather than accusatory. Every consumer's real
+ * team data still lands on its own; this only decides whether the frame
+ * around it commits to team-ness before that data arrives.
+ */
+export function useSoloView(): boolean {
+  const status = useStatus()
+  const account = useTeamAccount()
+  const solo = status.data?.solo ?? true
+  const authenticated = account.data?.authenticated === true
+  return solo || !authenticated
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +481,8 @@ export function useCreateInviteLink() {
   const c = useDataClient()
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (teamId: string) => c.createInviteLink(teamId),
+    mutationFn: (v: { teamId: string } & InviteOptions) =>
+      c.createInviteLink(v.teamId, { expiresDays: v.expiresDays, maxUses: v.maxUses }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['audit'] }) },
   })
 }
@@ -600,6 +637,12 @@ function isEnabledFlag(value: unknown): value is { enabled: boolean } {
   return typeof value === 'object' && value !== null && typeof (value as { enabled?: unknown }).enabled === 'boolean'
 }
 
+function isSharePromptsPatch(value: unknown): value is { sharePrompts: 'off' | 'distilled' | 'verbatim' } {
+  if (typeof value !== 'object' || value === null) return false
+  const v = (value as { sharePrompts?: unknown }).sharePrompts
+  return v === 'off' || v === 'distilled' || v === 'verbatim'
+}
+
 function optimisticSettings(prev: Settings, key: string, value: unknown): Settings | null {
   if (key === 'startAtLogin' && typeof value === 'boolean') {
     return { ...prev, daemon: { ...prev.daemon, startAtLogin: value } }
@@ -610,6 +653,13 @@ function optimisticSettings(prev: Settings, key: string, value: unknown): Settin
   if (key === 'distill' && isEnabledFlag(value)) {
     const enabled = value.enabled
     return { ...prev, delivery: prev.delivery.map(c => c.id === 'summaries' ? { ...c, enabled } : c) }
+  }
+  // Share-prompts write: setSetting('team', { sharePrompts: '...' }). Only
+  // patches when a real team is present (SharePromptsControl is not rendered
+  // on solo -- if a payload without team.sharePrompts ever slipped through
+  // we would rather do no patch than fabricate one).
+  if (key === 'team' && isSharePromptsPatch(value) && prev.team) {
+    return { ...prev, team: { ...prev.team, sharePrompts: value.sharePrompts } }
   }
   return null
 }
@@ -742,6 +792,39 @@ export function useLeaveTeam() {
   return useMutation({
     mutationFn: (teamId: string) => c.leaveTeam(teamId),
     onSuccess: () => accountRefresh(qc),
+  })
+}
+
+// The deletion preview. `enabled` is load-bearing: this is a backend RPC round
+// trip, and it should fire when the confirmation dialog opens rather than
+// sitting in the background of a Settings page nobody is deleting from.
+//
+// staleTime/gcTime 0 so every open re-reads. A stale count is tolerable almost
+// everywhere else in this product and intolerable here: it is the number a
+// person reads before agreeing to destroy something, and other machines push
+// to the same account between opens.
+export function useMyData(enabled: boolean) {
+  const c = useDataClient()
+  return useQuery({
+    queryKey: ['myData'],
+    queryFn: () => c.getMyData(),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+  })
+}
+
+// Irreversible. Invalidates everything on success rather than patching
+// individual caches: entries this user wrote surface in the feed, in search,
+// in project counts and in insights, and any one of those still rendering
+// removed rows would read as "it didn't work" -- the single impression this
+// action must never give.
+export function useDeleteMyData() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (projectId?: string | null) => c.deleteMyData(projectId ?? null),
+    onSuccess: () => { void qc.invalidateQueries() },
   })
 }
 

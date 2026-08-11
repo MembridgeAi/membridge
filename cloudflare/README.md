@@ -279,9 +279,18 @@ without an Access session; it must return 401.
 ## What the panel can and cannot do
 
 Writes go through a fixed allowlist in `ops-api/src/index.js`, each mapping to one
-narrow RPC. The ops API never gets generic INSERT/UPDATE on `teams`,
-`team_members`, `projects` or `memory_entries`, so the blast radius of a
-compromised Worker is the union of those four functions and nothing else.
+narrow RPC. An action not in that table cannot be reached, whatever the request
+body says.
+
+**Distinguish what the PANEL can do from what the KEY can do — the two are not
+the same, and this section used to conflate them.** It previously concluded that
+"the blast radius of a compromised Worker is the union of those four functions
+and nothing else". That is wrong: a compromised Worker means a leaked
+`SUPABASE_SERVICE_KEY`, and that key bypasses RLS and holds full CRUD on every
+table (see *The one credential worth watching* for the verification). The
+allowlist below constrains the panel's *code*, which is what stops an operator
+or a CSRF'd browser from doing something destructive. It does not constrain an
+attacker who has extracted the secret.
 
 **Can:** set an internal note on a team, flag a team as internal (drops it from
 every metric), rotate a team's invite code, issue a named onboarding invite.
@@ -292,10 +301,56 @@ affected user, which is the correct place for them — an admin panel that can
 irreversibly destroy a customer account is a bad trade for the convenience. Do
 those deliberately in the Supabase console.
 
-**Every write is audited** with the verified Access email. `p_actor` is a required
-argument on each write RPC, so the trail cannot be skipped by omitting it. An
-admin panel without an audit log is indistinguishable from someone holding the
-service key.
+**What the read routes DO return**, since "cannot read session content" is easy
+to over-read as "returns only aggregates". Audited 2026-08-05 against the live
+function bodies:
+
+- `GET /api/team/<uuid>` → `ops_team_detail`: team name, ops note, internal flag,
+  **every member's display name, role and join date**, and per-project *entry
+  counts* and last-activity timestamps. Real people's names, no emails, no user
+  ids, and no entry content.
+- `GET /api/*` (overview) → `ops_snapshot` aggregates, `ops_audit_recent` (last 50
+  ops actions), Analytics Engine counters, and `ops_onboarding_invites`, which
+  returns **raw onboarding invite tokens** for every invite including live
+  unredeemed ones. Those are credentials rendered in a browser page. Redeeming
+  one makes the redeemer the OWNER of a brand-new team rather than granting
+  access to an existing one, so the direct harm is bounded — but
+  `onboarding_invites` has no revocation path at all (only expiry and
+  single-use), so a token seen over a shoulder or left in a screenshot cannot be
+  killed, only waited out.
+
+No route returns `memory_entries` content or ciphertext.
+
+**Every write is audited**, and the actor is **self-reported** — read that
+carefully, because an earlier wording here ("audited with the verified Access
+email") claimed more than the design delivers.
+
+The Worker fills `p_actor` from the Cloudflare Access email it has verified, so
+in normal operation the name in the trail is correct. But `p_actor` is an
+*argument*, so from the database's side it is composed by whoever holds the
+credential. Anyone with the panel's write key can pass any string. The trail
+answers "which of us did this" among the operators in `ALLOWED_EMAILS`; it does
+not survive a stolen credential, and it was never able to.
+
+What the trail *does* guarantee, even against someone holding that credential:
+
+- **The event is real.** `ops_log` is granted to `service_role` alone, so the
+  panel's write role cannot write arbitrary rows — only cause them as a side
+  effect of the four real actions.
+- **The time is the database's**, not the caller's (`ops_audit.at` defaults to
+  `now()` and `ops_log` never names the column).
+- **Nothing can be erased.** `ops_audit` has RLS on with zero policies and no
+  table grants, so there is no UPDATE or DELETE path at all.
+
+So: the *actor* is mislabelable by someone who already holds the write key; the
+*event*, its *time* and its *occurrence* are not. And mislabelling is the least
+of what that key buys — see the note on `SUPABASE_SERVICE_KEY` in
+`ops-api/wrangler.toml`. Migration `048` records `via_role`, the one
+identity-adjacent value PostgREST verifies rather than accepts, and its header
+sets out why the actor itself cannot be made verifiable in the database.
+
+An admin panel without an audit log is indistinguishable from someone holding
+the service key — that reasoning stands, and is why the trail exists.
 
 ### Onboarding, and why the panel cannot just create a team
 
@@ -349,14 +404,53 @@ exempt — they are side-effect free.
 `SUPABASE_SERVICE_KEY` is the single high-privilege secret here. It is required
 because `ops_snapshot()` is granted to `service_role` only.
 
-Mitigations: it exists only as a Worker secret, the `ops-api` Worker is its sole
-holder, it can only reach the `ops_*` functions the panel actually calls, and that
-Worker has no route reachable without Access. Note this got more valuable to an
-attacker the moment writes were added — it is no longer read-only.
+**Corrected 2026-08-05 — this section previously said the key "can only reach
+the `ops_*` functions the panel actually calls". That is false, and it
+understated the blast radius of the one credential this section exists to warn
+about.** Verified read-only against the live database:
+
+- `service_role` has `rolbypassrls = true` (`select rolbypassrls from pg_roles
+  where rolname = 'service_role'`). Row-level security is not evaluated for it
+  at all — every membership predicate, `can_see_project` gate and project-access
+  scoping in this product is simply not in the path.
+- It holds `SELECT`, `INSERT` and `DELETE` on **all 15** tables in `public`
+  (`has_table_privilege('service_role', …)`), so it reaches them directly at
+  `/rest/v1/<table>`. The `ops_*` grants are what the *panel* uses, not a limit
+  on what the *key* can do.
+
+So the honest statement of blast radius: **anyone holding this key can read and
+write every row in the database, including every team's memory entries and the
+sealed team keys.** Content encrypted end-to-end stays ciphertext — the key does
+not unseal `team_keys`, since those are sealed to member public keys — but
+everything not encrypted, and all metadata, is fully exposed.
+
+What is genuinely mitigating, each checked rather than assumed:
+
+- It exists only as a Worker secret. No `service_role` key appears anywhere in
+  this repo or in build output — scanned by decoding every JWT-shaped string's
+  `role` claim; the only key committed is the `anon` one, which is public by
+  design, and the `service_role` token in `test/suites/redaction.test.js` is
+  synthetic (no `ref`, `iat` or `exp` claim, which every real Supabase key has).
+- Nothing else in the codebase uses `service_role`. The daemon, CLI, Electron app
+  and UI contain no reference to it; the only hits are that redaction test.
+- The Worker is not reachable without Access. Verified by an unauthenticated
+  request to `https://ops.membridge.me/api`, which returns `302` to
+  `weathered-sky-8f4e.cloudflareaccess.com/cdn-cgi/access/login/...` with an
+  `aud` matching `ACCESS_AUD` in `wrangler.toml`.
+
+**Would we know if it leaked? Almost certainly not.** `ops_log()` records writes
+made *through the ops RPCs* into `ops_audit`, but a stolen key used directly
+against `/rest/v1/<table>` calls no RPC and writes no audit row. Nothing in any
+table the team controls would change. The only trace would be Supabase's own API
+request logs, which are retained for a limited window and which nobody is
+currently watching or alerting on. Treat "no sign of misuse" as no evidence
+either way.
 
 **If `ops-api` is ever compromised, rotate this key first.** A dedicated
 read-only Postgres role would be strictly better and is the natural next
-hardening step.
+hardening step — and on the evidence above it is worth more than its "nice to
+have" framing suggests, because it is the only change that would actually shrink
+the blast radius rather than defend the perimeter around it.
 
 ---
 
