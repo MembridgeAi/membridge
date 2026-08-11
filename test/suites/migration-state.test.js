@@ -72,16 +72,27 @@ function ledgerStates() {
   const src = fs.readFileSync(LEDGER, 'utf8');
   const states = new Map(); // "033" -> Set of declared states
   for (const line of src.split('\n')) {
-    // The state column may carry a qualifier — "applied (superseded)" — so the
-    // capture has to allow parens. It did not at first, and the row simply
-    // vanished from the map, which this suite then reported as "012 declares no
-    // state". Worth keeping in mind: a parser that silently drops a row makes a
-    // present fact look absent.
-    const m = line.match(/^\|\s*(\d{3})\s*[`\w\s()]*\|\s*\**([\w ()]+?)\**\s*\|/);
+    // Capture the state column WHOLE — everything up to the closing pipe —
+    // rather than by an allow-list of characters.
+    //
+    // This was `[\w\s()]` and before that had no parens at all. Each time
+    // someone wrote a status the class did not cover, the row did not error:
+    // it silently STOPPED MATCHING and vanished from the map, resurfacing as
+    // "012 declares no state" or as `ledger says ""`. Both read as a missing
+    // row rather than a parse failure, which is the wrong problem to go
+    // looking for. The class had been narrowed-then-widened reactively twice,
+    // which is the tell that an allow-list is the wrong tool here.
+    //
+    // Now a row can only fail to parse by not being a row. Whatever is in the
+    // state column arrives as text and is judged downstream, so the failure
+    // mode is "unrecognised status" rather than "row disappeared".
+    const m = line.match(/^\|\s*(\d{3})\s*[^|]*\|([^|]*)\|/);
     if (!m) continue;
     const [, num, state] = m;
     if (!states.has(num)) states.set(num, new Set());
-    states.get(num).add(state.trim().toLowerCase());
+    // Strip the bold markers the ledger uses for emphasis; they are formatting,
+    // not part of the status.
+    states.get(num).add(state.replace(/\*/g, '').trim().toLowerCase());
   }
   return states;
 }
@@ -172,6 +183,56 @@ async function main() {
     }
     assert.deepStrictEqual(conflicts, [],
       `applied/unapplied is recorded in two places and they disagree:\n  ${conflicts.join('\n  ')}`);
+  });
+
+  // THE TWO-DOCUMENT DRIFT, and the one with a human at the end of it.
+  //
+  // MIGRATION-STATE.md records what is DEPLOYED. APPLY-RUNBOOK.md is the
+  // numbered list a human opens and pastes from. Nothing read them together,
+  // so they drifted, and on 2026-08-08 they disagreed in the direction that
+  // costs something: the ledger had been reconciled against production and
+  // said 037, 038, 039, 040 and 031 were live, while the runbook still listed
+  // all five as steps to paste, in order, with prose telling the reader to do
+  // 031 "when the other five are known good".
+  //
+  // Re-running 037-040 would likely have been harmless. 031 would not: it is a
+  // RECONSTRUCTION of an object that predates the repo, so `create or replace`
+  // would have replaced working production behaviour with our best guess at
+  // it, for no gain, since the behaviour was already confirmed live.
+  //
+  // The suite was green throughout. It asserted things about the ledger and
+  // nothing about the document that actually gets acted on — the check passed
+  // while the dangerous instruction sat there. Fixing that instance by hand
+  // fixes five rows and leaves the mechanism, so this is the mechanism.
+  //
+  // A struck step (`~~14~~`) is the runbook's own "do not paste this" marker
+  // and is what the fix looks like, so struck rows are exempt by design.
+  await check('the runbook never lists a migration the ledger calls applied', () => {
+    const src = fs.readFileSync(RUNBOOK, 'utf8');
+    const live = [];
+    for (const line of src.split('\n')) {
+      // A LIVE apply-step: a step number NOT wrapped in ~~strikethrough~~,
+      // followed by a cell naming a NNN_*.sql file.
+      const m = line.match(/^\|\s*(\d+)\s*\|\s*`?(\d{3})_[^`|]*\.sql`?\s*\|/);
+      if (!m) continue;
+      const [, , num] = m;
+      const declared = [...(ledger.get(num) || [])];
+      // TWO disqualifiers, not one. "applied" is the common case (pasting it
+      // again is redundant). "never apply" is the rarer and worse one: 031 is
+      // marked that way precisely BECAUSE its behaviour is live and the file is
+      // a reconstruction, so its status is not "applied" and an applied-only
+      // predicate would have walked straight past the single most dangerous
+      // row in the table.
+      const bad = declared.some(s => s.startsWith('applied') || s.includes('never apply'));
+      if (bad) live.push(`step ${m[1]} = ${num}`);
+    }
+    assert.deepStrictEqual(live, [],
+      'APPLY-RUNBOOK.md lists these as steps to paste, but MIGRATION-STATE.md '
+      + `records them as applied or as never-apply: ${live.join(', ')}. `
+      + 'Either the ledger is wrong or the runbook is stale — settle it against '
+      + 'production, then strike the runbook step (~~N~~) with the reason. '
+      + 'Re-applying is usually harmless; for a RECONSTRUCTION it overwrites '
+      + 'live behaviour with a guess.');
   });
 
   // The ledger's whole value is that its claims are dated. An undated ledger is
