@@ -1,0 +1,59 @@
+version: 2
+
+# Why three ecosystems and not one: the repo publishes an npm package whose
+# tarball ships only bin/lib/vendor, but CI and the desktop build pull from two
+# separate manifests (root and ui/, which is its own workspace with its own
+# lockfile) plus the Actions themselves. A single npm entry would silently leave
+# the React UI's devDeps and the pinned action SHAs unwatched.
+updates:
+  # Root: prod deps land in the published tarball and in the Electron runtime,
+  # so these are the ones that reach end users. Grouped so a routine patch bump
+  # is one PR, but majors stay separate for a deliberate read.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      prod-patch-minor:
+        applies-to: version-updates
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      dev-all:
+        applies-to: version-updates
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # electron/electron-builder majors change the embedded Node version, which
+      # the CI matrix pins against on purpose (24 = Electron 43's Node). Bumping
+      # these needs the matrix updated in the same change, so never automatic.
+      - dependency-name: electron
+        update-types: [version-update:semver-major]
+      - dependency-name: electron-builder
+        update-types: [version-update:semver-major]
+
+  # ui/ is a separate npm workspace with its own lockfile; CI installs it with a
+  # full `npm ci` (not --omit=dev) because vite/vitest are build-critical there.
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      ui-patch-minor:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # Actions are the CI supply chain: a compromised third-party action runs with
+  # the workflow's token on three OSes. Watched weekly like everything else.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
