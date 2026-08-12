@@ -39,7 +39,9 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 
 | 056 | `team_feed` off the default PUBLIC grant that four drop+create migrations kept restoring, with the paired grant that stops the revoke being an outage | `agent-insights-agg` | no |
 
-**Next free number: 057.**
+| 057 | Per-team unique display names (case/whitespace-insensitive), a member avatar choice, and `set_display_name` | `feat/member-identity-rename` | no |
+
+**Next free number: 058.**
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
@@ -79,6 +81,7 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | ~~16~~ | `054_sec_jamal_01.sql` | **ALREADY APPLIED — SKIP.** Verified against production 2026-08-08 with all three of the file's own queries; see the 054 row in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Left in this table rather than deleted so the numbering stays legible and so it is obvious this was checked rather than dropped. Do not paste it. *(sec lane)* |
 | 17 | `055_team_insights_rollup.sql` | Makes the per-person and per-project numbers on Insights real totals instead of a quarter-short sample, and stops the screen naming somebody as a project's only contributor on the strength of an incomplete read. Adds a new function, touches nothing existing — any order, on its own, and safe to apply before or after the client ships. *(insights lane)*
 | 18 | `056_team_feed_revoke_public.sql` | Stops `team_feed` being callable by PUBLIC. No data is exposed today — `is_team_member` denies a null identity — so this is defence in depth, not a live leak. **Apply in the same session as 055.** Self-verifying: it raises rather than silently doing nothing. *(insights lane)* |
+| 19 | `057_member_identity.sql` | Lets a member rename themselves and pick an avatar, with display names enforced unique per team by a partial unique index (not a client check). Adds columns to `team_members`, a dedupe-on-insert trigger, and `set_display_name`. Independent of everything above — any order, on its own. *(member-identity lane)* |
 
 **`052_account_deletion_fk_actions.sql` is deliberately NOT in this table.** It
 is parked pending a product decision — see `docs/ACCOUNT-DELETION.md` section 6
