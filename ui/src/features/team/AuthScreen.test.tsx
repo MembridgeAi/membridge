@@ -165,7 +165,7 @@ describe('AuthScreen sign-up outcome handling is exhaustive', () => {
     await userEvent.type(screen.getByLabelText(/email/i), 'brand-new@acme.dev')
     await userEvent.type(screen.getByLabelText(/password/i), 'long-enough-password')
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }))
-    expect(await screen.findByText(/Account created\. Confirm brand-new@acme\.dev/)).toBeInTheDocument()
+    expect(await screen.findByText(/Check brand-new@acme\.dev for a confirmation link/)).toBeInTheDocument()
     expect(screen.queryByText(/already has an account/)).toBeNull()
     cleanup()
 
@@ -235,6 +235,6 @@ describe('AuthScreen, signing up with an address that already has an account', (
     await userEvent.type(screen.getByLabelText(/password/i), 'long-enough-password')
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }))
 
-    expect(await screen.findByText(/Account created\. Confirm brand-new@acme\.dev/)).toBeInTheDocument()
+    expect(await screen.findByText(/Check brand-new@acme\.dev for a confirmation link/)).toBeInTheDocument()
   })
 })

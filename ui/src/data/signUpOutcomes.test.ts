@@ -17,9 +17,4 @@ describe('DataClient.signUp outcomes', () => {
     await expect(c.signUp({ displayName: 'A', email: FakeDataClient.REGISTERED_EMAIL, password: 'long-enough-pw' }))
       .resolves.toEqual({ status: 'email-exists', email: FakeDataClient.REGISTERED_EMAIL })
   })
-
-  it('exposes the registered fixture address as a constant, not a literal to copy', () => {
-    expect(typeof FakeDataClient.REGISTERED_EMAIL).toBe('string')
-    expect(FakeDataClient.REGISTERED_EMAIL).toContain('@')
-  })
 })

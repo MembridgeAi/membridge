@@ -1186,7 +1186,7 @@ async function cmdJoin() {
     } catch {
       const r = await teamsync.signup(config, email, password, opt('--name'));
       if (r.emailExists) {
-        die(`${email} already has an account, but that password was rejected. Check the password, or sign in from the MemBridge app.`);
+        die(`${email} already has an account, but signing in with it didn't work. Check the password, confirm the email is verified, or sign in from the MemBridge app.`);
       }
       if (r.needsConfirmation) {
         die(`Account created. Check ${email} for a confirmation link, then run this join command again.`);

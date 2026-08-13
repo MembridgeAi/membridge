@@ -14,6 +14,10 @@
   align-items: center;
   justify-content: center;
   min-height: 100%;
+  /* .auth-screen is a flex ITEM of .team-page (a column flex container), so
+     without this its main-size stays content-height and the card sits at the
+     top of a tall empty page instead of centring in it. */
+  flex: 1;
   padding: var(--sp-6) var(--sp-4);
   gap: var(--sp-5);
 }
@@ -177,6 +181,16 @@
 }
 .auth-oauth:hover { background: var(--panel2); }
 .auth-oauth-mark { flex: none; }
+
+/* Sits directly under the button rather than above the form like the other
+   .auth-note -- centred and tighter, so it reads as a caption on the button
+   above it, not as a paragraph of its own. */
+.auth-note-oauth {
+  margin: var(--sp-2) 0 0;
+  text-align: center;
+  font-size: var(--fs-sm);
+  color: var(--text3);
+}
 
 .auth-footnote {
   max-width: 400px;

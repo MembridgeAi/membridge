@@ -68,7 +68,8 @@ export function AuthScreen({ configured }: { configured: boolean }) {
   // has been typed (or the field was just reset), and the meter must not
   // render at all in that state. scorePassword('') already answers
   // { score: 0, hint: '' } uniquely for the empty string -- every non-empty
-  // password that scores 0 carries the "Use at least 8 characters." hint, so
+  // password that scores 0 still carries SOME hint (scorePassword('aaaaaaaa')
+  // is { score: 0, hint: 'Add another word — length matters most.' }), so
   // that pair alone would in fact distinguish "empty" from "typed". null is
   // still used instead, because it makes "nothing to score yet" a fact about
   // the type rather than something every reader has to re-derive by tracing
@@ -114,7 +115,7 @@ export function AuthScreen({ configured }: { configured: boolean }) {
             // the app just proceeds to the signed-in view.
             break
           case 'needs-confirmation':
-            setNotice(`Account created. Confirm ${result.email} from the email just sent to it, then sign in below.`)
+            setNotice(`Check ${result.email} for a confirmation link, then sign in below.`)
             setMode('signin')
             break
           case 'email-exists':
@@ -147,7 +148,7 @@ export function AuthScreen({ configured }: { configured: boolean }) {
   }
 
   return (
-    <main className="auth-screen">
+    <div className="auth-screen">
       <div className="auth-card">
         <div className="auth-brand">
           <MembridgeMark className="auth-brand-mark" />
@@ -236,12 +237,15 @@ export function AuthScreen({ configured }: { configured: boolean }) {
           <GitHubMark className="auth-oauth-mark" />
           Continue with GitHub
         </a>
+        <p className="auth-note auth-note-oauth">
+          The fastest way in. Uses your GitHub account, no password to set or remember.
+        </p>
       </div>
 
       <p className="auth-footnote">
         MemBridge works solo too — your memory stays on this machine either way.
         Sign in only if you want to share it with a team.
       </p>
-    </main>
+    </div>
   )
 }

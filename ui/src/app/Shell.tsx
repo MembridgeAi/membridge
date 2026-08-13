@@ -209,8 +209,8 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
           {/* A Link, not a button-plus-navigate like the create-team CTA
               above: this only ever changes route, so anchor semantics give it
               keyboard and middle-click behaviour for free. It points at the
-              Team page because TeamPage's SignInCard is the only surface that
-              accepts credentials; Settings has no sign-in control at all. */}
+              Team page because AuthScreen is the only surface that accepts
+              credentials; Settings has no sign-in control at all. */}
           {signedOut && (
             <Link href={ROUTES.team} className="rail-signin">Sign in</Link>
           )}
