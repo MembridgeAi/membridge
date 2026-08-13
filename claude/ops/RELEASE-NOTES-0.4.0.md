@@ -161,12 +161,17 @@ Verify each is actually merged before publishing; delete the ones that are not._
 - **Day-card area tags** — scannable area tags on day cards, and session bullets
   grouped under area headers.
 - **Settings danger zone** — the Privacy rows reordered into the stages data
-  actually moves through, and the owner-cannot-leave error fixed. **Decided:
-  only the first commit of this branch ships unless migration 058 has been
-  applied before tagging.** The owner-exit path needs 058 behind it; shipping the
-  whole branch against an unapplied 058 gives the user a control the database
-  cannot serve. If 058 is applied, ship the branch whole and delete this
-  sentence.
+  actually moves through, and the owner-cannot-leave error fixed. **Ships whole.**
+  Migration `058_owner_exit` was applied to the live project on 2026-08-13
+  (`20260813020159`), so the owner-exit path has a database behind it.
+
+  _Release-gate note, to be resolved before tagging and then deleted:_ what is
+  confirmed is that the apply succeeded and the row is in the migration table.
+  What is **not** yet confirmed is a `pg_proc`-level check that each function
+  exists with its intended grants. A migration table is a ledger, and this
+  release exists partly because a ledger in this repo was wrong in 13 of 17 rows
+  — so the ledger is not sufficient evidence for a control that deletes user
+  data. Do not tag until the function-level query has actually returned.
 
 <!-- END CONDITIONAL -->
 
@@ -182,7 +187,10 @@ Verify each is actually merged before publishing; delete the ones that are not._
   both to 0.4.0 in the same commit.
 - **`supabase/MIGRATION-STATE.md` is wrong in 13 of 17 rows**, and four migrations
   carrying an apply-before-shipping deploy gate are already applied. Do not use it
-  as the apply checklist for this release without reconciling it first.
+  as the apply checklist for this release without reconciling it first. It also
+  does not yet record `057_member_identity` and `058_owner_exit`, both applied
+  2026-08-13 — add them as part of the reconciliation rather than separately, so
+  the file is right once instead of freshly wrong.
 
 ## Known issues
 
