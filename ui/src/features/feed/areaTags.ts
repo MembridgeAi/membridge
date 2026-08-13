@@ -81,3 +81,61 @@ export function areaOf(file: string): Area | null {
   }
   return null
 }
+
+/** Areas that earn a tag on PRESENCE rather than on share.
+ *
+ *  The split is the whole design. Measured over the local corpus, tagging every
+ *  area a day touched put Docs on 73% of cards and UI/UX on 68% -- a tag that
+ *  fires on most cards cannot answer "who worked on X". But a flat share
+ *  threshold has the opposite failure: it silenced Integrations completely,
+ *  because MCP work is two files inside a twenty-file day.
+ *
+ *  So: areas touched by almost everything must earn their tag, and areas
+ *  touched by almost nothing are worth saying whenever they appear. */
+const PUNCTUAL: ReadonlySet<Area> = new Set<Area>(['Data/Schema', 'Build/CI', 'Integrations'])
+
+/** Share of a card's recognised files an AMBIENT area must reach. */
+const AMBIENT_SHARE = 0.25
+
+/** Most tags a card carries. Past three the strip stops being scannable, which
+ *  is the only thing it is for. */
+const TAG_LIMIT = 3
+
+export interface AreaTag {
+  area: Area
+  /** Distinct files this card touched in this area. Drives the ordering, and
+   *  is exposed so the renderer can title the tag. */
+  files: number
+}
+
+/** The areas a day's files earn, most-touched first, at most three.
+ *
+ *  Counts DISTINCT files, not touches: a day that edited one file thirty times
+ *  worked in one area, and weighting by touch count would let a single
+ *  hot file outrank a whole subsystem. */
+export function areaTagsFor(files: Array<{ file: string }>): AreaTag[] {
+  const seen = new Set<string>()
+  const counts = new Map<Area, number>()
+  let total = 0
+  for (const { file } of files) {
+    const key = repoRelative(file)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    const area = areaOf(key)
+    if (!area) continue
+    counts.set(area, (counts.get(area) ?? 0) + 1)
+    total++
+  }
+  if (total === 0) return []
+
+  // Sorted by weight, ties broken on name so the same day always renders the
+  // same strip -- an unstable order would make a card flicker between renders.
+  const ranked = [...counts.entries()]
+    .map(([area, n]): AreaTag => ({ area, files: n }))
+    .sort((a, b) => b.files - a.files || a.area.localeCompare(b.area))
+
+  const kept = ranked.filter(t => PUNCTUAL.has(t.area) || t.files / total >= AMBIENT_SHARE)
+  // A card with recognised files always says something: if every area fell
+  // below the bar, the heaviest one is still the truest thing available.
+  return (kept.length > 0 ? kept : ranked.slice(0, 1)).slice(0, TAG_LIMIT)
+}
