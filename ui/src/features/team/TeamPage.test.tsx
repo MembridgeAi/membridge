@@ -22,10 +22,28 @@ afterEach(() => {
 describe('TeamPage, signed out', () => {
   it('says the machine is signed out, in words, and offers a sign-in card', async () => {
     renderWith(new FakeDataClient({ authenticated: false }), <TeamPage />)
-    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument()
-    // The whole point: signed out must not read like "you just have no team".
-    expect(screen.getByText(/signed out/i)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
+    // The point the old amber banner carried: signed out must not read like
+    // "you just have no team". A whole dedicated screen now carries it --
+    // there is no team UI on screen at all.
+    expect(screen.getByText('to continue to MemBridge')).toBeInTheDocument()
     expect(screen.queryByLabelText(/team name/i)).toBeNull()
+  })
+
+  // Design spec: "TeamPage renders <AuthScreen> ALONE -- no page title, no
+  // card chrome." AuthScreen owns its own <h1>; TeamPage's own "Team" title
+  // must not also render above it, or a screen-reader user navigating by
+  // heading hits two top-level headings for what is meant to be one screen.
+  it('renders exactly one level-1 heading, owned by AuthScreen, with no page title above it', async () => {
+    renderWith(new FakeDataClient({ authenticated: false }), <TeamPage />)
+    // Wait for the account to resolve and AuthScreen's own heading to land
+    // before counting -- the loading state (no account yet) legitimately
+    // shows the "Team" title, and asserting too early would catch that
+    // transient render rather than the signed-out screen's steady state.
+    await screen.findByRole('heading', { level: 1, name: 'Sign in' })
+    const headings = screen.getAllByRole('heading', { level: 1 })
+    expect(headings).toHaveLength(1)
+    expect(headings[0]).toHaveTextContent('Sign in')
   })
 
   it('posts the typed email and password to the daemon and then clears the password field', async () => {
@@ -88,11 +106,11 @@ describe('TeamPage, signed out', () => {
     const client = new FakeDataClient({ authenticated: false })
     const signUp = vi.spyOn(client, 'signUp')
     renderWith(client, <TeamPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /create an account/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /^create account$/i }))
     await userEvent.type(screen.getByLabelText(/your name/i), 'Andrew')
     await userEvent.type(screen.getByLabelText(/email/i), 'andrew@acme.dev')
     await userEvent.type(screen.getByLabelText(/password/i), 'a-brand-new-password')
-    await userEvent.click(screen.getByRole('button', { name: /^sign up$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^create account$/i }))
 
     expect(signUp).toHaveBeenCalledWith({ displayName: 'Andrew', email: 'andrew@acme.dev', password: 'a-brand-new-password' })
     // needsConfirmation is a real state, not a failure -- saying nothing here

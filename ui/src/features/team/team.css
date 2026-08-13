@@ -7,6 +7,10 @@
 .team-page {
   display: flex;
   flex-direction: column;
+  /* Lets a full-height child (.auth-screen, signed out) resolve its own
+     min-height: 100% against something taller than its content -- .team-page
+     otherwise has no height of its own inside .shell-main. */
+  min-height: 100%;
   /* ONE column width for everything on this page. Each block used to pick
      its own -- cards at 560px, the multi-team note full-bleed, the roster
      wider still -- so the page stepped in and out three times down its own

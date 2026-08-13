@@ -9,7 +9,7 @@ import {
 
 import type {
   AccessMatrix, AdoptResult, AssistsStats, AuditEvent, DaemonHealth, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedEntry, FeedFilters, FeedPage, HooksVersionStatus, HookUpdateResult, Insights,
-  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, MyData, Project, Role, SearchPage, Session, SessionPrompt, Settings, SharePromptsMode, SignOutResult, SkeletonStats, Status, StreamEntry,
+  Invite, InviteOptions, LiveSession, McpRegisterResult, Member, MyData, Project, Role, SearchPage, Session, SessionPrompt, Settings, SharePromptsMode, SignOutResult, SignUpResult, SkeletonStats, Status, StreamEntry,
   TeamAccount,
 } from './types'
 
@@ -685,11 +685,19 @@ export class FakeDataClient implements DataClient {
     this.signedIn = true
     return this.guard<{ email: string; displayName: string | null }>({ email: credentials.email, displayName: 'Andrew' })
   }
-  // needsConfirmation: true is the DEFAULT fixture answer on purpose -- it is
-  // what a real Supabase project with email confirmation on returns, and the
-  // state a UI is most likely to forget to render.
+  /** The one fixture address that already has an account. A constant rather
+   *  than a literal repeated per test, so a test cannot silently drift onto a
+   *  different address and start exercising the fresh-signup path instead. */
+  static readonly REGISTERED_EMAIL = 'taken@acme.dev'
+
+  // needs-confirmation is the DEFAULT fixture answer on purpose -- it is what
+  // a real Supabase project with email confirmation on returns, and the state
+  // a UI is most likely to forget to render.
   signUp(credentials: { displayName: string; email: string; password: string }) {
-    return this.guard<{ needsConfirmation: boolean; email: string }>({ needsConfirmation: true, email: credentials.email })
+    if (credentials.email.toLowerCase() === FakeDataClient.REGISTERED_EMAIL) {
+      return this.guard<SignUpResult>({ status: 'email-exists', email: credentials.email })
+    }
+    return this.guard<SignUpResult>({ status: 'needs-confirmation', email: credentials.email })
   }
   // Default is the good path: the backend confirmed the revocation. The
   // failure is opt-in via `signOutRevokeError` rather than the default,

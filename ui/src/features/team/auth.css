@@ -1,0 +1,237 @@
+/* The signed-out screen. Same house rules as every other stylesheet here:
+ * tokens from styles/tokens.css, no shadows on resting content, no gradients,
+ * hover changes background/border only.
+ *
+ * TWO deliberate local exceptions, both confined to this file because this
+ * screen exists nowhere else in the app:
+ *   1. Type steps up. The global scale tops out at --fs-xl (19px), which is
+ *      right for a dense dashboard and too small for a sign-in heading.
+ *   2. Pill radius on the buttons. --r stays 7px everywhere else. */
+
+.auth-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  /* .auth-screen is a flex ITEM of .team-page (a column flex container), so
+     without this its main-size stays content-height and the card sits at the
+     top of a tall empty page instead of centring in it. */
+  flex: 1;
+  padding: var(--sp-6) var(--sp-4);
+  gap: var(--sp-5);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  padding: var(--sp-6) var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+  text-align: center;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .auth-card { animation: settle-in var(--dur-base) var(--ease-out) both; }
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-5);
+}
+.auth-brand-mark { width: 22px; height: 22px; }
+.auth-brand-name {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  letter-spacing: -0.01em;
+}
+
+.auth-heading {
+  margin: 0 0 var(--sp-1);
+  font-size: 24px;
+  font-weight: var(--fw-normal);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+}
+.auth-subhead {
+  margin: 0 0 var(--sp-5);
+  color: var(--text2);
+  font-size: 14px;
+  line-height: var(--lh-snug);
+}
+
+.auth-note,
+.auth-notice,
+.auth-error {
+  margin: 0 0 var(--sp-4);
+  text-align: left;
+  font-size: var(--fs-base);
+  line-height: var(--lh-snug);
+}
+.auth-note { color: var(--text2); }
+.auth-notice {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--r);
+  background: var(--accent-dim);
+  color: var(--text);
+}
+.auth-error { color: var(--red); }
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  text-align: left;
+}
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+/* Labels ABOVE the inputs, not Google's floating labels. Those need per-field
+   JS state tracking focus and filled-ness, and password managers routinely
+   autofill without firing the events that state depends on -- leaving the
+   label sitting on top of the value. Autofill is the one thing on this screen
+   that must not break. */
+.auth-field label {
+  color: var(--text2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+.auth-field input {
+  padding: 9px 12px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  background: var(--panel2);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 13px;
+}
+.auth-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.auth-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+.auth-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-family: var(--ui);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+}
+.auth-link:hover { text-decoration: underline; }
+
+.auth-submit {
+  padding: 8px 22px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--ui);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+}
+.auth-submit:hover {
+  border-color: var(--accent2);
+  background: var(--accent2);
+}
+.auth-submit:disabled { opacity: 0.5; }
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-5) 0;
+  color: var(--text3);
+  font-size: var(--fs-sm);
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.auth-oauth {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 9px 16px;
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+}
+.auth-oauth:hover { background: var(--panel2); }
+.auth-oauth-mark { flex: none; }
+
+/* Sits directly under the button rather than above the form like the other
+   .auth-note -- centred and tighter, so it reads as a caption on the button
+   above it, not as a paragraph of its own. */
+.auth-note-oauth {
+  margin: var(--sp-2) 0 0;
+  text-align: center;
+  font-size: var(--fs-sm);
+  color: var(--text3);
+}
+
+.auth-footnote {
+  max-width: 400px;
+  margin: 0;
+  color: var(--text3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+  text-align: center;
+}
+
+/* Colour is NOT the only signal: the filled-segment count carries the same
+   information, so the meter still reads with no colour perception at all. */
+.auth-strength {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+.auth-strength-bar {
+  display: flex;
+  gap: 3px;
+  flex: none;
+}
+.auth-strength-seg {
+  width: 22px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--line2);
+}
+.auth-strength-seg.is-0 { background: var(--red); }
+.auth-strength-seg.is-1 { background: var(--amber); }
+.auth-strength-seg.is-2 { background: var(--accent); }
+.auth-strength-seg.is-3 { background: var(--green); }
+.auth-strength-word {
+  color: var(--text2);
+  font-weight: var(--fw-medium);
+}
+.auth-strength-hint {
+  color: var(--text3);
+  flex: 1 1 100%;
+}

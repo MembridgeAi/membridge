@@ -3,7 +3,7 @@
 // mappers.ts for every judgment call the daemon's real shape forced.
 import type { Capabilities, DataClient } from './DataClient'
 import type {
-  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, McpRegisterResult,
+  AccessMatrix, AdoptResult, AuditEvent, DaemonHealthState, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, SignOutResult, SignUpResult, McpRegisterResult,
   Member, MyData, Project, Role, SearchPage, InviteOptions, Session, Settings, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 import {
@@ -330,15 +330,17 @@ export class LocalDaemonClient implements DataClient {
     return { email: r.email, displayName: r.displayName ?? null }
   }
 
-  async signUp(credentials: { displayName: string; email: string; password: string }): Promise<{ needsConfirmation: boolean; email: string }> {
-    const r = await postReadingError<{ needsConfirmation?: boolean; email: string }>('/api/team/signup', {
+  async signUp(credentials: { displayName: string; email: string; password: string }): Promise<SignUpResult> {
+    const r = await postReadingError<{ emailExists?: boolean; needsConfirmation?: boolean; email: string }>('/api/team/signup', {
       email: credentials.email, password: credentials.password, displayName: credentials.displayName,
     })
     this.requestCache.clear()
-    // Absent reads as "no confirmation needed" only when the daemon actually
-    // said so; a missing field on a signed-up-and-session-issued response is
-    // exactly that case (lib/server.js always sends the boolean).
-    return { needsConfirmation: !!r.needsConfirmation, email: r.email }
+    // emailExists is checked FIRST. The two are mutually exclusive coming out
+    // of the daemon, and if a future one ever sent both, "this address is
+    // taken" is the answer that leaves the user able to act.
+    if (r.emailExists) return { status: 'email-exists', email: r.email }
+    if (r.needsConfirmation) return { status: 'needs-confirmation', email: r.email }
+    return { status: 'signed-in' }
   }
 
   async signOut(): Promise<SignOutResult> {

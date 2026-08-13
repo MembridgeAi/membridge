@@ -1,6 +1,6 @@
 import type {
   AccessMatrix, AdoptResult, AuditEvent, DeleteMyDataResult, DeleteProjectResult, DiscoveredProject, FeedFilters, FeedPage, HookUpdateResult, Insights, Invite, LiveSession, McpRegisterResult,
-  InviteOptions, Member, MyData, Project, Role, SearchPage, Session, Settings, SignOutResult, SkeletonStats, Status, StreamEntry, TeamAccount,
+  InviteOptions, Member, MyData, Project, Role, SearchPage, Session, Settings, SignOutResult, SignUpResult, SkeletonStats, Status, StreamEntry, TeamAccount,
 } from './types'
 
 /** What the active TRANSPORT supports — never what the current USER is allowed
@@ -86,11 +86,12 @@ export interface DataClient {
   // the resolved value deliberately carries only the identity the daemon
   // confirmed.
   signIn(credentials: { email: string; password: string }): Promise<{ email: string; displayName: string | null }>
-  // POST /api/team/signup. `needsConfirmation: true` means the account exists
-  // but the email must be confirmed before a sign-in can succeed -- a real
-  // state, not a failure, and callers MUST say so (silence there reads as a
-  // rejected sign-up).
-  signUp(credentials: { displayName: string; email: string; password: string }): Promise<{ needsConfirmation: boolean; email: string }>
+  // POST /api/team/signup. Three outcomes, and callers MUST handle all three:
+  // 'needs-confirmation' is a real state rather than a failure (silence there
+  // reads as a rejected sign-up), and 'email-exists' is what the daemon says
+  // when the address already has an account -- which used to be reported as
+  // 'needs-confirmation' and sent people to wait for mail that never came.
+  signUp(credentials: { displayName: string; email: string; password: string }): Promise<SignUpResult>
   // POST /api/team/logout -- clears this machine's stored credentials AND asks
   // the backend to end the session. The two can disagree, which is why this
   // resolves a result instead of void: a caller that renders a clean "signed

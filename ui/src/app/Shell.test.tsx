@@ -103,8 +103,8 @@ describe('Shell', () => {
   describe('rail footer identity', () => {
     it('offers a sign-in control pointing at the Team page when the machine is signed out', async () => {
       renderApp({ authenticated: false, solo: true })
-      // Team page, not Settings: TeamPage's SignInCard is the only surface in
-      // the app that can actually take credentials.
+      // Team page, not Settings: AuthScreen is the only surface in the app
+      // that can actually take credentials.
       expect(await screen.findByRole('link', { name: /sign in/i })).toHaveAttribute('href', ROUTES.team)
     })
 

@@ -305,6 +305,46 @@ describe('LocalDaemonClient.getMembers() invariant: a quiet teammate\'s numbers 
   })
 })
 
+// Finding 2 (auth-screen-redesign whole-branch review): the wire seam
+// carrying the entire "don't lie about a confirmation email" fix had zero
+// test coverage -- every UI test drives FakeDataClient instead of this
+// client, and test/suites/signup-email-exists.test.js stops at teamsync, so
+// deleting either `emailExists: !!result.emailExists` (lib/server.js) or the
+// `if (r.emailExists) return ...` read of it (below) left every suite green.
+// This drives the real /api/team/signup response shape the daemon sends
+// through the actual mapping and asserts the resulting SignUpResult union
+// value, not just that a request was attempted.
+describe('LocalDaemonClient.signUp', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function stubSignup(body: unknown) {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('maps { emailExists: true } to the email-exists outcome', async () => {
+    stubSignup({ emailExists: true, needsConfirmation: false, email: 'taken@acme.dev' })
+    await expect(
+      new LocalDaemonClient().signUp({ displayName: 'A', email: 'taken@acme.dev', password: 'long-enough-pw' }),
+    ).resolves.toEqual({ status: 'email-exists', email: 'taken@acme.dev' })
+  })
+
+  it('maps { needsConfirmation: true } to the needs-confirmation outcome', async () => {
+    stubSignup({ emailExists: false, needsConfirmation: true, email: 'fresh@acme.dev' })
+    await expect(
+      new LocalDaemonClient().signUp({ displayName: 'A', email: 'fresh@acme.dev', password: 'long-enough-pw' }),
+    ).resolves.toEqual({ status: 'needs-confirmation', email: 'fresh@acme.dev' })
+  })
+
+  it('maps neither flag set to the signed-in outcome', async () => {
+    stubSignup({ emailExists: false, needsConfirmation: false, email: 'inplace@acme.dev' })
+    await expect(
+      new LocalDaemonClient().signUp({ displayName: 'A', email: 'inplace@acme.dev', password: 'long-enough-pw' }),
+    ).resolves.toEqual({ status: 'signed-in' })
+  })
+})
+
 describe('LocalDaemonClient capabilities', () => {
   // teamAdminSupported says the daemon transport CAN carry admin calls -- it
   // is not, and must never be read as, permission for the current viewer to

@@ -445,6 +445,18 @@ export interface SignOutResult {
   revokeError: string | null
 }
 
+/** What a sign-up actually achieved. THREE outcomes, not two.
+ *
+ *  It was two, and that is exactly how the shipped bug happened: an absent
+ *  session was read as "confirmation pending" when GoTrue also returns an
+ *  absent session for an address that ALREADY has an account. A union means
+ *  a caller that forgets one gets a compile error instead of showing the
+ *  wrong sentence. */
+export type SignUpResult =
+  | { status: 'signed-in' }
+  | { status: 'needs-confirmation'; email: string }
+  | { status: 'email-exists'; email: string }
+
 export interface Member {
   id: string
   name: string
