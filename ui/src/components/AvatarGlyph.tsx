@@ -99,6 +99,10 @@ function shape(glyph: Glyph) {
     case 'prism':
       return <path d="M16 8.5l8.5 14.5h-17z" fill="none" stroke="#fff"
                    strokeWidth="2.6" strokeLinejoin="round" />
+    default: {
+      const _exhaustive: never = glyph
+      return _exhaustive
+    }
   }
 }
 
