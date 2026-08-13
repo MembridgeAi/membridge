@@ -1167,4 +1167,37 @@ describe('SettingsPage', () => {
     expect(await screen.findByRole('radiogroup', { name: /avatar shape/i })).toBeInTheDocument()
     expect(screen.getByRole('radiogroup', { name: /avatar colour/i })).toBeInTheDocument()
   })
+
+  // Round 1 fix (a): the row must be gated on authenticated, not merely on
+  // rendering unconditionally. A signed-out visitor has no account.data.user
+  // to seed the dialog with and no mutation to run, so the door must not
+  // exist at all -- not render disabled, not render and no-op on click.
+  it('offers no identity editor when signed out', async () => {
+    renderApp({ authenticated: false }, <SettingsPage />)
+    await screen.findByText('Privacy')
+    expect(screen.queryByRole('button', { name: /change name/i })).toBeNull()
+  })
+
+  // Round 1 fix (b): onClose must actually be wired to the dialog's own
+  // Cancel button, not a no-op -- otherwise the Settings door opens a dialog
+  // nothing can close.
+  it('closes the identity editor on Cancel', async () => {
+    renderApp({}, <SettingsPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /change name/i }))
+    const dialog = await screen.findByRole('dialog', { name: /your name/i })
+    await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByRole('dialog', { name: /your name/i })).toBeNull()
+  })
+
+  // Round 1 fix (c): the dialog must actually be seeded from the signed-in
+  // account, not from hardcoded/empty props -- an empty currentName leaves
+  // the field blank (Save disabled), and an empty viewerId would make the
+  // Settings-door preview resolve a different avatar registry entry than
+  // the rail door for the same person.
+  it('seeds the identity editor with the signed-in account name', async () => {
+    renderApp({}, <SettingsPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /change name/i }))
+    const dialog = await screen.findByRole('dialog', { name: /your name/i })
+    expect(within(dialog).getByLabelText('Display name')).toHaveValue('Marco')
+  })
 })

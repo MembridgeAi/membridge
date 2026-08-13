@@ -391,18 +391,26 @@ export function SettingsPage() {
       {/* Second door onto the identity editor (Task 8) -- the rail footer's
           double-click is the first. Gated on account.data.authenticated, not
           on settings.team below, so it stays available to a signed-in solo
-          user with no team yet. Opens the exact same IdentityDialog the rail
-          uses: no parallel form, no second useSetDisplayName call. */}
+          user with no team yet, and stays ABSENT when signed out (there is
+          no account.data.user to seed the dialog with, and no mutation to
+          make). Opens the exact same IdentityDialog the rail uses: no
+          parallel form, no second useSetDisplayName call.
+          Own group ("You"), not the tail of Privacy above -- your name and
+          avatar aren't a privacy setting, and the rail already calls this
+          concept "You" (Shell.tsx), so this reuses established vocabulary
+          rather than inventing a new label. */}
       {account.data?.authenticated && (
-        <SettingRow
-          label="Your name and avatar"
-          description="What your teammates see. Your name has to be different from theirs."
-          testId="setting-identity"
-        >
-          <button type="button" className="settings-btn" onClick={() => setEditingIdentity(true)}>
-            Change name
-          </button>
-        </SettingRow>
+        <>
+          <div className="settings-group-label">You</div>
+          <SettingRow
+            label="Your name and avatar"
+            description="What your teammates see. Your name has to be different from theirs."
+          >
+            <button type="button" className="settings-btn" onClick={() => setEditingIdentity(true)}>
+              Change name and avatar
+            </button>
+          </SettingRow>
+        </>
       )}
       {editingIdentity && account.data?.user && (
         <IdentityDialog
