@@ -1122,6 +1122,9 @@ async function cmdSignup() {
   util.ensureConfig();
   const { email, password, name } = credArgs();
   const r = await teamsync.signup(util.getConfig(), email, password, name);
+  if (r.emailExists) {
+    die(`${email} already has an account. Run: membridge login --email ${email} --password ...`);
+  }
   if (r.needsConfirmation) {
     console.log(`Check ${email} for a confirmation link, then run: membridge login --email ${email} --password ...`);
     return;
@@ -1182,6 +1185,9 @@ async function cmdJoin() {
       await teamsync.login(config, email, password, opt('--name'));
     } catch {
       const r = await teamsync.signup(config, email, password, opt('--name'));
+      if (r.emailExists) {
+        die(`${email} already has an account, but that password was rejected. Check the password, or sign in from the MemBridge app.`);
+      }
       if (r.needsConfirmation) {
         die(`Account created. Check ${email} for a confirmation link, then run this join command again.`);
       }
