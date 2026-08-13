@@ -163,10 +163,13 @@ actually merged before publishing._
 - **A research-tooling failure documented** — `site:reddit.com` searches silently
   returned non-Reddit results rather than erroring, so any sweep relying on them
   could be confidently wrong.
-- **Day-card area tags** — scannable area tags on day cards, and session bullets
-  grouped under area headers. _Still awaiting its own lane's confirmation of
-  rebase and test counts; cut this bullet if that does not arrive before the
-  tag._
+- **Day-card area tags** — scannable area tags on day cards, derived from the
+  files a day touched, so the Feed can be skimmed for who worked on what.
+- **Sign-up no longer reports success for an email that already has an account.**
+  It used to tell you to go and confirm a mail that was never sent; it now says
+  the address is taken and hands you to sign-in with it kept. The signed-out
+  screen is rebuilt as a standalone sign-in page with an 8-character minimum and
+  a live strength meter.
 
 _(The Settings danger zone has landed on master and moved up into the body of
 these notes; it is no longer conditional.)_
@@ -176,12 +179,10 @@ these notes; it is no longer conditional.)_
 - **Member rename and avatars.** Mid-plan. Its migration (`057`) is already live
   in production; the code follows in a later release. See the note under *Before
   you tag*.
-- **The sign-up / signed-out screen rebuild.** Held by scope decision, **not
-  because it is unfinished** — the lane reports all six tasks complete, rebased
-  onto `a4754a3`, 460/460 vitest across 23 files, `tsc` clean, tree clean. It was
-  held while it was still mid-plan; it finished after the call was made. Shipping
-  it now would mean re-opening a release that is otherwise done, so it goes in the
-  next one. Worth knowing it is ready rather than pending.
+- **Session-area headers.** Implementation is done, but its fix-wave re-review
+  never ran, so nothing has checked the fixes that followed its review. Held for
+  that reason and no other. Do not confuse this branch with day-card area tags,
+  which is a separate, reviewed change and is in this release.
 
 ---
 
