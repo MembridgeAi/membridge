@@ -16695,13 +16695,34 @@ async function main() {
       assert.deepStrictEqual(rec.sessions, [], 'the OLD hook would have credited sessionA here — the new hook must credit nobody yet');
     });
 
-    // Now the daemon catches up: B's edit is scanned in (timestamped just
-    // before the commit, exactly like a real edit-then-commit), plus a
-    // trailing event proving the daemon has scanned PAST the commit's ts.
+    // Now the daemon catches up: B's edit is scanned in (timestamped before
+    // the commit, exactly like a real edit-then-commit), plus a trailing
+    // event proving the daemon has scanned PAST the commit's ts.
+    //
+    // THE MARGIN IS 60s AND WAS 2s, WHICH MADE THIS TEST DECIDE ON RUNNER
+    // SPEED. `past(ms)` is relative to the moment this line RUNS, not to the
+    // commit. Between `git commit` and here the test does a `git rev-parse`, a
+    // full `spawnSync` of `node bin/membridge.js hook post-commit`, a
+    // load/saveState, a whole syncOnce() and a loadCommitMap. If that exceeds
+    // the margin, B's "pre-commit" edit is stamped AFTER the commit,
+    // attributeCommit skips it (lib/commits.js: `t > cutoff`), nobody is
+    // credited, and the row stays provisional. On a Windows runner a single
+    // node spawn alone is often 0.5-1.5s, so 2s was a coin flip: it failed one
+    // CI attempt and passed the next on byte-identical code.
+    //
+    // The upper bound is the commit; the lower bound is sessionA's edit at
+    // past(600000), which must stay OLDER than B's or A wins the file and this
+    // test's whole point -- never credit the stale session -- inverts. 60s has
+    // an order of magnitude of room on both sides.
+    //
+    // The first check below passes VACUOUSLY when this races: it asserts
+    // nobody is credited, which is also exactly what a failed attribution
+    // looks like. Only the settle check can tell them apart, which is why the
+    // symptom reads as an attribution regression rather than a fixture bug.
     {
       const st = util.loadState();
       st.projects[projCore].events.push(
-        { ts: past(2000), source: 'Claude Code', kind: 'edit', file: path.join(projCore, 'src', 'shared.js'), session: 'sessionB' },
+        { ts: past(60000), source: 'Claude Code', kind: 'edit', file: path.join(projCore, 'src', 'shared.js'), session: 'sessionB' },
         { ts: new Date(Date.now() + 5000).toISOString(), source: 'Claude Code', kind: 'prompt', text: 'next prompt', session: 'sessionB' },
       );
       util.saveState(st);
@@ -16773,7 +16794,7 @@ async function main() {
     {
       const st = util.loadState();
       st.projects[projX].events.push(
-        { ts: past(2000), source: 'Claude Code', kind: 'edit', file: path.join(projX, 'src', 'shared.js'), session: 'sessionB' },
+        { ts: past(60000), source: 'Claude Code', kind: 'edit', file: path.join(projX, 'src', 'shared.js'), session: 'sessionB' },
         { ts: future(6000), source: 'Claude Code', kind: 'prompt', text: 'B continues', session: 'sessionB' });
       util.saveState(st);
     }
