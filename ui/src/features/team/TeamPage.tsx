@@ -63,11 +63,11 @@ function SignInCard({ configured }: { configured: boolean }) {
     try {
       if (mode === 'signup') {
         const result = await signUp.mutateAsync({ displayName, email, password })
-        // A confirmation-required sign-up is a SUCCESS with one more step.
-        // Saying nothing here is indistinguishable from a rejected sign-up,
-        // and the account genuinely cannot sign in until the mail is opened.
-        if (result.needsConfirmation) {
+        if (result.status === 'needs-confirmation') {
           setNotice(`Account created. Confirm ${result.email} from the email just sent to it, then sign in below.`)
+          setMode('signin')
+        } else if (result.status === 'email-exists') {
+          setNotice('That email already has an account. Sign in below to continue.')
           setMode('signin')
         }
       } else {
