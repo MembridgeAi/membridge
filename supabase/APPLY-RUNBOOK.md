@@ -39,7 +39,9 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 
 | 056 | `team_feed` off the default PUBLIC grant that four drop+create migrations kept restoring, with the paired grant that stops the revoke being an outage | `agent-insights-agg` | no |
 
-**Next free number: 057.**
+| 058 | `transfer_ownership` and `delete_team` — the owner of a team could never leave it and never delete it, because `leave_team` refuses owners, `set_role` cannot grant 'owner' and no disband existed. `delete_team` is gated on owner AND exactly one remaining member, so it can never reach another person's memory | `feat/settings-team-danger-zone` | no |
+
+**Next free number: 059.** 057 is held by `feat/member-identity-rename`; that file is not on this branch, which is why the numbering here skips it.
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
