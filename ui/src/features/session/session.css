@@ -205,6 +205,21 @@
   background: var(--accent);
 }
 
+/* Area headings inside the What widget. Small, quiet and uppercase: these are
+ * signposts through a list, not headings competing with the widget's own
+ * title. A group with no area renders no heading at all. */
+.session-what-group + .session-what-group {
+  margin-top: var(--sp-3);
+}
+.session-what-area {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
 .session-meta {
   margin-top: var(--sp-3);
   padding-bottom: var(--sp-4);

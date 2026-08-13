@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { whatBullets } from './distill'
+import { whatGroups } from './distill'
 import type { FileChange, Session } from '../../data/types'
 
 // The collapsible brief widgets, native <details>/<summary> (keyboard and
@@ -60,7 +60,7 @@ function changeCounts(c: FileChange): ReactNode {
 export function BriefWidgets({ session }: { session: Session }) {
   const keyFiles = session.changes.filter(c => c.note)
   const changes = session.changes
-  const what = whatBullets(session)
+  const what = whatGroups(session)
 
   return (
     <div className="session-widgets">
@@ -91,9 +91,19 @@ export function BriefWidgets({ session }: { session: Session }) {
       )}
       {what.length > 0 && (
         <Widget title="What" open>
-          <ul className="session-list">
-            {what.map(text => <li key={text} className="session-what">{text}</li>)}
-          </ul>
+          {what.map(group => (
+            <div key={group.area ?? '_unlabelled'} className="session-what-group">
+              {/* No heading for the unlabelled group: it is either the whole
+                  list (not worth grouping) or the leftovers, and "Other" would
+                  be inventing a category the writer did not choose. */}
+              {group.area && (
+                <h4 className="session-what-area" data-testid="what-area">{group.area}</h4>
+              )}
+              <ul className="session-list">
+                {group.points.map(text => <li key={text} className="session-what">{text}</li>)}
+              </ul>
+            </div>
+          ))}
         </Widget>
       )}
     </div>
