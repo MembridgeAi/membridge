@@ -129,3 +129,94 @@ describe('areaTagsFor', () => {
     expect(once.map(t => t.area)).toEqual(twice.map(t => t.area))
   })
 })
+
+// A tag that fires on most cards cannot answer "who worked on X". This is the
+// property the feature exists for, so it is asserted directly rather than left
+// to a reviewer to notice.
+//
+// The corpus below models the per-session area distribution measured by the
+// backtest (docs/superpowers/specs/2026-08-12-session-headers-and-day-tags-backtest.js,
+// salience mode, 27 sessions): UI/UX ~48%, Docs ~48%, Tests ~39%, Backend
+// ~30%, Data/Schema ~26%, Build/CI ~9%, Integrations ~9%. Shipping the real
+// corpus is not an option -- it is one person's private history -- so this
+// re-derives days of that shape rather than the real files.
+//
+// Days are sized 8-20 recognised files, not 3-4: a day that small makes any
+// single file 25%+ of the total, so the 25% ambient bar can never exclude
+// anything and every area effectively tags on presence. A corpus like that
+// cannot tell the shipped rule apart from a naive "tag everything touched"
+// rule -- see the canary test below, which proves this corpus can.
+describe('distribution invariant', () => {
+  const many = (n: number, path: (i: number) => string) =>
+    Array.from({ length: n }, (_, i) => path(i))
+
+  const DAYS: string[][] = [
+    // Big UI day with a stray doc: 2 of 20 files (10%) is well under the 25%
+    // ambient bar, so the doc should not earn a tag.
+    [...many(18, i => `ui/Comp${i}.tsx`), ...many(2, i => `docs/note${i}.md`)],
+    // UI day that also carries real doc work (6 of 16 = 37.5%, clears the bar).
+    [...many(10, i => `ui/Comp${i}.tsx`), ...many(6, i => `docs/note${i}.md`)],
+    // Backend day with a couple of tests (3 of 11 = 27.3%, just clears 25%).
+    [...many(8, i => `lib/mod${i}.js`), ...many(3, i => `test/case${i}.test.js`)],
+    // Migration day: Data/Schema is punctual (fires on presence) inside an
+    // otherwise Backend-majority day.
+    [...many(6, i => `lib/mod${i}.js`), ...many(2, i => `supabase/migrations/${i}.sql`)],
+    // CI-touch day: Build/CI is punctual, one workflow file among Backend work.
+    [...many(7, i => `lib/mod${i}.js`), '.github/workflows/ci.yml'],
+    // Migration day landing inside UI-heavy work.
+    [...many(10, i => `ui/Comp${i}.tsx`), ...many(2, i => `supabase/migrations/${i}.sql`)],
+    // Migration day landing inside Tests-heavy work.
+    [...many(8, i => `test/case${i}.test.js`), ...many(2, i => `supabase/migrations/${i}.sql`)],
+    // Mixed day: UI/UX, Docs and Tests each land at an even third.
+    [...many(4, i => `ui/Comp${i}.tsx`), ...many(4, i => `docs/note${i}.md`), ...many(4, i => `test/case${i}.test.js`)],
+    // Integrations day: one adapter file (punctual) inside Docs-majority work.
+    [...many(3, i => `ui/Comp${i}.tsx`), ...many(6, i => `docs/note${i}.md`), 'adapters/sync-adapter.js'],
+    // Docs day with a few tests alongside.
+    [...many(6, i => `docs/note${i}.md`), ...many(4, i => `test/case${i}.test.js`)],
+    // Pure docs day: writing a spec, no code touched.
+    many(5, i => `docs/note${i}.md`),
+  ]
+
+  it('lets no area tag more than half the days', () => {
+    const fired = new Map<string, number>()
+    for (const day of DAYS) {
+      for (const tag of areaTagsFor(day.map(file => ({ file })))) {
+        fired.set(tag.area, (fired.get(tag.area) ?? 0) + 1)
+      }
+    }
+    const over = [...fired.entries()].filter(([, n]) => n / DAYS.length > 0.5)
+    expect(over).toEqual([])
+  })
+
+  it('keeps the strip short enough to scan', () => {
+    const sizes = DAYS.map(d => areaTagsFor(d.map(file => ({ file }))).length)
+    const mean = sizes.reduce((a, b) => a + b, 0) / sizes.length
+    expect(mean).toBeLessThanOrEqual(2.5)
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(3)
+  })
+
+  // Teeth: prove this corpus can actually detect the degradation it exists to
+  // guard against. A "tag everything touched" selector -- no ambient
+  // threshold, no cap -- run over this SAME corpus must violate the invariant
+  // above. If it doesn't, the corpus is too weak to distinguish the shipped
+  // rule from the naive one, and the two tests above would be passing for the
+  // wrong reason.
+  it('the corpus can actually detect the degradation it guards against', () => {
+    const naiveAreaTagsFor = (files: Array<{ file: string }>): string[] => {
+      const areas = new Set<string>()
+      for (const { file } of files) {
+        const area = areaOf(file)
+        if (area) areas.add(area)
+      }
+      return [...areas]
+    }
+    const fired = new Map<string, number>()
+    for (const day of DAYS) {
+      for (const area of naiveAreaTagsFor(day.map(file => ({ file })))) {
+        fired.set(area, (fired.get(area) ?? 0) + 1)
+      }
+    }
+    const over = [...fired.entries()].filter(([, n]) => n / DAYS.length > 0.5)
+    expect(over.length).toBeGreaterThan(0)
+  })
+})
