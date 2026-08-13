@@ -200,10 +200,16 @@ async function main() {
       assert.strictEqual(dRow.displayName, 'Ada 2');
     });
 
-    await check('GET /api/team reports the avatar alongside the name', async () => {
-      await apiAs('b', 'POST', '/api/team/set-display-name', { name: 'BODHI', avatar: 'wave' });
+    await check('GET /api/team reports the avatar and colour alongside the name', async () => {
+      // creds.avatarColor is the ONLY path by which the viewer's own colour
+      // reaches the rail, Settings, and the identity dialog's seed value —
+      // assert it explicitly, not just avatar, or a dropped avatarColor line
+      // in the /api/team handler ships with every other display-name test
+      // still green.
+      await apiAs('b', 'POST', '/api/team/set-display-name', { name: 'BODHI', avatar: 'wave', avatarColor: '#AABBCC' });
       const res = await apiAs('b', 'GET', '/api/team');
       assert.strictEqual(res.body.user.avatar, 'wave');
+      assert.strictEqual(res.body.user.avatarColor, '#AABBCC');
     });
   } finally {
     mock.server.close();

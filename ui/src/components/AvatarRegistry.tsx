@@ -1,7 +1,7 @@
 import { createContext, useContext, type ReactNode } from 'react'
 
 export interface RegisteredAvatar {
-  glyph: string
+  glyph: string | null
   color: string | null
 }
 

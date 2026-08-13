@@ -233,6 +233,30 @@ describe('Shell', () => {
       // the plain-initial <span class="avatar"> never gets.
       expect(await screen.findByRole('img', { name: 'Andrew' })).toBeInTheDocument()
     })
+
+    // Shape and colour are independent choices (the picker has two separate
+    // rows), so a teammate who left the glyph on "Initial" and picked only a
+    // colour must still get that colour -- registering members solely on
+    // `person.avatar` being truthy drops this person from the map entirely,
+    // and every call site silently falls back to colorForId(id) instead.
+    class ColorOnlyRosterClient extends FakeDataClient {
+      async getMembers() {
+        const members = await super.getMembers()
+        return members.map(m => (m.id === 'sarah' ? { ...m, avatar: null, avatarColor: '#22C08F' } : m))
+      }
+    }
+
+    it("renders a teammate's picked colour even with no glyph chosen, not the id-derived colour", async () => {
+      window.history.pushState({}, '', ROUTES.team)
+      renderWith(new ColorOnlyRosterClient({ solo: false }), <App />)
+      const el = await screen.findByLabelText('Sarah')
+      // colorForId('sarah') is deterministic -- #F0616D / rgb(240, 97, 109),
+      // per components.test.tsx's Avatar suite -- so asserting the exact
+      // picked value AND that it differs from the derived one rules out a
+      // regression that silently falls back to the derived colour.
+      expect(el.style.background).toBe('rgb(34, 192, 143)')
+      expect(el.style.background).not.toBe('rgb(240, 97, 109)')
+    })
   })
 
   // App.tsx renders the first-run takeover regardless of path, but NavLink

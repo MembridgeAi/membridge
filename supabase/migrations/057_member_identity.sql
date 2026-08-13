@@ -6,12 +6,17 @@
 -- APPLIED 2026-08-13 to project mefgbiecvoszjorwzkfz, recorded in the
 -- migration table as 20260813020145.
 --
--- VERIFICATION OUTSTANDING. The apply reported success and the migration table
--- carries the row -- but that row is a LEDGER ENTRY, not a reading of the
--- catalog, and this repo's ledgers have been wrong in 13 of 17 rows. Nobody has
--- yet run the Verify block at the foot of this file; the session that applied
--- it had its catalog query blocked. Treat this as applied-unverified until
--- someone runs those queries, then replace this paragraph with the result.
+-- CATALOG-VERIFIED 2026-08-13, by direct reads against mefgbiecvoszjorwzkfz,
+-- not by trusting the migration-table ledger row alone. Confirmed present:
+-- team_members.avatar/avatar_color/name_released_at, the partial unique index
+-- team_members_display_name_unique, the team_members_dedupe_name BEFORE
+-- INSERT trigger, team_members_list returning the avatar columns, and
+-- set_display_name(p_name, p_avatar, p_avatar_color) with prosecdef = true.
+-- Also found WRONG by that same read: unique_member_name and
+-- team_members_dedupe_name were both granted EXECUTE to `authenticated` via
+-- Supabase's default privileges, which the `revoke ... from public, anon`
+-- below did not remove as originally applied -- see 059, which closes it, and
+-- supabase/MIGRATION-STATE.md's 057 row for the full result.
 -- ===========================================================================
 --
 -- WHY UNIQUENESS IS AN INDEX, NOT A CLIENT CHECK (OR EVEN A SERVER
@@ -320,10 +325,11 @@ create unique index if not exists team_members_display_name_unique
 --    from before. A PostgREST call with two arguments would keep resolving
 --    to the stale function, which echoes its input instead of reporting
 --    what was written -- the exact bug this migration's second revision
---    removed, still reachable through the old signature. Production has
---    never applied this file, so this only matters for a dev database that
---    ran an earlier revision, but the file has to be correct for that case
---    too.
+--    removed, still reachable through the old signature. Production applied
+--    this file's final (three-argument) revision directly (see the APPLIED
+--    stamp above), so it never hit this case -- but a dev database that ran
+--    an earlier revision first could, and the file has to be correct for
+--    that case too.
 --
 -- THE AUDIT ROW IS WRITTEN HERE, NOT BY THE DAEMON. team_audit's insert
 -- policy is `is_team_manager(team_id) and actor_id = auth.uid()` (024 §5,

@@ -152,18 +152,27 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   // getMembers() is meaningless without a team.
   const members = useMembers(onTeam)
   const avatarsById = useMemo(() => {
-    const m = new Map<string, { glyph: string; color: string | null }>()
+    const m = new Map<string, { glyph: string | null; color: string | null }>()
     for (const person of members.data ?? []) {
-      if (person.avatar) m.set(person.id, { glyph: person.avatar, color: person.avatarColor })
+      // Register on EITHER axis being set, not just glyph: shape and colour
+      // are independent choices (see the picker's two rows), so someone who
+      // only picked a colour and left the shape on "Initial" still needs to
+      // be in this map or their colour is silently discarded and every call
+      // site falls back to the id-derived colour instead.
+      if (person.avatar || person.avatarColor) {
+        m.set(person.id, { glyph: person.avatar, color: person.avatarColor })
+      }
     }
     // The viewer's own row, from the account query rather than the roster:
     // it updates the instant the save returns, and it is also the only
     // source when the roster query is disabled (not on a team). The `else`
-    // matters -- without it, clearing your glyph left the roster's stale
-    // (still-registered) value in the map until ['members'] refetched, so
-    // the glyph you had just deleted stayed on screen for a beat.
+    // matters -- without it, clearing both your glyph and colour left the
+    // roster's stale (still-registered) value in the map until ['members']
+    // refetched, so the old avatar stayed on screen for a beat. The delete
+    // only fires when NEITHER axis is set -- clearing just the glyph while a
+    // colour is still chosen must keep that colour in the map, not drop it.
     if (viewerId) {
-      if (avatar) m.set(viewerId, { glyph: avatar, color: avatarColor })
+      if (avatar || avatarColor) m.set(viewerId, { glyph: avatar, color: avatarColor })
       else m.delete(viewerId)
     }
     return m
