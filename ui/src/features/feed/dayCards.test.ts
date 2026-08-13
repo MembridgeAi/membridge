@@ -860,3 +860,31 @@ describe('buildDayCards with digests', () => {
     expect(cards[0].bullets).toEqual([])
   })
 })
+
+describe('buildDayCards tags', () => {
+  it('tags a card from the files its day touched', () => {
+    // Distinct `session` on each entry: dedupeSyncedTwins (buildDayCards'
+    // first step) keys on [session, author, project, instant], and with a
+    // shared session both entries collapse to the same key -- the same
+    // author, project and `at` the entry() default gives both -- so the
+    // second entry's file is discarded as a "synced twin" of the first
+    // before grouping ever sees it, and the card holds only one area.
+    const cards = buildDayCards([
+      entry({ id: 'a', session: 's1', files: ['ui/src/App.tsx', 'ui/src/Shell.tsx', 'ui/src/x.css'] }),
+      entry({ id: 'b', session: 's2', files: ['supabase/migrations/057_x.sql'] }),
+    ])
+    expect(cards[0].tags.map(t => t.area)).toEqual(['UI/UX', 'Data/Schema'])
+  })
+
+  it('gives a card with no recognised files an empty list, never undefined', () => {
+    const cards = buildDayCards([entry({ id: 'a', files: [] })])
+    expect(cards[0].tags).toEqual([])
+  })
+
+  it('counts a file named by changes as well as by files', () => {
+    const cards = buildDayCards([
+      entry({ id: 'a', files: [], changes: [{ file: 'lib/feed.js', status: 'edited', add: 1, del: 0, note: 'x', dep: false }] }),
+    ])
+    expect(cards[0].tags.map(t => t.area)).toEqual(['Backend'])
+  })
+})
