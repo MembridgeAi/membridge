@@ -61,7 +61,8 @@
 -- and clicked save would be surprising in a way that silently renaming a new
 -- joiner is not.
 --
--- WHY unique_member_name TAKES AN ADVISORY LOCK, AND WHY IT LOOKS GRATUITOUS.
+-- WHY BOTH unique_member_name AND set_display_name TAKE AN ADVISORY LOCK,
+-- AND WHY IT LOOKS GRATUITOUS.
 -- Four join paths (schema.sql's join_team, 003, 010's redeem_invite, 038's
 -- redeem_invite, 029's redeem_onboarding_invite) all insert into
 -- team_members with a BARE, UNTARGETED `on conflict do nothing` -- bare
@@ -97,6 +98,20 @@
 -- nearby appears to need it; it is the only thing standing between a bare
 -- `on conflict do nothing` four call sites away and a member who is told
 -- they joined a team that, underneath them, they did not.
+--
+-- unique_member_name's lock only covers INSERTs, and it is not the only
+-- writer of display_name -- set_display_name (an existing member renaming)
+-- is the other one, and it takes no lock of its own. A rename committing
+-- while a joiner sits between its trigger's not-exists probe and its INSERT
+-- reopens the identical race from the other direction. So set_display_name
+-- takes the same per-team lock too, for every team the caller belongs to,
+-- before it writes -- see the comment at its call site for why the lock
+-- order there is `order by team_id` rather than arbitrary. The guarantee
+-- that an INSERT's name is collision-free by the time it runs (leaned on by
+-- the comments in schema.sql's join_team and 010's redeem_invite) rests on
+-- BOTH writers taking this lock, not on unique_member_name's alone -- a
+-- future change to either one that drops its lock reopens the race this
+-- section describes.
 --
 -- Re-runnable: every function is `create or replace`, every column addition
 -- is `add column if not exists`, the constraint and trigger are dropped
@@ -158,10 +173,11 @@ declare
   n int := 1;
 begin
   -- Transaction-scoped advisory lock, keyed on the team. See the header's
-  -- "WHY unique_member_name TAKES AN ADVISORY LOCK" section: this serialises
-  -- name assignment per team so two concurrent joins cannot both compute the
-  -- same suffix and race a bare `on conflict do nothing` four call sites
-  -- away. Released automatically at transaction end (commit or rollback).
+  -- "WHY BOTH unique_member_name AND set_display_name TAKE AN ADVISORY LOCK"
+  -- section: this serialises name assignment per team so two concurrent
+  -- joins cannot both compute the same suffix and race a bare `on conflict
+  -- do nothing` four call sites away. Released automatically at transaction
+  -- end (commit or rollback).
   perform pg_advisory_xact_lock(hashtextextended(p_team::text, 0));
 
   if v_base = '' then v_base := 'member'; end if;
@@ -235,7 +251,22 @@ create unique index if not exists team_members_display_name_unique
   on public.team_members (team_id, public.normalize_member_name(display_name))
   where name_released_at is null;
 
--- 7. THE RPC.
+-- 7. THE RPC. Dropped first, not just replaced: p_avatar_color made this a
+--    three-argument function, and `create or replace` cannot change a
+--    function's SIGNATURE (only its body) -- Postgres treats a different
+--    argument list as a different function. Without this drop, a database
+--    that already ran this file's earlier two-argument revision would end
+--    up with BOTH signatures live: the new three-argument one AND the old
+--    two-argument one, still carrying its own `grant ... to authenticated`
+--    from before. A PostgREST call with two arguments would keep resolving
+--    to the stale function, which echoes its input instead of reporting
+--    what was written -- the exact bug this migration's second revision
+--    removed, still reachable through the old signature. Production has
+--    never applied this file, so this only matters for a dev database that
+--    ran an earlier revision, but the file has to be correct for that case
+--    too.
+drop function if exists public.set_display_name(text, text);
+
 create or replace function public.set_display_name(
   p_name text, p_avatar text default null, p_avatar_color text default null
 )
@@ -294,6 +325,30 @@ begin
       using errcode = 'MB001';
   end if;
 
+  -- unique_member_name's advisory lock (see the header) only serialises
+  -- INSERTs -- new joiners -- against each other. This UPDATE is the OTHER
+  -- writer of display_name, and without taking the same lock, a rename
+  -- committing here could still land between a joiner's trigger computing a
+  -- name and that joiner's INSERT: the joiner's not-exists probe would read
+  -- as free, this rename commits the same normalized name first, and the
+  -- joiner's INSERT then hits team_members_display_name_unique -- swallowed
+  -- by the same bare `on conflict do nothing` this file's header already
+  -- describes, reporting a join that did not happen. So this function takes
+  -- the identical per-team lock, for every team the caller belongs to,
+  -- before writing.
+  --
+  -- `order by team_id` is load-bearing, not decoration: pg_advisory_xact_lock
+  -- is not reentrant-safe across a set acquired in different orders, so two
+  -- callers each renaming across two teams they share (A, B) must acquire A
+  -- then B in BOTH sessions -- acquiring A,B in one and B,A in the other is
+  -- the textbook lock-ordering deadlock. Sorting by team_id gives every
+  -- caller the same order regardless of which teams they happen to belong
+  -- to. A joiner only ever takes one lock (their own team), so it can never
+  -- be the second half of a cycle.
+  perform pg_advisory_xact_lock(hashtextextended(t.team_id::text, 0))
+     from (select team_id from public.team_members
+            where user_id = auth.uid() order by team_id) t;
+
   -- One statement, so every team is updated atomically: a collision in any
   -- single team rolls back the rename in all of them. Assigning p_avatar and
   -- p_avatar_color directly (not coalesce) is deliberate -- null is the
@@ -301,22 +356,33 @@ begin
   -- would make that choice unexpressible. name_released_at resets so a
   -- previously-released name is re-protected.
   --
-  -- RETURNING, not the input variables: every row this statement touches
-  -- gets the same literal values, so grabbing any one row's RETURNING output
-  -- is representative, and it reports what the database actually committed
-  -- rather than echoing what was requested. That distinction matters most in
-  -- exactly the case this used to get wrong -- zero rows matched (the
-  -- signed-in-with-no-team case) -- where echoing the input reported the
-  -- requested name and avatar as saved even though nothing was written.
-  -- RETURNING into unmatched variables leaves them null, which is the honest
-  -- answer.
-  update public.team_members m
-     set display_name = v_name, avatar = p_avatar, avatar_color = p_avatar_color,
-         name_released_at = null
-   where m.user_id = auth.uid()
-   returning m.display_name, m.avatar, m.avatar_color
-     into v_display_name, v_avatar, v_avatar_color;
-  get diagnostics v_count = row_count;
+  -- CTE-wrapped RETURNING, not the input variables: every row this
+  -- statement touches gets the same literal values, so any one row's
+  -- RETURNING output is representative, and it reports what the database
+  -- actually committed rather than echoing what was requested. That
+  -- distinction matters most in exactly the case this used to get wrong --
+  -- zero rows matched (the signed-in-with-no-team case) -- where echoing
+  -- the input reported the requested name and avatar as saved even though
+  -- nothing was written. The CTE form (rather than a bare
+  -- `update ... returning ... into`) is hardening, not a bug fix: PL/pgSQL's
+  -- INTO without STRICT already takes the first row and discards the rest
+  -- when several rows match (PL/pgSQL 43.5.3), so the bare form was never
+  -- broken. This form is immune to someone later setting
+  -- `plpgsql.extra_errors = 'all'` (which would turn a multi-row INTO into a
+  -- too_many_rows error), and it drops the "which row is 'first' without an
+  -- ORDER BY" question entirely, since every candidate row is identical.
+  with upd as (
+    update public.team_members m
+       set display_name = v_name, avatar = p_avatar, avatar_color = p_avatar_color,
+           name_released_at = null
+     where m.user_id = auth.uid()
+     returning m.display_name, m.avatar, m.avatar_color
+  )
+  select (select display_name from upd limit 1),
+         (select avatar       from upd limit 1),
+         (select avatar_color from upd limit 1),
+         (select count(*)::int from upd)
+    into v_display_name, v_avatar, v_avatar_color, v_count;
 
   -- Zero rows is NOT an error: it is the signed-in-with-no-team case.
   return query select v_display_name, v_avatar, v_avatar_color, v_count;
