@@ -30,8 +30,9 @@ export function IdentityDialog({
   function submit(e: React.FormEvent) {
     e.preventDefault()
     // Refused locally: an empty name is not a question worth a round trip,
-    // and the daemon answers 400 for it anyway.
-    if (!trimmed || trimmed.length > 80) return
+    // and the daemon answers 400 for it anyway. (The 80-char cap is enforced
+    // by the input's own maxLength, so there's nothing left to check here.)
+    if (!trimmed) return
     save.mutate({ name: trimmed, avatar: glyph, avatarColor: colour }, { onSuccess: onClose })
   }
 
