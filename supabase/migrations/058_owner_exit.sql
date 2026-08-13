@@ -1,12 +1,19 @@
 -- ---------------------------------------------------------------------------
 -- 058: give a team owner a way out. Two new functions, nothing replaced.
 --
--- UNAPPLIED AS OF 2026-08-12. Verify:
+-- APPLIED — 2026-08-12, by Andrew against mefgbiecvoszjorwzkfz. Verify:
 --   select proname from pg_proc
 --    where proname in ('transfer_ownership', 'delete_team')
 --      and pronamespace = 'public'::regnamespace;
 -- Applied when it returns BOTH rows. State recorded in
 -- supabase/MIGRATION-STATE.md and nowhere else.
+--
+-- BEFORE-STATE, recorded because it is the thing this file was written to fix
+-- and it will not be observable again: the same query was run read-only
+-- against production on 2026-08-12, shortly before the apply, and returned
+-- NEITHER function while `leave_team` and `set_role` were both present. That
+-- is the trap in the live database, measured rather than inferred from the
+-- migration tree.
 --
 -- ---------------------------------------------------------------------------
 -- THE DEFECT, STATED PLAINLY
