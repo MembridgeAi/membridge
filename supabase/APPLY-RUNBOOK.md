@@ -39,7 +39,7 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 
 | 056 | `team_feed` off the default PUBLIC grant that four drop+create migrations kept restoring, with the paired grant that stops the revoke being an outage | `agent-insights-agg` | no |
 
-| 057 | Per-team unique display names (case/whitespace-insensitive), a member avatar choice, and `set_display_name` | `feat/member-identity-rename` | no |
+| 057 | Per-team unique display names (case/whitespace-insensitive), a member avatar choice, and `set_display_name` | `feat/member-identity-rename` | yes (2026-08-13, unverified — see MIGRATION-STATE.md) |
 
 **Next free number: 058.**
 

@@ -3,8 +3,15 @@
 -- avatar choice.
 --
 -- ===========================================================================
--- NOT APPLIED. Hand this to a human to run; nothing in this session has
--- touched any database.
+-- APPLIED 2026-08-13 to project mefgbiecvoszjorwzkfz, recorded in the
+-- migration table as 20260813020145.
+--
+-- VERIFICATION OUTSTANDING. The apply reported success and the migration table
+-- carries the row -- but that row is a LEDGER ENTRY, not a reading of the
+-- catalog, and this repo's ledgers have been wrong in 13 of 17 rows. Nobody has
+-- yet run the Verify block at the foot of this file; the session that applied
+-- it had its catalog query blocked. Treat this as applied-unverified until
+-- someone runs those queries, then replace this paragraph with the result.
 -- ===========================================================================
 --
 -- WHY UNIQUENESS IS AN INDEX, NOT A CLIENT CHECK (OR EVEN A SERVER
