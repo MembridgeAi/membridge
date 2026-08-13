@@ -16,8 +16,12 @@ const HOME_A = path.join(ROOT, 'home-name-a');
 const HOME_B = path.join(ROOT, 'home-name-b');
 // C never joins a team: the teamless case has its own credential-writing rule.
 const HOME_C = path.join(ROOT, 'home-name-c');
-const homeFor = { a: HOME_A, b: HOME_B, c: HOME_C };
-const portFor = { a: P(88), b: P(89), c: P(91) };
+// D exists only to prove the auto-suffix trigger against a REAL collision:
+// Ada already holds "Ada" on Acme, so D joining and asking for "Ada" must
+// land as "Ada 2".
+const HOME_D = path.join(ROOT, 'home-name-d');
+const homeFor = { a: HOME_A, b: HOME_B, c: HOME_C, d: HOME_D };
+const portFor = { a: P(88), b: P(89), c: P(91), d: P(92) };
 
 async function main() {
   const mock = createMockSupabase();
@@ -114,11 +118,70 @@ async function main() {
       assert.strictEqual(credsOf('b').avatar, null);
     });
 
+    await check('a colour round-trips into credentials.json', async () => {
+      // Avatars are TWO independent choices (glyph + colour), so avatarColor
+      // must survive the round trip exactly like avatar does.
+      const res = await apiAs('b', 'POST', '/api/team/set-display-name', { name: 'BODHI', avatar: 'ring', avatarColor: '#AABBCC' });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.avatarColor, '#AABBCC');
+      assert.strictEqual(credsOf('b').avatarColor, '#AABBCC');
+    });
+
+    await check('clearing the colour stores null, not the previous mark', async () => {
+      const res = await apiAs('b', 'POST', '/api/team/set-display-name', { name: 'BODHI', avatar: 'ring', avatarColor: null });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.avatarColor, null);
+      assert.strictEqual(credsOf('b').avatarColor, null);
+    });
+
+    await check('a malformed colour is a 400/MB002, not a stored value', async () => {
+      const res = await apiAs('b', 'POST', '/api/team/set-display-name', { name: 'BODHI', avatar: 'ring', avatarColor: 'not-a-color' });
+      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.body.code, 'MB002');
+      assert.strictEqual(credsOf('b').avatarColor, null, 'the prior clear must stand — nothing was written');
+    });
+
+    await check('a malformed RPC result is rejected, not laundered into teamless success', async () => {
+      // rest() returns null on a 204 and on a 200 whose body fails to parse.
+      // Without a shape guard, setDisplayName's old `row.teams` truthiness
+      // check would read that null (or an empty array, or a row missing
+      // `teams`) as "wrote nothing, teamless — store what I asked for", and
+      // stamp the REQUESTED name onto credentials.json even though nothing is
+      // known to have been written server-side. Exercised directly against
+      // teamsync.setDisplayName because the malformed shape is a daemon-level
+      // concern, not an HTTP-route one — Task 3's route doesn't exist yet.
+      process.env.MEMBRIDGE_HOME = HOME_B;
+      const before = credsOf('b');
+      mock.flags.malformedSetDisplayName = true;
+      let threw = null;
+      try {
+        await teamsync.setDisplayName(util.getConfig(), 'Should Never Land', null, null);
+      } catch (err) {
+        threw = err;
+      } finally {
+        mock.flags.malformedSetDisplayName = false;
+      }
+      assert.ok(threw, 'setDisplayName must reject a malformed RPC result');
+      assert.match(threw.message, /no usable result/);
+      const after = credsOf('b');
+      assert.strictEqual(after.displayName, before.displayName, 'credentials.json must be untouched');
+      assert.strictEqual(after.avatar, before.avatar);
+      assert.strictEqual(after.avatarColor, before.avatarColor);
+    });
+
     await check('joining under a taken name auto-suffixes instead of failing', async () => {
-      // The mock models 057's insert trigger. Ada already holds "Ada"; a
-      // second joiner asking for it must land as "Ada 2", not be turned away.
-      const taken = mock.members.filter(m => m.teamId === team.team_id).map(m => m.displayName);
-      assert.ok(taken.includes('Ada'), 'fixture: Ada holds her own name');
+      // The mock's memberInsertTrigger runs uniqueName on every insert (the
+      // 057 BEFORE INSERT trigger). Ada already holds "Ada" on Acme; D joins
+      // and explicitly asks for "Ada" too, and must land as "Ada 2" rather
+      // than being turned away or silently colliding.
+      process.env.MEMBRIDGE_HOME = HOME_D;
+      util.ensureConfig();
+      const dCreds = await teamsync.signup(util.getConfig(), 'd@test.dev', 'pw-d', 'Ada');
+      const joinedD = await apiAs('d', 'POST', '/api/team/join', { inviteCode: team.invite_code });
+      assert.strictEqual(joinedD.status, 200, 'fixture: D must join Acme');
+      const dRow = mock.members.find(m => m.teamId === team.team_id && m.userId === dCreds.userId);
+      assert.ok(dRow, 'D must be present on the team');
+      assert.strictEqual(dRow.displayName, 'Ada 2');
     });
 
     await check('GET /api/team reports the avatar alongside the name', async () => {

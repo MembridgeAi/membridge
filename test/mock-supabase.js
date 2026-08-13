@@ -269,6 +269,20 @@ function createMockSupabase() {
   // reaches it, which is why the real one is a trigger and not an RPC.
   // flags.noMemberJoinTrigger stands in for "046 not applied".
   const memberInsertTrigger = row => {
+    // 057_member_identity.sql: the BEFORE INSERT trigger that dedupes a
+    // colliding display name against the team's CURRENT membership, then the
+    // row is committed. Modelled inside this shared seam — rather than at
+    // each of the three insert call sites — because the real trigger lives on
+    // the table itself: no insert site knows the dedupe rule, and encoding it
+    // per-call-site here would reproduce the exact duplication 057 exists to
+    // avoid. Applies to every insert, owner rows included: an owner row on a
+    // brand-new team is trivially unique, so this is a no-op for it, not a
+    // special case. `row` is not yet in `members` when uniqueName runs, so it
+    // cannot collide with itself.
+    row.displayName = uniqueName(row.teamId, row.displayName);
+    members.push(row);
+    // 046_audit_member_joined.sql: the AFTER INSERT trigger, gated separately
+    // — it fires after the row (with its now-final name) is committed.
     if (flags.noMemberJoinTrigger) return;
     if (row.role === 'owner') return;
     insertAuditRow({
@@ -387,18 +401,16 @@ function createMockSupabase() {
       // account. Recorded here or deleteUserCascade's blocker list is vacuous.
       const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdBy: userId, createdAt: new Date().toISOString() };
       teams.set(team.id, team);
-      const ownerRow = { teamId: team.id, userId, displayName: uniqueName(team.id, body.p_display_name), role: 'owner', joinedAt: new Date().toISOString() };
-      members.push(ownerRow);
-      memberInsertTrigger(ownerRow); // 046: no-op for an owner row, called anyway so the gate is what excludes it
+      const ownerRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() };
+      memberInsertTrigger(ownerRow); // 057 dedupe + push, then 046: no-op for an owner row, called anyway so the gate is what excludes it
       return json(res, 200, [{ team_id: team.id, invite_code: team.inviteCode }]);
     }
     if (fn === 'join_team') {
       const team = [...teams.values()].find(t => t.inviteCode === body.p_code);
       if (!team) return json(res, 400, { message: 'invalid invite code' });
       if (!isMember(team.id, userId)) {
-        const joinRow = { teamId: team.id, userId, displayName: uniqueName(team.id, body.p_display_name), role: 'member', joinedAt: new Date().toISOString() };
-        members.push(joinRow);
-        memberInsertTrigger(joinRow); // 046
+        const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
+        memberInsertTrigger(joinRow); // 057 dedupe + push, then 046
       }
       // 029 §2: record this member's access to every project the team already
       // shares. Runs on a repeat join too, where it is a no-op.
@@ -477,8 +489,7 @@ function createMockSupabase() {
       const team = teams.get(inv.teamId);
       if (!isMember(team.id, userId)) {
         const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
-        members.push(joinRow);
-        memberInsertTrigger(joinRow); // 046
+        memberInsertTrigger(joinRow); // 057 dedupe + push, then 046
         inv.useCount++;
       }
       // 029 §2. In the real function this insert comes AFTER the membership
@@ -523,11 +534,19 @@ function createMockSupabase() {
       return json(res, 200, null);
     }
     if (fn === 'set_display_name') {
+      // Stands in for a proxy/network fault that truncates or otherwise
+      // mangles an otherwise-200 response body, so tests can prove the daemon
+      // rejects an unusable result instead of laundering it into a "teamless
+      // success" (see lib/teamsync.js's setDisplayName guard).
+      if (flags.malformedSetDisplayName) return json(res, 200, []);
       const name = String(body.p_name || '').trim();
       const avatar = body.p_avatar || null;
       const avatarColor = body.p_avatar_color || null;
       if (name.length < 1 || name.length > 80) {
         return json(res, 400, { code: 'MB002', message: 'a display name must be between 1 and 80 characters' });
+      }
+      if (avatar && !/^[a-z0-9-]{1,32}$/.test(avatar)) {
+        return json(res, 400, { code: 'MB002', message: 'avatar must be a lowercase glyph key' });
       }
       if (avatarColor && !/^#[0-9A-Fa-f]{6}$/.test(avatarColor)) {
         return json(res, 400, { code: 'MB002', message: 'avatar color must be a 6-digit hex value' });
