@@ -22,9 +22,11 @@ afterEach(() => {
 describe('TeamPage, signed out', () => {
   it('says the machine is signed out, in words, and offers a sign-in card', async () => {
     renderWith(new FakeDataClient({ authenticated: false }), <TeamPage />)
-    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument()
-    // The whole point: signed out must not read like "you just have no team".
-    expect(screen.getByText(/signed out/i)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
+    // The point the old amber banner carried: signed out must not read like
+    // "you just have no team". A whole dedicated screen now carries it --
+    // there is no team UI on screen at all.
+    expect(screen.getByText('to continue to MemBridge')).toBeInTheDocument()
     expect(screen.queryByLabelText(/team name/i)).toBeNull()
   })
 
@@ -88,11 +90,11 @@ describe('TeamPage, signed out', () => {
     const client = new FakeDataClient({ authenticated: false })
     const signUp = vi.spyOn(client, 'signUp')
     renderWith(client, <TeamPage />)
-    await userEvent.click(await screen.findByRole('button', { name: /create an account/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /^create account$/i }))
     await userEvent.type(screen.getByLabelText(/your name/i), 'Andrew')
     await userEvent.type(screen.getByLabelText(/email/i), 'andrew@acme.dev')
     await userEvent.type(screen.getByLabelText(/password/i), 'a-brand-new-password')
-    await userEvent.click(screen.getByRole('button', { name: /^sign up$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^create account$/i }))
 
     expect(signUp).toHaveBeenCalledWith({ displayName: 'Andrew', email: 'andrew@acme.dev', password: 'a-brand-new-password' })
     // needsConfirmation is a real state, not a failure -- saying nothing here

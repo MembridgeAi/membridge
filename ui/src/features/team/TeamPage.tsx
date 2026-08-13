@@ -3,10 +3,11 @@ import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { LoadingRows } from '../../components/LoadingBlock'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
-  useCreateInviteLink, useCreateTeam, useJoinTeam, useRenameTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
+  useCreateInviteLink, useCreateTeam, useJoinTeam, useRenameTeam, useSignOut, useTeamAccount,
 } from '../../data/queries'
 import type { TeamAccount, TeamSummary } from '../../data/types'
 import { EditablePill } from '../../components/EditablePill'
+import { AuthScreen } from './AuthScreen'
 import { DangerZone } from './DangerZone'
 import { MembersSection } from './MembersSection'
 import './team.css'
@@ -24,145 +25,6 @@ function memberCountLabel(n: number | null): string | null {
 
 function roleLabel(role: TeamSummary['role']): string {
   return role.charAt(0).toUpperCase() + role.slice(1)
-}
-
-// CREDENTIALS RULE for this whole file: a password is read from the submitted
-// form at submit time, handed to the mutation, and the field is emptied in the
-// same handler's finally. It is never held in component state (which would
-// outlive the submit and land in every subsequent render), never put in a
-// query key, never interpolated into a URL, and never added to an error
-// message -- daemon errors render exactly as the daemon worded them.
-function clearPassword(form: HTMLFormElement): void {
-  const field = form.elements.namedItem('password')
-  if (field instanceof HTMLInputElement) field.value = ''
-}
-
-/** State 1: no credentials on this machine. Deliberately loud -- a signed-out
- *  machine used to render identically to a signed-in machine with no team,
- *  which is how a silent sign-out went unnoticed: nothing in the app said
- *  anything was wrong. */
-function SignInCard({ configured }: { configured: boolean }) {
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin')
-  const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  const signIn = useSignIn()
-  const signUp = useSignUp()
-  const pending = signIn.isPending || signUp.isPending
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    // Captured before the first await: React clears currentTarget once the
-    // handler yields, and the finally below still needs the form.
-    const form = event.currentTarget
-    const data = new FormData(form)
-    const email = String(data.get('email') || '').trim()
-    const password = String(data.get('password') || '')
-    const displayName = String(data.get('displayName') || '').trim()
-    setError(null)
-    setNotice(null)
-    try {
-      if (mode === 'signup') {
-        const result = await signUp.mutateAsync({ displayName, email, password })
-        if (result.status === 'needs-confirmation') {
-          setNotice(`Account created. Confirm ${result.email} from the email just sent to it, then sign in below.`)
-          setMode('signin')
-        } else if (result.status === 'email-exists') {
-          setNotice('That email already has an account. Sign in below to continue.')
-          setMode('signin')
-        }
-      } else {
-        await signIn.mutateAsync({ email, password })
-      }
-    } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      clearPassword(form)
-    }
-  }
-
-  return (
-    <section className="team-card" aria-labelledby="team-auth-heading">
-      <p className="team-signed-out" role="status">
-        You are signed out. Team sync, shared memory and invites all need an account.
-      </p>
-      {/* T-78 item 9: name that solo works, on the surface the rail's Team
-          link lands on. Without this, a fresh install reaches this screen and
-          reads "you are signed out" as a defect state rather than as the
-          onboarding step it is -- there was no "solo mode is fine" pitch
-          anywhere in the app. Deliberately a short sentence, not a splash
-          screen, so an actual invitee is not made to scroll past a marketing
-          block. */}
-      <p className="team-note">
-        MemBridge works solo too — your memory stays on this machine either way. Sign in only if you
-        want to share it with a team.
-      </p>
-      <h2 className="team-card-title" id="team-auth-heading">
-        {mode === 'signup' ? 'Create an account' : 'Sign in'}
-      </h2>
-      {!configured && (
-        <p className="team-note">
-          This copy of MemBridge has no team service to sign in to, so sign-in won't work here.
-        </p>
-      )}
-      {notice && <p className="team-notice" role="status">{notice}</p>}
-      {error && <p className="team-error" role="alert">{error}</p>}
-
-      {/* GitHub is the ONLY method the hosted onboarding page offers
-          (cloudflare/join), so anyone who arrived that way has an account
-          with no password and could not sign in here at all while this card
-          was email-only. A plain anchor, not a fetch: /team/oauth/github is a
-          302 into GitHub's consent screen, and the daemon's callback page
-          finishes the exchange and links back here.
-
-          T-78 item 11: the note used to read "Use this if you set your
-          account up from a MemBridge invite page — that flow is GitHub-only,
-          so your account has no password to type below." A first-time user
-          who never saw an invite page could not decode any part of that
-          sentence, and it also failed to name what "Continue with GitHub" IS
-          for them (the fastest path in). Restated as what the button does,
-          with the invitee-specific fact moved behind a "why?" hint that the
-          reader does not need to understand in order to click. */}
-      <a className="team-btn team-btn-oauth" href="/team/oauth/github">
-        Continue with GitHub
-      </a>
-      <p className="team-note">
-        The fastest way in. Uses your GitHub account, no password to set or remember.
-      </p>
-
-      {/* Uncontrolled on purpose: the password lives in the DOM field for the
-          moment it takes to submit, never in React state. */}
-      <form className="team-form" onSubmit={submit}>
-        {mode === 'signup' && (
-          <div className="team-field">
-            <label htmlFor="team-name-field">Your name</label>
-            <input id="team-name-field" name="displayName" type="text" autoComplete="name" required />
-          </div>
-        )}
-        <div className="team-field">
-          <label htmlFor="team-email-field">Email</label>
-          <input id="team-email-field" name="email" type="email" autoComplete="email" required />
-        </div>
-        <div className="team-field">
-          <label htmlFor="team-password-field">Password</label>
-          <input
-            id="team-password-field" name="password" type="password"
-            autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required
-          />
-        </div>
-        <div className="team-actions">
-          <button type="submit" className="team-btn team-btn-primary" disabled={pending}>
-            {mode === 'signup' ? 'Sign up' : 'Sign in'}
-          </button>
-          <button
-            type="button" className="team-btn"
-            onClick={() => { setMode(mode === 'signup' ? 'signin' : 'signup'); setError(null) }}
-          >
-            {mode === 'signup' ? 'I already have an account' : 'Create an account'}
-          </button>
-        </div>
-      </form>
-    </section>
-  )
 }
 
 // What is currently on offer to share, and whether it actually reached the
@@ -397,7 +259,7 @@ export function TeamPage() {
         </p>
       )}
 
-      {account && !account.authenticated && <SignInCard configured={account.configured} />}
+      {account && !account.authenticated && <AuthScreen configured={account.configured} />}
 
       {account && account.authenticated && (
         <>
