@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { GitHubMark } from '../../assets/GitHubMark'
 import { MembridgeMark } from '../../assets/MembridgeMark'
 import { useSignIn, useSignUp } from '../../data/queries'
-import { MIN_PASSWORD_LENGTH, scorePassword, strengthWord, type PasswordScore } from './passwordStrength'
+import { MIN_PASSWORD_LENGTH, scorePassword, strengthWord, type PasswordScore, type PasswordStrength } from './passwordStrength'
 import './auth.css'
 
 function errorMessage(error: unknown): string {
@@ -63,7 +63,15 @@ export function AuthScreen({ configured }: { configured: boolean }) {
   // that is the entire reason a live meter is compatible with the credentials
   // rule at the top of this file. Do not "simplify" this into a controlled
   // password input.
-  const [strength, setStrength] = useState<{ score: PasswordScore; hint: string }>({ score: 0, hint: '' })
+  //
+  // null is a distinct third state from "scored and weak": it means nothing
+  // has been typed (or the field was just reset), and the meter must not
+  // render at all in that state. scorePassword('') also answers
+  // { score: 0, hint: '' } for an empty string, which is indistinguishable
+  // from a *typed* password that happens to have no hint (score 3), so null
+  // is the unambiguous signal for "there is nothing to score yet."
+  const [strength, setStrength] = useState<PasswordStrength | null>(null)
+  const passwordRef = useRef<HTMLInputElement>(null)
   const signIn = useSignIn()
   const signUp = useSignUp()
   const pending = signIn.isPending || signUp.isPending
@@ -89,12 +97,33 @@ export function AuthScreen({ configured }: { configured: boolean }) {
       }
       if (isSignUp) {
         const result = await signUp.mutateAsync({ displayName, email, password })
-        if (result.status === 'needs-confirmation') {
-          setNotice(`Account created. Confirm ${result.email} from the email just sent to it, then sign in below.`)
-          setMode('signin')
-        } else if (result.status === 'email-exists') {
-          setNotice('That email already has an account. Sign in below to continue.')
-          setMode('signin')
+        // Exhaustive on SignUpResult['status'] by construction: the default
+        // branch assigns to a `never`-typed variable, so a fourth outcome
+        // added to SignUpResult (types.ts) fails `tsc --noEmit` here rather
+        // than silently falling through with no notice, which is the exact
+        // shape of the shipped bug this whole task closes.
+        switch (result.status) {
+          case 'signed-in':
+            // Deliberate no-op: the sign-up mutation's own onSuccess handler
+            // refreshes auth state and moves the user on. There is no
+            // "account already exists and you're in" sentence to show --
+            // the app just proceeds to the signed-in view.
+            break
+          case 'needs-confirmation':
+            setNotice(`Account created. Confirm ${result.email} from the email just sent to it, then sign in below.`)
+            setMode('signin')
+            break
+          case 'email-exists':
+            setNotice('That email already has an account. Sign in below to continue.')
+            setMode('signin')
+            // The email was right; it just meant something else. Land the
+            // cursor on the only field they still need to fill.
+            passwordRef.current?.focus()
+            break
+          default: {
+            const _exhaustive: never = result
+            throw new Error(`Unhandled sign-up outcome: ${JSON.stringify(_exhaustive)}`)
+          }
         }
       } else {
         await signIn.mutateAsync({ email, password })
@@ -109,7 +138,7 @@ export function AuthScreen({ configured }: { configured: boolean }) {
       // as the submit error, once as the meter's stale hint for the password
       // that used to be in the field.
       clearPassword(form)
-      setStrength({ score: 0, hint: '' })
+      setStrength(null)
     }
   }
 
@@ -150,11 +179,11 @@ export function AuthScreen({ configured }: { configured: boolean }) {
           <div className="auth-field">
             <label htmlFor="auth-password">Password</label>
             <input
-              id="auth-password" name="password" type="password"
+              id="auth-password" name="password" type="password" ref={passwordRef}
               autoComplete={isSignUp ? 'new-password' : 'current-password'} required
-              onChange={isSignUp ? e => setStrength(scorePassword(e.target.value)) : undefined}
+              onChange={isSignUp ? e => setStrength(e.target.value.length > 0 ? scorePassword(e.target.value) : null) : undefined}
             />
-            {isSignUp && <StrengthMeter score={strength.score} hint={strength.hint} />}
+            {isSignUp && strength && <StrengthMeter score={strength.score} hint={strength.hint} />}
           </div>
 
           {/* The secondary action is a text link and the primary is a filled
@@ -168,7 +197,7 @@ export function AuthScreen({ configured }: { configured: boolean }) {
                 setMode(isSignUp ? 'signin' : 'signup')
                 setError(null)
                 setNotice(null)
-                setStrength({ score: 0, hint: '' })
+                setStrength(null)
               }}
             >
               {isSignUp ? 'Sign in instead' : 'Create account'}
