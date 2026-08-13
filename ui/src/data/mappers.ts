@@ -173,6 +173,18 @@ export interface RawMemberRow {
   display_name: string
   role: Role
   joined_at: string | null
+  /** 057_member_identity.sql's team_members.avatar column -- null means
+   *  "render my initial", a choice, not an absence. Optional HERE because
+   *  team_members_list (053) does not select it yet, so today's daemon never
+   *  sends it; mapMember collapses the missing case to the same null a
+   *  deliberate "no avatar" choice produces, which is the correct default
+   *  either way. NOT snake_case-inconsistent with avatar_color below by
+   *  accident -- `avatar` has no underscore to convert. */
+  avatar?: string | null
+  /** Sibling of avatar above, team_members.avatar_color. Snake_case on the
+   *  wire (unlike avatar) because Postgres/PostgREST return column names
+   *  verbatim -- do not assume every raw field here shares one convention. */
+  avatar_color?: string | null
   /** #59, from server.js's annotatePreFixLocal. The daemon always sends this
    *  -- zero included -- but it is typed optional HERE and only here, because
    *  this interface also describes what an OLDER daemon returns, and a client
@@ -682,6 +694,11 @@ export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
     // No `email`: the RPC has never sent one, and filling the field with ''
     // is what put a blank address line on every member row. See Member's doc.
     role: row.role,
+    // Both null-default rather than trusted: an absent field (today's
+    // team_members_list, which predates 057) and an explicit "no avatar
+    // chosen" collapse to the same answer on purpose -- see RawMemberRow.
+    avatar: row.avatar ?? null,
+    avatarColor: row.avatar_color ?? null,
     // schema.sql has joined_at NOT NULL, but the RPC's return type is
     // nullable -- fall back rather than assert a value we don't have.
     joinedAt: row.joined_at || '',

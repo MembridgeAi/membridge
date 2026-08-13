@@ -230,6 +230,15 @@ export interface DataClient {
   // Rename the team (POST /api/team/rename). Owner/admin only, enforced by
   // the rename_team RPC rather than here.
   renameTeam(teamId: string, name: string): Promise<void>
+  // Change YOUR OWN display name and avatar (glyph + color) across every team
+  // you belong to (POST /api/team/set-display-name). Uniqueness is enforced
+  // by the backend, not here: a taken name rejects with the daemon's 409
+  // text, and the daemon's `code` (MB001 collision, MB002 validation) is
+  // attached to the thrown Error so a caller can tell them apart without
+  // parsing prose. `avatar`/`avatarColor` are each independently nullable --
+  // null is "use my initial" / "use my derived color", a choice, never
+  // "leave unchanged".
+  setDisplayName(name: string, avatar: string | null, avatarColor: string | null): Promise<{ displayName: string; avatar: string | null; avatarColor: string | null }>
   // Replace the STANDING invite code with a new one (POST
   // /api/team/rotate-invite), which is the only remedy when the old one has
   // leaked -- it is long-lived and unlimited-use by design, unlike the

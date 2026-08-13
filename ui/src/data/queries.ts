@@ -548,6 +548,22 @@ export function useJoinTeam() {
   })
 }
 
+// Change the VIEWER's own name and avatar (Settings, not the Team page's
+// per-member admin controls). `avatar`/`avatarColor` are each independently
+// nullable and passed straight through -- null is a caller's choice ("use my
+// initial" / "use my derived color"), never coalesced with a previous value.
+export function useSetDisplayName() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { name: string; avatar: string | null; avatarColor: string | null }) =>
+      c.setDisplayName(v.name, v.avatar, v.avatarColor),
+    // accountRefresh relabels the rail; ['members'] relabels the roster and
+    // every avatar resolved through it.
+    onSuccess: () => { accountRefresh(qc); qc.invalidateQueries({ queryKey: ['members'] }) },
+  })
+}
+
 export function useRenameTeam() {
   const c = useDataClient()
   const qc = useQueryClient()

@@ -35,7 +35,7 @@ declare global {
 interface RawTeamPayload {
   configured?: boolean
   authenticated?: boolean
-  user?: { userId: string; email: string; displayName: string } | null
+  user?: { userId: string; email: string; displayName: string; avatar?: string | null; avatarColor?: string | null } | null
   teams?: RawTeamRow[]
   viewerId?: string | null
   inviteCode?: string | null
@@ -58,7 +58,7 @@ interface RawScanProject {
 interface TeamPayload {
   configured: boolean
   authenticated: boolean
-  user: { userId: string; email: string; displayName: string } | null
+  user: { userId: string; email: string; displayName: string; avatar: string | null; avatarColor: string | null } | null
   teams: RawTeamRow[]
   viewerId: string | null
   inviteCode: string | null
@@ -92,6 +92,12 @@ async function post<T>(pathAndQuery: string, body?: unknown): Promise<T> {
 // { error } carrying the ONLY explanation the user can act on ("email and
 // password are required", "Invalid login credentials"). That text is rendered
 // as-is; nothing the user typed is ever added to it here or by the caller.
+//
+// `code`, when the daemon sends one (set-display-name's MB001 collision vs.
+// MB002 validation), is attached to the thrown Error rather than folded into
+// its message -- a caller that needs to tell the two apart (Task 6's dialog)
+// reads `.code`, and every other caller that ignores it sees the same message
+// as before.
 async function postReadingError<T>(pathAndQuery: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${pathAndQuery}`, {
     method: 'POST',
@@ -100,8 +106,12 @@ async function postReadingError<T>(pathAndQuery: string, body?: unknown): Promis
   })
   // A body that is not JSON at all (a proxy's HTML error page) must not throw
   // a parse error over the top of the real status.
-  const data = await res.json().catch(() => null) as ({ error?: string } & T) | null
-  if (!res.ok) throw new Error((data && data.error) || `${pathAndQuery} failed: ${res.status}`)
+  const data = await res.json().catch(() => null) as ({ error?: string; code?: string } & T) | null
+  if (!res.ok) {
+    const err: Error & { code?: string } = new Error((data && data.error) || `${pathAndQuery} failed: ${res.status}`)
+    if (data && data.code) err.code = data.code
+    throw err
+  }
   return data as T
 }
 
@@ -232,7 +242,11 @@ export class LocalDaemonClient implements DataClient {
         // fabricated default that would claim a signed-in session.
         configured: data.configured ?? false,
         authenticated: data.authenticated ?? false,
-        user: data.user ?? null,
+        // avatar/avatarColor defaulted individually, same as every other
+        // field here: an older daemon's user object predates both, and an
+        // absent choice reads as "no choice made" (null), never as a crash
+        // on `undefined` reaching TeamAccount's non-optional fields.
+        user: data.user ? { ...data.user, avatar: data.user.avatar ?? null, avatarColor: data.user.avatarColor ?? null } : null,
         teams: Array.isArray(data.teams) ? data.teams : [],
         viewerId: data.viewerId ?? null,
         inviteCode: data.inviteCode ?? null,
@@ -374,6 +388,23 @@ export class LocalDaemonClient implements DataClient {
     // The name is on the cached /api/team read that the rail, Settings and the
     // Team page all render from.
     this.requestCache.clear()
+  }
+
+  // postReadingError so a name collision (MB001) or a malformed avatar/color
+  // (MB002) surfaces the daemon's own sentence, with `.code` attached (see
+  // postReadingError) so the dialog can tell them apart. avatar/avatarColor
+  // are forwarded exactly as given -- ?? null only guards the RESPONSE
+  // fields against an old daemon that echoes the request back missing one;
+  // null is never substituted for what the caller asked to set.
+  async setDisplayName(name: string, avatar: string | null, avatarColor: string | null): Promise<{ displayName: string; avatar: string | null; avatarColor: string | null }> {
+    const r = await postReadingError<{ displayName: string; avatar?: string | null; avatarColor?: string | null }>(
+      '/api/team/set-display-name', { name, avatar, avatarColor },
+    )
+    // Every cached read that shows this member's identity -- /api/team (the
+    // rail, Settings, Team page) and the members roster -- is stale the
+    // moment this resolves.
+    this.requestCache.clear()
+    return { displayName: r.displayName, avatar: r.avatar ?? null, avatarColor: r.avatarColor ?? null }
   }
 
   async rotateInviteCode(teamId: string): Promise<string> {
