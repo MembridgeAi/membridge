@@ -40,8 +40,11 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 | 056 | `team_feed` off the default PUBLIC grant that four drop+create migrations kept restoring, with the paired grant that stops the revoke being an outage | `agent-insights-agg` | no |
 
 | 057 | Per-team unique display names (case/whitespace-insensitive), a member avatar choice, and `set_display_name` | `feat/member-identity-rename` | yes (2026-08-13, unverified — see MIGRATION-STATE.md) |
+| 059 | Revokes `authenticated` EXECUTE on `unique_member_name`/`team_members_dedupe_name` — closes the cross-team display-name enumeration oracle that 057's `public, anon`-only revoke left open (Supabase grants `authenticated` EXECUTE on new public-schema functions by default, and 057 never named that role) | `feat/member-identity-rename` | no |
 
-**Next free number: 058.**
+**058 is claimed elsewhere** — on branch `feat/settings-team-danger-zone`, not visible from this branch, so its row is not written here to avoid guessing at its content; that branch's own commit is the record for it.
+
+**Next free number: 060.**
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.
@@ -82,6 +85,7 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | 17 | `055_team_insights_rollup.sql` | Makes the per-person and per-project numbers on Insights real totals instead of a quarter-short sample, and stops the screen naming somebody as a project's only contributor on the strength of an incomplete read. Adds a new function, touches nothing existing — any order, on its own, and safe to apply before or after the client ships. *(insights lane)*
 | 18 | `056_team_feed_revoke_public.sql` | Stops `team_feed` being callable by PUBLIC. No data is exposed today — `is_team_member` denies a null identity — so this is defence in depth, not a live leak. **Apply in the same session as 055.** Self-verifying: it raises rather than silently doing nothing. *(insights lane)* |
 | 19 | `057_member_identity.sql` | Lets a member rename themselves and pick an avatar, with display names enforced unique per team by a partial unique index (not a client check). Adds columns to `team_members`, a dedupe-on-insert trigger, and `set_display_name`. **NOT independent of 053 — apply-order matters.** §3 drops and recreates `team_members_list` (053's function) to add `avatar`/`avatar_color` to what it returns, carrying 053's `deleted_at` column forward in the same definition — apply THIS file and skip 053 entirely; do not apply 053 afterward (see 053's row above for what that breaks). Independent of everything ELSE above — any order, on its own, with respect to non-053 files. *(member-identity lane)* |
+| 20 | `059_revoke_unique_member_name_authenticated.sql` | 057 is already applied to production, but its own revoke line only removed `public`/`anon` from `unique_member_name`/`team_members_dedupe_name` — it never named `authenticated`, which Supabase grants EXECUTE to on every new public-schema function by default. This file closes that: two `revoke ... from authenticated` statements, nothing else. **Independent of every other file in this table, including 057 and 058** — no `create function`, no dependency on apply order, safe whether pasted before, after, or in the same session as anything else here. *(member-identity lane)* |
 
 **`052_account_deletion_fk_actions.sql` is deliberately NOT in this table.** It
 is parked pending a product decision — see `docs/ACCOUNT-DELETION.md` section 6

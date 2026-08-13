@@ -42,8 +42,8 @@ reasoning is not recoverable from the diff.
 | Affordance | **Double-click + keyboard** | Double-click as asked, plus Enter on a focused control. Double-click alone is invisible and unreachable without a mouse. |
 | Join collision | **Silent auto-suffix** | A joiner is often at a CLI with no input box and their name comes from local credentials. Rejecting the join is a dead end at onboarding. Rename still errors, because there the person *is* looking at an input box. |
 | Deleted accounts | **Reserved 10 days, then reusable** | Deletion sets `auth.users.deleted_at` and leaves the member row (`053:35`), so without this a departed teammate's name is locked up forever. |
-| Avatar storage | **Column on `team_members`, all teams** | Same RPC, same editor, same scope as the name. Not unique — two people may pick the same mark. |
-| Avatar art | **One SVG sprite sheet, supplied by Andrew** | Plumbing ships now against placeholder marks; the real file is a drop-in replacement. |
+| Avatar storage | **Two columns on `team_members`, all teams** | `avatar` (glyph key) and `avatar_color` (a second, independent choice). Same RPC, same editor, same scope as the name. Neither is unique — two people may pick the same glyph, the same color, or both. |
+| Avatar art | **A React component, glyph and color chosen independently** | Superseded the original SVG-sprite-sheet plan (see Architecture §5). Andrew delivered 15 stroked glyphs; color is a separate pick from 10 token colors, giving 150 combinations from one component instead of one sprite sheet Andrew would need to hand-draw combinations into. |
 | Audit | **Record `member-renamed`** | The only record that explains why a familiar name became an unfamiliar one. |
 
 ## Architecture
@@ -69,10 +69,32 @@ Sections in order:
    `normalize_member_name` against rows with `name_released_at is null`, the
    same predicate the index uses, so the helper and the constraint can never
    disagree about what "taken" means.
-4. **Rewrite the four insert paths** to call it: `create_team`, `join_team`,
-   `redeem_invite`, `redeem_onboarding_invite`. Each insert sits in a bounded
-   retry loop (5 attempts) — two simultaneous joins can both compute `marco 2`,
-   and without the retry the index reintroduces the dead end this avoids.
+4. **A single `before insert` trigger on `team_members`**, not a rewrite of the
+   four insert paths. The trigger (`team_members_dedupe_name`) calls
+   `unique_member_name` on every row before it lands, so `create_team`,
+   `join_team`, `redeem_invite`, `redeem_onboarding_invite` — and anything
+   added later — are covered automatically, with no insert site needing to
+   know the suffixing rule. This is a deviation from the original plan to
+   rewrite each of the four RPCs individually; the trigger was chosen instead
+   because it cannot be forgotten by a future insert path the way a per-RPC
+   convention can.
+
+   **The residual this accepts.** Two people joining the same team with the
+   same name at the same instant both fire the trigger before either
+   transaction commits, so both could compute the same suffix (`marco 2`) and
+   the second's insert would then collide on the unique index. This is closed
+   by a per-team advisory lock taken inside `unique_member_name`
+   (`pg_advisory_xact_lock`, keyed on the team id): every insert into that
+   team's roster serializes on name assignment, so the second joiner's
+   trigger blocks until the first commits, then computes `marco 3` against
+   the now-committed roster instead of colliding. The lock is
+   transaction-scoped and releases automatically at commit or rollback.
+   `set_display_name` (an existing member renaming) takes the same per-team
+   lock before it writes, for the same reason from the other direction — a
+   rename committing between a joiner's not-exists probe and its insert would
+   otherwise reopen the identical race. See `057_member_identity.sql`'s
+   header for the full mechanics, including why the lock order across
+   multiple teams has to be `order by team_id` rather than arbitrary.
 5. **Pre-release legacy duplicates** — stamp `name_released_at = now()` on all
    but the earliest joiner of any existing duplicate group. Production had zero
    duplicates when this was written, but one appearing before the apply would
@@ -136,8 +158,26 @@ already carries `displayName` (`lib/teamsync.js:209`), or a token refresh
 silently drops the avatar.
 
 `POST /api/team/set-display-name` — 400 on empty or overlong, **409 on
-collision**, 200 with `{ displayName, avatar }`. Records a `member-renamed`
-audit row via the existing `apiAccess.recordAudit`, carrying old and new name.
+collision**, 200 with `{ displayName, avatar, avatarColor }`.
+
+**The `member-renamed` audit row is written inside `set_display_name` itself,
+not by the daemon.** This deviates from the pattern most other audited
+actions follow (daemon calls `apiAccess.recordAudit` after the mutation
+succeeds). It cannot follow that pattern here: `team_audit`'s insert policy
+requires manager role (`is_team_manager(team_id) and actor_id = auth.uid()`),
+but renaming yourself is self-service for every member, manager or not, and
+`recordAudit` swallows its own failures by design (`lib/api-access.js`) so
+that a failed log never turns a completed action into a false error. Put
+those two facts together for a plain member and a daemon-side `recordAudit`
+call would be silently refused by RLS and silently swallowed by
+`recordAudit` — a 200 response with no audit row anywhere, the exact
+fail-open-plus-unconditional-success shape this repo treats as its
+characteristic bug. Writing the row inside the `security definer` RPC's own
+transaction is the only way to log an action a plain member is allowed to
+take on themself. One row is written per team the rename touched (the RPC
+updates every team a member belongs to in one statement), not one row filed
+under an arbitrary "first" team — the RPC is the only actor that knows which
+teams were actually written.
 
 `GET /api/team` returns `avatar` alongside `displayName` (`lib/server.js:2813`).
 
@@ -156,13 +196,40 @@ and roster queries so the rail and the Members list both relabel.
 **DataClient.** `setDisplayName(name, avatar)` added to the interface,
 `LocalDaemonClient` and `FakeDataClient`.
 
-### 5. Avatar rendering — no call-site churn
+### 5. Avatar rendering — `AvatarGlyph.tsx`, not a sprite sheet
 
-`Avatar` is used at 14 sites and none of them change. It already receives `id`,
-so a context provider mounted once in `Shell` publishes an `id → avatar` map
-built from the roster query the app already runs, and `Avatar` looks itself up.
-Tests that render `Avatar` with no provider get an empty map and fall back to
-the initial, which is today's behaviour.
+The original plan below was superseded once the art arrived: instead of an
+SVG sprite sheet with `<symbol>` elements and a `?raw` import, the glyphs
+shipped as a React component, `ui/src/components/AvatarGlyph.tsx` —
+15 stroked marks ("Signal" family) in the language of the MemBridge wordmark,
+over a flat token-color circle. **Shape and color are chosen
+independently** — `GLYPHS` (15 keys) and `AVATAR_COLORS` (10 token colors,
+the first eight carried forward unchanged from `Avatar.tsx`'s existing
+`PALETTE` so a user who never picks keeps their current color) are separate
+enums, giving 150 distinct combinations from one component rather than one
+sprite Andrew would need to hand-draw every combination into. This is why
+`team_members` carries two independent columns (`avatar`, `avatar_color`),
+not one — see the Decisions table.
+
+`Avatar` is used at 14 sites and none of them change. It already receives
+`id`, so a context provider mounted once in `Shell` publishes an
+`id → (avatar, avatarColor)` map built from the roster query the app already
+runs, and `Avatar` looks itself up, rendering `AvatarGlyph` when a glyph is
+set and falling back to the initial otherwise. Tests that render `Avatar`
+with no provider get an empty map and fall back to the initial, which is
+today's behaviour.
+
+**Unknown keys fall back to the initial** — the case where a teammate on a
+newer build picked a glyph or color this build's component does not
+recognise.
+
+**Editor reachability.** The picker is reachable from two places — the rail
+footer's double-click (§4 below) and a row in Settings — through one shared
+dialog, `ui/src/app/IdentityDialog.tsx`, so the two entry points cannot drift
+into two different pickers or two different validation paths.
+
+<details>
+<summary>Original plan (superseded, kept for history)</summary>
 
 **Sprite contract.** `ui/src/assets/avatars.svg`, injected once at app root. One
 `<symbol id="mb-avatar-<key>" viewBox="0 0 24 24">` per mark, paths using
@@ -170,8 +237,7 @@ the initial, which is today's behaviour.
 stay legible at 16px, the smallest current usage. Roughly 8 crude placeholder
 marks ship with this work; Andrew's file replaces it and nothing else changes.
 
-**Unknown keys fall back to the initial** — the case where a teammate on a newer
-build picked a mark this build's sprite does not contain.
+</details>
 
 ## Edge cases
 
