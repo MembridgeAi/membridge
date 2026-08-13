@@ -66,10 +66,14 @@ export function AuthScreen({ configured }: { configured: boolean }) {
   //
   // null is a distinct third state from "scored and weak": it means nothing
   // has been typed (or the field was just reset), and the meter must not
-  // render at all in that state. scorePassword('') also answers
-  // { score: 0, hint: '' } for an empty string, which is indistinguishable
-  // from a *typed* password that happens to have no hint (score 3), so null
-  // is the unambiguous signal for "there is nothing to score yet."
+  // render at all in that state. scorePassword('') already answers
+  // { score: 0, hint: '' } uniquely for the empty string -- every non-empty
+  // password that scores 0 carries the "Use at least 8 characters." hint, so
+  // that pair alone would in fact distinguish "empty" from "typed". null is
+  // still used instead, because it makes "nothing to score yet" a fact about
+  // the type rather than something every reader has to re-derive by tracing
+  // scorePassword's hint logic, and because it can't be produced by accident
+  // the way an empty hint string can.
   const [strength, setStrength] = useState<PasswordStrength | null>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
   const signIn = useSignIn()
@@ -197,6 +201,18 @@ export function AuthScreen({ configured }: { configured: boolean }) {
                 setMode(isSignUp ? 'signin' : 'signup')
                 setError(null)
                 setNotice(null)
+                // strength === null is supposed to mean "the field is empty."
+                // That invariant is only true if every place that nulls it
+                // also empties the field in the same breath -- so clear the
+                // password input's real DOM value here too, rather than
+                // trusting this handler and the submit `finally` to agree by
+                // convention. The input is never unmounted by the isSignUp
+                // toggle (only "Your name" and the meter are conditional), so
+                // its uncontrolled value would otherwise survive a mode
+                // switch untouched: a real, weak password left sitting in the
+                // DOM with no meter describing it. A half-typed password
+                // surviving a sign-in/sign-up switch isn't wanted anyway.
+                if (passwordRef.current) passwordRef.current.value = ''
                 setStrength(null)
               }}
             >

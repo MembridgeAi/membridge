@@ -127,6 +127,28 @@ describe('AuthScreen password rules', () => {
     expect(await screen.findByText('Use at least 8 characters.')).toBeInTheDocument()
     expect(screen.queryByTestId('auth-strength')).toBeNull()
   })
+
+  it('clears a typed password on toggling away from sign-up, so switching back does not silently carry an undescribed password in the DOM', async () => {
+    // Regression: the password <input> is never unmounted by the isSignUp
+    // toggle -- only "Your name" and the meter are conditional -- so its
+    // uncontrolled DOM value used to survive a round trip through sign-in
+    // while `strength` (reset to null by the toggle handler) did not. That
+    // let a real, weak, non-empty password sit in the field with no meter
+    // describing it: state and DOM disagreed about whether it was empty.
+    renderWith(new FakeDataClient({ authenticated: false }), <AuthScreen configured />)
+    await userEvent.click(await screen.findByRole('button', { name: /create account/i }))
+
+    const passwordField = screen.getByLabelText(/password/i)
+    await userEvent.type(passwordField, 'short')
+    expect(await screen.findByTestId('auth-strength')).toBeInTheDocument()
+
+    // Sign-up -> sign-in -> sign-up, without ever retyping the password.
+    await userEvent.click(screen.getByRole('button', { name: /sign in instead/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /create account/i }))
+
+    expect(screen.getByLabelText(/password/i)).toHaveValue('')
+    expect(screen.queryByTestId('auth-strength')).toBeNull()
+  })
 })
 
 describe('AuthScreen sign-up outcome handling is exhaustive', () => {
