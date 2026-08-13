@@ -56,12 +56,44 @@ function runCli(args, extraEnv) {
   });
 }
 
-// A pid that is guaranteed dead AND reaped: spawnSync waits for the child, and
-// libuv reaps it, so kill(pid, 0) answers ESRCH -- unlike the zombie below.
+// A pid that is dead AND reaped: spawnSync waits for the child, and libuv reaps
+// it, so kill(pid, 0) answers ESRCH -- unlike the zombie below.
+//
+// WHY THIS RE-DRAWS INSTEAD OF TRUSTING THE SPAWN. Reaped does not mean the
+// number stays unused. Windows recycles pids aggressively, and this run spawns
+// thousands of short-lived node processes across 106 suites, so a pid reaped a
+// millisecond ago can already name a LIVE process by the time `stop` reads the
+// pid file. When that happens cmdStop is not wrong -- isRunning() sees a live
+// pid, isMembridgeProcess() is unconditionally true on win32 (bin/membridge.js
+// :113, deliberately, because reading a Windows command line is too fragile to
+// gate startup on), so stop reports "Stopped MemBridge (pid N)" and KEEPS the
+// pid file. The check then fails on a fixture whose premise quietly stopped
+// being true, and it fails only under load: observed as a windows-only CI flake
+// that passed on ci.yml and failed on build-app for the same commit, with the
+// giveaway `expected "not running", got: Stopped MemBridge (pid 1536)`.
+//
+// So verify the premise rather than assuming it. The liveness predicate below
+// mirrors bin/membridge.js:93 EXACTLY -- EPERM means a live pid owned by
+// someone else, anything else (ESRCH) means genuinely gone -- because a fixture
+// that judged liveness differently from the code under test would be checking
+// the wrong thing.
 function deadReapedPid() {
-  const r = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
-  assert.ok(r.pid, 'fixture child failed to spawn');
-  return r.pid;
+  const live = pid => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return !!e && e.code === 'EPERM';
+    }
+  };
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const r = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    assert.ok(r.pid, 'fixture child failed to spawn');
+    if (!live(r.pid)) return r.pid;
+  }
+  assert.fail('could not draw a pid that stayed dead in 20 attempts — the ' +
+    'machine is recycling pids faster than this fixture can outrun, which is ' +
+    'a real signal about the runner, not a flake to retry through');
 }
 
 async function main() {
