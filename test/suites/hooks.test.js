@@ -930,6 +930,39 @@ async function main() {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // The two vocabularies are one vocabulary (session-area-headers, task 4).
+  // The hook writes "[UI/UX] ..." onto a point; the day card derives
+  // "UI/UX" from file paths. They are separate literals in two languages,
+  // so nothing but this test stops them drifting into a header and a tag
+  // that name the same work differently.
+  // ---------------------------------------------------------------------
+  {
+    const { AREAS } = require('../../lib/hooks.js');
+    // ROOT (from the harness) is a throwaway sandbox dir (fs.mkdtempSync),
+    // not this checkout's repo root, so it cannot find areaTags.ts. Use the
+    // same __dirname-relative path the file already uses for LIB above, and
+    // that audit-story.test.js uses for its own real-repo-source reads.
+    const REPO = path.join(__dirname, '..', '..');
+    const src = h.readSource(path.join(REPO, 'ui/src/features/feed/areaTags.ts'));
+    // The union type is the tags' declaration of the vocabulary.
+    const union = /export type Area =([\s\S]*?)\n\n/.exec(src);
+    check('areaTags.ts still declares an Area union', () => {
+      assert.ok(union, 'the Area union regex must still match areaTags.ts');
+    });
+    const declared = union ? (union[1].match(/'([^']+)'/g) || []).map(s => s.slice(1, -1)) : [];
+    check('every hook area exists in the tag vocabulary', () => {
+      for (const a of AREAS) {
+        assert.ok(declared.includes(a), `AREAS has "${a}" but areaTags.ts's Area union does not`);
+      }
+    });
+    check('every tag area exists in the hook vocabulary', () => {
+      for (const a of declared) {
+        assert.ok(AREAS.includes(a), `areaTags.ts's Area union has "${a}" but AREAS does not`);
+      }
+    });
+  }
+
   h.finish();
 }
 
