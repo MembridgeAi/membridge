@@ -261,3 +261,73 @@
   font-size: var(--fs-sm);
   color: var(--text2);
 }
+
+/* ── Danger zone ───────────────────────────────────────────────────────────
+ * Last panel on the tab, holding the operations that cannot be undone. Red is
+ * spent on the heading and the buttons' text and border only -- a filled red
+ * panel would make the section shout continuously at someone who is on this
+ * tab to copy an invite link, and by the time they DO need it the colour has
+ * stopped meaning anything. Same reason the buttons are outlined rather than
+ * solid: they are correct actions, not warnings. */
+.danger-zone {
+  border-color: color-mix(in srgb, var(--red) 30%, var(--line));
+}
+.danger-zone-title {
+  margin: 0 0 4px;
+  color: var(--red);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  letter-spacing: -.005em;
+}
+.danger-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--line);
+}
+.danger-row-text {
+  flex: 1;
+  min-width: 190px;
+}
+.danger-row-label {
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.danger-row-desc {
+  margin: 2px 0 0;
+  color: var(--text3);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-base);
+  max-width: 62ch;
+}
+.danger-btn {
+  flex: none;
+  align-self: center;
+  padding: 4px 11px;
+  border: 1px solid color-mix(in srgb, var(--red) 42%, transparent);
+  border-radius: var(--r);
+  background: var(--panel);
+  color: var(--red);
+  font-family: var(--ui);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.danger-btn:hover:not(:disabled) {
+  background: var(--red-dim);
+  border-color: var(--red);
+}
+.danger-btn:disabled {
+  color: var(--text3);
+  border-color: var(--line2);
+  cursor: default;
+}
+.danger-btn:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}

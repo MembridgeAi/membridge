@@ -3,9 +3,11 @@ import { DaemonErrorBanner, daemonErrorOf } from '../../components/DaemonError'
 import { LoadingRows } from '../../components/LoadingBlock'
 import { useDataClient } from '../../data/DataClientProvider'
 import {
-  useCreateInviteLink, useCreateTeam, useJoinTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
+  useCreateInviteLink, useCreateTeam, useJoinTeam, useRenameTeam, useSignIn, useSignOut, useSignUp, useTeamAccount,
 } from '../../data/queries'
 import type { TeamAccount, TeamSummary } from '../../data/types'
+import { EditablePill } from '../../components/EditablePill'
+import { DangerZone } from './DangerZone'
 import { MembersSection } from './MembersSection'
 import './team.css'
 
@@ -237,6 +239,10 @@ export function TeamPage() {
   const createTeam = useCreateTeam()
   const mintInvite = useCreateInviteLink()
   const signOut = useSignOut()
+  // Backs the inline rename on the team-name pill below. Same mutation the
+  // Settings Rename dialog uses, so both routes to a rename share one cache
+  // invalidation and cannot disagree about the current name.
+  const renameTeam = useRenameTeam()
 
   const [share, setShare] = useState<Share | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -454,7 +460,22 @@ export function TeamPage() {
                   measured at the 900px floor a 78-character single-token name
                   produced horizontal scroll inside the content column, a
                   150-character one 648px of it. */}
-              <h2 className="team-card-title wrap-anywhere" id="team-current-heading">{team.name}</h2>
+              {/* The pill replaces a plain heading, not the heading element:
+                  #team-current-heading is referenced elsewhere and the h2 is
+                  what makes this a landmark. The pill caps and ellipsises the
+                  name with the full value on `title`, which also settles the
+                  uncapped-name overflow the comment above describes. Renaming
+                  is admin/owner only, matching the Rename control in Settings;
+                  a member sees plain text with no affordance at all. */}
+              <h2 className="team-card-title wrap-anywhere" id="team-current-heading">
+                <EditablePill
+                  value={team.name}
+                  canEdit={team.role === 'owner' || team.role === 'admin'}
+                  label="Team name"
+                  testId="team-name-pill"
+                  onSave={next => renameTeam.mutateAsync({ teamId: team.id, name: next })}
+                />
+              </h2>
               <p className="team-note">
                 You are the {roleLabel(team.role)}
                 {memberCountLabel(team.memberCount) && ` · ${memberCountLabel(team.memberCount)}`}
@@ -548,6 +569,9 @@ export function TeamPage() {
               two screens split one team across two places, and each shipped
               its own invite control wired to a different code path. */}
           {team && <MembersSection />}
+
+          {/* Last on the tab, after the roster: leave, transfer, disband. */}
+          {team && <DangerZone team={team} />}
 
           {actionError && <p className="team-error" role="alert">{actionError}</p>}
 
