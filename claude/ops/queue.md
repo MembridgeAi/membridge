@@ -177,7 +177,16 @@ something that was asked for, and neither is being fixed yet.
   require it to match before stopping, or make stop on win32 refuse rather than
   guess when it cannot confirm identity.
 
-- **The Windows CI leg has no headroom, and one added suite tips it (found
+- ~~**The Windows CI leg has no headroom, and one added suite tips it**~~
+  **FIXED 2026-08-13 in `9000e9c`.** The pool was bounded only by free port
+  blocks (up to 40) and never by machine capacity, so a 4-core runner ran ~10x
+  oversubscribed while the 18-core dev machine stayed green. Now capped at two
+  workers per core, minimum four, overridable with `MEMBRIDGE_TEST_WORKERS`.
+  Measured on 18 cores over all 105 parallel suites: 40 workers 7s, 8 workers
+  7s, 6 workers 9s — the parallelism above 8 was buying nothing. Original
+  report kept below.
+
+  **Original report, kept because the reasoning outlives the fix (found
   2026-08-13).** `test/run.js` bounds concurrency by verified-free port block,
   which stops port cross-talk, but nothing bounds the number of heavy
   *daemon-spawning* suites running at once. Adding a single new suite
