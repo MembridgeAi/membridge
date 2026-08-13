@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { GitHubMark } from '../../assets/GitHubMark'
 import { MembridgeMark } from '../../assets/MembridgeMark'
 import { useSignIn, useSignUp } from '../../data/queries'
+import { MIN_PASSWORD_LENGTH, scorePassword, strengthWord, type PasswordScore } from './passwordStrength'
 import './auth.css'
 
 function errorMessage(error: unknown): string {
@@ -19,6 +20,29 @@ function clearPassword(form: HTMLFormElement): void {
   if (field instanceof HTMLInputElement) field.value = ''
 }
 
+/** Four segments, a word, and one actionable hint.
+ *
+ *  Advisory, never a gate: only MIN_PASSWORD_LENGTH blocks a submit. A meter
+ *  that blocks becomes a puzzle, and users solve puzzles with `Password1!`.
+ *
+ *  The segments are aria-hidden and the word/hint carry the meaning, so a
+ *  screen reader hears "Good, mix in a number or symbol" rather than counting
+ *  four decorative divs. role="status" rather than "alert": this updates on
+ *  every keystroke and must not interrupt. */
+function StrengthMeter({ score, hint }: { score: PasswordScore; hint: string }) {
+  return (
+    <div className="auth-strength" data-testid="auth-strength" role="status">
+      <div className="auth-strength-bar" aria-hidden="true">
+        {[0, 1, 2, 3].map(i => (
+          <span key={i} className={i <= score ? `auth-strength-seg is-${score}` : 'auth-strength-seg'} />
+        ))}
+      </div>
+      <span className="auth-strength-word">{strengthWord(score)}</span>
+      {hint && <span className="auth-strength-hint">{hint}</span>}
+    </div>
+  )
+}
+
 /** The signed-out state, as a whole screen.
  *
  *  It used to be a card inside the Team page, under the page title and an
@@ -34,6 +58,12 @@ export function AuthScreen({ configured }: { configured: boolean }) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // ONLY the derived score and hint. The password itself is scored inside the
+  // change handler from event.target.value and is never assigned to state --
+  // that is the entire reason a live meter is compatible with the credentials
+  // rule at the top of this file. Do not "simplify" this into a controlled
+  // password input.
+  const [strength, setStrength] = useState<{ score: PasswordScore; hint: string }>({ score: 0, hint: '' })
   const signIn = useSignIn()
   const signUp = useSignUp()
   const pending = signIn.isPending || signUp.isPending
@@ -51,6 +81,12 @@ export function AuthScreen({ configured }: { configured: boolean }) {
     setError(null)
     setNotice(null)
     try {
+      if (isSignUp && password.length < MIN_PASSWORD_LENGTH) {
+        // Sign-UP only. An account created before this rule, or through GitHub
+        // OAuth, must still be able to sign in with whatever it has.
+        setError(`Use at least ${MIN_PASSWORD_LENGTH} characters.`)
+        return
+      }
       if (isSignUp) {
         const result = await signUp.mutateAsync({ displayName, email, password })
         if (result.status === 'needs-confirmation') {
@@ -66,7 +102,14 @@ export function AuthScreen({ configured }: { configured: boolean }) {
     } catch (err) {
       setError(errorMessage(err))
     } finally {
+      // The field goes back to empty on every attempt, success or failure --
+      // the meter has to follow it back to empty too, or it goes on
+      // describing a password that is no longer there. Left un-reset, a
+      // rejected short sign-up shows "Use at least 8 characters." twice: once
+      // as the submit error, once as the meter's stale hint for the password
+      // that used to be in the field.
       clearPassword(form)
+      setStrength({ score: 0, hint: '' })
     }
   }
 
@@ -109,7 +152,9 @@ export function AuthScreen({ configured }: { configured: boolean }) {
             <input
               id="auth-password" name="password" type="password"
               autoComplete={isSignUp ? 'new-password' : 'current-password'} required
+              onChange={isSignUp ? e => setStrength(scorePassword(e.target.value)) : undefined}
             />
+            {isSignUp && <StrengthMeter score={strength.score} hint={strength.hint} />}
           </div>
 
           {/* The secondary action is a text link and the primary is a filled
@@ -119,7 +164,12 @@ export function AuthScreen({ configured }: { configured: boolean }) {
           <div className="auth-actions">
             <button
               type="button" className="auth-link"
-              onClick={() => { setMode(isSignUp ? 'signin' : 'signup'); setError(null); setNotice(null) }}
+              onClick={() => {
+                setMode(isSignUp ? 'signin' : 'signup')
+                setError(null)
+                setNotice(null)
+                setStrength({ score: 0, hint: '' })
+              }}
             >
               {isSignUp ? 'Sign in instead' : 'Create account'}
             </button>

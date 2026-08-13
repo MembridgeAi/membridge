@@ -186,3 +186,38 @@
   line-height: var(--lh-snug);
   text-align: center;
 }
+
+/* Colour is NOT the only signal: the filled-segment count carries the same
+   information, so the meter still reads with no colour perception at all. */
+.auth-strength {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+.auth-strength-bar {
+  display: flex;
+  gap: 3px;
+  flex: none;
+}
+.auth-strength-seg {
+  width: 22px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--line2);
+}
+.auth-strength-seg.is-0 { background: var(--red); }
+.auth-strength-seg.is-1 { background: var(--amber); }
+.auth-strength-seg.is-2 { background: var(--accent); }
+.auth-strength-seg.is-3 { background: var(--green); }
+.auth-strength-word {
+  color: var(--text2);
+  font-weight: var(--fw-medium);
+}
+.auth-strength-hint {
+  color: var(--text3);
+  flex: 1 1 100%;
+}
