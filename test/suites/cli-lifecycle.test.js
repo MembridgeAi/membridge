@@ -157,6 +157,79 @@ async function main() {
     });
   }
 
+  // ---- stop must not kill a process that is not MemBridge ----------------
+  //
+  // The pid file can name a LIVE process that is not ours: pids get recycled,
+  // aggressively so on Windows, and a stale pid file is likeliest exactly when
+  // the daemon died badly — which is also when its pid is likeliest to have
+  // been handed to somebody else. `isRunning()` cannot tell the difference and
+  // `isMembridgeProcess()` is unconditionally true on win32 by design, so stop
+  // asks the daemon over HTTP instead: /api/status reports the serving
+  // process's own pid, and a reply naming our pid is proof.
+  //
+  // The victim here is a real, live, innocent process. If stop regresses, this
+  // check does not merely fail — it kills it, and the assertion says so.
+  {
+    const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore', detached: false,
+    });
+    // Liveness is tracked by the child's own exit event, NOT by kill(pid, 0).
+    // The victim is a child of this process, so once it is signalled it sits as
+    // a ZOMBIE until this process reaps it — and kill(pid, 0) succeeds against a
+    // zombie, so the naive probe reports "alive" forever and the check can never
+    // pass. (The same distinction the zombie-start check below is built on.)
+    let exited = false;
+    victim.on('exit', () => { exited = true; });
+    const stillAlive = () => !exited;
+    fs.writeFileSync(util.pidPath(), String(victim.pid));
+    const r = runCli(['stop']);
+    await check('`membridge stop` refuses to kill a live pid it cannot confirm is MemBridge', async () => {
+      const said = `${r.stdout || ''}${r.stderr || ''}`;
+      assert.ok(!said.includes(`Stopped MemBridge (pid ${victim.pid})`),
+        'stop reported stopping MemBridge for a process that was never MemBridge');
+      assert.ok(/not running|Refusing/i.test(said),
+        `expected stop to say it refused or that MemBridge is not running, got: ${said}`);
+      // Survival is asserted AFTER giving the event loop a turn. A signalled
+      // child does not report its exit synchronously, so checking immediately
+      // would read "alive" even in the regression case and prove nothing --
+      // the message assertions above are what fail fast; this is the one that
+      // states the actual stake.
+      await new Promise(r2 => setTimeout(r2, 250));
+      assert.ok(stillAlive(),
+        `stop TERMINATED pid ${victim.pid}, an unrelated live process that merely ` +
+        'happened to be named by the pid file. This is the bug itself: a recycled ' +
+        'pid makes stop take out a stranger.');
+    });
+    await check('`membridge stop --force` still stops a pid it could not confirm', async () => {
+      // The escape hatch has to work, or a genuinely wedged daemon — which
+      // cannot answer the HTTP probe either — becomes unstoppable.
+      //
+      // The pid file is re-seeded because the refusal above may legitimately
+      // have cleared it: on POSIX the command line POSITIVELY disconfirms the
+      // victim, so the file is known garbage and stop removes it. On win32 no
+      // such answer exists, so the refusal leaves the file alone and --force is
+      // the documented next step. --force overrides an inability to confirm,
+      // never a positive disconfirmation, and this check is about the former.
+      assert.ok(stillAlive(), 'fixture: the victim must survive the unforced stop above');
+      fs.writeFileSync(util.pidPath(), String(victim.pid));
+      const forced = runCli(['stop', '--force']);
+      assert.strictEqual(forced.status, 0, `exit ${forced.status}, stderr: ${forced.stderr}`);
+      assert.ok((forced.stdout || '').includes('Stopped MemBridge'),
+        `expected --force to stop it, got: ${forced.stdout}${forced.stderr}`);
+      // SIGTERM is delivered, not applied: the process stays schedulable for a
+      // moment after kill() returns. Yield to the event loop rather than
+      // spinning — a busy-wait here would starve the very 'exit' event this is
+      // waiting on, and hang until the deadline every time.
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && stillAlive()) {
+        await new Promise(r => setTimeout(r, 25));
+      }
+      assert.ok(!stillAlive(), '--force did not actually terminate the pid');
+    });
+    try { victim.kill('SIGKILL'); } catch {}
+    try { fs.unlinkSync(util.pidPath()); } catch {}
+  }
+
   {
     const r = runCli(['stop']);
     check('`membridge stop` with no pid file at all stays a clean no-op', () => {

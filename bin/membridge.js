@@ -419,7 +419,48 @@ function cmdStart() {
   prompts.flushValueMoment(config);
 }
 
-function cmdStop() {
+// Positive identification, before we signal anything.
+//
+// isRunning() answers "is SOMETHING alive at this pid", which is a different
+// question from "is that something OUR daemon", and stop was treating the two
+// as one. The gap is not theoretical: Windows recycles pids aggressively, so a
+// pid file left behind by a daemon that died badly routinely names a live
+// STRANGER by the time anyone runs stop — and a stale pid file is most likely
+// exactly when the daemon died badly, so the failure mode selects for itself.
+// Observed on CI as `Stopped MemBridge (pid 1536)` against a pid a test fixture
+// had reaped moments earlier.
+//
+// isMembridgeProcess() closes this on POSIX by reading the command line, but
+// returns true UNCONDITIONALLY on win32 (see its comment: reading a Windows
+// command line needs wmic, removed from current Windows, or a slow CIM query).
+// That trade is defensible for the START guard it was written for, where being
+// wrong costs a spurious refusal to start. It does not carry over to STOP,
+// where being wrong costs somebody else's process.
+//
+// So ask the daemon rather than the OS. /api/status already reports the serving
+// process's own pid, so a reply naming OUR pid is proof of identity that needs
+// no platform-specific API, no new endpoint, and no subprocess.
+async function confirmDaemon(pid, config) {
+  const port = config && config.dashboardPort;
+  if (!port) return { verdict: 'unreachable', servingPid: null };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/status`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return { verdict: 'unreachable', servingPid: null };
+    const body = await res.json();
+    if (!body || typeof body.pid !== 'number') return { verdict: 'unreachable', servingPid: null };
+    return body.pid === pid
+      ? { verdict: 'confirmed', servingPid: body.pid }
+      : { verdict: 'mismatch', servingPid: body.pid };
+  } catch {
+    // No answer is NOT evidence of a stranger — a wedged daemon looks the same
+    // as a recycled pid from out here. The caller decides what to do with that.
+    return { verdict: 'unreachable', servingPid: null };
+  }
+}
+
+async function cmdStop() {
   const pid = readPid();
   if (!isRunning(pid)) {
     // The daemon is gone but its pid file may not be: a crash or kill -9 never
@@ -432,6 +473,48 @@ function cmdStop() {
     console.log('MemBridge is not running.');
     return;
   }
+
+  if (!flag('--force')) {
+    const { verdict, servingPid } = await confirmDaemon(pid, util.getConfig());
+
+    if (verdict === 'mismatch') {
+      // A MemBridge IS answering, but it is not the process our pid file names.
+      // Killing the recorded pid would take out a stranger AND leave the real
+      // daemon running, so clear the file and say which pid actually serves.
+      try { fs.unlinkSync(util.pidPath()); } catch {}
+      console.log(
+        `MemBridge is not running under pid ${pid} — the daemon answering on this ` +
+        `machine reports pid ${servingPid}. Cleared the stale pid file; nothing was stopped.`
+      );
+      return;
+    }
+
+    if (verdict === 'unreachable') {
+      // Nothing answered. On POSIX the command line settles it outright. On
+      // win32 it cannot, so refuse rather than guess: a wedged daemon is
+      // recoverable with one documented flag, a killed stranger is not.
+      if (process.platform === 'win32') {
+        console.error(
+          `Refusing to stop pid ${pid}: it is alive, but nothing answered on ` +
+          `http://127.0.0.1:${util.getConfig().dashboardPort} to confirm it is MemBridge. ` +
+          `Windows reuses pids, so this may be an unrelated process that inherited ` +
+          `the pid of a daemon that already died.\n` +
+          `If you are sure it is MemBridge (a wedged daemon will not answer either), ` +
+          `run \`membridge stop --force\`.`
+        );
+        process.exit(1);
+      }
+      if (!isMembridgeProcess(pid)) {
+        try { fs.unlinkSync(util.pidPath()); } catch {}
+        console.log(
+          `MemBridge is not running — pid ${pid} is alive but belongs to another ` +
+          `program. Cleared the stale pid file; nothing was stopped.`
+        );
+        return;
+      }
+    }
+  }
+
   process.kill(pid);
   try {
     fs.unlinkSync(util.pidPath());
@@ -1559,7 +1642,9 @@ and vice versa. Everything stays on your machine.
 Usage: membridge <command>
 
   start               run the background daemon (sync + dashboard)
-  stop                stop the background daemon
+  stop [--force]      stop the background daemon (--force skips the check that
+                      the pid really is MemBridge — needed only for a daemon
+                      wedged badly enough that it no longer answers)
   status              daemon state, watched projects, config summary
   dashboard           open the local web dashboard (starts daemon if needed)
   sync [--dry-run] [--project <path>]   one sync pass right now
