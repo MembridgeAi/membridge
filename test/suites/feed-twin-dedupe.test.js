@@ -72,13 +72,44 @@ async function main() {
   });
 
   check('feed: a shared self-twin folds even though its ts is spelled differently', () => {
+    const raw = '2026-08-05T12:00:00.550Z';
+    // The premise, asserted where it actually lives now: the backend really
+    // does hand this instant back spelled differently from the way it went up.
+    // This used to be checked on the NORMALIZED pair, but normalizeTeam
+    // canonicalises ts on the way in (feed.js), so by then the two spellings
+    // agree by construction -- which is the point of the fix, and would have
+    // made the old assertion prove nothing rather than fail loudly. It failed
+    // loudly, which is why the guard was worth having.
+    assert.notStrictEqual(pgTimestamptz(raw), raw,
+      'fixture check: the wire spelling must actually differ, or this proves nothing');
+
     const { local, team } = pair();
-    assert.notStrictEqual(local.ts, team.ts,
-      'fixture check: the two spellings must actually differ, or this proves nothing');
+    // The canonicalisation itself, so a regression that removed it is caught
+    // here rather than surfacing as a mis-ordered feed under a rarer condition
+    // (two entries in the SAME SECOND, where a raw string compare orders by
+    // punctuation -- '+' sorts before '.' -- instead of by time).
+    assert.strictEqual(team.ts, local.ts,
+      'normalizeTeam must canonicalise the wire spelling to the local Z-form');
     assert.strictEqual(feed.dedupeKey(local), feed.dedupeKey(team),
       'the same instant on the same project must produce the same collision key');
     const out = feed.buildFeed({ local: [local], team: [team] });
     assert.strictEqual(out.entries.length, 1, 'your own work rendered twice in the feed');
+  });
+
+  check('feed: two spellings of ONE second sort by time, not by punctuation', () => {
+    // The npm-publish blocker on v0.4.0: get_recent_activity returned entries
+    // "not sorted newest-first" because a team row spelled '...49+00:00' and a
+    // local row spelled '...49.000Z' were compared as strings, and '+' (0x2B)
+    // sorts before '.' (0x2E). Same instant, so the order was decided by
+    // format. Only reproducible when two entries share a second, which is why
+    // it lurked until a busy release day.
+    const second = '2026-08-13T16:11:49.000Z';
+    const { team } = pair({ ts: second });
+    const newer = feed.normalizeLocal({ ts: '2026-08-13T16:12:04.095Z', session: 's2', summary: 'later' },
+      { projectName: 'other', projectPath: '/repos/other', projectId: 'other-uuid', authorId: 'me' });
+    const out = feed.buildFeed({ local: [newer], team: [team] });
+    assert.deepStrictEqual(out.entries.map(e => e.ts), ['2026-08-13T16:12:04.095Z', second],
+      'the newer entry must lead regardless of how either ts is spelled');
   });
 
   check('feed: an UNSHARED self-twin (null ask) folds on session and instant', () => {
