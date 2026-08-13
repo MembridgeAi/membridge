@@ -147,25 +147,26 @@ undercounted it by about half.
 
 ---
 
-<!-- CONDITIONAL: everything from here to the closing marker depends on what else
-     Andrew lands before tagging. Cut the whole block in one edit if none of it
-     ships. Each item is independently removable. -->
+## Also in this release
 
-## Also in this release, if landed
+_Each of these was verified to merge clean into `a4754a3` with `git merge-tree`,
+not assumed. They are not on master at the time of writing; confirm each is
+actually merged before publishing._
 
-_These were in flight when these notes were drafted and are not on master yet.
-Verify each is actually merged before publishing; delete the ones that are not._
-
-- **PR #41 — migration runbook guard.** Strikes five already-applied migrations
-  from `supabase/APPLY-RUNBOOK.md`, which still listed them as paste-ready steps
-  for a human to run, and adds a check so a migration marked applied in the
-  ledger can never reappear as an apply-step.
-- **`docs/readme-honesty-and-voice`** — README and site copy corrected where they
-  claimed more than the code delivers.
-- **`docs/reddit-research-route`** — documents a research-tooling failure where
-  `site:reddit.com` searches silently returned non-Reddit results.
+- **Migration runbook guard.** `supabase/APPLY-RUNBOOK.md` still listed five
+  already-applied migrations as numbered, paste-ready steps for a human to run —
+  including `031`, a reconstruction that would have been applied over a live
+  object for no gain. Those are struck, and a check now stops a migration marked
+  applied in the ledger from reappearing as an apply-step.
+- **README and site copy** corrected where they claimed more than the code
+  delivers.
+- **A research-tooling failure documented** — `site:reddit.com` searches silently
+  returned non-Reddit results rather than erroring, so any sweep relying on them
+  could be confidently wrong.
 - **Day-card area tags** — scannable area tags on day cards, and session bullets
-  grouped under area headers.
+  grouped under area headers. _Still awaiting its own lane's confirmation of
+  rebase and test counts; cut this bullet if that does not arrive before the
+  tag._
 
 _(The Settings danger zone has landed on master and moved up into the body of
 these notes; it is no longer conditional.)_
@@ -207,8 +208,12 @@ these notes; it is no longer conditional.)_
   v0.3.3 release — that asset 404s — and 0.3.4 is the current tag. Any instruction
   to bump the installer to 0.3.3 is wrong and will break installation for every
   user. Stamp from what actually published.
-- **`package-lock.json` says 0.3.3 while `package.json` says 0.3.4.** Reconcile
-  both to 0.4.0 in the same commit.
+- **Merge `chore/version-0.4.0` last, immediately before tagging**, so the tagged
+  commit is the one that says 0.4.0. It carries all **four** version fields:
+  `package.json`, `package-lock.json`'s root, `package-lock.json`'s `""` package
+  entry, **and `app/package.json`** — the Electron app's own manifest, which is
+  easy to miss. Bumping only the first three tags a 0.4.0 release whose desktop
+  app still calls itself 0.3.4.
 - **`supabase/MIGRATION-STATE.md` is wrong in 13 of 17 rows**, and four migrations
   carrying an apply-before-shipping deploy gate are already applied. Do not use it
   as the apply checklist for this release without reconciling it first. It also
@@ -236,7 +241,14 @@ these notes; it is no longer conditional.)_
 
 ---
 
-_Compiled from `git log v0.3.4..bde3d97`. Claims about encryption, capture and
+_Compiled from `git log v0.3.4..a4754a3`. Claims about encryption, capture and
 savings were checked against the shipped code rather than inferred from commit
 subjects; where a claim could not be verified it appears under Known issues
 instead._
+
+_One provenance note for whoever runs the merge: the branches carrying the
+runbook guard and the two documentation fixes are **unowned** — the session that
+wrote them has ended. They are pushed and were green when they were written, but
+**no one is watching their CI**. If a leg goes red after those merges, nothing
+will notice on its own; check them by hand rather than assuming silence means
+success._
