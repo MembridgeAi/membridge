@@ -1,0 +1,152 @@
+[
+  {
+    "name": "empty",
+    "text": "",
+    "tokens": 0
+  },
+  {
+    "name": "single ascii char",
+    "text": "a",
+    "tokens": 1
+  },
+  {
+    "name": "single space",
+    "text": " ",
+    "tokens": 1
+  },
+  {
+    "name": "common word",
+    "text": "the",
+    "tokens": 1
+  },
+  {
+    "name": "two words",
+    "text": "hello world",
+    "tokens": 2
+  },
+  {
+    "name": "pangram",
+    "text": "The quick brown fox jumps over the lazy dog.",
+    "tokens": 10
+  },
+  {
+    "name": "js source",
+    "text": "function estimateTokens(str) {\n  return Math.ceil(String(str).length / 4);\n}\n",
+    "tokens": 24
+  },
+  {
+    "name": "ts source",
+    "text": "export interface Row { id: string; count: number }\n",
+    "tokens": 13
+  },
+  {
+    "name": "json",
+    "text": "{\"a\":1,\"b\":[1,2,3],\"c\":\"value\"}",
+    "tokens": 17
+  },
+  {
+    "name": "markdown",
+    "text": "# Heading\n\n- one\n- two\n\n**bold** and `code`.\n",
+    "tokens": 20
+  },
+  {
+    "name": "url",
+    "text": "https://example.com/path?query=1&other=2#frag",
+    "tokens": 17
+  },
+  {
+    "name": "japanese",
+    "text": "日本語のテキストもトークン化できますか？",
+    "tokens": 20
+  },
+  {
+    "name": "cyrillic",
+    "text": "Привет, мир! Это тест токенизации.",
+    "tokens": 19
+  },
+  {
+    "name": "greek + math",
+    "text": "λ = Σ(xᵢ − μ)² / n ≈ 3.14159",
+    "tokens": 22
+  },
+  {
+    "name": "emoji",
+    "text": "🎉🚀👩‍💻",
+    "tokens": 11
+  },
+  {
+    "name": "combining accents",
+    "text": "égalé and café naïve résumé",
+    "tokens": 15
+  },
+  {
+    "name": "rtl arabic",
+    "text": "مرحبا بالعالم، هذا اختبار.",
+    "tokens": 25
+  },
+  {
+    "name": "mixed multibyte identifiers",
+    "text": "const précision = \"über\"; // 日本語コメント\n",
+    "tokens": 17
+  },
+  {
+    "name": "whitespace run",
+    "text": "   \n\n\t  ",
+    "tokens": 3
+  },
+  {
+    "name": "long repeat",
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tokens": 32
+  },
+  {
+    "name": "repeated word",
+    "text": "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+    "tokens": 100
+  },
+  {
+    "name": "punctuation run",
+    "text": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "tokens": 125
+  },
+  {
+    "name": "base64 blob",
+    "text": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4",
+    "tokens": 3000
+  },
+  {
+    "name": "numbers",
+    "text": "1234567890 3.14159 0xDEADBEEF 1e-9",
+    "tokens": 15
+  },
+  {
+    "name": "lib/token-estimate.js head",
+    "text": "'use strict';\n// estimateTokens(str): the ONLY token-estimation point in the codebase.\n// Every surface that reports tokens (serve policy, ledger fold, dashboard,\n// diagnostics) must import this rather than reimplementing the heuristic --\n// that keeps one number one number, everywhere.\n//\n// It lives in its own module, rather than in lib/skeleton.js where it started,\n// so the recall hot path (lib/recall.js, reached from the PreToolUse hook)\n// can have it without requiring the tree-sitter extractor at all. That module\n// only loads wasm lazily, so the old arrangement was not actually slow -- but\n// it left a binding startup-cost constraint resting on nobody ever adding a\n// top-level require to it. This makes the separation structural. See the\n// require-cache test in test/run-tests.js that pins it. lib/bpe.js, required\n// below, holds that line: fs and path, nothing else, and it does not read the\n// vocabulary off disk until a count is actually asked for.\n//\n// --- WHAT CHANGED (measured-savings spec, Tier 2) ---------------------------\n// This used to be `Math.ceil(str.length / 4)` in full. It is now a real BPE\n// tokenizer over a vendored vocabulary (see vendor/tokenizer/README.md), for\n// two reasons the spec spells out:\n//\n//   1. chars/4 is not centred. Measured over 318 of this repo's own source\n//      files (4.49 M chars), the real ratio is 3.62 chars per token, not 4.00.\n//      chars/4 therefore UNDERSTATES a source file by 9.4% in aggregate, with\n//      a per-file spread of -40.9% to +9.5% -- and the error is a function of\n//      file type (CSS -25.0%, JSON -18.4%, Markdown -12.3%, TS -8.5%,\n//      JS -6.8%, TSX -5.4%), so it does not cancel between two files.\n//   2. It made the two sides of the avoidance formula incomparable.\n//      estimateCallTokens priced a read in BYTES/4 while this priced the\n//      skeleton in CHARS/4, an asymmetry recorded but unfixed at\n//      lib/recall.js's own MINOR 2 note. Both sides now count tokens with the\n//      same vocabulary, so their difference means something.\n//\n// It is STILL AN ESTIMATE, and the vocabulary is not Claude's current\n// tokenizer -- exact counts need Anthropic's count-tokens endpoint, a key and\n// a network call. Nothing derived from this function may be labelled\n// \"measured\" on any surface. The only measured token figures MemBridge has\n// are the vendor-reported ones in lib/usage-normalize.js. What Tier 2 buys is\n// determinism and a smaller, quantified error; the calibration evidence lives\n// in test/suites/token-estimate.test.js.\n//\n// AUTO-PAUSE AND REJECTION LEARNING are unchanged in mechanism and remain\n// estimate-driven decisions, not reported figures (spec: \"chars/4 still drives\n// auto-pause and rejection learning\"). Rejection learning counts rejections\n// and never reads a token figure at all; the net-negative auto-pause reads the\n// SIGN of a lifetime total plus a serve count (lib/diagnostics.js), neither of\n// which is a scale-sensitive threshold. They are better fed by a centred\n// estimator than a biased one, but they are not thereby measured, and no\n// surface may say they are.\nconst bpe = require('./bpe');\n\n// Single-session escape hatch, matching MEMBRIDGE_NO_RECALL / MEMBRIDGE_NO_DIAGNOSTICS.\n// Set it and every count falls back to the old heuristic -- useful for\n// bisecting a token figure, and it is the switch a user with a hard process\n// startup budget can reach for.\nconst disabled = () => process.env.MEMBRIDGE_NO_BPE === '1';\n\n// The pre-Tier-2 heuristic. Kept, exported and tested, because it is the\n// fallback when the vocabulary cannot be loaded (spec's error handling:\n// \"fall back to the existing chars/4 and mark the estimate as degraded ...\n// never throw into the recall hot path or the sync pass\"), and because the\n// calibration suite measures the new estimator against it.\nfunction estimateTokensChars4(str) {\n  return Math.ceil(String(str).length / 4);\n}\n\nlet degradedReason = null;\n\nfunction estimateTokens(str) {\n  if (",
+    "tokens": 1060
+  },
+  {
+    "name": "lib/roi.js head",
+    "text": "'use strict';\n// The controlled comparison: what one eligible read costs when recall serves\n// it, versus what it costs when recall is withheld, and how sure we are.\n//\n// This module is pure arithmetic over the four-values-per-arm blocks the fold\n// accumulates (lib/ledger-fold-state.js's normalizeComparison). It reads no\n// files, no clock and no config, so every number it produces is reproducible\n// from its inputs alone -- which is the point: an effect figure nobody can\n// re-derive is a claim, not a measurement.\n//\n// WHAT IT MEASURES. Assignment is per SESSION (lib/recall.js's holdoutBucket:\n// 3% of sessions are wholly withheld). The unit of comparison is the ELIGIBLE\n// READ. Both halves are load-bearing and they are not the same choice: session\n// size varies by far more than the effect does, so a per-session comparison\n// over a 1-in-30 sample is dominated by which sessions happened to land in the\n// holdout, while a per-read ASSIGNMENT would leave no cohort to compare at all\n// because a session would be simultaneously served and withheld.\n//\n// WHAT IT DOES NOT MEASURE, and cannot:\n//  * Tokens billed. Both arms are priced by lib/token-estimate.js, an\n//    estimator. The difference of two estimates is an estimate. The only\n//    measured token figures MemBridge has are the vendor-reported ones\n//    (lib/usage-normalize.js) and they cannot be attributed to a single read.\n//  * Whether the session went better. A withheld session still gets its\n//    injected CLAUDE.md block and its MCP tools; only the recall serve is\n//    withheld. This measures tokens, not outcomes, and nothing here supports a\n//    claim about quality in either direction.\n//  * Anything, before both thresholds are crossed. See the sufficiency gate.\nconst { HOLDOUT_EPOCH } = require('./holdout-epoch');\nconst { normalizeComparison, zeroArm } = require('./ledger-fold-state');\n\n// Sufficiency gate, TWO thresholds, both of which must be crossed. One is not\n// enough: the two arms fill at wildly different rates (the withheld arm is 3%\n// of sessions, so the served arm crosses any threshold roughly thirty times\n// sooner), and a served count in the thousands says nothing about whether the\n// withheld arm carries enough reads to separate a difference from noise.\n//\n// 30 per arm, applied independently, is the conventional floor at which a\n// sample mean's normal approximation is usable -- which is exactly what the\n// interval below rests on. It matches MIN_HOLDOUT_FOR_EFFECT, the threshold\n// lib/ledger-fold.js already uses for the same question, and follows the\n// precedent set by lib/diagnostics.js's MIN_HOLDOUT_SKIPS, whose own comment\n// gives the reasoning this gate exists for: \"reporting a number here would\n// look precise while being noise.\"\nconst MIN_SERVED_READS = 30;\nconst MIN_WITHHELD_READS = 30;\n\n// Two-sided 95%. A normal quantile, not a t quantile: with n >= 30 in both\n// arms the difference is immaterial next to the estimator error already in\n// both inputs, and pretending otherwise would be false precision.\nconst Z_95 = 1.96;\n\n// Sample mean and sample variance from an arm's (reads, tokens, tokensSq).\n// This is why tokensSq is stored: pooled MEANS compose from sums and counts,\n// but an interval needs a second moment, and there is no way to recover one\n// from means after the fact.\nfunction armStats(arm) {\n  const n = arm.reads;\n  if (n <= 0) return { n: 0, mean: 0, variance: 0 };\n  const mean = arm.tokens / n;\n  if (n < 2) return { n, mean, variance: 0 };\n  // Var = (sum(x^2) - n*mean^2) / (n-1), clamped at 0: the algebraically\n  // equivalent forms differ in floating point, and a variance of -1e-9 would\n  // become NaN one Math.sqrt later.\n  const variance = Math.max(0, (arm.tokensSq - (n * mean * mean)) / (n - 1));\n  return { n, mean, variance };\n}\n\n// Sum arms elementwise. Pooling across projects on one machine is exactly this\n// -- the sums and counts are what compose, which is the whole reason the fold\n// stores sums and counts.\nf",
+    "tokens": 1047
+  },
+  {
+    "name": "spec head",
+    "text": "# Measured Savings: ground truth, deterministic estimates, and a real control group\n\n**Date:** 2026-07-31\n**Status:** Approved design (Andrew, from mock `analytics-mockup.html`)\n**Applies to:** `lib/` (ledger, recall, token estimation, server) and the React/TS dashboard in `ui/`\n**Builds on:** `lib/server.js` `savingsPayload`, `lib/recall.js` `holdoutBucket`, `lib/token-estimate.js`, `lib/usage-normalize.js`, `lib/adapters/claude-code.js`, `lib/api-insights.js`, `ui/src/features/insights/`\n\n## Problem\n\nMemBridge's central value claim is that it reduces token spend, and today the product cannot substantiate it.\n\nThe savings ledger is well engineered as bookkeeping. Idempotency, dedupe, monotonicity, bounded state and the wire whitelist are real and heavily tested against hand-derived fixtures. What it reports is another matter:\n\n1. **Every token figure is an estimate.** `avoided.tokens`, `billed.tokens` and `holdout.callTokens` all derive from `chars / 4` (`lib/token-estimate.js`) and `lines x 12` (`lib/recall.js:118`). No tokenizer is ever consulted. `lib/recall.js:137` documents an unfixed upward bias where one side of the comparison counts bytes and the other counts characters.\n2. **The counterfactual cannot be closed by better arithmetic.** `lib/ledger-fold-recall-settle.js:23` records that against 57,941 real re-reads a 5 minute settlement window missed roughly 34% of follow-ups, that 60 minutes still leaves roughly 10% permanently overstated, and that no fixed window both settles promptly and waits long enough.\n3. **Nothing is surfaced.** `/api/savings` exists and computes all of the above. No UI consumer reads it.\n4. **There is no sufficiency gate.** A day one install returns `avoided.tokens: 0`, indistinguishable from a measured zero. The pattern to copy already exists at `lib/diagnostics.js:47` (`MIN_HOLDOUT_SKIPS`), whose own comment explains the reasoning: \"reporting a number here would look precise while being noise.\"\n5. **`assists.total` is not a coherent quantity.** `lib/api-insights.js:78` sums two cumulative counters with `mcpQueries`, which reads a per tool last used map and therefore saturates at 6. The total is dropped. `byKind` is kept, because the per kind counts are each coherent on their own; it is only their sum that is not.\n6. **Insights is team only.** A solo user, which is every user on day one, sees no measurement surface at all.\n7. **Two integrity leftovers.** USD is computed by `lib/pricing.js` and written to every user's disk (`lib/ledger-fold.js:269`) from a rate table the file itself flags as going stale, while the comment at `lib/server.js:471` claims no dollar figure is ever computed. The persisted figure stays. It is the only thing that lets a user-supplied-rate feature work later without re-folding every user's history, which is a cost that would not be recoverable once the history is written without it. The comment is the part that is wrong, so the comment is the part that changes. The persisted figure must still never be served. And `test/ledger-equivalence.js`, the oracle comparison `lib/ledger.js:2` names as authoritative, is referenced by neither CI workflow and has never run. Adding a workflow line does not make it run: it reads `MEMBRIDGE_REF` and skips outright when that is unset, and the token-spend-analysis corpus it points at is not in the repo.\n\n## The model\n\nThree tiers, plus a consolidation. Each tier stands alone and ships independently.\n\n### Tier 1: ground truth\n\nMemBridge already ingests real vendor reported token counts. `lib/adapters/claude-code.js:97` emits `kind:'usage'` events carrying `message.usage` verbatim, and `lib/usage-normalize.js` normalizes them across Anthropic, OpenAI and Google with correct cache subset handling.\n\nSurface those directly: input, output and cache tokens per session, per project, per day. No estimation appears anywhere in this tier. This is the spine the rest of the page is positioned against.\n\n### Tier 2: deterministic tokenization\n\nReplace `chars / 4` inside `lib/token-estimate.js`, which is by design the single estimation point in the codebase, with a real BPE tokenizer loaded from a local vocabulary file. This removes the documented bytes versus characters bias and stops the estimate drifting on multibyte source.\n\nIt remains an approximation of Claude's tokenizer. Exact counts require Anthropic's count-tokens endpoint, which needs a key and a network call, and is therefore out of the question. The gain is determinism and a far smaller error, not exactness, and the UI must not imply otherwise.\n\n**The tokenizer does not reach everywhere, and the word \"measured\" must not imply that it does.** `chars / 4` still drives auto-pause and rejection learning, which run on the recall hot path and on the sync pass and are decisions rather than reported figures. They are unchanged by this tier and they remain estimates. Only the numbers this spec marks as measured are measured; a reader who sees \"measured\" on the page must not conclude that every internal quantity behind recall's behavior was upgraded with it.\n\n### Tier 3: the measurement\n\n**Session level ASSIGNMENT.** `holdoutBucket` currently hashes `sessionId + relPath` (`lib/recall.js:77`), assigning the holdout per read. A session can therefore be partly served and partly withheld, which leaves no clean cohort to compare. Change the hash input to `sessionId` alone so a session is wholly in or wholly out. Rate stays at 3%, roughly one session in thirty.\n\n**Assignment and measurement are two different choices and must not be conflated.** Assignment is per session, as above, because that is what gives a clean cohort with no within-session contamination. The unit the comparison is computed over is the eligible read, which is a separate decision made below. A future implementer who reads \"per eligible read\" and moves the hash back to per read has broken the cohort; a future implementer who reads \"per session assignment\" and computes the effect per session has thro",
+    "tokens": 1453
+  },
+  {
+    "name": "null-ish string",
+    "text": "null",
+    "tokens": 1
+  },
+  {
+    "name": "crlf",
+    "text": "line one\r\nline two\r\n",
+    "tokens": 7
+  },
+  {
+    "name": "tabs indent",
+    "text": "\tif (x) {\n\t\treturn y;\n\t}\n",
+    "tokens": 15
+  }
+]

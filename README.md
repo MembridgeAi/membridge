@@ -142,7 +142,7 @@ which project, and where knowledge is concentrated in one person's head.
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/project-page.png" width="100%" alt="MemBridge project page for shop-app: session history on the left; on the right, per-person access toggles, memory delivery status, and sync status showing end-to-end encryption on.">
+  <img src="docs/screenshots/project-page.png" width="100%" alt="MemBridge project page for shop-app: session history on the left; on the right, per-person access toggles, memory delivery status, and sync status showing content encryption on.">
 </p>
 
 <br>
@@ -174,9 +174,14 @@ intent, decisions and gotchas. See
 Everything starts local. No cloud, no account, no API keys until you join a
 team — and the team layer is opt-in per project.
 
-- **End-to-end encrypted.** Team content is secretbox-encrypted with a per-team
-  key sealed to each member's public key. The server stores ciphertext only.
-  Private keys never leave the macOS Keychain.
+- **End-to-end encrypted.** Your asks, summaries, decisions, gotchas, file paths
+  and change notes are secretbox-encrypted with a per-team key sealed to each
+  member's public key, so the server stores ciphertext it cannot open. Private
+  keys never leave the macOS Keychain.
+- **Routing details stay readable** so sync and access control can work: project,
+  timestamp, session, which AI tool, and your display name. The content is what
+  gets encrypted. The [encryption spec](docs/ENCRYPTION-SPEC.md) §0.1 lists the
+  exact fields.
 - **Fail-closed.** When encryption can't run, sync **holds and pauses** rather
   than degrading to plaintext.
 - **Secret redaction.** AWS, GitHub, Google, Slack, OpenAI and Anthropic keys,
@@ -184,7 +189,10 @@ team — and the team layer is opt-in per project.
 - **Your prompts stay local** by default. Your source code is never
   transmitted — only distilled summaries.
 - **Per-project access control**, roles (owner / admin / member), and a 30-day
-  audit trail. Tick a cell to grant or revoke.
+  audit trail. Tick a cell to grant or revoke. Project access is enforced by
+  server-side database rules, **not** by encryption — one team key spans every
+  project, so revoking a project does not withhold a key. Removing someone from
+  the **team** is different and does rotate the key. [Spec §0.2–0.3](docs/ENCRYPTION-SPEC.md).
 
 <br>
 
@@ -194,7 +202,7 @@ team — and the team layer is opt-in per project.
 | --- | --- |
 | **macOS** (Apple Silicon) | `curl -fsSL https://membridge.app/install.sh \| sh` — installs the menu-bar app |
 | **macOS** (Intel), **Windows**, **Linux** | `npm i -g @membridgeai/membridge && membridge start` |
-| **Headless / CI boxes** | Same npm install; `membridge start` runs the daemon with no UI |
+| **Headless / CI boxes** | Same npm install; `membridge start` runs the daemon and serves the full dashboard at `127.0.0.1:7437` — reach it over an SSH port-forward (`ssh -L 7437:127.0.0.1:7437 <box>`) or stick to the CLI |
 
 Then `membridge status` to confirm, or open the dashboard at
 `http://127.0.0.1:7437`. `membridge enable-autostart` makes it run at login.
@@ -213,7 +221,7 @@ boxes and terminal-first teammates aren't second-class.
 | `membridge dashboard` | Open the web UI at `http://127.0.0.1:7437` |
 | `membridge sync [--dry-run] [--project <path>]` | One sync pass right now |
 | `membridge scan` | Read-only report of discovered tools and projects |
-| `membridge remove [--project <path>]` | Strip injected memory blocks |
+| `membridge remove [--project <path>] [--keep-memory]` | Strip injected memory blocks **and permanently delete that project's local `.membridge/` history** (irreversible); `--keep-memory` strips the blocks only. Local data only — it does not delete entries already synced to a team |
 | `membridge enable-autostart` / `disable-autostart` | Run at login |
 | `membridge setup-hooks` / `remove-hooks` | Session summary + recall hooks |
 | `membridge git-filter <on\|off\|status>` | Keep the injected block out of git (on by default, set up by `setup-hooks`) |
@@ -266,8 +274,16 @@ dependency list is deliberately short: encryption (`libsodium-wrappers`), code
 parsing (`web-tree-sitter`), and the MCP server (`@modelcontextprotocol/sdk`,
 `zod`).
 
-**What happens when someone leaves?** Revoke them in Members. Their access ends
-at the next sync; their past contributions stay with the team.
+**What happens when someone leaves?** Remove them in Members. That rotates the
+team key to a new epoch sealed only to the remaining members, so they cannot
+read anything written afterwards — this one is enforced by cryptography, not
+just by a server check. Rotation is forward-only: history they already synced
+stays readable to them, because no rotation can undo a copy someone already
+holds. Their past contributions stay with the team.
+
+Removing someone from a single **project** while they stay on the team is a
+weaker, server-side guarantee — one team key spans every project, so there is no
+key to withhold. See the [encryption spec](docs/ENCRYPTION-SPEC.md) §0.2.
 
 </details>
 

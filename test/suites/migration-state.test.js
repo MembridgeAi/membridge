@@ -185,19 +185,33 @@ async function main() {
       '"applied" is meaningless without saying applied WHERE');
   });
 
-  // 031 is the one genuinely-unapplied numbered migration, and it is also a
-  // reconstruction of an object that already exists in production, so applying
-  // it blind would overwrite live behaviour with a guess. That pairing is easy
-  // to lose when someone works down the list applying everything outstanding.
-  await check('031 is recorded as unapplied AND as a reconstruction', () => {
-    const row = [...(ledger.get('031') || [])].join(',');
-    assert.ok(row.includes('not applied'),
-      `031 must stay recorded as unapplied; ledger says "${row}"`);
+  // 031 is a RECONSTRUCTION of an object that already exists in production, so
+  // applying it blind would overwrite live behaviour with a guess. That is the
+  // property worth pinning, and it is easy to lose when someone works down the
+  // list applying everything outstanding.
+  //
+  // This check used to also assert the row said "not applied". That assertion
+  // was a PROXY for the danger, and on 2026-08-08 the proxy went wrong while
+  // the danger did not. Re-verification against production (`pg_get_functiondef`
+  // on the live `rls_auto_enable`) found every distinctive string from 031's
+  // body already live — the fail-closed `raise exception`, the `search_path`
+  // pin, the skip-logging branch. The old "not applied" was false, and false in
+  // the DANGEROUS direction: it told a reader that production's RLS auto-enable
+  // fails OPEN when it in fact fails CLOSED.
+  //
+  // So the status string is not the invariant. The invariant is that the row
+  // never lets a reader run this file against production without diffing first,
+  // whatever its applied state says.
+  await check('031 is recorded as a reconstruction that must not be applied blind', () => {
     const src = fs.readFileSync(LEDGER, 'utf8');
     assert.match(src, /031[\s\S]{0,600}?RECONSTRUCTION/i,
       'the 031 row must keep its "diff before applying" warning: the live ' +
       'rls_auto_enable predates the repo, so create-or-replace would overwrite ' +
       'production with a reconstruction');
+    assert.match(src, /031[\s\S]{0,600}?diff before/i,
+      'the 031 row must carry an explicit instruction to diff before any ' +
+      '`create or replace`. Marking it "applied" is fine and is now correct — ' +
+      'losing the do-not-apply-blind instruction is not');
   });
 
   // SEC-9. A migration that claims to RECONSTRUCT a live object is making the

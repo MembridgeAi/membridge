@@ -898,6 +898,7 @@ async function main() {
     const kcBob = mkMemKeychain();
     const mockE2E = createMockSupabase();
     let e2eErr = null, resAlice = null, resBob = null, bobEntries = null, origRows = null;
+    let bobState = null, bobLedger = null;
     try {
       await new Promise(r => mockE2E.server.listen(P(53), '127.0.0.1', r));
       process.env.MEMBRIDGE_TEAM_URL = `http://127.0.0.1:${P(53)}`;
@@ -929,6 +930,11 @@ async function main() {
       util.saveState(stA);
       resAlice = await teamsync.syncTeams({ project: projE2E, cryptoDeps: { keychain: kcAlice, teamcrypto: tcE2E } });
       origRows = mockE2E.entries.map(e => ({ ...e }));
+      // Move the sealed rows into a high id range so a plausibly PRE-cutover
+      // row can be planted BELOW them below. The mock hands out ids 1,2,3…;
+      // real installs have thousands of pre-E2E rows under the first sealed
+      // one, and that gap is exactly what the downgrade gate must not black out.
+      for (const e of mockE2E.entries) e.id += 1000;
 
       // Inject fake plaintext into every stored content column: cutover rows
       // carry none, so anything readable server-side is server-controlled. A
@@ -937,14 +943,30 @@ async function main() {
       for (const e of mockE2E.entries) {
         e.ask = 'TAMPERED ask'; e.summary = 'TAMPERED summary'; e.decisions = 'TAMPERED';
       }
-      // Plus one plaintext-only row (no ciphertext): must pull through as-is.
+      // Plus one plaintext-only row (no ciphertext) ABOVE the sealed rows:
+      // this is the silent downgrade — a row the server can write in the clear
+      // into a team that is encrypting, which used to render as authentic
+      // teammate content under a green E2E badge.
       const alice = mockE2E.users.get('alice-e2e@test.dev');
       mockE2E.entries.push({
         project_id: linkE.projectId, author_id: alice.id, author_name: 'Alice',
         ts: '2026-07-18T12:30:00.000Z', source: 'Codex', session: 'plain1',
         ask: 'plain only row', goal: null, decisions: null, gotchas: null,
         summary: 'no cipher here', files: ['docs/x.md'], changes: null,
+        id: 2000,
         created_at: new Date(Date.now() + 60000).toISOString(),
+      });
+      // And one plaintext row from BEFORE the team turned E2E on (id below
+      // every sealed row this device has opened). Blacking these out would
+      // brick the history of every install that predates the cutover, so it
+      // must still read.
+      mockE2E.entries.push({
+        project_id: linkE.projectId, author_id: alice.id, author_name: 'Alice',
+        ts: '2026-06-01T09:00:00.000Z', source: 'Codex', session: 'legacy1',
+        ask: 'from before e2e', goal: null, decisions: null, gotchas: null,
+        summary: 'pre-cutover history', files: ['docs/old.md'], changes: null,
+        id: 7,
+        created_at: new Date(Date.now() + 90000).toISOString(),
       });
 
       // Bob: pull and decrypt.
@@ -954,6 +976,8 @@ async function main() {
       util.saveState(stB);
       resBob = await teamsync.syncTeams({ project: projE2E, cryptoDeps: { keychain: kcBob, teamcrypto: tcE2E } });
       bobEntries = (util.loadState().projects[projE2E] || {}).teamEntries || [];
+      bobState = util.loadState();
+      bobLedger = (bobState.teamE2E || {})[teamE.team_id] || null;
     } catch (e) { e2eErr = e; } finally {
       process.env.MEMBRIDGE_HOME = savedHome;
       process.env.MEMBRIDGE_TEAM_URL = savedUrl2;
@@ -986,13 +1010,49 @@ async function main() {
         'tampered plaintext surfaced — pull must take content from the ciphertext');
     });
 
-    check('teamsync: pull keeps a plaintext-only row unchanged', () => {
+    // THE DOWNGRADE GATE. `if (teamCrypto && r.ciphertext && r.nonce)` asked
+    // only whether the row HAD ciphertext, so a row served without any skipped
+    // the crypto branch entirely and its server-written plaintext columns
+    // rendered as authentic teammate content — no undecryptable flag, badge
+    // still green. Omitting the ciphertext is the same attack as corrupting it,
+    // and it is reachable with no attacker at all: one teammate running
+    // team.encrypt=false pushes exactly this row shape.
+    check('teamsync: a plaintext row from a team that is encrypting renders opaque (no silent downgrade)', () => {
       assert.ok(!e2eErr, `e2e scenario threw: ${e2eErr && e2eErr.message}`);
       const plain = bobEntries.find(e => e.session === 'plain1');
-      assert.ok(plain, 'plaintext-only row missing from pull');
-      assert.strictEqual(plain.ask, 'plain only row');
-      assert.strictEqual(plain.summary, 'no cipher here');
-      assert.deepStrictEqual(plain.files, ['docs/x.md']);
+      assert.ok(plain, 'the ciphertext-less row must still be stored, as an opaque row');
+      assert.strictEqual(plain.undecryptable, true,
+        'a row with no ciphertext from an encrypting team must be marked undecryptable');
+      assert.strictEqual(plain.ask, null, 'server-written plaintext must not become content');
+      assert.strictEqual(plain.summary, null, 'server-written plaintext must not become content');
+      assert.deepStrictEqual(plain.files, [], 'server-written file list must not become content');
+    });
+
+    // The other half of the same rule: fail closed WITHOUT bricking installs
+    // that predate E2E. Distinguished by locally-held evidence only — the row
+    // sits below the lowest id this device has actually DECRYPTED, so it comes
+    // from before the team's cutover. Config cannot make this call (encryption
+    // is default-on, so it says "encrypted" for teams that never sealed a byte)
+    // and the server must not be allowed to.
+    check('teamsync: a pre-cutover plaintext row (below the lowest decrypted id) still reads', () => {
+      assert.ok(!e2eErr, `e2e scenario threw: ${e2eErr && e2eErr.message}`);
+      const legacy = bobEntries.find(e => e.session === 'legacy1');
+      assert.ok(legacy, 'pre-cutover row missing from pull');
+      assert.ok(!legacy.undecryptable, 'pre-cutover history must not be blacked out');
+      assert.strictEqual(legacy.ask, 'from before e2e');
+      assert.strictEqual(legacy.summary, 'pre-cutover history');
+      assert.deepStrictEqual(legacy.files, ['docs/old.md']);
+    });
+
+    check('teamsync: the E2E ledger records observed ciphertext and the downgrade, so the badge can report what was VERIFIED', () => {
+      assert.ok(!e2eErr, `e2e scenario threw: ${e2eErr && e2eErr.message}`);
+      assert.ok(bobLedger, 'state.teamE2E must carry a record for the team just pulled');
+      assert.strictEqual(bobLedger.active, true, 'observing ciphertext must ratchet the team to active');
+      assert.ok(Number.isFinite(bobLedger.minSealedId),
+        'the lowest DECRYPTED row id is the pre-cutover boundary and must be recorded');
+      assert.ok(bobLedger.lastDowngradeAt, 'the plaintext row must be recorded as a downgrade');
+      assert.ok(/no ciphertext/.test(bobState.teamPlaintextRows || ''),
+        `the pass must surface the downgrade for the status badge, got: ${JSON.stringify(bobState.teamPlaintextRows)}`);
     });
 
     check('teamsync: round trip — Bob recovers exactly what Alice pushed, through the ciphertext', () => {
@@ -1032,7 +1092,7 @@ async function main() {
         setTeamCfg();
         await teamsync.signup(util.getConfig(), 'dana-e2e@test.dev', 'pw-d', 'Dana');
         const teamT = await teamsync.createTeam(util.getConfig(), 'TamperTeam');
-        await teamsync.linkProject(util.getConfig(), projT, teamT.team_id, 'TamperTeam');
+        const linkT = await teamsync.linkProject(util.getConfig(), projT, teamT.team_id, 'TamperTeam');
 
         process.env.MEMBRIDGE_HOME = homeE;
         setTeamCfg();
@@ -1084,6 +1144,18 @@ async function main() {
           { ts: '2026-07-18T15:00:00.000Z', source: 'Claude Code', kind: 'prompt', text: 'fresh content after corruption', session: 't2' });
         util.saveState(stD2);
         await teamsync.syncTeams({ project: projT, cryptoDeps: { keychain: kcDana, teamcrypto: tcE2E } });
+
+        // Sweep: the SAME defect lived in the feed's own decrypt path
+        // (decryptTeamRows), where a row with no ciphertext was pushed through
+        // untouched. The dashboard renders these directly off the server, so
+        // this was the shorter route to the same lie.
+        mockT.entries.push({
+          project_id: linkT.projectId, author_id: mockT.users.get('dana-e2e@test.dev').id,
+          author_name: 'Dana', ts: '2026-07-18T16:00:00.000Z', source: 'Codex', session: 'feedplain',
+          ask: 'PLAINTEXT feed row', goal: null, decisions: null, gotchas: null,
+          summary: 'PLAINTEXT feed row', files: [], changes: null, headline: null,
+          id: 9000, created_at: new Date(Date.now() + 120000).toISOString(),
+        });
 
         process.env.MEMBRIDGE_HOME = homeE;
         const rawE2 = util.loadUserConfig();
@@ -1146,6 +1218,8 @@ async function main() {
           `fresh encrypted row must decrypt in the feed, got: ${JSON.stringify(feedEve.entries.map(e => ({ ask: e.ask, undecryptable: e.undecryptable })))}`);
         assert.ok(feedEve.entries.some(e => e.undecryptable === true),
           'corrupted rows must carry the undecryptable marker through normalizeTeam');
+        assert.ok(!JSON.stringify(feedEve.entries).includes('PLAINTEXT feed row'),
+          'a feed row with NO ciphertext from an encrypting team must render opaque, not as content');
       });
 
       check('feed: feedPayload refreshes a stale token instead of rendering every team row opaque', () => {
@@ -1254,6 +1328,59 @@ async function main() {
     assert.ok(!auth.includes('abcDEF123456ghijKLmn') && auth.includes('[redacted:authorization]'), `auth -> ${auth}`);
   });
 
+  // NEAR-MISS CORPUS. The table above proves each pattern matches its own
+  // happy-path sample, and the negatives below prove it does not over-match.
+  // Neither catches the failure that actually leaks: a credential one
+  // character off the shape the pattern was written for. Every line here was
+  // verified to survive redaction unchanged before the fix that added it.
+  check('redact: credential shapes one character off the happy path are still redacted', () => {
+    const leaks = [
+      // connection-uri listed six database schemes. https://user:pass@host is
+      // the commonest credential-in-URL shape of all and was not among them.
+      ['https creds', 'clone https://admin:hunter2@git.internal.example.com/repo.git', 'hunter2'],
+      ['http creds', 'curl http://svc_user:S3cr3tPass@api.acme.com/v1/ping', 'S3cr3tPass'],
+      ['ssh creds', 'rsync ssh://root:toorpass@10.0.0.5/vol', 'toorpass'],
+      ['git creds', 'git://deploy:sekritpw@host/repo.git', 'sekritpw'],
+      // bearer was /g where its sibling authorization is /gi. Lowercase
+      // "bearer" is what appears in curl transcripts, logs and prose.
+      ['lowercase bearer', 'retrying with bearer abc123def456ghi789', 'abc123def456ghi789'],
+      ['uppercase BEARER', 'BEARER abc123def456ghi789', 'abc123def456ghi789'],
+      // AWS issues ASIA (STS), ABIA and ACCA alongside AKIA. All are 20 chars,
+      // which is below ENTROPY_MIN_LEN, so the backstop cannot catch them.
+      ['AWS STS key', 'aws sts token id ASIAY34FZKBOKMUTVV7A', 'ASIAY34FZKBOKMUTVV7A'],
+      // xoxc (browser session) and xoxd (cookie) are full-account credentials
+      // and fell outside the [abeprs] class.
+      ['slack xoxc', 'token xoxc-2216254567-2216-abcdefghijk-1234567890', 'xoxc-2216254567'],
+      // secret-assignment required the name to be immediately followed by the
+      // separator, so the JSON form -- which is what an agent's tool
+      // arguments, an MCP config and a settings.json dump all look like --
+      // sailed straight through while the shell/env form was caught.
+      ['JSON password', '{"password": "hunter2"}', 'hunter2'],
+      ['JSON api_key', '{"api_key": "acme-live-42"}', 'acme-live-42'],
+      ['JSON token, no space', '"token":"shhh-dont-tell"', 'shhh-dont-tell'],
+    ];
+    for (const [name, input, secret] of leaks) {
+      const out = redactLib.redactDefault(input);
+      assert.ok(!out.includes(secret), `${name}: secret survived -> ${out}`);
+    }
+  });
+
+  // The scheme and name widenings above must not start eating ordinary prose,
+  // ordinary URLs, or the identifiers the negatives section already protects.
+  check('redact: the widened URI schemes and quoted names do not over-match', () => {
+    const survivors = [
+      'see https://example.com/docs/getting-started for the walkthrough',
+      'clone https://github.com/membridge/membridge.git and run npm ci',
+      'the http://localhost:7799 dashboard shows the fleet',
+      'email andrew@example.com about the ssh://host/vol mount',
+      'ASIAN markets and ACCAdemic writing are ordinary words',
+      'the tokenizer and passwordless flows are documented',
+    ];
+    for (const s of survivors) {
+      assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s} -> ${redactLib.redactDefault(s)}`);
+    }
+  });
+
   // Live incident: a sign-in callback of the form
   // https://host/auth/cli?code=<uuid> reached memory with all 23 patterns
   // before this one already running. Nothing caught it -- no pattern named
@@ -1331,6 +1458,70 @@ async function main() {
       assert.strictEqual(redactLib.redactDefault(s), s, `false positive on: ${s}`);
     }
   });
+  // Home directories and usernames. The team boundary is the ONLY place this
+  // may happen: redactText is shared with the local injected block, where the
+  // real path is the product (an agent handed `~/x` cannot open the file), so
+  // a blanket fix in redactDefault would have broken the feature to fix the
+  // leak. Nothing scrubbed these anywhere before — this repo's own injected
+  // block carries `/Users/andrewbrown/...` — while the README claims private
+  // paths are scrubbed.
+  check('redact: scrubHomePaths collapses every home-directory shape to ~, keeping the tail', () => {
+    const cases = [
+      ['/Users/andrewbrown/membridge/lib/redact.js', '~/membridge/lib/redact.js'],
+      ['/home/andrew/src/app.py', '~/src/app.py'],
+      ['C:\\Users\\Andrew Brown\\code\\app.cs', '~\\code\\app.cs'],
+      ['/mnt/c/Users/andrew/proj/x.ts', '~/proj/x.ts'],
+      ['read /Users/marco/.claude/settings.json then /home/marco/.zshrc', 'read ~/.claude/settings.json then ~/.zshrc'],
+      // Bare home with no tail still loses the username.
+      ['cd /Users/andrewbrown', 'cd ~'],
+    ];
+    for (const [input, want] of cases) {
+      assert.strictEqual(redactLib.scrubHomePaths(input), want, `home path not scrubbed: ${input}`);
+      assert.ok(!redactLib.scrubHomePaths(input).toLowerCase().includes('andrew')
+        || /marco/.test(input), `username survived: ${input}`);
+    }
+    // Negatives: nothing that is not a home path may move.
+    for (const s of ['/usr/local/bin/node', 'lib/redact.js', 'the /Users/ directory itself',
+      '/var/folders/xy/T/tmpfile', 'https://example.com/home/index.html']) {
+      assert.strictEqual(redactLib.scrubHomePaths(s), s, `false positive on: ${s}`);
+    }
+  });
+
+  check('redact: scrubHomePaths is NOT part of the default table — the local block keeps its real paths', () => {
+    const p = '/Users/andrewbrown/membridge/lib/redact.js';
+    assert.strictEqual(redactLib.redactDefault(p), p,
+      'the shared default table must not scrub home paths — the local injected block depends on them');
+    assert.strictEqual(digest.redactText(p, digest.compileRedactions({})), p,
+      'digest.redactText feeds the LOCAL block and must stay path-preserving');
+  });
+
+  // The boundary itself: what actually crosses to a teammate and to the server.
+  check('teamsync: entryToRow scrubs home paths out of every field that crosses the wire', () => {
+    const cr = { userId: 'u1', displayName: 'Me' };
+    const rx = digest.compileRedactions({});
+    const row = teamsync.entryToRow({
+      ts: 't1',
+      source: 'Claude Code',
+      session: 's1',
+      ask: 'open /Users/andrewbrown/membridge/lib/redact.js and fix it',
+      goal: 'ship /home/andrew/src/app.py',
+      decisions: '- keep /Users/andrewbrown/notes.md out of git',
+      gotchas: '- C:\\Users\\Andrew\\AppData is read-only',
+      summaryFull: 'edited /Users/andrewbrown/membridge/lib/teamsync.js',
+      headline: 'Fixed /Users/andrewbrown/membridge',
+      files: ['/Users/andrewbrown/elsewhere/notes.md'],
+      changes: [{ file: '/Users/andrewbrown/elsewhere/notes.md', note: 'moved /home/andrew/tmp/x' }],
+    }, 'p1', cr, true, rx);
+    const wire = JSON.stringify(row);
+    assert.ok(!/\/Users\/andrewbrown/.test(wire), `a macOS home path crossed the wire -> ${wire}`);
+    assert.ok(!/\/home\/andrew\b/.test(wire), `a Linux home path crossed the wire -> ${wire}`);
+    assert.ok(!/Users\\Andrew/.test(wire), `a Windows home path crossed the wire -> ${wire}`);
+    // The tail is what a teammate actually needs, and it must survive.
+    assert.ok(/membridge\/lib\/redact\.js/.test(row.ask), `path tail lost -> ${row.ask}`);
+    assert.ok(/src\/app\.py/.test(row.goal), `path tail lost -> ${row.goal}`);
+    assert.ok(/elsewhere\/notes\.md/.test(JSON.stringify(row.files)), `file tail lost -> ${JSON.stringify(row.files)}`);
+  });
+
   check('redact: session-id UUIDs are never redacted (load-bearing for the hook)', () => {
     const uuid = '1f0e5d5d-1603-4ea6-8b41-832bf6d27195';
     assert.strictEqual(redactLib.redactDefault(uuid), uuid);
@@ -1556,6 +1747,84 @@ async function main() {
     const out = digest.redactText(`service role: ${JWT}`, digest.compileRedactions({}));
     assert.ok(!out.includes(JWT), 'service_role JWT survived');
     assert.ok(out.includes('[redacted:jwt]'), 'expected the jwt marker');
+  });
+
+  // NEAR-MISS CORPUS.
+  //
+  // Every shape in this file was, until now, only ever tested against its own
+  // happy-path sample — which is exactly why the bugs existed: `AKIA…` was
+  // pinned, so nobody noticed `ASIA…` fell off the end of the character class,
+  // and `PGPASSWORD=x` was pinned, so nobody noticed `{"password": "x"}` could
+  // not match because the separator could not cross the `"` between key and
+  // colon. A pattern proved only by the string it was written from proves
+  // nothing about its boundary.
+  //
+  // So: each case below sits ONE CHARACTER off a string that already passes.
+  // The `hit` group must redact; the `miss` group must survive untouched,
+  // because a pattern that eats ordinary prose is its own kind of data loss.
+  check('redact: near-miss corpus — one character off a match, both directions', () => {
+    const compiled = digest.compileRedactions({});
+    const red = t => digest.redactText(t, compiled);
+
+    // Must be caught. Each is a sibling of an already-pinned shape.
+    const hits = [
+      ['ASIA STS key',      'AKIA'.replace('AKIA', 'ASIA') + 'ABCDEFGHIJKLMNOP'],
+      ['ABIA key',          'ABIA' + 'ABCDEFGHIJKLMNOP'],
+      ['ACCA key',          'ACCA' + 'ABCDEFGHIJKLMNOP'],
+      ['xoxc browser token','xoxc-1234567890-abcdefghij'],
+      ['xoxd cookie token', 'xoxd-1234567890-abcdefghij'],
+    ];
+    for (const [label, secret] of hits) {
+      const out = red(`value ${secret} here`);
+      assert.ok(!out.includes(secret), `${label}: survived redaction`);
+    }
+
+    // The JSON-key form, which the separator widening is what fixes. The
+    // quoted-name variants are each one quote away from the bare form.
+    for (const src of [
+      '{"password": "hunter2corgi"}',
+      "{'password': 'hunter2corgi'}",
+      '{"api_key":"hunter2corgi"}',
+      'password = "hunter2corgi"',
+      'PGPASSWORD=hunter2corgi',
+    ]) {
+      const out = red(src);
+      assert.ok(!out.includes('hunter2corgi'), `JSON/assignment form leaked: ${src} -> ${out}`);
+    }
+
+    // Idempotence: re-redacting must not nest or double-wrap a marker. The
+    // guard that prevents this is a negative lookahead one character wide.
+    const once = red('{"password": "hunter2corgi"}');
+    assert.strictEqual(red(once), once, 're-redaction was not idempotent');
+    assert.ok(!/\[redacted:[^\]]*\[redacted:/.test(once), 'markers nested');
+
+    // The opening quote of the VALUE must survive, or the output stops being
+    // parseable JSON — the widening absorbs the NAME's quote only.
+    assert.ok(once.includes('"[redacted:secret-assignment]"'),
+      `value quotes were swallowed: ${once}`);
+
+    // Defence in depth, pinned deliberately: `xoxz-` is NOT a real Slack
+    // prefix and the slack-token pattern rightly ignores it — but a
+    // random-looking body that long still clears the entropy bar, so the
+    // backstop catches it anyway. Recorded as a hit so a future narrowing of
+    // the backstop cannot quietly remove the second layer.
+    assert.ok(!red('xoxz-1234567890-abcdefghij').includes('1234567890-abcdefghij'),
+      'the entropy backstop no longer covers an unrecognised token prefix');
+
+    // Must NOT be caught: one character off in the harmless direction.
+    const misses = [
+      'AKIA1234',                       // too short to be a key
+      'AKIASHORT',                      // right prefix, wrong body length
+      'akia1234567890123456',           // lowercase: not an AWS key
+      'xoxz-token-here',                // wrong prefix AND low entropy
+      'the password field is empty',    // prose, skip-listed
+      'the token is set',               // prose, skip-listed
+      'discussing password policy',     // no assignment at all
+      'oauth_url=https://example.com',  // "auth" inside a word, not a secret
+    ];
+    for (const src of misses) {
+      assert.strictEqual(red(src), src, `over-redacted harmless text: ${src}`);
+    }
   });
 
   check('redact: memory.md and memory.json redact prompt, checkpoint, and todo item', () => {

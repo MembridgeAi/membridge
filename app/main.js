@@ -633,11 +633,20 @@ if (loginArg) {
     // This dialog used to run before ensureInstalled()/tick()/setInterval,
     // which meant no hook install and no sync happened until the user noticed
     // an unowned dialog, while the tray already said "running". The dialog
-    // gates ONLY consent.applyConsent (recording distill.consent, and running
-    // hooks.setupHooks() on a grant); none of the machinery above is
-    // consent-gated — it already ran unconditionally after the dialog — so
-    // starting it first changes nothing about what consent controls. Sync
-    // output honors the decision at render time: lib/digest.js only adds the
+    // gates ONLY consent.applyConsent (recording the decision, and running
+    // hooks.setupHooks() on a grant).
+    //
+    // The dialog's claim that it "installs a Claude Code hook" is now true
+    // (#48). It was not: hooks.ensureInstalled() above used to write the Stop
+    // hook, both PreToolUse hooks, the SessionStart hooks and a Bash
+    // auto-approve rule before this ran, so "Not now" declined an install that
+    // had already happened. The fix is in the writer, not in this ordering —
+    // ensureInstalled now installs nothing without a recorded grant, which
+    // also covers the CLI daemon boot, where there is no dialog at all. So the
+    // sync machinery still starts first (the tray must never say "running"
+    // over a blocked launch) and consent still controls what gets installed.
+    //
+    // Sync output honors the decision at render time: lib/digest.js only adds the
     // AGENTS.md summary line when distill.consent === 'granted', so a sync
     // pass that ran while the dialog was still open wrote nothing a "Not now"
     // should have prevented.
