@@ -1,9 +1,11 @@
-import { createContext, useContext, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useRoute } from 'wouter'
 import { MembridgeMark } from '../assets/MembridgeMark'
+import { AvatarRegistryProvider } from '../components/AvatarRegistry'
 import { useDataClient } from '../data/DataClientProvider'
-import { useSettings, useStatus, useTeamAccount } from '../data/queries'
+import { useMembers, useSettings, useStatus, useTeamAccount } from '../data/queries'
 import type { Status } from '../data/types'
+import { IdentityDialog } from './IdentityDialog'
 import { ROUTES } from './routes'
 import { TeamSwitcher } from './TeamSwitcher'
 
@@ -137,6 +139,30 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   // rather than falling through to an empty span.
   const identity = account?.user?.displayName || account?.user?.email || 'Signed in'
 
+  const [editingIdentity, setEditingIdentity] = useState(false)
+  const avatar = account?.user?.avatar ?? null
+  const avatarColor = account?.user?.avatarColor ?? null
+  // TeamAccount carries no top-level viewerId -- account.user IS the viewer's
+  // own row (GET /api/team describes the signed-in caller), so userId here is
+  // the same id Settings.viewerId derives separately for the roster surfaces.
+  const viewerId = account?.user?.userId ?? ''
+
+  // The roster this app already fetches, reshaped into the id -> avatar map
+  // the Avatar component resolves itself through. `onTeam` gates it because
+  // getMembers() is meaningless without a team.
+  const members = useMembers(onTeam)
+  const avatarsById = useMemo(() => {
+    const m = new Map<string, { glyph: string; color: string | null }>()
+    for (const person of members.data ?? []) {
+      if (person.avatar) m.set(person.id, { glyph: person.avatar, color: person.avatarColor })
+    }
+    // The viewer's own row, from the account query rather than the roster:
+    // it updates the instant the save returns, and it is also the only
+    // source when the roster query is disabled (not on a team).
+    if (viewerId && avatar) m.set(viewerId, { glyph: avatar, color: avatarColor })
+    return m
+  }, [members.data, viewerId, avatar, avatarColor])
+
   // Creating a team requires an account, so a signed-out machine gets the
   // sign-in control in the footer instead of this. Gating on solo alone sent
   // a signed-out user to a create-team form they could not submit -- and
@@ -144,6 +170,7 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   const showCreateTeam = ready && !onTeam && signedIn
 
   return (
+    <AvatarRegistryProvider value={avatarsById}>
     <div className="shell">
       <nav className="rail" aria-label="Primary">
         {/* MembridgeMark is an inlined SVG component (see
@@ -215,7 +242,37 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
             <Link href={ROUTES.team} className="rail-signin">Sign in</Link>
           )}
           {signedIn && (
-            <span className="rail-identity" data-testid="rail-identity" title={identity}>{identity}</span>
+            <>
+              {/* Deliberately NOT a <button>: a button activates on a single
+                  click, and the asked-for gesture is a double one. role +
+                  tabIndex keep it announced and reachable, and Enter is the
+                  keyboard equivalent of the double-click. */}
+              <span
+                className="rail-identity"
+                data-testid="rail-identity"
+                role="button"
+                tabIndex={0}
+                title={`${identity} — double-click to change your name`}
+                onDoubleClick={() => setEditingIdentity(true)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setEditingIdentity(true)
+                  }
+                }}
+              >
+                {identity}
+              </span>
+              {editingIdentity && (
+                <IdentityDialog
+                  currentName={account?.user?.displayName || ''}
+                  currentAvatar={avatar}
+                  currentAvatarColor={avatarColor}
+                  viewerId={viewerId}
+                  onClose={() => setEditingIdentity(false)}
+                />
+              )}
+            </>
           )}
         </div>
       </nav>
@@ -229,5 +286,6 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
         {children}
       </main>
     </div>
+    </AvatarRegistryProvider>
   )
 }

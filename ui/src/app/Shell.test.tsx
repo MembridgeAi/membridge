@@ -18,6 +18,15 @@ class FirstRunClient extends FakeDataClient {
   }
 }
 
+// FakeOptions has no `authenticated` flag, so the signed-out machine is
+// modelled the way FirstRunClient models an unfinished setup above: a
+// subclass overriding the one query that decides.
+class SignedOutClient extends FakeDataClient {
+  async getTeamAccount(): Promise<TeamAccount> {
+    return { ...(await super.getTeamAccount()), authenticated: false, user: null }
+  }
+}
+
 // The route survives a render, so a test that navigates has to put it back or
 // it leaks into every test after it in this file.
 afterEach(() => {
@@ -145,6 +154,38 @@ describe('Shell', () => {
       )
 
       expect(screen.queryByRole('link', { name: /sign in/i })).toBeNull()
+      expect(screen.queryByTestId('rail-identity')).toBeNull()
+    })
+
+    it('opens the identity editor on a double-click of your name', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      await userEvent.dblClick(identity)
+      expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+    })
+
+    // Double-click is unreachable without a mouse, so the same control answers
+    // Enter when focused.
+    it('opens the identity editor with the keyboard', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      identity.focus()
+      await userEvent.keyboard('{Enter}')
+      expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+    })
+
+    // A single click must NOT open it -- "double tap" is the asked-for gesture,
+    // and a plain <button> would fire on the first one.
+    it('does not open the editor on a single click', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      await userEvent.click(identity)
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('offers no identity editor when signed out', async () => {
+      renderWith(new SignedOutClient({ solo: true }), <App />)
+      expect(await screen.findByRole('link', { name: 'Sign in' })).toBeInTheDocument()
       expect(screen.queryByTestId('rail-identity')).toBeNull()
     })
   })
