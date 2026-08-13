@@ -161,8 +161,12 @@ Verify each is actually merged before publishing; delete the ones that are not._
 - **Day-card area tags** — scannable area tags on day cards, and session bullets
   grouped under area headers.
 - **Settings danger zone** — the Privacy rows reordered into the stages data
-  actually moves through, and the owner-cannot-leave error fixed. **If migration
-  058 has not been applied, only the first commit of this branch ships.**
+  actually moves through, and the owner-cannot-leave error fixed. **Decided:
+  only the first commit of this branch ships unless migration 058 has been
+  applied before tagging.** The owner-exit path needs 058 behind it; shipping the
+  whole branch against an unapplied 058 gives the user a control the database
+  cannot serve. If 058 is applied, ship the branch whole and delete this
+  sentence.
 
 <!-- END CONDITIONAL -->
 
