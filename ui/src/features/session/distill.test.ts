@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { INTENT_MAX, distilledBullets, shortIntent, whatBullets } from './distill'
+import { INTENT_MAX, distilledBullets, shortIntent, whatGroups } from './distill'
 import type { Session } from '../../data/types'
 
 const session = (overrides: Partial<Session> = {}): Session => ({
@@ -90,61 +90,71 @@ describe('shortIntent', () => {
   })
 })
 
-// whatBullets: the merged "What" widget's content. Two shapes reach it, and
-// both have to read as a scannable list. New sessions arrive already bulleted
-// (lib/hooks.js asks for one short line per bullet); every session distilled
-// before that change arrives as one prose paragraph, and there are hundreds of
-// those already synced, so prose is split on sentence boundaries rather than
-// rendered as a single bullet the width of the widget.
-describe('whatBullets', () => {
-  it('splits a bulleted field into one bullet per line, markers stripped', () => {
-    const out = whatBullets(session({
-      decisions: '- Durability beats recency.\n- The gate moved to hooks.js.\n* Third marker shape.',
-    }))
-    expect(out).toEqual([
-      'Durability beats recency.',
-      'The gate moved to hooks.js.',
-      'Third marker shape.',
-    ])
+// whatGroups: the merged "What" widget's content, grouped by the area each
+// point named. Two shapes reach it, and both have to read as a scannable
+// list. New sessions arrive already bulleted and area-prefixed (lib/hooks.js
+// asks for one short "[Area] " line per bullet); every session distilled
+// before that change arrives as one prose paragraph with no prefixes, and
+// there are hundreds of those already synced, so prose is split on sentence
+// boundaries and lands in a single unlabelled group, rendering exactly as it
+// did before areas existed.
+describe('whatGroups', () => {
+  const s = (decisions: string | null, gotchas: string | null = null) =>
+    session({ decisions, gotchas })
+
+  it('groups by area once there are enough points across enough areas', () => {
+    const groups = whatGroups(s(
+      '[UI/UX] Removed the menu item\n[UI/UX] Renamed the tab\n[Backend] Raised the rate limit\n[Backend] Cached the lookup',
+    ))
+    expect(groups.map(g => g.area)).toEqual(['UI/UX', 'Backend'])
+    expect(groups[0].points).toEqual(['Removed the menu item', 'Renamed the tab'])
   })
 
-  it('splits legacy prose on sentence boundaries', () => {
-    const out = whatBullets(session({
-      decisions: 'Durability beats recency because a crashed run must not steal the hook. The gate moved to hooks.js.',
-    }))
-    expect(out).toEqual([
-      'Durability beats recency because a crashed run must not steal the hook.',
-      'The gate moved to hooks.js.',
-    ])
+  it('renders flat below the point threshold, stripping prefixes anyway', () => {
+    // 3 points is under GROUP_MIN_POINTS -- three headings over one line each
+    // reads worse than the flat list this replaces.
+    const groups = whatGroups(s('[UI/UX] One\n[Backend] Two\n[Tests] Three'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].area).toBe(null)
+    expect(groups[0].points).toEqual(['One', 'Two', 'Three'])
   })
 
-  it('appends gotchas after decisions in one list', () => {
-    const out = whatBullets(session({
-      decisions: 'Durability beats recency.',
-      gotchas: 'settings.json rewrites drop unknown keys.',
-    }))
-    expect(out).toEqual([
-      'Durability beats recency.',
-      'settings.json rewrites drop unknown keys.',
-    ])
+  it('renders flat when every point shares one area', () => {
+    const groups = whatGroups(s('[UI/UX] One\n[UI/UX] Two\n[UI/UX] Three\n[UI/UX] Four'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].area).toBe(null)
   })
 
-  it('never truncates a bullet: the widget restructures text, it does not hide it', () => {
-    const long = `${'word '.repeat(80).trim()}.`
-    const out = whatBullets(session({ decisions: long }))
-    expect(out).toEqual([long])
+  it('keeps first-seen area order, not alphabetical', () => {
+    const groups = whatGroups(s(
+      '[Tests] One\n[Tests] Two\n[Backend] Three\n[Backend] Four',
+    ))
+    expect(groups.map(g => g.area)).toEqual(['Tests', 'Backend'])
   })
 
-  it('is empty when neither field was captured, so the widget can be absent', () => {
-    expect(whatBullets(session())).toEqual([])
-    expect(whatBullets(session({ decisions: '   ', gotchas: null }))).toEqual([])
+  it('puts unprefixed points in a trailing unlabelled group', () => {
+    const groups = whatGroups(s(
+      '[UI/UX] One\n[UI/UX] Two\n[Backend] Three\nFour with no area',
+    ))
+    expect(groups[groups.length - 1].area).toBe(null)
+    expect(groups[groups.length - 1].points).toEqual(['Four with no area'])
   })
 
-  it('drops a gotcha that merely repeats a decision', () => {
-    const out = whatBullets(session({
-      decisions: 'Durability beats recency.',
-      gotchas: 'durability beats recency',
-    }))
-    expect(out).toEqual(['Durability beats recency.'])
+  it('reads legacy prose with no prefixes as one flat group', () => {
+    const groups = whatGroups(s('We did a thing. Then another thing.'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].area).toBe(null)
+  })
+
+  it('merges decisions and gotchas into the same areas', () => {
+    const groups = whatGroups(
+      s('[UI/UX] One\n[UI/UX] Two', '[UI/UX] Three\n[Backend] Four'),
+    )
+    expect(groups.find(g => g.area === 'UI/UX')?.points).toEqual(['One', 'Two', 'Three'])
+  })
+
+  it('drops a gotcha that merely restates a decision', () => {
+    const groups = whatGroups(s('[UI/UX] Same line', '[UI/UX] Same line.'))
+    expect(groups[0].points).toEqual(['Same line'])
   })
 })
