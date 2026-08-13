@@ -56,13 +56,35 @@ const NOT_PROJECT: RegExp[] = [
  *  which is a Node module and unreachable from the browser bundle. A path shape
  *  not handled here yields a wrong tag, which is cheap and visible; see the
  *  "Deviation" section of the plan for why that trade was taken over
- *  normalising daemon-side. */
+ *  normalising daemon-side.
+ *
+ *  WORKTREE PREFIXES ONLY. It handles no absolute-checkout prefix, and that is
+ *  a decision rather than an omission. Every path reaching this code is already
+ *  project-relative -- the daemon relativises against the project root on the
+ *  way in (lib/memorydb.js:92, lib/provenance.js:37) -- and 0 of the 89 paths
+ *  in the measured live corpus are absolute, contrary to what the plan's
+ *  Deviation section assumed. The rule that used to be here stripped
+ *  `/<root>/<a>/<b>/<c>/`, so on a shallower checkout
+ *  `/Users/marco/membridge/ui/src/data/DataClient.ts` became
+ *  `src/data/DataClient.ts` and a UI file tagged `Backend`. Left alone that
+ *  same path still contains `/ui/` and tags `UI/UX`, so removing the rule is
+ *  strictly more accurate for the case it claimed to serve.
+ *
+ *  The strip LOOPS because it is applied again by areaOf after areaTagsFor has
+ *  already deduped on its output: a nested prefix
+ *  (`.claude/worktrees/a/.claude/worktrees/b/lib/x.js`) that only collapsed on
+ *  the second pass would be counted as a second, distinct file. */
 export function repoRelative(file: string): string {
-  return String(file || '')
-    .replace(/^.*?\.claude\/worktrees\/[^/]+\//, '')
-    .replace(/^.*?\.worktrees\/[^/]+\//, '')
-    .replace(/^\/(?:Users|home)\/[^/]+\/[^/]+\/[^/]+\//, '')
-    .replace(/^\.\//, '')
+  let out = String(file || '')
+  for (;;) {
+    // Each replace can only shorten the string, so this terminates.
+    const next = out
+      .replace(/^.*?\.claude\/worktrees\/[^/]+\//, '')
+      .replace(/^.*?\.worktrees\/[^/]+\//, '')
+    if (next === out) break
+    out = next
+  }
+  return out.replace(/^\.\//, '')
 }
 
 export function isProjectFile(file: string): boolean {
@@ -94,7 +116,13 @@ export function areaOf(file: string): Area | null {
  *  touched by almost nothing are worth saying whenever they appear. */
 const PUNCTUAL: ReadonlySet<Area> = new Set<Area>(['Data/Schema', 'Build/CI', 'Integrations'])
 
-/** Share of a card's recognised files an AMBIENT area must reach. */
+/** Share of a card's recognised files an AMBIENT area must reach.
+ *
+ *  Pinned from BOTH sides in areaTags.test.ts ("at exactly the 25% bar" /
+ *  "one file below"). Every other assertion in the suite is a one-sided upper
+ *  bound, so before that pair this constant could be raised to 0.40 with the
+ *  whole suite still green -- silently changing what every historical card
+ *  says. Move it and those two tests go red, which is the point. */
 const AMBIENT_SHARE = 0.25
 
 /** Most tags a card carries. Past three the strip stops being scannable, which
@@ -135,7 +163,17 @@ export function areaTagsFor(files: Array<{ file: string }>): AreaTag[] {
     .sort((a, b) => b.files - a.files || a.area.localeCompare(b.area))
 
   const kept = ranked.filter(t => PUNCTUAL.has(t.area) || t.files / total >= AMBIENT_SHARE)
+  if (kept.length > 0) return kept.slice(0, TAG_LIMIT)
+
   // A card with recognised files always says something: if every area fell
-  // below the bar, the heaviest one is still the truest thing available.
-  return (kept.length > 0 ? kept : ranked.slice(0, 1)).slice(0, TAG_LIMIT)
+  // below the bar, the heaviest is still the truest thing available. But
+  // "the heaviest" is only a fact when nothing ties it. `ranked` breaks ties
+  // alphabetically, so taking ranked[0] on a day of five areas at 20% each
+  // rendered exactly `Backend` -- an alphabetical accident presented as a
+  // finding about where the day's work went, which is the one failure mode
+  // this feature cannot have. EVERY leader is kept instead, so a tie renders
+  // as the tie it is. Still capped: three is what the strip can carry, and a
+  // day whose leaders overflow it is one the reader must open anyway.
+  const top = ranked[0].files
+  return ranked.filter(t => t.files === top).slice(0, TAG_LIMIT)
 }

@@ -881,6 +881,20 @@ describe('buildDayCards tags', () => {
     expect(cards[0].tags).toEqual([])
   })
 
+  // The spec calls worktree-path normalisation the single most important guard
+  // of this feature -- almost all work in this repo happens inside
+  // `.claude/worktrees/<name>/`, and a raw path like this one begins `.claude/`
+  // and tags every such day `Config`. areaOf pins it as a unit; this pins it
+  // END TO END, because the card is built from dayFiles' output and a
+  // normalisation that only held inside areaOf would still ship the bug.
+  it('normalises a worktree-prefixed path on the way onto the card', () => {
+    const cards = buildDayCards([
+      entry({ id: 'a', files: ['.claude/worktrees/agent-x/ui/src/App.tsx'] }),
+    ])
+    expect(cards[0].files.map(fl => fl.file)).toEqual(['.claude/worktrees/agent-x/ui/src/App.tsx'])
+    expect(cards[0].tags.map(t => t.area)).toEqual(['UI/UX'])
+  })
+
   it('counts a file named by changes as well as by files', () => {
     const cards = buildDayCards([
       entry({ id: 'a', files: [], changes: [{ file: 'lib/feed.js', status: 'edited', add: 1, del: 0, note: 'x', dep: false }] }),

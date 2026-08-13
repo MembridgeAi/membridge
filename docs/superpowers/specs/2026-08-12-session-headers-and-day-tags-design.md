@@ -104,8 +104,12 @@ A tag that appears on most cards cannot answer "who worked on X", so the rule is
   **on presence**. These are rarely touched at all, so touching one *is* the
   signal — "they went into the MCP server" must survive being 2 files out of 20.
 - Tags are **ordered by files touched** and **capped at 3**.
-- A session whose areas all fall below threshold takes its single heaviest area,
-  so a session with files never renders zero tags.
+- A session whose areas all fall below threshold takes its heaviest area — and
+  **every area tied with it**, still capped at 3 — so a session with files never
+  renders zero tags. "Single heaviest" was the original wording and it is wrong
+  where nothing is heaviest: ordering breaks ties alphabetically, so a day of
+  five areas at 20% each rendered exactly `Backend`, presenting an alphabetical
+  accident as a finding about where the day's work went.
 
 Resulting distribution: `UI/UX` 45%, `Tests` 41%, `Docs` 36%, `Backend` 36%,
 `Data/Schema` 27%, `Build/CI` 14%, `Integrations` 14%.
