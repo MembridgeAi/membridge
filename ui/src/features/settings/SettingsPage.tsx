@@ -4,9 +4,10 @@ import { StateChip } from '../../components/StateChip'
 import { Toggle } from '../../components/Toggle'
 import { readEncryption } from '../../components/encryptionState'
 import { useDataClient } from '../../data/DataClientProvider'
-import { useOpenConfigFile, useSetSetting, useSettings, useSoloView, useStatus } from '../../data/queries'
+import { useOpenConfigFile, useSetSetting, useSettings, useSoloView, useStatus, useTeamAccount } from '../../data/queries'
 import { absoluteTime, relativeAgo } from '../../data/relativeTime'
 import type { DeliveryChannel, HooksVersionStatus, Settings, SharePromptsMode } from '../../data/types'
+import { IdentityDialog } from '../../app/IdentityDialog'
 import { ContextFilesDialog } from './ContextFilesDialog'
 import { DaemonGroup } from './DaemonGroup'
 import { EditListDialog } from './EditListDialog'
@@ -204,6 +205,12 @@ export function SettingsPage() {
   // any conditional return below, per rules-of-hooks.
   const soloView = useSoloView()
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null)
+  // Settings' door onto the SAME identity editor the rail footer opens (Task
+  // 8): one dialog, one picker, one useSetDisplayName mutation. Gated on
+  // being signed in, not on being on a team -- your own name/avatar is
+  // editable whether or not settings.team exists, unlike TeamGroup.
+  const account = useTeamAccount()
+  const [editingIdentity, setEditingIdentity] = useState(false)
 
   // Full error page only for a first-load failure (no data at all); a failed
   // refetch with cached data degrades to the inline banner below instead of
@@ -380,6 +387,32 @@ export function SettingsPage() {
         )}
         <button type="button" className="settings-btn" onClick={() => setActiveDialog('exclude')}>Edit</button>
       </SettingRow>
+
+      {/* Second door onto the identity editor (Task 8) -- the rail footer's
+          double-click is the first. Gated on account.data.authenticated, not
+          on settings.team below, so it stays available to a signed-in solo
+          user with no team yet. Opens the exact same IdentityDialog the rail
+          uses: no parallel form, no second useSetDisplayName call. */}
+      {account.data?.authenticated && (
+        <SettingRow
+          label="Your name and avatar"
+          description="What your teammates see. Your name has to be different from theirs."
+          testId="setting-identity"
+        >
+          <button type="button" className="settings-btn" onClick={() => setEditingIdentity(true)}>
+            Change name
+          </button>
+        </SettingRow>
+      )}
+      {editingIdentity && account.data?.user && (
+        <IdentityDialog
+          currentName={account.data.user.displayName || ''}
+          currentAvatar={account.data.user.avatar}
+          currentAvatarColor={account.data.user.avatarColor}
+          viewerId={account.data.user.userId}
+          onClose={() => setEditingIdentity(false)}
+        />
+      )}
 
       <DaemonGroup daemon={settings.daemon} />
 

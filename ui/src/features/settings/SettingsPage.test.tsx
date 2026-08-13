@@ -1146,4 +1146,25 @@ describe('SettingsPage', () => {
       expect(alert.textContent).toContain('picker exploded')
     })
   })
+
+  // Task 8: Settings opens the exact same IdentityDialog the rail footer
+  // does -- one picker, one validation path, one useSetDisplayName mutation.
+  // Default fixture (renderApp({})) is authenticated with a signed-in user,
+  // same as every other row-visibility test in this file.
+  it('opens the identity editor from the Settings row', async () => {
+    renderApp({}, <SettingsPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /change name/i }))
+    expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+  })
+
+  // One control, two doors: Settings must not grow its own picker. Asserting
+  // both the shape AND colour radiogroups render proves the SHARED dialog
+  // opened -- a bespoke Settings-only "Change name" form with just a text
+  // field would pass a weaker "a dialog opened" check but fail this one.
+  it('shows the same shape and colour rows as the rail editor', async () => {
+    renderApp({}, <SettingsPage />)
+    await userEvent.click(await screen.findByRole('button', { name: /change name/i }))
+    expect(await screen.findByRole('radiogroup', { name: /avatar shape/i })).toBeInTheDocument()
+    expect(screen.getByRole('radiogroup', { name: /avatar colour/i })).toBeInTheDocument()
+  })
 })
