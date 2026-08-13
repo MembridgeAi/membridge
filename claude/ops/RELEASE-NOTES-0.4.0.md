@@ -1,6 +1,6 @@
 # MemBridge 0.4.0
 
-_Previous release: 0.3.4. Master at time of writing: `bde3d97`. 64 commits._
+_Previous release: 0.3.4. Master at time of writing: `a4754a3`. 69 commits._
 
 This release is mostly about **making the product's claims true**. Several things
 MemBridge said it did — refuse plaintext, honour a declined consent, forget what
@@ -138,6 +138,12 @@ undercounted it by about half.
 - Insights counts team breakdowns in the database rather than a capped local
   fold, and the coverage banner explains what it means instead of describing how
   the fetch works.
+- **A team owner has a way out.** Owning a team used to mean being unable to
+  leave it: the Settings control was offered and always failed. Ownership can now
+  be transferred, or the team disbanded, and the Privacy rows are ordered by the
+  stages your data actually moves through rather than by where the settings
+  happened to live.
+- **Hover-to-edit team name**, with a danger zone at the foot of the Team tab.
 
 ---
 
@@ -160,24 +166,30 @@ Verify each is actually merged before publishing; delete the ones that are not._
   `site:reddit.com` searches silently returned non-Reddit results.
 - **Day-card area tags** — scannable area tags on day cards, and session bullets
   grouped under area headers.
-- **Settings danger zone** — the Privacy rows reordered into the stages data
-  actually moves through, and the owner-cannot-leave error fixed. **Ships whole.**
-  Migration `058_owner_exit` was applied to the live project on 2026-08-13
-  (`20260813020159`), so the owner-exit path has a database behind it.
-
-  _Release-gate note, to be resolved before tagging and then deleted:_ what is
-  confirmed is that the apply succeeded and the row is in the migration table.
-  What is **not** yet confirmed is a `pg_proc`-level check that each function
-  exists with its intended grants. A migration table is a ledger, and this
-  release exists partly because a ledger in this repo was wrong in 13 of 17 rows
-  — so the ledger is not sufficient evidence for a control that deletes user
-  data. Do not tag until the function-level query has actually returned.
+_(The Settings danger zone has landed on master and moved up into the body of
+these notes; it is no longer conditional.)_
 
 <!-- END CONDITIONAL -->
 
 ---
 
 ## Before you tag
+
+- **The database is currently one migration ahead of the code.**
+  `057_member_identity` is applied to production, but the code that calls it — the
+  member rename and avatar work — is not on master and may not ship in 0.4.0.
+  This is additive and safe in that direction: a build without the code simply
+  never calls those functions. Worth stating rather than leaving implicit, because
+  the reverse gap is the dangerous one and someone reading a migration list should
+  not have to guess which way this one points.
+- **`058_owner_exit` is catalog-verified; `057_member_identity` is not.** 058 was
+  checked at the catalog, not the ledger: `transfer_ownership` (2 args) and
+  `delete_team` (1 arg) both present, both `security definer`, ACL limited to
+  authenticated/postgres/service_role with no PUBLIC and no anon — so its revoke
+  landed too. 057's only evidence is the apply plus a migration-table row, and its
+  ledger entry says `applied (unverified)` for exactly that reason. **Do not
+  promote that wording without running the Verify block at the foot of
+  `057_member_identity.sql`.**
 
 - **The installer must be stamped from the actual released asset.** There is no
   v0.3.3 release — that asset 404s — and 0.3.4 is the current tag. Any instruction
