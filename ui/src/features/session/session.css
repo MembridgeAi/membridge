@@ -239,6 +239,36 @@
   color: var(--text3);
 }
 
+/* --- provenance --------------------------------------------------------- */
+
+/* Where this copy came from, and what it cannot show. DELIBERATELY UNDECORATED:
+ * no tint, no border, no glyph, no accent rule. Everything in this app that
+ * carries a container or a warning mark means something is broken and wants
+ * the reader's hands, and nothing is broken here -- a teammate's session
+ * legitimately has no checkpoints. Muted body text in the same register as the
+ * back link is the whole design; the words carry the meaning. */
+.session-provenance {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.session-provenance-line,
+.session-missing-note {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+  color: var(--text3);
+  max-width: 60ch;
+}
+
+/* Sits in the distilled-bullets slot, so it needs the bullets' own top margin
+ * when it is the only thing in that slot. */
+.session-missing-note {
+  margin-top: var(--sp-4);
+}
+
 /* --- error / gone states ------------------------------------------------ */
 
 .session-error {

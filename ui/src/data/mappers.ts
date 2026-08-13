@@ -3,7 +3,7 @@
 // LocalDaemonClient.ts so every mapping decision is unit-testable without a
 // live daemon. Settings' own mapping lives in ./settingsMapper.ts, split out
 // to keep this file focused on feed/project/member mapping.
-import type { DayDigest, DayDigestSource, FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, RawDayDigest, Role, Session, StreamEntry, SyncState } from './types'
+import type { DayDigest, DayDigestSource, FeedEntry, FeedFilters, FileChange, LiveSession, LiveSessionGroup, Member, Project, RawDayDigest, Role, Session, SessionMissing, SessionOrigin, StreamEntry, SyncState } from './types'
 
 // ---------------------------------------------------------------------------
 // Raw daemon shapes consumed here (subset of the real payloads -- see
@@ -129,7 +129,20 @@ export interface RawSessionPayload {
   changes?: RawFileChange[] | null
   checkpoints?: { ts?: string; text?: string }[] | null
   prompts?: { ts?: string; ask?: string | null; files?: string[]; undecryptable?: boolean }[] | null
+  commits?: number
+  // Typed as plain strings, NOT as the unions: this interface describes what
+  // an arbitrary daemon sent, including one newer than this client. Narrowing
+  // happens in the mapper, where an unrecognized value can be dropped.
+  heldBy?: string
+  unavailable?: string[] | null
 }
+
+// The three origins and three missing-things this client understands. A value
+// outside these sets is dropped rather than passed through -- the page renders
+// provenance as a sentence, and there is no sentence for a value we have never
+// seen. Kept as arrays-of-const so the runtime guard and the type cannot drift.
+const SESSION_ORIGINS: readonly SessionOrigin[] = ['local-events', 'team-cache', 'team-archive']
+const SESSION_MISSING: readonly SessionMissing[] = ['checkpoints', 'commits', 'earlier-activity']
 
 export function mapSession(raw: RawSessionPayload): Session {
   return {
@@ -165,7 +178,32 @@ export function mapSession(raw: RawSessionPayload): Session {
           ...(p.undecryptable ? { undecryptable: true } : {}),
         }))
       : [],
+    // Commit count. A non-integer, a negative, or an absent field stays
+    // ABSENT rather than becoming 0: a session that produced no commits is a
+    // real 0, and the daemon omits the field entirely when it could not read
+    // the commit map. Collapsing those two into 0 is exactly the "flag that
+    // records a success the code never achieved" shape -- here it would be a
+    // count the client never received.
+    ...(typeof raw.commits === 'number' && Number.isFinite(raw.commits) && raw.commits >= 0
+      ? { commits: Math.floor(raw.commits) }
+      : {}),
+    // Provenance, spread-in so an absent or unrecognized value leaves the key
+    // off the object entirely -- `heldBy: undefined` would be a present key
+    // whose value is a lie of omission, and `'in' checks` downstream would
+    // disagree with the type.
+    ...(isSessionOrigin(raw.heldBy) ? { heldBy: raw.heldBy } : {}),
+    ...(Array.isArray(raw.unavailable)
+      ? { unavailable: raw.unavailable.filter(isSessionMissing) }
+      : {}),
   }
+}
+
+function isSessionOrigin(v: unknown): v is SessionOrigin {
+  return typeof v === 'string' && (SESSION_ORIGINS as readonly string[]).includes(v)
+}
+
+function isSessionMissing(v: unknown): v is SessionMissing {
+  return typeof v === 'string' && (SESSION_MISSING as readonly string[]).includes(v)
 }
 
 export interface RawMemberRow {

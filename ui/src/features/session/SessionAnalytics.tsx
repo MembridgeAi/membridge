@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { Session } from '../../data/types'
+import { commitsMissingLabel } from './provenance'
 
 // The session page's analytics header: four tiles, fixed order.
 //
@@ -73,10 +74,10 @@ export function lineTotals(session: Session): { add: number; del: number; counte
 }
 
 /** Commits the session produced, or null when the daemon did not serve the
- *  field. GET /api/session does not carry it today (see Session.commits in
- *  data/types.ts) -- the tile is written against the shape and degrades until
- *  the server side lands. Anything that is not a non-negative integer is
- *  treated as absent rather than coerced. */
+ *  field -- which is every team-origin payload (attribution is computed from
+ *  this machine's commit map) and any local one whose commit map could not be
+ *  read. Anything that is not a non-negative integer is treated as absent
+ *  rather than coerced. */
 export function commitsProduced(session: Session): number | null {
   const n = session.commits
   if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return null
@@ -105,6 +106,14 @@ function Empty() {
   return <span className="session-tile-empty">not captured</span>
 }
 
+/** The stand-in for a tile whose input is absent FOR A STATED REASON (this
+ *  copy of the session never carried it). Same muted register as Empty -- it
+ *  is provenance, not a fault -- but different words, because "not captured"
+ *  and "not in this copy" are different facts. */
+function Unavailable({ text }: { text: string }) {
+  return <span className="session-tile-empty" data-testid="session-tile-commits-unavailable">{text}</span>
+}
+
 function Tile({ label, children, detail }: { label: string; children: ReactNode; detail?: ReactNode }) {
   return (
     <div className="session-tile">
@@ -120,6 +129,7 @@ export function SessionAnalytics({ session }: { session: Session }) {
   const topFiles = topFilesByEditFrequency(session)
   const lines = lineTotals(session)
   const commits = commitsProduced(session)
+  const missingCommits = commitsMissingLabel(session)
   const duration = durationLabel(session.startedAt, session.endedAt)
 
   return (
@@ -151,7 +161,13 @@ export function SessionAnalytics({ session }: { session: Session }) {
       </Tile>
 
       <Tile label="Commits">
-        {commits === null ? <Empty /> : commits}
+        {/* Three states, not two. "not captured" is the tile's own default and
+            asserts that nothing was found -- true only when nobody said
+            otherwise. When the daemon NAMES commits as unavailable, the
+            absence has a reason and the tile states it instead. Reached only
+            in the branch that was already empty, so a payload that contradicts
+            itself never prints a denial next to a real count. */}
+        {commits === null ? (missingCommits ? <Unavailable text={missingCommits} /> : <Empty />) : commits}
       </Tile>
 
       <Tile label="Duration">

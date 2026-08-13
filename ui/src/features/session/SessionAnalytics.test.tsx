@@ -135,3 +135,46 @@ describe('SessionAnalytics header (four tiles)', () => {
     expect(duration.textContent).toContain('live')
   })
 })
+
+// The Commits tile used to have two states -- a number, or "not captured" --
+// and "not captured" asserts that we looked and found nothing. On a teammate's
+// session that assertion is false: the count is not in this copy at all and
+// never will be, because attribution is computed from this machine's commit
+// map. Reading "not captured" there is reading "they committed nothing".
+describe('the Commits tile distinguishes absence-of-data from absence-of-work', () => {
+  const commitsTile = () => screen.getByText('Commits').closest('.session-tile')!
+
+  it('says the count is not in this copy for a teammate session', () => {
+    render(<SessionAnalytics session={session({ heldBy: 'team-cache', unavailable: ['checkpoints', 'commits'] })} />)
+    expect(commitsTile().textContent).toContain('not in this copy')
+    expect(commitsTile().textContent).not.toContain('not captured')
+  })
+
+  it('says the count could not be counted when the local commit map was unreadable', () => {
+    render(<SessionAnalytics session={session({ heldBy: 'local-events', unavailable: ['commits'] })} />)
+    expect(commitsTile().textContent).toContain("couldn't be counted")
+  })
+
+  it('keeps the plain "not captured" when no payload said anything about commits', () => {
+    render(<SessionAnalytics session={session()} />)
+    expect(commitsTile().textContent).toContain('not captured')
+    expect(screen.queryByTestId('session-tile-commits-unavailable')).toBeNull()
+  })
+
+  // The self-contradicting payload: a real count is visible data, and a denial
+  // printed next to visible data is worse than saying nothing.
+  it('never denies a count it was actually given', () => {
+    render(<SessionAnalytics session={session({
+      commits: 3, heldBy: 'local-events', unavailable: ['commits'],
+    })} />)
+    expect(commitsTile().textContent).toContain('3')
+    expect(screen.queryByTestId('session-tile-commits-unavailable')).toBeNull()
+  })
+
+  // Stays in the same muted register as "not captured": provenance, not fault.
+  it('renders the reason as a muted tile value, not an alarm', () => {
+    render(<SessionAnalytics session={session({ heldBy: 'team-archive', unavailable: ['commits'] })} />)
+    expect(commitsTile().querySelector('.session-tile-empty')).not.toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+})

@@ -676,3 +676,73 @@ describe('mapDayDigests', () => {
     expect(d.sources[0]).toEqual({ entryId: 'a|t', session: null, ts: '', project: '', projectId: null, distilled: false, text: '' })
   })
 })
+
+// Provenance normalization. The daemon says where this copy came from and what
+// it structurally cannot show; the page turns that into a sentence. Everything
+// here defends the two ways that goes wrong: inventing a value the payload
+// never sent, and passing through a value we have no sentence for.
+describe('mapSession provenance (heldBy / unavailable)', () => {
+  it('carries the three origins through unchanged', () => {
+    expect(mapSession({ heldBy: 'local-events' }).heldBy).toBe('local-events')
+    expect(mapSession({ heldBy: 'team-cache' }).heldBy).toBe('team-cache')
+    expect(mapSession({ heldBy: 'team-archive' }).heldBy).toBe('team-archive')
+  })
+
+  it('carries the three missing-things through, preserving what the daemon named', () => {
+    expect(mapSession({ unavailable: ['checkpoints', 'commits', 'earlier-activity'] }).unavailable)
+      .toEqual(['checkpoints', 'commits', 'earlier-activity'])
+    // An empty list is a real statement -- "nothing is missing" -- and must
+    // survive as an empty list rather than collapsing into absent.
+    expect(mapSession({ unavailable: [] }).unavailable).toEqual([])
+  })
+
+  // The absent case: an older daemon, or a response cached before these
+  // fields existed. Absent must stay ABSENT -- not defaulted to the local
+  // origin, not turned into a placeholder. The page renders nothing for it.
+  it('leaves both keys off entirely when the payload carried neither', () => {
+    const s = mapSession({ session: 's1' })
+    expect('heldBy' in s).toBe(false)
+    expect('unavailable' in s).toBe(false)
+    expect(s.heldBy).toBeUndefined()
+    expect(s.unavailable).toBeUndefined()
+  })
+
+  // A future daemon inventing a fourth origin must degrade to silence, never
+  // to a guess -- there is no sentence for a value this client has never seen.
+  it('drops an unrecognized origin rather than passing it to the renderer', () => {
+    expect('heldBy' in mapSession({ heldBy: 'team-telepathy' })).toBe(false)
+    expect('heldBy' in mapSession({ heldBy: '' })).toBe(false)
+  })
+
+  it('drops unrecognized members while keeping the ones it understands', () => {
+    expect(mapSession({ unavailable: ['checkpoints', 'vibes', 'commits'] }).unavailable)
+      .toEqual(['checkpoints', 'commits'])
+  })
+
+  it('treats a non-array unavailable as absent instead of crashing the page', () => {
+    expect('unavailable' in mapSession({ unavailable: null })).toBe(false)
+  })
+})
+
+// #10, separable from the provenance work above. mapSession never mapped
+// `commits`, so the analytics header's Commits tile read "not captured" for
+// EVERY local session, including ones that produced commits -- the daemon has
+// been serving the count all along (lib/server.js sessionPayload). A tile that
+// says "not captured" next to work that produced three commits is the same
+// defect this page is being fixed for, one tile over.
+describe('mapSession carries the commit count the daemon serves', () => {
+  it('keeps a real count, including a genuine zero', () => {
+    expect(mapSession({ commits: 3 }).commits).toBe(3)
+    expect(mapSession({ commits: 0 }).commits).toBe(0)
+  })
+
+  it('leaves the key off when the daemon omitted it, never defaulting to zero', () => {
+    const s = mapSession({ session: 's1' })
+    expect('commits' in s).toBe(false)
+  })
+
+  it('treats a nonsense count as absent rather than rendering it', () => {
+    expect('commits' in mapSession({ commits: -1 })).toBe(false)
+    expect('commits' in mapSession({ commits: Number.NaN })).toBe(false)
+  })
+})

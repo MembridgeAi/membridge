@@ -262,6 +262,33 @@ const SESSION_FIXTURES: Record<string, RawSessionPayload> = {
     ],
     prompts: [{ ts: '2026-07-28T14:00:00Z', ask: 'start', files: ['ui/src/features/feed/FeedPage.tsx'] }],
   },
+  // A TEAMMATE'S session out of the durable archive, with the backward
+  // backfill unfinished: the shape the provenance work exists for. No
+  // checkpoint trail (none crosses team sync), no commit count (attribution is
+  // computed from the local commit map), and a history that may be missing its
+  // own beginning -- three absences that render identically to "this person
+  // did nothing" unless the page says otherwise.
+  //
+  // s-f1..s-f5 deliberately carry NEITHER field, so they keep modelling an
+  // older daemon, and every existing session test is the regression guard for
+  // the absent case.
+  's-f6': {
+    session: 's-f6', project: 'membridge', projectPath: '/Users/x/membridge',
+    author: 'Jamal', authorId: 'jamal', source: 'Claude Code',
+    startedAt: '2026-07-27T11:00:00Z', endedAt: '2026-07-27T12:20:00Z', live: false,
+    summary: 'Revocation now reaches local disk.',
+    summaryFull: 'Revocation now reaches local disk.',
+    goal: 'stop revoked projects from staying readable offline',
+    headline: 'Revocation now reaches local disk.',
+    decisions: 'Route every local reader through util.teamRowsFor.',
+    gotchas: null,
+    files: ['lib/util.js'],
+    changes: [{ file: 'lib/util.js', status: 'edited', add: 22, del: 3, note: null, dep: false }],
+    checkpoints: [],
+    prompts: [{ ts: '2026-07-27T11:00:00Z', ask: null, files: ['lib/util.js'] }],
+    heldBy: 'team-archive',
+    unavailable: ['checkpoints', 'commits', 'earlier-activity'],
+  },
 }
 
 export class FakeDataClient implements DataClient {
