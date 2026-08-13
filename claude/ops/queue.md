@@ -151,9 +151,15 @@ the repo — and no automated criterion can settle it.
 These are real gaps found while doing other work. Neither is a defect in
 something that was asked for, and neither is being fixed yet.
 
-- **`membridge stop` on Windows can kill a process that is not MemBridge
-  (found 2026-08-13, during the 0.4.0 cut).** Windows recycles pids
-  aggressively. If the pid in the pid file has been reassigned to some other
+- ~~**`membridge stop` on Windows can kill a process that is not MemBridge**~~
+  **FIXED 2026-08-13 in `3b234de`.** stop now confirms identity over HTTP
+  (`/api/status` reports the serving process's own pid) before signalling:
+  confirmed stops as before, a different pid answering clears the stale file and
+  kills nothing, and nothing answering falls back to the command line on POSIX /
+  refuses with a `--force` hint on win32. Original report kept below.
+
+  **Original report, kept because the reasoning outlives the fix.** Windows
+  recycles pids aggressively. If the pid in the pid file has been reassigned to some other
   live process, `cmdStop` stops THAT process: `isRunning()` reads it as alive
   (correctly), and `isMembridgeProcess()` is `return true` unconditionally on
   win32 — deliberately, because reading a Windows command line needs wmic
