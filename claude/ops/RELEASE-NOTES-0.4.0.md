@@ -144,6 +144,17 @@ undercounted it by about half.
   stages your data actually moves through rather than by where the settings
   happened to live.
 - **Hover-to-edit team name**, with a danger zone at the foot of the Team tab.
+- **Change your own name, and pick an avatar.** Double-click your name in the
+  bottom-left rail — or use the new row in Settings, which opens the same
+  editor — to rename yourself and choose an avatar glyph and a background
+  colour, picked independently. Display names are now unique within each team,
+  compared case- and whitespace-insensitively and enforced by a database index
+  rather than a client check, so two people can no longer be the same `marco` in
+  a feed. Renaming applies across every team you belong to at once, and fails
+  whole if the name is taken in any of them. Joining a team under a name someone
+  already holds no longer fails — it becomes `marco 2` — because a person
+  joining from the CLI has no input box to correct. Old entries keep the name
+  they were pushed under; renaming does not rewrite history.
 
 ---
 
@@ -176,34 +187,53 @@ these notes; it is no longer conditional.)_
 
 **Held out of 0.4.0 by decision, not by accident** — do not re-add these:
 
-- **Member rename and avatars.** Mid-plan. Its migration (`057`) is already live
-  in production; the code follows in a later release. See the note under *Before
-  you tag*.
-- **Session-area headers.** Implementation is done, but its fix-wave re-review
-  never ran, so nothing has checked the fixes that followed its review. Held for
-  that reason and no other. Do not confuse this branch with day-card area tags,
-  which is a separate, reviewed change and is in this release.
+- **Session-area headers.** Its fix-wave re-review has now been run — that was
+  the only thing the earlier hold was waiting on — and it came back **keep
+  held**, on evidence rather than on schedule. The commit named *"stop the area
+  parsers losing a teammate's text"* still loses a teammate's text: any
+  bracketed prefix shorter than 21 characters is taken for an area label and
+  stripped, so a decision written `[WIP] Rate limit raised to 10s` renders with
+  `[WIP]` silently gone, and points prefixed `[#1244]` render as codebase-area
+  headings the tag vocabulary can never produce. A second commit, *"say what the
+  flat branch actually orders"*, states an ordering bound the code does not
+  honour — an eight-point single-area list is reordered away from the
+  most-important-first sequence the hook asks for. Neither defect is large and
+  both are fixable; the branch is held until they are. Do not confuse it with
+  day-card area tags, which is a separate, reviewed change and IS in this
+  release.
+
+_(**Member rename and avatars** was held here while it was mid-plan. It is now
+finished, reviewed end to end, and merged up to current master — it ships in
+this release, described under **Interface**. The *Before you tag* note about the
+database running one migration ahead of the code no longer applies to it.)_
 
 ---
 
 ## Before you tag
 
-- **The database ships one migration ahead of the code, deliberately.**
-  `057_member_identity` is applied to production, but the code that calls it — the
-  member rename and avatar work — is **held out of 0.4.0** and stays on its
-  branch. This is additive and safe in that direction: a build without the code
-  simply never calls those functions, and the columns and index sit unused until
-  the lane lands in a later release. Stated explicitly rather than left implicit,
-  because the reverse gap is the dangerous one and someone reading a migration
-  list should not have to guess which way this one points.
-- **`058_owner_exit` is catalog-verified; `057_member_identity` is not.** 058 was
-  checked at the catalog, not the ledger: `transfer_ownership` (2 args) and
-  `delete_team` (1 arg) both present, both `security definer`, ACL limited to
-  authenticated/postgres/service_role with no PUBLIC and no anon — so its revoke
-  landed too. 057's only evidence is the apply plus a migration-table row, and its
-  ledger entry says `applied (unverified)` for exactly that reason. **Do not
-  promote that wording without running the Verify block at the foot of
-  `057_member_identity.sql`.**
+- **The database no longer runs ahead of the code.** An earlier draft of these
+  notes warned that `057_member_identity` was applied while the code that calls
+  it stayed on a branch. That gap is closed: the member rename and avatar work
+  ships in this release, so the migration and its callers land together.
+- **`057_member_identity` and `058_owner_exit` are both catalog-verified.** 058:
+  `transfer_ownership` (2 args) and `delete_team` (1 arg) both present, both
+  `security definer`, ACL limited to authenticated/postgres/service_role with no
+  PUBLIC and no anon. 057 was verified the same way on 2026-08-13, by read-only
+  catalog reads rather than by trusting the apply: the three new
+  `team_members` columns, the partial unique index, the dedupe trigger,
+  `team_members_list` returning both avatar columns, and
+  `set_display_name(text, text, text)` `security definer` with a pinned
+  `search_path`. Its ledger entry has been promoted from `applied (unverified)`
+  accordingly — that promotion is done, not pending.
+- **`059` is NOT applied, and should be applied with this release.** Verifying
+  057 at the catalog turned up something the repo could not show: Supabase's
+  default privileges grant EXECUTE on every new public-schema function to
+  `authenticated`, and 057's revoke named only `public, anon`. So
+  `unique_member_name` — `security definer`, taking an unchecked team id — is
+  callable today by any signed-in user, letting them probe whether a display
+  name is taken on a team they do not belong to. `059` is two `revoke`
+  statements that close it. It is independent of every other file and safe on
+  its own, but it must go **after** 057, never before.
 
 - **The installer must be stamped from the actual released asset.** There is no
   v0.3.3 release — that asset 404s — and 0.3.4 is the current tag. Any instruction
