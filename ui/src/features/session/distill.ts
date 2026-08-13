@@ -94,32 +94,136 @@ function splitPoints(text: string | null): string[] {
   return pieces.map(p => oneLine(p).replace(/^[-*•]\s*/, '')).filter(Boolean)
 }
 
-/** The merged "What" widget's bullets: the session's decisions followed by its
- *  gotchas, as one scannable list.
+/** Fewest points worth splitting under headings. Below this, headings cost
+ *  more than they buy: with a hard ceiling of 4 points per field, three
+ *  headings over one line each is a common shape, not a hypothetical one. */
+export const GROUP_MIN_POINTS = 4
+
+/** Fewest distinct areas worth splitting. One heading over the whole list says
+ *  nothing the list did not already say. */
+export const GROUP_MIN_AREAS = 2
+
+export interface WhatGroup {
+  /** The area these points share, or null for the unlabelled group -- either
+   *  the whole list when it is not worth grouping, or the trailing points that
+   *  carried no area of their own. */
+  area: string | null
+  points: string[]
+}
+
+/** Longest a label may be, measured AFTER `oneLine` has collapsed it. Same
+ *  bound, same measurement, as lib/hooks.js AREA_LABEL_MAX. */
+const AREA_LABEL_MAX = 20
+
+/** Read a leading "[Area] " off a point. Mirrors lib/hooks.js splitAreaPrefix
+ *  RULE FOR RULE, deliberately WITHOUT a copy of the vocabulary: the hook is
+ *  the only place the valid set is enforced, so this renders whatever label was
+ *  written and a future ninth area needs no change here.
  *
- *  Two shapes reach this and both have to read the same way. A session
- *  distilled after the hook prompt started asking for bullets arrives with one
- *  line per point; every session distilled before that arrives as a prose
- *  paragraph, and hundreds of those are already synced, so prose is split on
- *  sentence boundaries rather than rendered as a single bullet the height of
- *  the widget.
+ *  What the two share, and why each rule exists -- every one of them is about
+ *  not eating text a teammate wrote:
  *
- *  Nothing is truncated and the list is not capped. Restructuring text is this
- *  renderer's job; making it short is the distiller's (lib/hooks.js), and a
- *  clip here would hide a teammate's reasoning with no control to reach it.
+ *    * ANCHORED, so a bracket mid-sentence ("Fixed the [object Object] label")
+ *      is not mistaken for a prefix.
+ *    * The "]" must be followed by whitespace or end the point. The hook would
+ *      reject an unknown label, but this renderer meets rows the hook never
+ *      saw -- teammates on older installs, the Codex adapter, anything synced
+ *      from before areas existed -- so "[clipWords](src/mappers.ts) now trims"
+ *      arrives here for real, and stripping its "[clipWords]" would show the
+ *      reader a line that starts "(src/mappers.ts)".
+ *    * A blank label ("[   ] x") is no area at all. It renders no heading, yet
+ *      an empty-string area still counts toward GROUP_MIN_AREAS -- enough on
+ *      its own to flip a list into grouped mode with an invisible boundary in
+ *      it.
  *
- *  A gotcha that merely restates a decision is dropped: the two fields are one
- *  list now, and the same sentence twice reads as a rendering bug. */
-export function whatBullets(session: Session): string[] {
-  const out: string[] = []
+ *  Exported for the parser-agreement table in distill.test.ts, which mirrors
+ *  the one in test/suites/hooks.test.js: the two parsers cannot be run in one
+ *  process, so the same inputs are asserted on both sides instead. */
+export function parseAreaPoint(text: string): { area: string | null; point: string } {
+  const flat = oneLine(text)
+  const m = /^\[([^\][]*)\](?=\s|$)\s*(.*)$/.exec(flat)
+  if (!m) return { area: null, point: flat }
+  const area = m[1].trim()
+  if (!area || area.length > AREA_LABEL_MAX) return { area: null, point: flat }
+  return { area, point: m[2].trim() }
+}
+
+/** The merged "What" widget: the session's decisions followed by its gotchas,
+ *  grouped under the area each point named.
+ *
+ *  Grouping engages only at GROUP_MIN_POINTS across GROUP_MIN_AREAS; otherwise
+ *  the whole list comes back as one unlabelled group and renders exactly as it
+ *  did before areas existed. Every session captured before this shipped has no
+ *  prefixes at all and lands in that case by construction, which is the
+ *  intended degradation, not a gap.
+ *
+ *  Areas keep FIRST-SEEN order rather than being sorted: decisions come before
+ *  gotchas and the hook asks for the most important first, so first-seen is
+ *  the writer's own ordering. Sorting would overwrite it with the alphabet.
+ *
+ *  A gotcha that merely restates a decision IN THE SAME AREA is dropped, as
+ *  before: the two fields are one list here, and the same sentence twice under
+ *  one heading reads as a bug. The dedupe key carries the area for exactly that
+ *  reason -- the same sentence recorded under two areas is two facts, and
+ *  keying on the text alone silently deleted the second area's copy. */
+export function whatGroups(session: Session): WhatGroup[] {
   const seen = new Set<string>()
+  const order: string[] = []
+  const byArea = new Map<string, string[]>()
+  const loose: string[] = []
+
   for (const field of [session.decisions, session.gotchas]) {
+    // A newline in the field means the writer made the list, so every line
+    // parses its own prefix. With no newline the field is ONE point and
+    // splitPoints cut it at sentence boundaries, so only the first fragment
+    // can carry the prefix -- the rest are that same point's later clauses.
+    // Without inheriting the area they land in the trailing unlabelled group,
+    // which puts two headings between a sentence and its own next clause.
+    const sentenceSplit = !String(field || '').includes('\n')
+    let carried: string | null = null
+
     for (const piece of splitPoints(field)) {
-      const key = sameLineKey(piece)
-      if (!key || seen.has(key)) continue
+      const parsed = parseAreaPoint(piece)
+      const point = parsed.point
+      let area = parsed.area
+      if (area !== null) carried = area
+      else if (sentenceSplit) area = carried
+
+      const textKey = sameLineKey(point)
+      if (!textKey) continue
+      // A NUL joins the two halves of the key: with a space as the joiner,
+      // area "A" + text "b c" and area "A b" + text "c" collide on one key.
+      const key = `${area === null ? '' : area}\u0000${textKey}`
+      if (seen.has(key)) continue
       seen.add(key)
-      out.push(piece)
+      if (area === null) { loose.push(point); continue }
+      if (!byArea.has(area)) { byArea.set(area, []); order.push(area) }
+      byArea.get(area)!.push(point)
     }
   }
-  return out
+
+  const total = loose.length + [...byArea.values()].reduce((n, ps) => n + ps.length, 0)
+  if (total === 0) return []
+
+  // Not worth grouping: hand back one flat list with prefixes stripped -- a
+  // reader should never see the raw "[UI/UX] " markup whichever branch runs.
+  //
+  // The order is NOT the order the points were written: labelled points come
+  // first, grouped by area in first-seen area order, then the unlabelled ones.
+  // That is a real reordering, and it is left alone rather than described as
+  // something it is not -- it can only show up on a sub-threshold list that
+  // mixes labelled and unlabelled points, where fewer than four points render
+  // with no headings at all, so nothing about the reordering is visible as a
+  // wrong heading. Ticketed separately; do not read this branch as
+  // order-preserving.
+  if (total < GROUP_MIN_POINTS || order.length < GROUP_MIN_AREAS) {
+    const flat: string[] = []
+    for (const area of order) flat.push(...byArea.get(area)!)
+    flat.push(...loose)
+    return [{ area: null, points: flat }]
+  }
+
+  const groups: WhatGroup[] = order.map(area => ({ area, points: byArea.get(area)! }))
+  if (loose.length > 0) groups.push({ area: null, points: loose })
+  return groups
 }

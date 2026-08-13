@@ -112,4 +112,23 @@ describe('BriefWidgets (Task 4)', () => {
     const what = screen.getByText('What').closest('details')!
     expect(what.querySelector('summary .session-widget-peek')).toBeNull()
   })
+
+  // Grouping engages at >=4 total points across >=2 distinct areas
+  // (distill.ts GROUP_MIN_POINTS / GROUP_MIN_AREAS). This fixture has 4
+  // points across 2 areas (UI/UX, Backend), clearing both thresholds.
+  it('heads each area group once the list clears the grouping threshold', () => {
+    render(<BriefWidgets session={session({
+      decisions: '[UI/UX] Removed the menu item\n[UI/UX] Renamed the tab',
+      gotchas: '[Backend] Raised the rate limit\n[Backend] Cached the lookup',
+    })} />)
+    expect(screen.getAllByTestId('what-area').map(n => n.textContent)).toEqual(['UI/UX', 'Backend'])
+    // The raw prefix must never reach the reader.
+    expect(screen.queryByText(/\[UI\/UX\]/)).toBeNull()
+  })
+
+  it('heads nothing when the list is flat', () => {
+    render(<BriefWidgets session={session({ decisions: '[UI/UX] One\n[Backend] Two', gotchas: null })} />)
+    expect(screen.queryAllByTestId('what-area')).toHaveLength(0)
+    expect(screen.getByText('One')).toBeTruthy()
+  })
 })

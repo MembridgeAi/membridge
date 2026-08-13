@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { INTENT_MAX, distilledBullets, shortIntent, whatBullets } from './distill'
+import { INTENT_MAX, distilledBullets, parseAreaPoint, shortIntent, whatGroups } from './distill'
 import type { Session } from '../../data/types'
 
 const session = (overrides: Partial<Session> = {}): Session => ({
@@ -90,61 +90,167 @@ describe('shortIntent', () => {
   })
 })
 
-// whatBullets: the merged "What" widget's content. Two shapes reach it, and
-// both have to read as a scannable list. New sessions arrive already bulleted
-// (lib/hooks.js asks for one short line per bullet); every session distilled
-// before that change arrives as one prose paragraph, and there are hundreds of
-// those already synced, so prose is split on sentence boundaries rather than
-// rendered as a single bullet the width of the widget.
-describe('whatBullets', () => {
-  it('splits a bulleted field into one bullet per line, markers stripped', () => {
-    const out = whatBullets(session({
-      decisions: '- Durability beats recency.\n- The gate moved to hooks.js.\n* Third marker shape.',
-    }))
-    expect(out).toEqual([
-      'Durability beats recency.',
-      'The gate moved to hooks.js.',
-      'Third marker shape.',
-    ])
+// whatGroups: the merged "What" widget's content, grouped by the area each
+// point named. Two shapes reach it, and both have to read as a scannable
+// list. New sessions arrive already bulleted and area-prefixed (lib/hooks.js
+// asks for one short "[Area] " line per bullet); every session distilled
+// before that change arrives as one prose paragraph with no prefixes, and
+// there are hundreds of those already synced, so prose is split on sentence
+// boundaries and lands in a single unlabelled group, rendering exactly as it
+// did before areas existed.
+describe('whatGroups', () => {
+  const s = (decisions: string | null, gotchas: string | null = null) =>
+    session({ decisions, gotchas })
+
+  it('groups by area once there are enough points across enough areas', () => {
+    const groups = whatGroups(s(
+      '[UI/UX] Removed the menu item\n[UI/UX] Renamed the tab\n[Backend] Raised the rate limit\n[Backend] Cached the lookup',
+    ))
+    expect(groups.map(g => g.area)).toEqual(['UI/UX', 'Backend'])
+    expect(groups[0].points).toEqual(['Removed the menu item', 'Renamed the tab'])
   })
 
-  it('splits legacy prose on sentence boundaries', () => {
-    const out = whatBullets(session({
-      decisions: 'Durability beats recency because a crashed run must not steal the hook. The gate moved to hooks.js.',
-    }))
-    expect(out).toEqual([
-      'Durability beats recency because a crashed run must not steal the hook.',
-      'The gate moved to hooks.js.',
-    ])
+  it('renders flat below the point threshold, stripping prefixes anyway', () => {
+    // 3 points is under GROUP_MIN_POINTS -- three headings over one line each
+    // reads worse than the flat list this replaces.
+    const groups = whatGroups(s('[UI/UX] One\n[Backend] Two\n[Tests] Three'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].area).toBe(null)
+    expect(groups[0].points).toEqual(['One', 'Two', 'Three'])
   })
 
-  it('appends gotchas after decisions in one list', () => {
-    const out = whatBullets(session({
-      decisions: 'Durability beats recency.',
-      gotchas: 'settings.json rewrites drop unknown keys.',
-    }))
-    expect(out).toEqual([
-      'Durability beats recency.',
-      'settings.json rewrites drop unknown keys.',
-    ])
+  it('renders flat when every point shares one area', () => {
+    const groups = whatGroups(s('[UI/UX] One\n[UI/UX] Two\n[UI/UX] Three\n[UI/UX] Four'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].area).toBe(null)
   })
 
-  it('never truncates a bullet: the widget restructures text, it does not hide it', () => {
-    const long = `${'word '.repeat(80).trim()}.`
-    const out = whatBullets(session({ decisions: long }))
-    expect(out).toEqual([long])
+  it('keeps first-seen area order, not alphabetical', () => {
+    const groups = whatGroups(s(
+      '[Tests] One\n[Tests] Two\n[Backend] Three\n[Backend] Four',
+    ))
+    expect(groups.map(g => g.area)).toEqual(['Tests', 'Backend'])
   })
 
-  it('is empty when neither field was captured, so the widget can be absent', () => {
-    expect(whatBullets(session())).toEqual([])
-    expect(whatBullets(session({ decisions: '   ', gotchas: null }))).toEqual([])
+  it('puts unprefixed points in a trailing unlabelled group', () => {
+    const groups = whatGroups(s(
+      '[UI/UX] One\n[UI/UX] Two\n[Backend] Three\nFour with no area',
+    ))
+    expect(groups[groups.length - 1].area).toBe(null)
+    expect(groups[groups.length - 1].points).toEqual(['Four with no area'])
   })
 
-  it('drops a gotcha that merely repeats a decision', () => {
-    const out = whatBullets(session({
-      decisions: 'Durability beats recency.',
-      gotchas: 'durability beats recency',
-    }))
-    expect(out).toEqual(['Durability beats recency.'])
+  it('reads legacy prose with no prefixes as one flat group', () => {
+    const groups = whatGroups(s('We did a thing. Then another thing.'))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].area).toBe(null)
   })
+
+  it('merges decisions and gotchas into the same areas', () => {
+    const groups = whatGroups(
+      s('[UI/UX] One\n[UI/UX] Two', '[UI/UX] Three\n[Backend] Four'),
+    )
+    expect(groups.find(g => g.area === 'UI/UX')?.points).toEqual(['One', 'Two', 'Three'])
+  })
+
+  it('drops a gotcha that merely restates a decision in the same area', () => {
+    const groups = whatGroups(s('[UI/UX] Same line', '[UI/UX] Same line.'))
+    expect(groups[0].points).toEqual(['Same line'])
+  })
+
+  // The same sentence under two areas is two facts, not a duplicate. Keying
+  // dedupe on the text alone kept the first and deleted the second area's copy,
+  // which is a teammate's line disappearing with nothing to show it happened.
+  it('keeps the same sentence under each area that recorded it', () => {
+    const groups = whatGroups(s(
+      '[UI/UX] Ports collide\n[UI/UX] One\n[Tests] Ports collide\n[Tests] Two',
+    ))
+    expect(groups.find(g => g.area === 'UI/UX')?.points).toEqual(['Ports collide', 'One'])
+    expect(groups.find(g => g.area === 'Tests')?.points).toEqual(['Ports collide', 'Two'])
+  })
+
+  // A one-point field has no newline, so it is cut at sentence boundaries and
+  // only the FIRST fragment can carry the prefix. Without inheritance the tail
+  // clause fell into the trailing unlabelled group, putting every other area's
+  // heading between a sentence and the clause that finishes it.
+  it('keeps a sentence-split point under the area its first fragment named', () => {
+    const groups = whatGroups(s(
+      '[UI/UX] One\n[UI/UX] Two\n[UI/UX] Three',
+      '[Tests] The harness reuses ports. Run the gate first.',
+    ))
+    expect(groups.map(g => g.area)).toEqual(['UI/UX', 'Tests'])
+    expect(groups[1].points).toEqual(['The harness reuses ports.', 'Run the gate first.'])
+  })
+
+  // A row the hook never validated -- an older install, the Codex adapter,
+  // anything synced before areas existed -- can open with a bracket that is not
+  // a label at all. Eating it leaves the reader a line starting "(src/...)".
+  it('renders a point that merely opens with a bracket whole', () => {
+    const groups = whatGroups(s('[clipWords](src/mappers.ts) now trims'))
+    expect(groups[0].points).toEqual(['[clipWords](src/mappers.ts) now trims'])
+  })
+
+  // An empty-string area renders no heading but still counts toward
+  // GROUP_MIN_AREAS, so it could flip a list into grouped mode and then put an
+  // invisible boundary in the middle of it.
+  it('does not let a blank label make an invisible group', () => {
+    const groups = whatGroups(s('[ ] x\n[UI/UX] One\n[Backend] Two\n[Backend] Three'))
+    expect(groups.map(g => g.area)).toEqual(['UI/UX', 'Backend', null])
+    expect(groups[2].points).toEqual(['[ ] x'])
+  })
+
+  // Inherited from the old whatBullets tests, which task 2 deleted: these three
+  // guarantees survived the rewrite and are the ones a reader would notice
+  // breaking.
+  it('never truncates a long point, however long the writer made it', () => {
+    const long = `${'word '.repeat(60)}end`
+    const groups = whatGroups(s(long))
+    expect(groups[0].points[0]).toBe(long.trim())
+    expect(groups[0].points[0].length).toBeGreaterThan(INTENT_MAX)
+  })
+
+  it('strips leading bullet markers so the list renders as one shape', () => {
+    const groups = whatGroups(s('- One\n* Two\n• Three'))
+    expect(groups[0].points).toEqual(['One', 'Two', 'Three'])
+  })
+
+  it('is an empty list, never a placeholder, when both fields are empty', () => {
+    expect(whatGroups(session())).toEqual([])
+    expect(whatGroups(s('', '   '))).toEqual([])
+  })
+})
+
+// The area parser exists twice on purpose: lib/hooks.js splitAreaPrefix
+// validates what an agent writes, parseAreaPoint renders what any tool ever
+// wrote, and no module can be shared across the CommonJS/TypeScript boundary
+// between them. A rule that changes on one side only is a point accepted one
+// way and displayed another, so this table is MIRRORED VERBATIM in
+// test/suites/hooks.test.js -- change one, change both, or one side fails.
+const PARSER_TABLE: Array<{ input: string; area: string | null; text: string }> = [
+  { input: '[UI/UX] Removed the menu item', area: 'UI/UX', text: 'Removed the menu item' },
+  { input: 'Removed the menu item', area: null, text: 'Removed the menu item' },
+  { input: 'Fixed the [object Object] label', area: null, text: 'Fixed the [object Object] label' },
+  // "]" not followed by whitespace: a sentence, not a label.
+  { input: '[clipWords](src/mappers.ts) now trims', area: null, text: '[clipWords](src/mappers.ts) now trims' },
+  { input: '[Tests]no space', area: null, text: '[Tests]no space' },
+  // Blank and empty labels name no area, and keep their text whole.
+  { input: '[ ] x', area: null, text: '[ ] x' },
+  { input: '[] x', area: null, text: '[] x' },
+  // The length bound is measured on the COLLAPSED label, which is the rule that
+  // used to differ: the UI flattens first, the hook did not.
+  { input: `[a${' '.repeat(30)}b] note`, area: 'a b', text: 'note' },
+  { input: `[${'x'.repeat(20)}] note`, area: 'x'.repeat(20), text: 'note' },
+  { input: `[${'x'.repeat(21)}] note`, area: null, text: `[${'x'.repeat(21)}] note` },
+  // "]" at end of string is still a prefix.
+  { input: '[Tests]', area: 'Tests', text: '' },
+]
+
+describe('parseAreaPoint agrees with lib/hooks.js splitAreaPrefix', () => {
+  for (const row of PARSER_TABLE) {
+    it(`classifies ${JSON.stringify(row.input)}`, () => {
+      const out = parseAreaPoint(row.input)
+      expect(out.area).toBe(row.area)
+      expect(out.point).toBe(row.text)
+    })
+  }
 })

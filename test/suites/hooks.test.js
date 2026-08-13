@@ -861,6 +861,153 @@ async function main() {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Area prefixes on distilled points (session-area-headers, task 1).
+  // ---------------------------------------------------------------------
+  {
+    const { splitAreaPrefix, AREAS, POINT_MAX } = require('../../lib/hooks.js');
+
+    // Matches the calling convention of the `runAppend:` checks above: a
+    // fresh sandbox home, a summaries.jsonl path under a throwaway project
+    // dir, invoked via the real CLI entrypoint. Failures land on stderr
+    // (see fail() in runAppend), which is what this returns.
+    function runAppendResult(line) {
+      const s = sandbox('area-prefix');
+      fs.mkdirSync(s.home, { recursive: true });
+      const target = path.join(s.dir, 'proj', '.membridge', 'summaries.jsonl');
+      const r = spawnSync(process.execPath, [HOOK_JS, 'append', target, line], {
+        encoding: 'utf8', env: { ...process.env, MEMBRIDGE_HOME: s.home },
+      });
+      return r.stderr;
+    }
+
+    check('splitAreaPrefix reads a known area off the front', () => {
+      assert.strictEqual(splitAreaPrefix('[UI/UX] Removed the menu item').area, 'UI/UX');
+    });
+    check('splitAreaPrefix returns the text without the prefix', () => {
+      assert.strictEqual(splitAreaPrefix('[UI/UX] Removed the menu item').text, 'Removed the menu item');
+    });
+    check('splitAreaPrefix reports no area for an unprefixed line', () => {
+      assert.strictEqual(splitAreaPrefix('Removed the menu item').area, null);
+    });
+    check('splitAreaPrefix leaves an unprefixed line whole', () => {
+      assert.strictEqual(splitAreaPrefix('Removed the menu item').text, 'Removed the menu item');
+    });
+    // A bracket that is not a prefix must not be eaten -- points legitimately
+    // contain brackets mid-sentence.
+    check('splitAreaPrefix ignores a bracket that is not leading', () => {
+      assert.strictEqual(splitAreaPrefix('Fixed the [object Object] label').area, null);
+    });
+    check('AREAS holds exactly eight areas', () => {
+      assert.strictEqual(AREAS.length, 8);
+    });
+
+    // The area parser exists twice on purpose: this one validates what an agent
+    // writes, ui/src/features/session/distill.ts parseAreaPoint renders what any
+    // tool ever wrote, and no module can be shared across the CommonJS/TypeScript
+    // boundary between them. A rule that changes on one side only is a point
+    // accepted one way and displayed another, so this table is MIRRORED VERBATIM
+    // in ui/src/features/session/distill.test.ts -- change one, change both, or
+    // one side fails.
+    //
+    // Two of these rows are the divergences a review found and this pins shut:
+    // a "]" not followed by whitespace is not a label (so "[clipWords](...)"
+    // keeps its text), and the length bound is measured on the label with its
+    // internal whitespace collapsed (the UI flattens the line first; this side
+    // used to bound the raw string, so "[a<30 spaces>b]" was a prefix there and
+    // not here).
+    const PARSER_TABLE = [
+      { input: '[UI/UX] Removed the menu item', area: 'UI/UX', text: 'Removed the menu item' },
+      { input: 'Removed the menu item', area: null, text: 'Removed the menu item' },
+      { input: 'Fixed the [object Object] label', area: null, text: 'Fixed the [object Object] label' },
+      { input: '[clipWords](src/mappers.ts) now trims', area: null, text: '[clipWords](src/mappers.ts) now trims' },
+      { input: '[Tests]no space', area: null, text: '[Tests]no space' },
+      { input: '[ ] x', area: null, text: '[ ] x' },
+      { input: '[] x', area: null, text: '[] x' },
+      { input: `[a${' '.repeat(30)}b] note`, area: 'a b', text: 'note' },
+      { input: `[${'x'.repeat(20)}] note`, area: 'x'.repeat(20), text: 'note' },
+      { input: `[${'x'.repeat(21)}] note`, area: null, text: `[${'x'.repeat(21)}] note` },
+      { input: '[Tests]', area: 'Tests', text: '' },
+    ];
+    for (const row of PARSER_TABLE) {
+      check(`splitAreaPrefix classifies ${JSON.stringify(row.input)}`, () => {
+        const out = splitAreaPrefix(row.input);
+        assert.strictEqual(out.area, row.area, `area for ${JSON.stringify(row.input)}`);
+        assert.strictEqual(out.text, row.text, `text for ${JSON.stringify(row.input)}`);
+      });
+    }
+
+    // The whole point of the bracket rule: a point that opens with a bracket
+    // that is not a label must reach summaries.jsonl unrejected and unaltered.
+    const bracketOpener = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: '[clipWords](src/mappers.ts) now trims to the word',
+    });
+    check('a point opening with a non-label bracket is not rejected as an area', () => {
+      assert.ok(!/not one of the areas/.test(String(runAppendResult(bracketOpener))));
+    });
+
+    // POINT_MAX applies to the POINT, not to the prefix. A 120-char point with a
+    // 15-char prefix is still a legal 120-char point.
+    const longPoint = 'x'.repeat(POINT_MAX);
+    const okLine = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: `[Integrations] ${longPoint}`,
+    });
+    check('a full-length point is not rejected for carrying a prefix', () => {
+      assert.ok(!/invalid line/.test(String(runAppendResult(okLine))));
+    });
+
+    const badArea = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: '[Frontend] Renamed the thing',
+    });
+    check('an unknown area label is rejected loudly', () => {
+      assert.ok(/not one of the areas/.test(String(runAppendResult(badArea))));
+    });
+
+    const noPrefix = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: 'Renamed the thing',
+    });
+    check('an unprefixed point is still accepted', () => {
+      assert.ok(!/invalid line/.test(String(runAppendResult(noPrefix))));
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // The two vocabularies are one vocabulary (session-area-headers, task 4).
+  // The hook writes "[UI/UX] ..." onto a point; the day card derives
+  // "UI/UX" from file paths. They are separate literals in two languages,
+  // so nothing but this test stops them drifting into a header and a tag
+  // that name the same work differently.
+  // ---------------------------------------------------------------------
+  {
+    const { AREAS } = require('../../lib/hooks.js');
+    // ROOT (from the harness) is a throwaway sandbox dir (fs.mkdtempSync),
+    // not this checkout's repo root, so it cannot find areaTags.ts. Use the
+    // same __dirname-relative path the file already uses for LIB above, and
+    // that audit-story.test.js uses for its own real-repo-source reads.
+    const REPO = path.join(__dirname, '..', '..');
+    const src = h.readSource(path.join(REPO, 'ui/src/features/feed/areaTags.ts'));
+    // The union type is the tags' declaration of the vocabulary.
+    const union = /export type Area =([\s\S]*?)\n\n/.exec(src);
+    check('areaTags.ts still declares an Area union', () => {
+      assert.ok(union, 'the Area union regex must still match areaTags.ts');
+    });
+    const declared = union ? (union[1].match(/'([^']+)'/g) || []).map(s => s.slice(1, -1)) : [];
+    check('every hook area exists in the tag vocabulary', () => {
+      for (const a of AREAS) {
+        assert.ok(declared.includes(a), `AREAS has "${a}" but areaTags.ts's Area union does not`);
+      }
+    });
+    check('every tag area exists in the hook vocabulary', () => {
+      for (const a of declared) {
+        assert.ok(AREAS.includes(a), `areaTags.ts's Area union has "${a}" but AREAS does not`);
+      }
+    });
+  }
+
   h.finish();
 }
 

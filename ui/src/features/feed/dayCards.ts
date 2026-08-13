@@ -1,6 +1,7 @@
 import { localDayKey, localDayRangeMs } from '../../data/localTime'
 import { clipWords } from '../../data/mappers'
 import type { DayDigest, FeedEntry } from '../../data/types'
+import { areaTagsFor, type AreaTag } from './areaTags'
 
 // Consolidated day cards: one card per PERSON per local calendar day, across
 // every project they touched. The feed's problem was volume of the wrong
@@ -980,6 +981,11 @@ export interface DayCard {
    *  thing twice. Empty when the day captured no usable ask. */
   intent: string
   files: DayFile[]
+  /** Which parts of the codebase this day touched, most-touched first, at most
+   *  three. Derived from `files`, so it is available on every day already
+   *  captured rather than only on days recorded after this shipped. Empty when
+   *  nothing recognisable was touched -- an empty strip, never a fake tag. */
+  tags: AreaTag[]
   bullets: DayBullet[]
   /** Newest session first, each holding its own prompts oldest-first. Every
    *  entry of the day is reachable through these, so the card carries no
@@ -1077,6 +1083,7 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
     const dayFullyLoaded = dayStart !== null && oldestLoadedMs !== null && oldestLoadedMs < dayStart
     const overview = pickDayOverview(sorted, byDigestKey.get(key) ?? null, { dayFullyLoaded })
     const bullets = dayBullets(sessions, overview)
+    const files = dayFiles(sorted)
     cards.push({
       key,
       slug: daySlug(key),
@@ -1092,7 +1099,10 @@ export function buildDayCards(rawEntries: FeedEntry[], digests: DayDigest[] = []
       sessionCount: sessions.length,
       overview,
       intent: dayIntent(dayAsks(sessions), sessions.length, overview.text),
-      files: dayFiles(sorted),
+      files,
+      // dayFiles already folds `changes[].file` in alongside `files`, so a file
+      // that only ever appeared as a change note still counts toward its area.
+      tags: areaTagsFor(files),
       bullets,
       sessions,
     })

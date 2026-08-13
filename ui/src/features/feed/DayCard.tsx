@@ -135,6 +135,24 @@ export function DayCard({ card, showAvatar, targeted = false, targetSession = nu
       {card.overview.coverageNote && (
         <span className="day-card-coverage">{card.overview.coverageNote}</span>
       )}
+      {/* Which parts of the codebase this day touched. Spans, never links:
+          this card is itself an <a> (see the note above), so a nested anchor
+          would be unnested by the parser and the DOM would stop matching this
+          JSX. Filtering by tag therefore lives on the Feed's own filter bar if
+          it is ever built, never here. */}
+      {card.tags.length > 0 && (
+        <span className="day-card-tags" data-testid="day-card-tags">
+          {card.tags.map(t => (
+            <span
+              key={t.area}
+              className="mono day-card-tag"
+              title={`${t.files} ${t.files === 1 ? 'file' : 'files'} in ${t.area}`}
+            >
+              {t.area}
+            </span>
+          ))}
+        </span>
+      )}
       <span className="mono day-card-stats">{dayCardStats(card).join(' · ')}</span>
       <span className="day-card-chevron" aria-hidden="true">›</span>
     </Link>
