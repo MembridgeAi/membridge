@@ -902,6 +902,51 @@ async function main() {
       assert.strictEqual(AREAS.length, 8);
     });
 
+    // The area parser exists twice on purpose: this one validates what an agent
+    // writes, ui/src/features/session/distill.ts parseAreaPoint renders what any
+    // tool ever wrote, and no module can be shared across the CommonJS/TypeScript
+    // boundary between them. A rule that changes on one side only is a point
+    // accepted one way and displayed another, so this table is MIRRORED VERBATIM
+    // in ui/src/features/session/distill.test.ts -- change one, change both, or
+    // one side fails.
+    //
+    // Two of these rows are the divergences a review found and this pins shut:
+    // a "]" not followed by whitespace is not a label (so "[clipWords](...)"
+    // keeps its text), and the length bound is measured on the label with its
+    // internal whitespace collapsed (the UI flattens the line first; this side
+    // used to bound the raw string, so "[a<30 spaces>b]" was a prefix there and
+    // not here).
+    const PARSER_TABLE = [
+      { input: '[UI/UX] Removed the menu item', area: 'UI/UX', text: 'Removed the menu item' },
+      { input: 'Removed the menu item', area: null, text: 'Removed the menu item' },
+      { input: 'Fixed the [object Object] label', area: null, text: 'Fixed the [object Object] label' },
+      { input: '[clipWords](src/mappers.ts) now trims', area: null, text: '[clipWords](src/mappers.ts) now trims' },
+      { input: '[Tests]no space', area: null, text: '[Tests]no space' },
+      { input: '[ ] x', area: null, text: '[ ] x' },
+      { input: '[] x', area: null, text: '[] x' },
+      { input: `[a${' '.repeat(30)}b] note`, area: 'a b', text: 'note' },
+      { input: `[${'x'.repeat(20)}] note`, area: 'x'.repeat(20), text: 'note' },
+      { input: `[${'x'.repeat(21)}] note`, area: null, text: `[${'x'.repeat(21)}] note` },
+      { input: '[Tests]', area: 'Tests', text: '' },
+    ];
+    for (const row of PARSER_TABLE) {
+      check(`splitAreaPrefix classifies ${JSON.stringify(row.input)}`, () => {
+        const out = splitAreaPrefix(row.input);
+        assert.strictEqual(out.area, row.area, `area for ${JSON.stringify(row.input)}`);
+        assert.strictEqual(out.text, row.text, `text for ${JSON.stringify(row.input)}`);
+      });
+    }
+
+    // The whole point of the bracket rule: a point that opens with a bracket
+    // that is not a label must reach summaries.jsonl unrejected and unaltered.
+    const bracketOpener = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: '[clipWords](src/mappers.ts) now trims to the word',
+    });
+    check('a point opening with a non-label bracket is not rejected as an area', () => {
+      assert.ok(!/not one of the areas/.test(String(runAppendResult(bracketOpener))));
+    });
+
     // POINT_MAX applies to the POINT, not to the prefix. A 120-char point with a
     // 15-char prefix is still a legal 120-char point.
     const longPoint = 'x'.repeat(POINT_MAX);

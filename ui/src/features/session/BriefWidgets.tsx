@@ -17,7 +17,9 @@ import type { FileChange, Session } from '../../data/types'
 // "Why" and "Watch out" were merged into "What". They were always read
 // together, two open paragraphs stacked above the file list is the wall this
 // page exists to avoid, and the reader does not sort reasoning from pitfalls
-// before reading either. whatBullets (distill.ts) turns both into one list.
+// before reading either. whatGroups (distill.ts) turns both into one list,
+// split under area headings only when there are enough points across enough
+// areas to be worth it.
 //
 // The Checkpoints widget was REMOVED in the page redesign: the checkpoint
 // trail is now the distilled bullet list directly under the summary (see

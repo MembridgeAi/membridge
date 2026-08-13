@@ -111,18 +111,41 @@ export interface WhatGroup {
   points: string[]
 }
 
-/** Read a leading "[Area] " off a point. Mirrors lib/hooks.js splitAreaPrefix,
- *  deliberately WITHOUT a copy of the vocabulary: the hook is the only place
- *  the valid set is enforced, so this renders whatever label was written and a
- *  future ninth area needs no change here.
+/** Longest a label may be, measured AFTER `oneLine` has collapsed it. Same
+ *  bound, same measurement, as lib/hooks.js AREA_LABEL_MAX. */
+const AREA_LABEL_MAX = 20
+
+/** Read a leading "[Area] " off a point. Mirrors lib/hooks.js splitAreaPrefix
+ *  RULE FOR RULE, deliberately WITHOUT a copy of the vocabulary: the hook is
+ *  the only place the valid set is enforced, so this renders whatever label was
+ *  written and a future ninth area needs no change here.
  *
- *  Anchored and length-bounded, so a bracket mid-sentence ("Fixed the [object
- *  Object] label") is not mistaken for a prefix and silently eaten. */
-function parseAreaPoint(text: string): { area: string | null; point: string } {
+ *  What the two share, and why each rule exists -- every one of them is about
+ *  not eating text a teammate wrote:
+ *
+ *    * ANCHORED, so a bracket mid-sentence ("Fixed the [object Object] label")
+ *      is not mistaken for a prefix.
+ *    * The "]" must be followed by whitespace or end the point. The hook would
+ *      reject an unknown label, but this renderer meets rows the hook never
+ *      saw -- teammates on older installs, the Codex adapter, anything synced
+ *      from before areas existed -- so "[clipWords](src/mappers.ts) now trims"
+ *      arrives here for real, and stripping its "[clipWords]" would show the
+ *      reader a line that starts "(src/mappers.ts)".
+ *    * A blank label ("[   ] x") is no area at all. It renders no heading, yet
+ *      an empty-string area still counts toward GROUP_MIN_AREAS -- enough on
+ *      its own to flip a list into grouped mode with an invisible boundary in
+ *      it.
+ *
+ *  Exported for the parser-agreement table in distill.test.ts, which mirrors
+ *  the one in test/suites/hooks.test.js: the two parsers cannot be run in one
+ *  process, so the same inputs are asserted on both sides instead. */
+export function parseAreaPoint(text: string): { area: string | null; point: string } {
   const flat = oneLine(text)
-  const m = /^\[([^\][]{1,20})\]\s*(.*)$/.exec(flat)
+  const m = /^\[([^\][]*)\](?=\s|$)\s*(.*)$/.exec(flat)
   if (!m) return { area: null, point: flat }
-  return { area: m[1].trim(), point: m[2].trim() }
+  const area = m[1].trim()
+  if (!area || area.length > AREA_LABEL_MAX) return { area: null, point: flat }
+  return { area, point: m[2].trim() }
 }
 
 /** The merged "What" widget: the session's decisions followed by its gotchas,
@@ -138,8 +161,11 @@ function parseAreaPoint(text: string): { area: string | null; point: string } {
  *  gotchas and the hook asks for the most important first, so first-seen is
  *  the writer's own ordering. Sorting would overwrite it with the alphabet.
  *
- *  A gotcha that merely restates a decision is dropped, as before: the two
- *  fields are one list here, and the same sentence twice reads as a bug. */
+ *  A gotcha that merely restates a decision IN THE SAME AREA is dropped, as
+ *  before: the two fields are one list here, and the same sentence twice under
+ *  one heading reads as a bug. The dedupe key carries the area for exactly that
+ *  reason -- the same sentence recorded under two areas is two facts, and
+ *  keying on the text alone silently deleted the second area's copy. */
 export function whatGroups(session: Session): WhatGroup[] {
   const seen = new Set<string>()
   const order: string[] = []
@@ -147,10 +173,28 @@ export function whatGroups(session: Session): WhatGroup[] {
   const loose: string[] = []
 
   for (const field of [session.decisions, session.gotchas]) {
+    // A newline in the field means the writer made the list, so every line
+    // parses its own prefix. With no newline the field is ONE point and
+    // splitPoints cut it at sentence boundaries, so only the first fragment
+    // can carry the prefix -- the rest are that same point's later clauses.
+    // Without inheriting the area they land in the trailing unlabelled group,
+    // which puts two headings between a sentence and its own next clause.
+    const sentenceSplit = !String(field || '').includes('\n')
+    let carried: string | null = null
+
     for (const piece of splitPoints(field)) {
-      const { area, point } = parseAreaPoint(piece)
-      const key = sameLineKey(point)
-      if (!key || seen.has(key)) continue
+      const parsed = parseAreaPoint(piece)
+      const point = parsed.point
+      let area = parsed.area
+      if (area !== null) carried = area
+      else if (sentenceSplit) area = carried
+
+      const textKey = sameLineKey(point)
+      if (!textKey) continue
+      // A NUL joins the two halves of the key: with a space as the joiner,
+      // area "A" + text "b c" and area "A b" + text "c" collide on one key.
+      const key = `${area === null ? '' : area}\u0000${textKey}`
+      if (seen.has(key)) continue
       seen.add(key)
       if (area === null) { loose.push(point); continue }
       if (!byArea.has(area)) { byArea.set(area, []); order.push(area) }
