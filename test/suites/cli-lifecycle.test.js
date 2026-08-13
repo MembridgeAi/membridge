@@ -56,27 +56,36 @@ function runCli(args, extraEnv) {
   });
 }
 
-// A pid that is dead AND reaped: spawnSync waits for the child, and libuv reaps
-// it, so kill(pid, 0) answers ESRCH -- unlike the zombie below.
+// A pid that is dead and CANNOT come back to life while this check runs.
 //
-// WHY THIS RE-DRAWS INSTEAD OF TRUSTING THE SPAWN. Reaped does not mean the
-// number stays unused. Windows recycles pids aggressively, and this run spawns
-// thousands of short-lived node processes across 106 suites, so a pid reaped a
-// millisecond ago can already name a LIVE process by the time `stop` reads the
-// pid file. When that happens cmdStop is not wrong -- isRunning() sees a live
-// pid, isMembridgeProcess() is unconditionally true on win32 (bin/membridge.js
-// :113, deliberately, because reading a Windows command line is too fragile to
-// gate startup on), so stop reports "Stopped MemBridge (pid N)" and KEEPS the
-// pid file. The check then fails on a fixture whose premise quietly stopped
-// being true, and it fails only under load: observed as a windows-only CI flake
-// that passed on ci.yml and failed on build-app for the same commit, with the
-// giveaway `expected "not running", got: Stopped MemBridge (pid 1536)`.
+// This used to spawn a child, let spawnSync reap it, and use its pid -- reaped
+// therefore dead. That premise is false on Windows, which recycles pids
+// aggressively; with thousands of short-lived processes spawning across 106
+// suites, the number was live again by the time `stop` read the pid file.
+// cmdStop was then RIGHT to report "Stopped MemBridge (pid 1536)": isRunning()
+// saw a live pid and isMembridgeProcess() is unconditionally true on win32
+// (bin/membridge.js:113, a deliberate choice because reading a Windows command
+// line is too fragile to gate startup on). The check failed on a fixture whose
+// premise had quietly expired -- windows-only, load-dependent, and it passed on
+// ci.yml while failing on build-app for the SAME commit.
 //
-// So verify the premise rather than assuming it. The liveness predicate below
-// mirrors bin/membridge.js:93 EXACTLY -- EPERM means a live pid owned by
-// someone else, anything else (ESRCH) means genuinely gone -- because a fixture
-// that judged liveness differently from the code under test would be checking
-// the wrong thing.
+// Re-drawing until the pid reads dead does NOT fix it, and shipping that was a
+// mistake: the race is not between spawn and draw, it is between the fixture's
+// last look and cmdStop's, which no amount of redrawing closes. It is also
+// actively harmful -- every lost race means cmdStop TERMINATES whatever process
+// inherited that pid, so a retry loop kills a stranger on the runner each time
+// round, on a machine whose other 105 suites are those strangers.
+//
+// So stop drawing from the space the OS is handing out. A pid near INT32_MAX is
+// never allocated in practice (Windows hands out low numbers -- the observed
+// collisions were 1536 and 1564) and answers ESRCH, which isRunning() reads as
+// not-running through exactly the same path a reaped pid takes. Nothing is
+// spawned, nothing can be recycled into it, and nothing gets killed. The
+// liveness predicate mirrors bin/membridge.js:93 exactly (EPERM means alive,
+// anything else means gone) so the fixture and the code under test agree on
+// what dead means; the assert exists so that a machine which somehow DOES own
+// this pid fails loudly instead of quietly killing it.
+const UNALLOCATABLE_PIDS = [2147483646, 2147483645, 999999999];
 function deadReapedPid() {
   const live = pid => {
     try {
@@ -86,14 +95,11 @@ function deadReapedPid() {
       return !!e && e.code === 'EPERM';
     }
   };
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const r = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
-    assert.ok(r.pid, 'fixture child failed to spawn');
-    if (!live(r.pid)) return r.pid;
-  }
-  assert.fail('could not draw a pid that stayed dead in 20 attempts — the ' +
-    'machine is recycling pids faster than this fixture can outrun, which is ' +
-    'a real signal about the runner, not a flake to retry through');
+  const pid = UNALLOCATABLE_PIDS.find(p => !live(p));
+  assert.ok(pid, `every fixture pid (${UNALLOCATABLE_PIDS.join(', ')}) is live on ` +
+    'this machine, which should be impossible — refusing to hand cmdStop a pid ' +
+    'it would terminate');
+  return pid;
 }
 
 async function main() {
