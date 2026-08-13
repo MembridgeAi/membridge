@@ -861,6 +861,75 @@ async function main() {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Area prefixes on distilled points (session-area-headers, task 1).
+  // ---------------------------------------------------------------------
+  {
+    const { splitAreaPrefix, AREAS, POINT_MAX } = require('../../lib/hooks.js');
+
+    // Matches the calling convention of the `runAppend:` checks above: a
+    // fresh sandbox home, a summaries.jsonl path under a throwaway project
+    // dir, invoked via the real CLI entrypoint. Failures land on stderr
+    // (see fail() in runAppend), which is what this returns.
+    function runAppendResult(line) {
+      const s = sandbox('area-prefix');
+      fs.mkdirSync(s.home, { recursive: true });
+      const target = path.join(s.dir, 'proj', '.membridge', 'summaries.jsonl');
+      const r = spawnSync(process.execPath, [HOOK_JS, 'append', target, line], {
+        encoding: 'utf8', env: { ...process.env, MEMBRIDGE_HOME: s.home },
+      });
+      return r.stderr;
+    }
+
+    check('splitAreaPrefix reads a known area off the front', () => {
+      assert.strictEqual(splitAreaPrefix('[UI/UX] Removed the menu item').area, 'UI/UX');
+    });
+    check('splitAreaPrefix returns the text without the prefix', () => {
+      assert.strictEqual(splitAreaPrefix('[UI/UX] Removed the menu item').text, 'Removed the menu item');
+    });
+    check('splitAreaPrefix reports no area for an unprefixed line', () => {
+      assert.strictEqual(splitAreaPrefix('Removed the menu item').area, null);
+    });
+    check('splitAreaPrefix leaves an unprefixed line whole', () => {
+      assert.strictEqual(splitAreaPrefix('Removed the menu item').text, 'Removed the menu item');
+    });
+    // A bracket that is not a prefix must not be eaten -- points legitimately
+    // contain brackets mid-sentence.
+    check('splitAreaPrefix ignores a bracket that is not leading', () => {
+      assert.strictEqual(splitAreaPrefix('Fixed the [object Object] label').area, null);
+    });
+    check('AREAS holds exactly eight areas', () => {
+      assert.strictEqual(AREAS.length, 8);
+    });
+
+    // POINT_MAX applies to the POINT, not to the prefix. A 120-char point with a
+    // 15-char prefix is still a legal 120-char point.
+    const longPoint = 'x'.repeat(POINT_MAX);
+    const okLine = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: `[Integrations] ${longPoint}`,
+    });
+    check('a full-length point is not rejected for carrying a prefix', () => {
+      assert.ok(!/invalid line/.test(String(runAppendResult(okLine))));
+    });
+
+    const badArea = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: '[Frontend] Renamed the thing',
+    });
+    check('an unknown area label is rejected loudly', () => {
+      assert.ok(/not one of the areas/.test(String(runAppendResult(badArea))));
+    });
+
+    const noPrefix = JSON.stringify({
+      session: 's1', ts: new Date().toISOString(), headline: 'h', did: 'd',
+      decisions: 'Renamed the thing',
+    });
+    check('an unprefixed point is still accepted', () => {
+      assert.ok(!/invalid line/.test(String(runAppendResult(noPrefix))));
+    });
+  }
+
   h.finish();
 }
 
