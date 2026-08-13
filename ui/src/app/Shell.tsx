@@ -158,8 +158,14 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
     }
     // The viewer's own row, from the account query rather than the roster:
     // it updates the instant the save returns, and it is also the only
-    // source when the roster query is disabled (not on a team).
-    if (viewerId && avatar) m.set(viewerId, { glyph: avatar, color: avatarColor })
+    // source when the roster query is disabled (not on a team). The `else`
+    // matters -- without it, clearing your glyph left the roster's stale
+    // (still-registered) value in the map until ['members'] refetched, so
+    // the glyph you had just deleted stayed on screen for a beat.
+    if (viewerId) {
+      if (avatar) m.set(viewerId, { glyph: avatar, color: avatarColor })
+      else m.delete(viewerId)
+    }
     return m
   }, [members.data, viewerId, avatar, avatarColor])
 
@@ -245,8 +251,18 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
             <>
               {/* Deliberately NOT a <button>: a button activates on a single
                   click, and the asked-for gesture is a double one. role +
-                  tabIndex keep it announced and reachable, and Enter is the
-                  keyboard equivalent of the double-click. */}
+                  tabIndex keep it announced and reachable, and onKeyDown is
+                  the keyboard equivalent of the double-click for a sighted
+                  keyboard user tabbing in without assistive tech running.
+
+                  onClick + `detail === 0` is a SEPARATE path, not a
+                  redundant one: NVDA/JAWS activate a role="button" element
+                  by dispatching a synthetic click, not a keydown, so
+                  onKeyDown alone never fires for that user and the control
+                  would announce an affordance it doesn't have. A real mouse
+                  click carries MouseEvent.detail 1; only an AT/keyboard-
+                  synthesised click carries 0, so a genuine single click
+                  still does nothing here. */}
               <span
                 className="rail-identity"
                 data-testid="rail-identity"
@@ -254,6 +270,9 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
                 tabIndex={0}
                 title={`${identity} — double-click to change your name`}
                 onDoubleClick={() => setEditingIdentity(true)}
+                onClick={e => {
+                  if (e.detail === 0) setEditingIdentity(true)
+                }}
                 onKeyDown={e => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()

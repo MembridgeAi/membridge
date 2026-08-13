@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from '../data/DataClientProvider'
@@ -165,12 +165,14 @@ describe('Shell', () => {
     })
 
     // Double-click is unreachable without a mouse, so the same control answers
-    // Enter when focused.
-    it('opens the identity editor with the keyboard', async () => {
+    // Enter and Space when focused -- the keyboard path for a sighted user
+    // tabbing in without assistive tech running (see the AT test below for
+    // the separate path a screen reader takes).
+    it.each(['{Enter}', ' '])('opens the identity editor with the keyboard (%s)', async key => {
       renderApp({ solo: false })
       const identity = await screen.findByTestId('rail-identity')
       identity.focus()
-      await userEvent.keyboard('{Enter}')
+      await userEvent.keyboard(key)
       expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
     })
 
@@ -183,10 +185,53 @@ describe('Shell', () => {
       expect(screen.queryByRole('dialog')).toBeNull()
     })
 
+    // NVDA/JAWS activate a role="button" element by dispatching a synthetic
+    // CLICK, not a keydown -- so a screen-reader user pressing Enter on this
+    // control never reaches the onKeyDown handler above. A real mouse click
+    // always carries MouseEvent.detail 1; only an AT-synthesised (or
+    // programmatic) click carries 0, which is the only thing that tells the
+    // two apart. userEvent.click always sets detail 1, so this has to go
+    // through fireEvent directly to exercise the AT path at all.
+    it('opens the identity editor on an assistive-technology activation (detail: 0)', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      fireEvent.click(identity, { detail: 0 })
+      expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+    })
+
     it('offers no identity editor when signed out', async () => {
       renderWith(new SignedOutClient({ solo: true }), <App />)
       expect(await screen.findByRole('link', { name: 'Sign in' })).toBeInTheDocument()
       expect(screen.queryByTestId('rail-identity')).toBeNull()
+    })
+  })
+
+  // Shell mounts AvatarRegistryProvider around the whole app so that every
+  // Avatar anywhere -- MemberRow, AccessPopover, feed entries, and so on --
+  // can resolve a teammate's picked glyph purely from their id. Nothing
+  // upstream of this test exercised that: it is possible to delete the
+  // useMemo AND the provider wrapper in Shell.tsx and have every other test
+  // in this suite (and components.test.tsx's own registry test, which
+  // supplies its own provider directly) stay green.
+  describe('teammate avatar registry', () => {
+    // Scoped to this test only, via a getMembers() override, rather than
+    // editing FakeDataClient's shared roster -- that roster backs many other
+    // suites (MembersSection, ProjectsPage, ...) and giving Andrew a glyph
+    // there would change what they see too.
+    class AvatarRosterClient extends FakeDataClient {
+      async getMembers() {
+        const members = await super.getMembers()
+        return members.map(m => (m.id === 'andrew' ? { ...m, avatar: 'halo', avatarColor: '#22C08F' } : m))
+      }
+    }
+
+    it("renders a teammate's registered glyph, not their initial", async () => {
+      window.history.pushState({}, '', ROUTES.team)
+      renderWith(new AvatarRosterClient({ solo: false }), <App />)
+      // Same discriminator components.test.tsx's Avatar suite uses:
+      // AvatarGlyph puts the accessible name on the <svg role="img">, which
+      // the plain-initial <span class="avatar"> never gets.
+      expect(await screen.findByRole('img', { name: 'Andrew' })).toBeInTheDocument()
     })
   })
 
