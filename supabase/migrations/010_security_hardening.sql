@@ -272,6 +272,12 @@ begin
   end if;
   select * into v_team from public.teams where id = v_invite.team_id;
   -- Never grants more than member; joining twice is a no-op, not a burn.
+  -- Bare `on conflict do nothing`, no target -- same reasoning as
+  -- join_team in schema.sql. It is not resting on the composite PK being
+  -- this table's only constraint (057 added a second one, a partial unique
+  -- index on display_name); 057's advisory lock guarantees the name in this
+  -- INSERT is already collision-free by the time it runs, so this can only
+  -- ever hit the PK.
   insert into public.team_members (team_id, user_id, display_name)
     values (v_team.id, auth.uid(), p_display_name)
     on conflict do nothing;

@@ -61,6 +61,43 @@
 -- and clicked save would be surprising in a way that silently renaming a new
 -- joiner is not.
 --
+-- WHY unique_member_name TAKES AN ADVISORY LOCK, AND WHY IT LOOKS GRATUITOUS.
+-- Four join paths (schema.sql's join_team, 003, 010's redeem_invite, 038's
+-- redeem_invite, 029's redeem_onboarding_invite) all insert into
+-- team_members with a BARE, UNTARGETED `on conflict do nothing` -- bare
+-- because naming team_id as a conflict target is ambiguous with the OUT
+-- column of the same name (003's fix). An untargeted `on conflict do
+-- nothing` absorbs ANY unique violation on the table, not only the one it
+-- was written for (the composite PK, so a double-join is a no-op). Once this
+-- file adds a SECOND unique constraint, it is also silently absorbed by the
+-- same clause in all four places -- and every one of those RPCs still
+-- returns the team as successfully joined afterwards, which is exactly this
+-- codebase's characteristic bug: a fail-open path paired with an
+-- unconditional success flag.
+--
+-- The concrete race: two people redeem invites into the same team at the
+-- same moment with the same display name. Both BEFORE INSERT triggers fire
+-- before either transaction commits, so neither sees the other's row; both
+-- independently compute "Marco 2". The loser's INSERT hits
+-- team_members_display_name_unique, `on conflict do nothing` swallows it,
+-- and the RPC reports success to someone who is not actually a member.
+--
+-- Fixing this by rewriting all four RPC bodies (naming the new index as an
+-- additional `on conflict` arm, or checking FOUND) would spread the fix
+-- across files this migration does not otherwise touch, for a race that is
+-- entirely about how NAMES get assigned -- which already lives here. Instead
+-- `unique_member_name` opens with `pg_advisory_xact_lock`, keyed on the team:
+-- every insert into that team's roster, from any of the four paths, now
+-- serializes on name assignment. The second joiner's trigger simply blocks
+-- until the first transaction commits, then re-reads the now-committed
+-- roster and computes "Marco 3" instead of colliding. The lock is
+-- transaction-scoped (`_xact_`), so it releases automatically at commit or
+-- rollback -- nothing to clean up, and no risk of a stuck lock outliving its
+-- transaction. It will look gratuitous to a future reader because nothing
+-- nearby appears to need it; it is the only thing standing between a bare
+-- `on conflict do nothing` four call sites away and a member who is told
+-- they joined a team that, underneath them, they did not.
+--
 -- Re-runnable: every function is `create or replace`, every column addition
 -- is `add column if not exists`, the constraint and trigger are dropped
 -- before being recreated, and the unique index is `create ... if not
@@ -82,17 +119,29 @@ $$;
 
 -- 2. COLUMNS.
 --    avatar: null means "render my initial", which is a CHOICE, not "unset".
+--    avatar_color: a second, independent choice (glyph x background color,
+--    15 glyphs x 10 token colors per the UI). Null means "use the color
+--    colorForId already derives from my user id" -- the same shape as null
+--    avatar, and for the same reason: a caller has to be able to say "go
+--    back to my derived color" as an explicit act, not merely by omitting
+--    the field, which is why set_display_name assigns it directly below
+--    rather than coalescing.
 --    name_released_at: non-null means this row no longer holds its name
 --    against anyone. A partial index predicate must be immutable, so the
 --    10-day grace period cannot live in the predicate -- it is expressed by
 --    the RPC stamping this column when it meets an expired name.
 alter table public.team_members
   add column if not exists avatar text,
+  add column if not exists avatar_color text,
   add column if not exists name_released_at timestamptz;
 
 alter table public.team_members drop constraint if exists team_members_avatar_shape;
 alter table public.team_members add constraint team_members_avatar_shape
   check (avatar is null or avatar ~ '^[a-z0-9-]{1,32}$');
+
+alter table public.team_members drop constraint if exists team_members_avatar_color_shape;
+alter table public.team_members add constraint team_members_avatar_color_shape
+  check (avatar_color is null or avatar_color ~ '^#[0-9A-Fa-f]{6}$');
 
 -- 3. SUFFIX HELPER. security definer is REQUIRED, not defensive: at join time
 --    the caller is not yet a member, so RLS hides every existing row from them
@@ -108,6 +157,13 @@ declare
   v_try  text;
   n int := 1;
 begin
+  -- Transaction-scoped advisory lock, keyed on the team. See the header's
+  -- "WHY unique_member_name TAKES AN ADVISORY LOCK" section: this serialises
+  -- name assignment per team so two concurrent joins cannot both compute the
+  -- same suffix and race a bare `on conflict do nothing` four call sites
+  -- away. Released automatically at transaction end (commit or rollback).
+  perform pg_advisory_xact_lock(hashtextextended(p_team::text, 0));
+
   if v_base = '' then v_base := 'member'; end if;
   if char_length(v_base) > 80 then v_base := left(v_base, 80); end if;
   v_try := v_base;
@@ -121,6 +177,13 @@ begin
     );
     n := n + 1;
     if n > 99 then
+      -- Does not re-test not-exists before returning, which would normally
+      -- be a gap -- a 100th concurrent caller could theoretically still
+      -- collide. Safe here specifically BECAUSE of the lock above: every
+      -- other insert into this team is blocked until this transaction ends,
+      -- so nothing else can claim a name while this function is running,
+      -- and the appended UUID makes a same-transaction self-collision
+      -- practically impossible.
       return left(v_base, 71) || ' ' || substr(gen_random_uuid()::text, 1, 8);
     end if;
     v_try := left(v_base, 80 - (char_length(n::text) + 1)) || ' ' || n::text;
@@ -173,8 +236,10 @@ create unique index if not exists team_members_display_name_unique
   where name_released_at is null;
 
 -- 7. THE RPC.
-create or replace function public.set_display_name(p_name text, p_avatar text default null)
-returns table (display_name text, avatar text, teams int)
+create or replace function public.set_display_name(
+  p_name text, p_avatar text default null, p_avatar_color text default null
+)
+returns table (display_name text, avatar text, avatar_color text, teams int)
 language plpgsql
 security definer
 set search_path = public
@@ -184,6 +249,9 @@ declare
   v_norm  text;
   v_clash text;
   v_count int;
+  v_display_name text;
+  v_avatar text;
+  v_avatar_color text;
 begin
   if char_length(v_name) < 1 or char_length(v_name) > 80 then
     raise exception 'a display name must be between 1 and 80 characters'
@@ -191,6 +259,9 @@ begin
   end if;
   if p_avatar is not null and p_avatar !~ '^[a-z0-9-]{1,32}$' then
     raise exception 'unrecognised avatar' using errcode = 'MB002';
+  end if;
+  if p_avatar_color is not null and p_avatar_color !~ '^#[0-9A-Fa-f]{6}$' then
+    raise exception 'unrecognised avatar color' using errcode = 'MB002';
   end if;
   v_norm := public.normalize_member_name(v_name);
 
@@ -224,17 +295,31 @@ begin
   end if;
 
   -- One statement, so every team is updated atomically: a collision in any
-  -- single team rolls back the rename in all of them. Assigning p_avatar
-  -- directly (not coalesce) is deliberate -- null is the "just my initial"
-  -- choice, and coalescing would make that choice unexpressible.
-  -- name_released_at resets so a previously-released name is re-protected.
+  -- single team rolls back the rename in all of them. Assigning p_avatar and
+  -- p_avatar_color directly (not coalesce) is deliberate -- null is the
+  -- "just my initial" / "just my derived color" choice, and coalescing
+  -- would make that choice unexpressible. name_released_at resets so a
+  -- previously-released name is re-protected.
+  --
+  -- RETURNING, not the input variables: every row this statement touches
+  -- gets the same literal values, so grabbing any one row's RETURNING output
+  -- is representative, and it reports what the database actually committed
+  -- rather than echoing what was requested. That distinction matters most in
+  -- exactly the case this used to get wrong -- zero rows matched (the
+  -- signed-in-with-no-team case) -- where echoing the input reported the
+  -- requested name and avatar as saved even though nothing was written.
+  -- RETURNING into unmatched variables leaves them null, which is the honest
+  -- answer.
   update public.team_members m
-     set display_name = v_name, avatar = p_avatar, name_released_at = null
-   where m.user_id = auth.uid();
+     set display_name = v_name, avatar = p_avatar, avatar_color = p_avatar_color,
+         name_released_at = null
+   where m.user_id = auth.uid()
+   returning m.display_name, m.avatar, m.avatar_color
+     into v_display_name, v_avatar, v_avatar_color;
   get diagnostics v_count = row_count;
 
   -- Zero rows is NOT an error: it is the signed-in-with-no-team case.
-  return query select v_name, p_avatar, v_count;
+  return query select v_display_name, v_avatar, v_avatar_color, v_count;
 exception
   when unique_violation then
     raise exception 'somebody on your team is already called %', v_name
@@ -243,9 +328,10 @@ end;
 $$;
 
 -- 8. GRANTS (042). A newly created function is EXECUTE-able by PUBLIC by
---    default, which means callable with the anon key.
-revoke execute on function public.set_display_name(text, text) from public, anon;
-grant  execute on function public.set_display_name(text, text) to authenticated;
+--    default, which means callable with the anon key. Signature is
+--    (text, text, text) now that p_avatar_color joined p_name/p_avatar.
+revoke execute on function public.set_display_name(text, text, text) from public, anon;
+grant  execute on function public.set_display_name(text, text, text) to authenticated;
 
 -- unique_member_name and team_members_dedupe_name are deliberately NOT granted
 -- to authenticated, unlike set_display_name above. unique_member_name takes a
@@ -280,6 +366,14 @@ grant  execute on function public.team_members_dedupe_name() to service_role;
 --   select count(*) from public.team_members
 --    where name_released_at is not null;                    -- expect 0 on a
 --                                                           -- clean database
+--
+--   select column_name, data_type from information_schema.columns
+--    where table_name = 'team_members' and column_name = 'avatar_color';
+--   -- expect one row, data_type 'text'
+--
+--   select conname, pg_get_constraintdef(oid) from pg_constraint
+--    where conname = 'team_members_avatar_color_shape';
+--   -- expect the check to reference '^#[0-9A-Fa-f]{6}$'
 --
 --   select proname, prosecdef, proconfig from pg_proc
 --    where proname in ('set_display_name','unique_member_name',
