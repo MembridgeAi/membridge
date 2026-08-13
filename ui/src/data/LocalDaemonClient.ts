@@ -657,7 +657,10 @@ export class LocalDaemonClient implements DataClient {
   async removeMember(memberId: string): Promise<void> {
     const team = await this.firstTeam()
     if (!team) throw new Error('removeMember requires a team, and this machine is not on one.')
-    await post('/api/team/remove-member', { teamId: team.team_id, userId: memberId })
+    // Same reason as leaveTeam below: remove_member raises "only a team owner
+    // or admin can remove members" and "the team owner cannot be removed"
+    // (002:179). Both are answers the person clicking Remove needs to read.
+    await postReadingError('/api/team/remove-member', { teamId: team.team_id, userId: memberId })
   }
 
   // GET /api/team/audit (lib/api-access.js readAudit) is also already wired
@@ -781,7 +784,15 @@ export class LocalDaemonClient implements DataClient {
   }
 
   async leaveTeam(teamId: string): Promise<void> {
-    await post<{ left: boolean }>('/api/team/leave', { teamId })
+    // postReadingError, not post: /api/team/leave is a POLICY gate, not just a
+    // write. leave_team raises "the owner cannot leave their own team"
+    // (045:96), the daemon's catch-all forwards that message in the 500 body,
+    // and plain post() threw it away and reported "/api/team/leave failed:
+    // 500" -- a refusal the system could explain exactly, rendered as an
+    // unexplained server fault. Every other RPC-backed team mutation here
+    // (rename, rotate, create, join) already reads the body; this one was the
+    // holdout.
+    await postReadingError<{ left: boolean }>('/api/team/leave', { teamId })
     // Wide-reaching effect (this machine's team membership just changed) that
     // the request cache can't infer from the URL alone -- clear it all
     // rather than risk a stale team/status read for the rest of the TTL.

@@ -5,6 +5,19 @@ interface SettingRowProps {
   description?: string
   children: ReactNode
   testId?: string
+  /** Extra content under the description, in the LABEL column -- a docs link
+   *  belonging to this row's subject, a "set in your config file" marker. It
+   *  exists because the only slot a row had for such a thing was the control
+   *  column, where a link rendered beside a tall control (share-prompts' three
+   *  option cards) floated in the leftover space attached to nothing. Anything
+   *  that explains the row goes here; anything that ACTS on it stays a child. */
+  labelAside?: ReactNode
+  /** Cross-axis alignment of label against control. Default 'center' is right
+   *  for this page's usual shape -- a one-line label against a chip and a
+   *  button. A row whose control is much taller than its label (a radio group)
+   *  must pass 'start', or the label is centred against ~300px of control and
+   *  reads as floating in mid-air beside the middle option. */
+  align?: 'center' | 'start'
   /** What went wrong with THIS row's action, already named ("Couldn't restart
    *  MemBridge."). The group used to share one line reading "Couldn't save the
    *  change." for four unrelated controls, so pressing Restart told you a save
@@ -16,12 +29,13 @@ interface SettingRowProps {
 /** One row inside a Settings group: a label (+ optional description) on the
  *  left, a status/control area on the right -- matches settings-solo-v2.html's
  *  .srow. A hairline separator only, never a card. */
-export function SettingRow({ label, description, children, testId, error }: SettingRowProps) {
+export function SettingRow({ label, description, children, testId, error, labelAside, align = 'center' }: SettingRowProps) {
   return (
-    <div className="setting-row" data-testid={testId}>
+    <div className={`setting-row${align === 'start' ? ' setting-row-top' : ''}`} data-testid={testId}>
       <div className="setting-row-label">
         {label}
         {description && <div className="setting-row-desc">{description}</div>}
+        {labelAside && <div className="setting-row-aside">{labelAside}</div>}
         {error && <div className="setting-row-error" role="alert">{error}</div>}
       </div>
       {/* .setting-row-ctl (settings.css) is `flex: none`: it never shrinks

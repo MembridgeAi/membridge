@@ -630,7 +630,12 @@ describe('SettingsPage', () => {
     const row = await screen.findByTestId('setting-plaintext')
     expect(within(row).queryByRole('switch')).toBeNull()
     expect(within(row).queryByRole('button')).toBeNull()
-    expect(within(row).getByText(/change it in your config file \(team\.encrypt, team\.plaintextOff\)/i)).toBeInTheDocument()
+    // "where it is actually changed" moved out of the grey description and
+    // into the padlocked aside, because this row now sits directly beneath
+    // rows that ARE editable in-app and a sentence in prose was not enough to
+    // tell them apart. The assertion follows the fact, not the old sentence:
+    // the row must still name the config file and both keys.
+    expect(within(row).getByText(/set in your config file · team\.encrypt, team\.plaintextOff/i)).toBeInTheDocument()
     expect(screen.queryByText(/share plaintext with team/i)).toBeNull()
   })
 
@@ -877,8 +882,13 @@ describe('SettingsPage', () => {
     })
   })
 
+  // role: 'admin', not the fixture's default 'owner'. leave_team refuses every
+  // owner (045:96), so the Leave button is disabled for them and an owner can
+  // never reach this flow. These two tests are about the flow's MECHANICS --
+  // confirm before calling, surface a rejection -- so they run as the role
+  // that can actually perform it. Owner behaviour has its own test below.
   it('leaves the team only after confirming in a dialog, through a real DataClient call', async () => {
-    const client = new FakeDataClient()
+    const client = new FakeDataClient({ role: 'admin' })
     const spy = vi.spyOn(client, 'leaveTeam')
     renderWith(client, <SettingsPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^leave team$/i }))
@@ -889,13 +899,28 @@ describe('SettingsPage', () => {
   })
 
   it('surfaces a failed leave-team instead of silently closing the dialog', async () => {
-    const client = new FakeDataClient()
+    const client = new FakeDataClient({ role: 'admin' })
     vi.spyOn(client, 'leaveTeam').mockRejectedValue(new Error('leave rejected'))
     renderWith(client, <SettingsPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^leave team$/i }))
     const dialog = await screen.findByRole('dialog')
     await userEvent.click(within(dialog).getByRole('button', { name: /^leave team$/i }))
     expect(await screen.findByText(/leave rejected/i)).toBeInTheDocument()
+  })
+
+  // The defect this replaces: Leave team was rendered for owners
+  // unconditionally, and leave_team refuses every owner, so the one role that
+  // could never succeed got a live button and a 500 for pressing it.
+  it('never offers an owner a leave they cannot perform', async () => {
+    const client = new FakeDataClient({ role: 'owner' })
+    const spy = vi.spyOn(client, 'leaveTeam')
+    renderWith(client, <SettingsPage />)
+    const leave = await screen.findByRole('button', { name: /^leave team$/i })
+    expect(leave).toBeDisabled()
+    await userEvent.click(leave)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(spy).not.toHaveBeenCalled()
+    expect(await screen.findByTestId('owner-cannot-leave')).toBeInTheDocument()
   })
 
   it('saves edited redaction patterns through a real DataClient call', async () => {

@@ -307,43 +307,51 @@ export function SettingsPage() {
         </SettingRow>
       ))}
 
-      <div className="settings-group-label">Privacy</div>
-      {/* READ-ONLY ON PURPOSE -- do not turn this back into a toggle.
-       *
-       * It used to read "Share plaintext with team" and be described as "Off
-       * means...", i.e. exactly like a switch, while its only child was a chip
-       * and it ignored clicks. Restated as a status row: the label names the
-       * state, and the description says where the state is actually changed.
-       *
-       * Marco's reasoning for keeping it read-only (his call, 2026-08-05): an
-       * accidental `encrypt: false` in his own config already shipped a full
-       * plaintext history to the server once. A privacy DOWNGRADE one click
-       * away, on a page with no confirmation step, is how that recurs. This
-       * row's job is to let him SEE the state, not to change it here; the
-       * config file is deliberately the only way in, and "Open config file"
-       * above is how you get there. */}
-      {/* T-78: Team memory encryption is the ONE Privacy row that describes
-          team behaviour ("teammates' apps decrypt locally") and names the two
-          config keys (team.encrypt, team.plaintextOff) that only mean
-          something once a team exists. On a solo (or signed-out) install both
-          are noise: there is no team to encrypt for, and pointing at those
-          keys hands the user two variables to search their config for with no
-          value. Hidden entirely, matching the ticket's rule that the
-          surface goes AWAY on solo rather than saying "n/a". */}
+      {/* The four Privacy rows are two STAGES of one pipeline, not four peers:
+          what never gets captured, then what leaves once something has been.
+          Ordered that way, reading top to bottom traces what happens to your
+          data -- which is the question ("what can my team see about me?") the
+          group is opened to answer, and which previously had to be assembled
+          from four rows in no particular order. The split is labelled rather
+          than implied, because two hairline rows under one heading do not read
+          as a stage on their own. */}
+      <div className="settings-group-label">
+        Privacy
+        <span className="settings-group-hint">what never gets captured</span>
+      </div>
+      <SettingRow label="Excluded folders" description="Never watched, never synced" testId="setting-excluded">
+        <span className="mono settings-metric">{pathsLabel(settings.privacy.excludedPaths)}</span>
+        {settings.privacy.excludeStale.length > 0 && (
+          <StateChip tone="warn" glyph="⚠">{`${settings.privacy.excludeStale.length} no longer exist`}</StateChip>
+        )}
+        <button type="button" className="settings-btn" onClick={() => setActiveDialog('exclude')}>Edit</button>
+      </SettingRow>
+      <SettingRow
+        label="Redaction patterns"
+        description="Built-in key, token and credential shapes, plus your own"
+        testId="setting-redaction"
+      >
+        <span className="mono settings-metric">
+          {settings.privacy.redactionBuiltIn === null ? 'built-in count unknown' : `${settings.privacy.redactionBuiltIn} built-in`}
+          {' · '}{settings.privacy.redactionCustom} custom
+        </span>
+        <button type="button" className="settings-btn" onClick={() => setActiveDialog('redaction')}>Edit</button>
+      </SettingRow>
+
+      {/* Second stage. Absent entirely on solo for the same reason its two rows
+          are: with no team, nothing leaves, and a heading over nothing is
+          noise. */}
       {!soloView && (
-        <SettingRow
-          label="Team memory encryption"
-          description="End-to-end means teammates' apps decrypt locally and the server cannot read your content. Routing metadata — project, timestamp, session, tool and your display name — travels outside the ciphertext. Change it in your config file (team.encrypt, team.plaintextOff), not here."
-          testId="setting-plaintext"
-        >
-          <EncryptionDetail privacy={settings.privacy} />
-        </SettingRow>
+        <div className="settings-group-label">
+          Shared with your team
+          <span className="settings-group-hint">what leaves this machine</span>
+        </div>
       )}
       {/* Share-prompts is a MACHINE preference (what this daemon transmits to
-          teammates on top of each summary), so it sits in Privacy next to
-          encryption -- both answer "what leaves this machine". Hidden on
-          solo for the same reason the encryption row is: with no team to
-          transmit to, the control is noise, not a choice.
+          teammates on top of each summary), so it leads this stage -- it is
+          the one row here the user actually decides. Hidden on solo for the
+          same reason the encryption row is: with no team to transmit to, the
+          control is noise, not a choice.
           Wired via the same setSetting mutation every other Settings write
           uses; the key is 'team' with a nested `{sharePrompts}` value so the
           daemon's PUT /api/settings body reads {team: {sharePrompts: '...'}}
@@ -366,24 +374,59 @@ export function SettingsPage() {
           }}
         />
       )}
-      <SettingRow
-        label="Redaction patterns"
-        description="Built-in key, token and credential shapes, plus your own"
-        testId="setting-redaction"
-      >
-        <span className="mono settings-metric">
-          {settings.privacy.redactionBuiltIn === null ? 'built-in count unknown' : `${settings.privacy.redactionBuiltIn} built-in`}
-          {' · '}{settings.privacy.redactionCustom} custom
-        </span>
-        <button type="button" className="settings-btn" onClick={() => setActiveDialog('redaction')}>Edit</button>
-      </SettingRow>
-      <SettingRow label="Excluded folders" description="Never watched, never synced" testId="setting-excluded">
-        <span className="mono settings-metric">{pathsLabel(settings.privacy.excludedPaths)}</span>
-        {settings.privacy.excludeStale.length > 0 && (
-          <StateChip tone="warn" glyph="⚠">{`${settings.privacy.excludeStale.length} no longer exist`}</StateChip>
-        )}
-        <button type="button" className="settings-btn" onClick={() => setActiveDialog('exclude')}>Edit</button>
-      </SettingRow>
+      {/* READ-ONLY ON PURPOSE -- do not turn this back into a toggle.
+       *
+       * It used to read "Share plaintext with team" and be described as "Off
+       * means...", i.e. exactly like a switch, while its only child was a chip
+       * and it ignored clicks. Restated as a status row: the label names the
+       * state, and a padlocked aside says where the state is actually changed
+       * -- the aside rather than the description because this row now sits
+       * beside three rows that ARE editable in-app, and a sentence buried in
+       * grey prose was not enough to tell them apart.
+       *
+       * Marco's reasoning for keeping it read-only (his call, 2026-08-05): an
+       * accidental `encrypt: false` in his own config already shipped a full
+       * plaintext history to the server once. A privacy DOWNGRADE one click
+       * away, on a page with no confirmation step, is how that recurs. This
+       * row's job is to let him SEE the state, not to change it here; the
+       * config file is deliberately the only way in, and "Open config file"
+       * above is how you get there. */}
+      {/* T-78: Team memory encryption is the ONE Privacy row that describes
+          team behaviour ("teammates' apps decrypt locally") and names the two
+          config keys (team.encrypt, team.plaintextOff) that only mean
+          something once a team exists. On a solo (or signed-out) install both
+          are noise: there is no team to encrypt for, and pointing at those
+          keys hands the user two variables to search their config for with no
+          value. Hidden entirely, matching the ticket's rule that the
+          surface goes AWAY on solo rather than saying "n/a". */}
+      {!soloView && (
+        <SettingRow
+          label="Team memory encryption"
+          // The metadata carve-out comes from master (PR #40) and is kept
+          // verbatim through this rebase. It is the honesty half of this row:
+          // "end-to-end" alone reads as "the server knows nothing", and the
+          // server does know project, timestamp, session, tool and who you
+          // are. My shorter rewrite said "nothing readable is stored on the
+          // server", which that carve-out makes FALSE -- so master's wording
+          // wins and only the config-file clause moves to the aside.
+          description="Teammates' apps decrypt locally and the server cannot read your content. Routing metadata — project, timestamp, session, tool and your display name — travels outside the ciphertext."
+          testId="setting-plaintext"
+          // The label now carries a description AND the padlocked aside, so a
+          // centred chip would float against three lines of text.
+          align="start"
+          labelAside={(
+            <span className="setting-locked">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
+                <rect x="4" y="11" width="16" height="10" rx="2" />
+                <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+              </svg>
+              set in your config file · team.encrypt, team.plaintextOff
+            </span>
+          )}
+        >
+          <EncryptionDetail privacy={settings.privacy} />
+        </SettingRow>
+      )}
 
       <DaemonGroup daemon={settings.daemon} />
 
