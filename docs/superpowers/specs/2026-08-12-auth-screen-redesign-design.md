@@ -165,7 +165,8 @@ Centered in the viewport, one column at `max-width: 400px`:
    stays on this machine either way.
 ```
 
-- `MembridgeMark` at ~40px, product name beside it.
+- `MembridgeMark` at ~22px with the product name beside it, as a lockup rather
+  than a large standalone logo — the mark's artwork is drawn for small sizes.
 - Heading `Sign in` / `Create your account`; subhead `to continue to MemBridge`
   / `to share memory with your team`.
 - Inputs ~38px tall, labels above.
@@ -214,8 +215,14 @@ the button already carries the text. It stays an `<a>` to
 
 ### Minimum length
 
-**8 characters, on sign-up only**, as `minLength={8}` plus a submit-time guard
-that shows `Use at least 8 characters.` and does not call the mutation.
+**8 characters, on sign-up only**, as a submit-time guard that shows
+`Use at least 8 characters.` and does not call the mutation.
+
+Deliberately *not* the `minLength` attribute. Native constraint validation
+blocks the submit in a browser with the browser's own tooltip while jsdom does
+not enforce it at all, so the wording users see would differ from the wording
+the tests assert and the JS guard would be dead code in production. One rule,
+one message, one place.
 
 Sign-in never length-checks. An account created before this rule, or through
 GitHub OAuth, must still be able to sign in with whatever it has. A client-side
