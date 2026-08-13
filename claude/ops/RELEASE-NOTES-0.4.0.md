@@ -176,12 +176,12 @@ these notes; it is no longer conditional.)_
 - **Member rename and avatars.** Mid-plan. Its migration (`057`) is already live
   in production; the code follows in a later release. See the note under *Before
   you tag*.
-- **The sign-up / signed-out screen rebuild.** Mid-plan, and self-excluded by the
-  lane on the correct grounds: two of its six commits are only correct in
-  sequence, so the branch cannot be cut partway. A half-built sign-up screen costs
-  more than a release cycle does.
-
-<!-- END CONDITIONAL -->
+- **The sign-up / signed-out screen rebuild.** Held by scope decision, **not
+  because it is unfinished** — the lane reports all six tasks complete, rebased
+  onto `a4754a3`, 460/460 vitest across 23 files, `tsc` clean, tree clean. It was
+  held while it was still mid-plan; it finished after the call was made. Shipping
+  it now would mean re-opening a release that is otherwise done, so it goes in the
+  next one. Worth knowing it is ready rather than pending.
 
 ---
 
