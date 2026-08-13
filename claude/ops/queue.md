@@ -151,6 +151,43 @@ the repo — and no automated criterion can settle it.
 These are real gaps found while doing other work. Neither is a defect in
 something that was asked for, and neither is being fixed yet.
 
+- **`membridge stop` on Windows can kill a process that is not MemBridge
+  (found 2026-08-13, during the 0.4.0 cut).** Windows recycles pids
+  aggressively. If the pid in the pid file has been reassigned to some other
+  live process, `cmdStop` stops THAT process: `isRunning()` reads it as alive
+  (correctly), and `isMembridgeProcess()` is `return true` unconditionally on
+  win32 — deliberately, because reading a Windows command line needs wmic
+  (removed) or a slow CIM query, and `bin/membridge.js:113` argues both are too
+  fragile to gate daemon startup on. That tradeoff is defensible for the
+  *startup* guard it was written for, where the cost is a spurious refusal.
+  It is not obviously defensible for `stop`, where the cost is terminating a
+  stranger's process. Observed for real on CI: `Stopped MemBridge (pid 1536)`
+  against a pid that a fixture had reaped moments earlier. A stale pid file is
+  most likely exactly when the daemon died badly, which is when the pid is most
+  likely to have been recycled — so the failure mode selects for itself. The
+  test fixture that surfaced it was fixed in `d2d3a45` (it now re-draws until
+  the pid is genuinely dead); the product behaviour was NOT touched. Options
+  worth weighing: write the daemon's start time or a nonce alongside the pid and
+  require it to match before stopping, or make stop on win32 refuse rather than
+  guess when it cannot confirm identity.
+
+- **The Windows CI leg has no headroom, and one added suite tips it (found
+  2026-08-13).** `test/run.js` bounds concurrency by verified-free port block,
+  which stops port cross-talk, but nothing bounds the number of heavy
+  *daemon-spawning* suites running at once. Adding a single new suite
+  (`display-name`, which starts and stops a real daemon per request across two
+  homes plus a mock Supabase) made the windows leg start crashing a rotating
+  cast of its siblings — `team-identity`, then
+  `account-deletion`/`audit-story`/`daemon-restart-handoff`, then
+  `team-pull-cursor` — never the same set twice, never an actual failed check,
+  while all five other legs stayed green. Marking that one suite `@serial`
+  (`77a35f6`) restored it, which fixes the symptom for today and leaves the
+  next added suite to rediscover the cliff. run.js's own header already records
+  the previous instance of this ("ONE added suite was enough to tip it"). Worth
+  doing: identify the heavy daemon suites by measured spawn count rather than by
+  who happened to crash, and either mark that class `@serial` or give the pool a
+  second, smaller budget for them.
+
 - **Digest lead-ins that announce instead of report (found 2026-08-05).**
   The filler fix stops short conversational clauses becoming day headlines,
   but a second class survives because it is long: "Now let me look at the
