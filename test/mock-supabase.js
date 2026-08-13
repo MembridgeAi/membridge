@@ -561,10 +561,43 @@ function createMockSupabase() {
           message: `somebody on ${t ? t.name : 'your team'} is already called ${name}`,
         });
       }
-      // One pass over every team, mirroring the single UPDATE in 057.
+      // Snapshot each team's name BEFORE the rename below overwrites it --
+      // the only moment that value is still readable, same reasoning as
+      // memberDeleteTrigger's read of the pre-delete row for 049.
+      const oldNameByTeam = new Map(
+        members.filter(m => m.userId === userId).map(m => [m.teamId, m.displayName]));
+      // One pass over every team, mirroring the single UPDATE in 057. Fix
+      // round 1: 057's real RPC now writes the `member-renamed` audit row
+      // itself, one row PER TEAM, inside this same statement -- team_audit's
+      // insert policy is manager-only and a rename is self-service for every
+      // member, so the daemon cannot write this row (see lib/server.js's
+      // comment at the set-display-name route). Modelled here rather than as
+      // a separate trigger function like memberInsertTrigger/
+      // memberDeleteTrigger because the real write lives inside
+      // set_display_name itself, not on a table trigger — there is no
+      // separate INSERT/UPDATE/DELETE call site to hang a shared helper off.
       let n = 0;
       for (const m of members) {
-        if (m.userId === userId) { m.displayName = name; m.avatar = avatar; m.avatarColor = avatarColor; m.nameReleasedAt = null; n += 1 }
+        if (m.userId === userId) {
+          m.displayName = name; m.avatar = avatar; m.avatarColor = avatarColor; m.nameReleasedAt = null; n += 1;
+          insertAuditRow({
+            id: uuid(),
+            team_id: m.teamId,
+            actor_id: userId,
+            action: 'member-renamed',
+            object_type: 'member',
+            object_key: userId,
+            detail: {
+              memberId: userId,
+              targetName: name,
+              oldName: oldNameByTeam.get(m.teamId) || null,
+              newName: name,
+              avatar,
+              avatarColor,
+            },
+            created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+          });
+        }
       }
       // Report what was ACTUALLY WRITTEN. With no member rows to update there
       // was nothing server-side to write, so this returns nulls rather than

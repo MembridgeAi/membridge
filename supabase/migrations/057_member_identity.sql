@@ -265,6 +265,41 @@ create unique index if not exists team_members_display_name_unique
 --    never applied this file, so this only matters for a dev database that
 --    ran an earlier revision, but the file has to be correct for that case
 --    too.
+--
+-- THE AUDIT ROW IS WRITTEN HERE, NOT BY THE DAEMON. team_audit's insert
+-- policy is `is_team_manager(team_id) and actor_id = auth.uid()` (024 §5,
+-- tightened by 025 §5) -- manager-only. Renaming yourself is self-service for
+-- EVERY member, so for any non-manager a daemon-side
+-- `apiAccess.recordAudit` call would be refused by RLS and swallowed by
+-- design (lib/api-access.js), landing a 200 with no audit row anywhere. Same
+-- finding as 046's, on a different route: a fail-open path under an
+-- unconditional success. `POST /api/team/delete-my-data` already avoids this
+-- the same way (035 §3, lib/server.js) -- writing the row inside the
+-- definer RPC's own transaction is the only way to log an action a plain
+-- member is allowed to take on themself.
+--
+-- ONE ROW PER AFFECTED TEAM, not one row filed under an arbitrary "first"
+-- team: this function is the only actor that knows which teams were
+-- actually written (the UPDATE below touches every membership at once), and
+-- a single row under one team would leave every OTHER team's log silent
+-- about a rename its own roster shows. Written from inside the same
+-- statement as the UPDATE (the FOR loop below iterates its RETURNING
+-- output), so an audit row cannot exist for a rename that rolled back --
+-- and cannot be missing for one that committed.
+--
+-- object_key is auth.uid()::text -- the member's user id, never the display
+-- name -- matching the sibling convention at lib/server.js's member-removed
+-- and role-changed audit calls. Keying the row on the value that just
+-- changed would make it unjoinable against itself.
+--
+-- detail carries BOTH the generic memberId/targetName shape 046 and 049
+-- already write (so lib/api-access.js readAudit's actor/target resolution
+-- works on this action without a special case) AND an explicit oldName,
+-- because "who was this person before" is the entire reason this row
+-- exists and targetName alone (the new name) cannot answer it. oldName is
+-- read from v_old_names, snapshotted from team_members BEFORE the UPDATE --
+-- the only moment that value is still in the database, the same reasoning
+-- 049's trigger gives for reading OLD off a row it is about to lose.
 drop function if exists public.set_display_name(text, text);
 
 create or replace function public.set_display_name(
@@ -283,6 +318,11 @@ declare
   v_display_name text;
   v_avatar text;
   v_avatar_color text;
+  -- team_id::text -> the name this row held BEFORE the rename, snapshotted
+  -- just before the UPDATE below overwrites it. See the audit block after
+  -- the UPDATE for why this cannot be read any later.
+  v_old_names jsonb;
+  r record;
 begin
   if char_length(v_name) < 1 or char_length(v_name) > 80 then
     raise exception 'a display name must be between 1 and 80 characters'
@@ -349,6 +389,16 @@ begin
      from (select team_id from public.team_members
             where user_id = auth.uid() order by team_id) t;
 
+  -- Snapshot every team's CURRENT name before the UPDATE below overwrites
+  -- it -- read while this call already holds the per-team locks above, so
+  -- nothing else can rename the caller between this read and the write.
+  -- This is the only remaining place the pre-rename name exists; once the
+  -- UPDATE runs, the audit block below has no other way to learn it.
+  select coalesce(jsonb_object_agg(m.team_id::text, m.display_name), '{}'::jsonb)
+    into v_old_names
+    from public.team_members m
+   where m.user_id = auth.uid();
+
   -- One statement, so every team is updated atomically: a collision in any
   -- single team rolls back the rename in all of them. Assigning p_avatar and
   -- p_avatar_color directly (not coalesce) is deliberate -- null is the
@@ -356,46 +406,52 @@ begin
   -- would make that choice unexpressible. name_released_at resets so a
   -- previously-released name is re-protected.
   --
-  -- CTE-wrapped RETURNING, not the input variables: every row this
-  -- statement touches gets the same literal values, so any one row's
-  -- RETURNING output is representative, and it reports what the database
-  -- actually committed rather than echoing what was requested. That
-  -- distinction matters most in exactly the case this used to get wrong --
-  -- zero rows matched (the signed-in-with-no-team case) -- where echoing
-  -- the input reported the requested name and avatar as saved even though
-  -- nothing was written. The CTE form (rather than a bare
-  -- `update ... returning ... into`) is hardening, not a bug fix: PL/pgSQL's
-  -- INTO without STRICT already takes the first row and discards the rest
-  -- when several rows match (PL/pgSQL 43.5.3), so the bare form was never
-  -- broken. This form is immune to someone later setting
-  -- `plpgsql.extra_errors = 'all'` (which would turn a multi-row INTO into a
-  -- too_many_rows error), and it drops the "which row is 'first' without an
-  -- ORDER BY" question entirely, since every candidate row is identical.
-  with upd as (
+  -- FOR ... IN UPDATE ... RETURNING, not a bare `update ... returning ...
+  -- into`: PL/pgSQL's INTO without STRICT already takes the first row and
+  -- discards the rest when several rows match (PL/pgSQL 43.5.3), which was
+  -- fine when the only job was picking a representative value (every row
+  -- gets the same literal display_name/avatar/avatar_color, so any one
+  -- row's output is representative) -- but discarding the rest is now
+  -- wrong, because every row is also a team this rename must be audited
+  -- against. The loop visits each updated row once, so it both accumulates
+  -- the representative OUT values (v_display_name/v_avatar/v_avatar_color,
+  -- reassigned identically on every iteration) and writes that team's own
+  -- audit row -- see the header block above this function for why the
+  -- write happens here and not in the daemon, and why it is one row per
+  -- team rather than one overall.
+  v_count := 0;
+  for r in
     update public.team_members m
        set display_name = v_name, avatar = p_avatar, avatar_color = p_avatar_color,
            name_released_at = null
      where m.user_id = auth.uid()
-     returning m.display_name, m.avatar, m.avatar_color
-  )
-  -- `upd.` qualification below is MANDATORY, not style: this function
-  -- declares `returns table (display_name text, avatar text,
-  -- avatar_color text, teams int)`, which makes all four of those names
-  -- PL/pgSQL variables inside this body, exactly as 029:96-99 explains for
-  -- `team_id` in a function declaring `returns table (team_id uuid, ...)`.
-  -- An unqualified `display_name`/`avatar`/`avatar_color` here is ambiguous
-  -- between the CTE's column and the OUT-parameter variable, and under the
-  -- default `plpgsql.variable_conflict = error` that is a `42702 column
-  -- reference ... is ambiguous` at plan time -- on every call, not an edge
-  -- case, since this is the main path. 003_fix_join_ambiguity.sql is named
-  -- after this exact class of bug.
-  select (select upd.display_name from upd limit 1),
-         (select upd.avatar       from upd limit 1),
-         (select upd.avatar_color from upd limit 1),
-         (select count(*)::int    from upd)
-    into v_display_name, v_avatar, v_avatar_color, v_count;
+     returning m.team_id, m.display_name, m.avatar, m.avatar_color
+  loop
+    v_count := v_count + 1;
+    v_display_name := r.display_name;
+    v_avatar := r.avatar;
+    v_avatar_color := r.avatar_color;
+    insert into public.team_audit (team_id, actor_id, action, object_type, object_key, detail)
+    values (
+      r.team_id,
+      auth.uid(),
+      'member-renamed',
+      'member',
+      auth.uid()::text,
+      jsonb_build_object(
+        'memberId', auth.uid()::text,
+        'targetName', r.display_name,
+        'oldName', v_old_names ->> r.team_id::text,
+        'newName', r.display_name,
+        'avatar', r.avatar,
+        'avatarColor', r.avatar_color
+      )
+    );
+  end loop;
 
-  -- Zero rows is NOT an error: it is the signed-in-with-no-team case.
+  -- Zero rows is NOT an error: it is the signed-in-with-no-team case -- and
+  -- with no rows, the loop above wrote no audit rows either, correctly:
+  -- there is no team to file one against.
   return query select v_display_name, v_avatar, v_avatar_color, v_count;
 exception
   when unique_violation then
@@ -456,3 +512,15 @@ grant  execute on function public.team_members_dedupe_name() to service_role;
 --    where proname in ('set_display_name','unique_member_name',
 --                      'team_members_dedupe_name');
 --   -- expect prosecdef = true and a search_path in proconfig for all three
+--
+--   -- Renaming a member of two teams must file ONE audit row PER TEAM, both
+--   -- filed under the member's user id, not their name. Run as a member of
+--   -- two teams (select set_display_name('New Name')), then:
+--   select team_id, actor_id, object_key, detail->>'oldName' as old_name,
+--          detail->>'newName' as new_name
+--     from public.team_audit
+--    where action = 'member-renamed' and object_key = auth.uid()::text
+--    order by team_id;
+--   -- expect one row per team that member belongs to, each with the same
+--   -- object_key (the member's user id), the same new_name, and old_name
+--   -- equal to whatever that team's row said before the call.
