@@ -44,6 +44,23 @@
 //   0  CONFIRMED  failed every run in isolation. Real. File it.
 //   3  PHANTOM    passed in isolation. Load artifact. Do NOT file it.
 //   4  FLAKY      inconsistent across identical isolated runs. Needs a human.
+//   4  UNVERIFIED passed here, but --origin names a platform this host is not.
+//                 Shares FLAKY's exit because it shares FLAKY's remedy: a
+//                 human decides. It is NOT a PHANTOM -- see below.
+//
+// THE SECOND CASE THE VERDICT CANNOT SEE: A FAILURE FROM ANOTHER PLATFORM.
+// PHANTOM asserts a cause ("the failure was machine load") and tells the
+// reader to drop the finding. That is only available if this host could have
+// reproduced the failure at all. A Mac cannot reproduce Windows process-spawn
+// latency at any load level, so green runs here say nothing about a
+// windows-latest failure. Observed for real: a Windows-only CI failure was
+// verified on a Mac, returned "PHANTOM ... Do NOT file it", and the finding
+// was a genuine fixture race that was pre-existing on master.
+//
+// Left unguarded, that is a definitive success marker written on a path where
+// the work did not happen -- this repo's characteristic bug, inside the tool
+// built to protect against it. Pass --origin <platform> whenever the failure
+// came from CI rather than from this machine.
 //   1  ERROR      bad usage, or the runner itself could not execute.
 
 const { execFileSync, spawnSync } = require('child_process');
@@ -76,6 +93,12 @@ function parseArgs(argv) {
     else if (flag === '--suite') { args.suite = value; i += 1; }
     else if (flag === '--name') { args.name = value; i += 1; }
     else if (flag === '--runs') { args.runs = Number(value); i += 1; }
+    // The platform the ORIGINAL failure was observed on, as process.platform
+    // spells it ('win32', 'darwin', 'linux'). Supply it whenever the failure
+    // came from CI rather than from this machine; it is what stops a green
+    // local run being reported as PHANTOM for a failure this host could never
+    // have reproduced.
+    else if (flag === '--origin') { args.origin = value; i += 1; }
   }
   return args;
 }
@@ -223,8 +246,36 @@ function main() {
       process.exit(EXIT.CONFIRMED);
     }
     if (failures.length === 0) {
-      process.stdout.write(`VERDICT: PHANTOM -- passed all ${args.runs} isolated runs.\n`);
+      // PHANTOM asserts a CAUSE -- "the failure was machine load" -- and tells
+      // the reader to drop the finding. That inference is only available when
+      // this host could have reproduced the original failure in the first
+      // place. If the failure came from another platform, N green runs here
+      // establish nothing about it: a macOS host cannot reproduce Windows
+      // process-spawn latency at any load level, so the tool would be
+      // certifying a measurement it never took.
+      //
+      // That is this repo's characteristic bug -- a success marker written on
+      // a path where the work did not happen -- inside the tool built to
+      // protect against it. Observed: a Windows-only CI failure verified on a
+      // Mac returned "PHANTOM ... Do NOT file it", for a real fixture race
+      // that was pre-existing on master and needed fixing.
+      //
+      // Exits FLAKY rather than PHANTOM, because the ACTION is FLAKY's -- a
+      // human decides -- and because silently downgrading to "drop it" is the
+      // failure being prevented. Pass --origin <platform> when verifying a
+      // failure seen elsewhere; omit it for a local failure and PHANTOM still
+      // renders as before.
+      if (args.origin && args.origin !== process.platform) {
+        process.stdout.write(`VERDICT: UNVERIFIED -- passed all ${args.runs} isolated runs on ${process.platform}, `
+          + `but the original failure was on ${args.origin}.\n`);
+        process.stdout.write('This host cannot exercise that platform, so these runs do not clear the finding '
+          + 'and this is NOT a PHANTOM. Escalate to a human, or re-verify on the origin platform.\n');
+        process.exit(EXIT.FLAKY);
+      }
+      process.stdout.write(`VERDICT: PHANTOM -- passed all ${args.runs} isolated runs on ${process.platform}.\n`);
       process.stdout.write('The original failure was machine load, not a defect. Do NOT file it, and do NOT "fix" the code.\n');
+      process.stdout.write('This holds only for a failure seen on THIS platform. If it came from CI on another OS, '
+        + 're-run with --origin <platform>; these runs do not cover it.\n');
       process.exit(EXIT.PHANTOM);
     }
     process.stdout.write(`VERDICT: FLAKY -- failed ${failures.length} of ${args.runs} identical isolated runs.\n`);
