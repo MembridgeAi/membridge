@@ -401,6 +401,37 @@ describe('FeedPage', () => {
     )
     expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull()
   })
+
+  it('shows the areas a day touched, as inert tags', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [entry({
+        id: 'a', session: 's-1', outcome: 'Reworked the feed cards',
+        files: ['ui/src/features/feed/DayCard.tsx', 'ui/src/features/feed/feed.css'],
+      })],
+      nextBefore: null, dayDigests: [],
+    })
+    renderWith(c, <FeedPage />)
+
+    const card = (await screen.findByText('Reworked the feed cards')).closest('.day-card') as HTMLElement
+    const tags = within(card).getByTestId('day-card-tags')
+    expect(tags).toHaveTextContent('UI/UX')
+    // The card is itself an <a>; a nested interactive element would be unnested
+    // by the parser and the DOM would stop matching the JSX.
+    expect(tags.querySelector('a, button')).toBeNull()
+  })
+
+  it('renders no tag strip at all for a day with no recognisable files', async () => {
+    const c = new FakeDataClient()
+    vi.spyOn(c, 'getFeed').mockResolvedValue({
+      entries: [entry({ id: 'a', session: 's-1', outcome: 'Thinking, mostly', files: [] })],
+      nextBefore: null, dayDigests: [],
+    })
+    renderWith(c, <FeedPage />)
+
+    const card = (await screen.findByText('Thinking, mostly')).closest('.day-card') as HTMLElement
+    expect(within(card).queryByTestId('day-card-tags')).toBeNull()
+  })
 })
 
 // The owner's ask: "i want feed simply to contain the day cards with the one
