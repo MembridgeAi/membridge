@@ -13178,7 +13178,7 @@ async function main() {
     assert.ok(!/1-3\s+plain-text sentences/.test(r), 'the old 1-3 sentence ask must be gone');
   });
   // The session page renders decisions and gotchas as one bulleted list
-  // (ui/src/features/session/distill.ts whatBullets). Prose still renders, split
+  // (ui/src/features/session/distill.ts whatGroups). Prose still renders, split
   // on sentences, because hundreds of already-synced sessions carry it -- but
   // nothing downstream can SHORTEN a paragraph, so the ask itself has to be
   // bullets with a stated budget. Uncapped was the actual defect: headline and

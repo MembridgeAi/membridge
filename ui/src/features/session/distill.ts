@@ -205,9 +205,17 @@ export function whatGroups(session: Session): WhatGroup[] {
   const total = loose.length + [...byArea.values()].reduce((n, ps) => n + ps.length, 0)
   if (total === 0) return []
 
-  // Not worth grouping: hand back one flat list, in the order the points were
-  // written, with prefixes stripped -- a reader should never see the raw
-  // "[UI/UX] " markup whichever branch runs.
+  // Not worth grouping: hand back one flat list with prefixes stripped -- a
+  // reader should never see the raw "[UI/UX] " markup whichever branch runs.
+  //
+  // The order is NOT the order the points were written: labelled points come
+  // first, grouped by area in first-seen area order, then the unlabelled ones.
+  // That is a real reordering, and it is left alone rather than described as
+  // something it is not -- it can only show up on a sub-threshold list that
+  // mixes labelled and unlabelled points, where fewer than four points render
+  // with no headings at all, so nothing about the reordering is visible as a
+  // wrong heading. Ticketed separately; do not read this branch as
+  // order-preserving.
   if (total < GROUP_MIN_POINTS || order.length < GROUP_MIN_AREAS) {
     const flat: string[] = []
     for (const area of order) flat.push(...byArea.get(area)!)
