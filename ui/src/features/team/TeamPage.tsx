@@ -226,7 +226,14 @@ export function TeamPage() {
 
   return (
     <div className="team-page">
-      <h1 className="team-title">Team</h1>
+      {/* AuthScreen owns the page when signed out (design spec: "TeamPage
+          renders <AuthScreen> ALONE -- no page title, no card chrome") --
+          it renders its own <h1>, so this title must not also render above
+          it, or a screen-reader user navigating by heading hits two
+          top-level headings for one screen. Still shown while the account
+          is loading (`!account`) and once signed in: neither of those
+          states is AuthScreen's. */}
+      {(!account || account.authenticated) && <h1 className="team-title">Team</h1>}
       {daemonError && <DaemonErrorBanner className="team-error" error={daemonError.error} />}
 
       {/* Nothing about the account renders until the daemon has answered --

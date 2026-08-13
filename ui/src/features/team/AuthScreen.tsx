@@ -129,7 +129,7 @@ export function AuthScreen({ configured }: { configured: boolean }) {
           </div>
         </form>
 
-        <div className="auth-divider"><span>or</span></div>
+        <div className="auth-divider" aria-hidden="true"><span>or</span></div>
 
         {/* GitHub is the ONLY method the hosted onboarding page offers
             (cloudflare/join), so anyone who arrived that way has an account

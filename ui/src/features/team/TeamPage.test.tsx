@@ -30,6 +30,22 @@ describe('TeamPage, signed out', () => {
     expect(screen.queryByLabelText(/team name/i)).toBeNull()
   })
 
+  // Design spec: "TeamPage renders <AuthScreen> ALONE -- no page title, no
+  // card chrome." AuthScreen owns its own <h1>; TeamPage's own "Team" title
+  // must not also render above it, or a screen-reader user navigating by
+  // heading hits two top-level headings for what is meant to be one screen.
+  it('renders exactly one level-1 heading, owned by AuthScreen, with no page title above it', async () => {
+    renderWith(new FakeDataClient({ authenticated: false }), <TeamPage />)
+    // Wait for the account to resolve and AuthScreen's own heading to land
+    // before counting -- the loading state (no account yet) legitimately
+    // shows the "Team" title, and asserting too early would catch that
+    // transient render rather than the signed-out screen's steady state.
+    await screen.findByRole('heading', { level: 1, name: 'Sign in' })
+    const headings = screen.getAllByRole('heading', { level: 1 })
+    expect(headings).toHaveLength(1)
+    expect(headings[0]).toHaveTextContent('Sign in')
+  })
+
   it('posts the typed email and password to the daemon and then clears the password field', async () => {
     const client = new FakeDataClient({ authenticated: false })
     const signIn = vi.spyOn(client, 'signIn')
