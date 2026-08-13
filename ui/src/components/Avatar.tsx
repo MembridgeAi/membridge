@@ -1,7 +1,14 @@
+import { AvatarGlyph, isGlyph } from './AvatarGlyph'
+import { useRegisteredAvatar } from './AvatarRegistry'
+
 interface AvatarProps {
   name: string
   id: string
   size?: number
+  /** Overrides the registry lookup. Only the picker's live preview passes
+   *  these; every other call site resolves through the registry. */
+  avatar?: string | null
+  avatarColor?: string | null
 }
 
 const DEFAULT_SIZE = 24
@@ -21,14 +28,25 @@ function colorForId(id: string): string {
 /** Circle, initial, deterministic color — the one non-switch exception to
  *  the no-rounded-corners rule: avatars represent people, so they are
  *  circles (see components.css, `.avatar`). */
-export function Avatar({ name, id, size = DEFAULT_SIZE }: AvatarProps) {
+export function Avatar({ name, id, size = DEFAULT_SIZE, avatar, avatarColor }: AvatarProps) {
+  const registered = useRegisteredAvatar(id)
+  const glyph = avatar !== undefined ? avatar : registered?.glyph ?? null
+  const picked = avatarColor !== undefined ? avatarColor : registered?.color ?? null
+  // Null color means "the color my id already derives" -- a real choice, and
+  // the reason nobody's avatar changes colour when this ships.
+  const color = picked || colorForId(id)
+
+  if (isGlyph(glyph)) {
+    return <AvatarGlyph glyph={glyph} color={color} name={name} size={size} />
+  }
+
   const initial = name.trim().charAt(0).toUpperCase() || '?'
   return (
     <span
       className="avatar"
       title={name}
       aria-label={name}
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.5), background: colorForId(id) }}
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.5), background: color }}
     >
       {initial}
     </span>
