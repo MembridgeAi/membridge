@@ -166,8 +166,19 @@ Verify each is actually merged before publishing; delete the ones that are not._
   `site:reddit.com` searches silently returned non-Reddit results.
 - **Day-card area tags** — scannable area tags on day cards, and session bullets
   grouped under area headers.
+
 _(The Settings danger zone has landed on master and moved up into the body of
 these notes; it is no longer conditional.)_
+
+**Held out of 0.4.0 by decision, not by accident** — do not re-add these:
+
+- **Member rename and avatars.** Mid-plan. Its migration (`057`) is already live
+  in production; the code follows in a later release. See the note under *Before
+  you tag*.
+- **The sign-up / signed-out screen rebuild.** Mid-plan, and self-excluded by the
+  lane on the correct grounds: two of its six commits are only correct in
+  sequence, so the branch cannot be cut partway. A half-built sign-up screen costs
+  more than a release cycle does.
 
 <!-- END CONDITIONAL -->
 
@@ -175,13 +186,14 @@ these notes; it is no longer conditional.)_
 
 ## Before you tag
 
-- **The database is currently one migration ahead of the code.**
+- **The database ships one migration ahead of the code, deliberately.**
   `057_member_identity` is applied to production, but the code that calls it — the
-  member rename and avatar work — is not on master and may not ship in 0.4.0.
-  This is additive and safe in that direction: a build without the code simply
-  never calls those functions. Worth stating rather than leaving implicit, because
-  the reverse gap is the dangerous one and someone reading a migration list should
-  not have to guess which way this one points.
+  member rename and avatar work — is **held out of 0.4.0** and stays on its
+  branch. This is additive and safe in that direction: a build without the code
+  simply never calls those functions, and the columns and index sit unused until
+  the lane lands in a later release. Stated explicitly rather than left implicit,
+  because the reverse gap is the dangerous one and someone reading a migration
+  list should not have to guess which way this one points.
 - **`058_owner_exit` is catalog-verified; `057_member_identity` is not.** 058 was
   checked at the catalog, not the ledger: `transfer_ownership` (2 args) and
   `delete_team` (1 arg) both present, both `security definer`, ACL limited to
