@@ -544,26 +544,29 @@ grant  execute on function public.set_display_name(text, text, text) to authenti
 -- protection in this schema already (see supabase/APPLY-RUNBOOK.md's closing
 -- section), so an explicit grant to it discloses nothing new.
 --
--- THIS REVOKE LINE IS INCOMPLETE, AND THIS FILE IS ALREADY APPLIED, SO
--- EDITING IT HERE FIXES NOTHING LIVE. Revoking from `public, anon` removes
--- the two roles this repo usually reasons about, but Supabase's default
--- privileges separately grant EXECUTE on every newly created public-schema
--- function to `authenticated` -- a third role this revoke line never names.
--- Verified live 2026-08-13: both functions below are callable by
--- `authenticated` in production right now, which reopens exactly the
--- cross-team name-enumeration oracle the paragraph above describes, just
--- through the one role this file forgot to revoke it from. Because 057 is
--- already applied (migration-table row 20260813020145), changing the SQL in
--- this file cannot change what is live -- a migration file is a record of
--- what ran, not a lever on the present. `059_revoke_unique_member_name_
--- authenticated.sql` is the new statement that actually closes this in
--- production; its header has the full explanation and the live-verification
--- query. The lines below are left exactly as they ran (re-running this file
--- would restate the same gap), so this comment is the correction -- read it
--- alongside 059, not as a substitute for applying 059.
-revoke execute on function public.unique_member_name(uuid, text) from public, anon;
+-- THE REVOKE BELOW ALSO NAMES authenticated, ADDED AFTER THIS FILE WAS
+-- ALREADY APPLIED TO PRODUCTION. The original revoke here named only
+-- `public, anon` -- the two roles this repo usually reasons about -- but
+-- Supabase's default privileges separately grant EXECUTE on every newly
+-- created public-schema function to `authenticated`, independently of
+-- anything this file writes, and the original line never named that role.
+-- Verified live 2026-08-13: both functions were callable by `authenticated`
+-- in production, reopening exactly the cross-team name-enumeration oracle
+-- the paragraph above describes, through the one role the revoke forgot.
+-- Because 057 was ALREADY APPLIED (migration-table row 20260813020145)
+-- before this was noticed, editing the SQL in this file cannot retroactively
+-- change what is live -- a migration file is a record of what ran, not a
+-- lever on the present. `059_revoke_unique_member_name_authenticated.sql` is
+-- the new statement that actually closes this in production; its header has
+-- the full explanation and the live-verification query. The revoke below is
+-- updated anyway, for the next database this file runs against from
+-- scratch: revoking a privilege that was never granted is a harmless no-op,
+-- so a database where 059 has already run is unaffected, and a FRESH
+-- database that only ever runs 057 now gets the correct ACL immediately
+-- instead of inheriting the same gap 059 exists to close.
+revoke execute on function public.unique_member_name(uuid, text) from public, anon, authenticated;
 grant  execute on function public.unique_member_name(uuid, text) to service_role;
-revoke execute on function public.team_members_dedupe_name() from public, anon;
+revoke execute on function public.team_members_dedupe_name() from public, anon, authenticated;
 grant  execute on function public.team_members_dedupe_name() to service_role;
 
 -- Verify after applying:

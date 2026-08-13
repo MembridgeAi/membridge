@@ -28,11 +28,18 @@
 -- EXECUTE on every new function in `public`, independently of whatever this
 -- repo's migration writes. Revoking from `public, anon` removes the two
 -- roles this repo usually reasons about; it does nothing to the third,
--- separately-granted role. Verified live on 2026-08-13, read-only:
+-- separately-granted role. Verified live on 2026-08-13, read-only. NOTE the
+-- `left join`, not an inner join: `aclexplode` reports PUBLIC as grantee 0,
+-- which has no row in `pg_roles` at all — an inner join here would silently
+-- DROP that row and let a query like this one report a clean result while
+-- PUBLIC still held EXECUTE. `coalesce(r.rolname, 'PUBLIC')` is what keeps
+-- that grantee visible instead of disappearing from the result set (the same
+-- shape MIGRATION-STATE.md's 056 row guards against, there with an explicit
+-- `grantee = 0` check rather than a coalesce):
 --
---   select r.rolname, p.proname
+--   select coalesce(r.rolname, 'PUBLIC') as rolname, p.proname
 --     from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
---     join pg_roles r on r.oid = a.grantee
+--     left join pg_roles r on r.oid = a.grantee
 --    where p.pronamespace = 'public'::regnamespace
 --      and p.proname in ('unique_member_name', 'team_members_dedupe_name')
 --      and a.privilege_type = 'EXECUTE';
@@ -108,6 +115,13 @@
 -- the privilege is a silent no-op in Postgres, not an error — safe to paste
 -- twice, and safe to paste whether or not 057 has already been re-applied
 -- with a fixed revoke line (see the edit to 057's own file in this commit).
+--
+-- MUST GO AFTER 057, NOT BEFORE. Both `revoke` statements below name
+-- functions 057 creates; revoking on a function that does not exist yet
+-- raises "function ... does not exist", not a no-op. Moot on
+-- `mefgbiecvoszjorwzkfz` (057 already ran there), but on any other database
+-- this file has to follow 057. Independent of every OTHER file in this
+-- repo's registry, including 058.
 -- ===========================================================================
 
 revoke execute on function public.unique_member_name(uuid, text) from authenticated;
@@ -115,16 +129,21 @@ revoke execute on function public.team_members_dedupe_name() from authenticated;
 
 -- Verify after applying:
 --
---   select r.rolname, p.proname
+--   -- `left join`, not `join` -- an inner join drops PUBLIC (grantee 0)
+--   -- silently, which would let this query report PASS with PUBLIC still
+--   -- holding EXECUTE. See the header's note on this same query.
+--   select coalesce(r.rolname, 'PUBLIC') as rolname, p.proname
 --     from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
---     join pg_roles r on r.oid = a.grantee
+--     left join pg_roles r on r.oid = a.grantee
 --    where p.pronamespace = 'public'::regnamespace
 --      and p.proname in ('unique_member_name', 'team_members_dedupe_name')
 --      and a.privilege_type = 'EXECUTE'
---    order by p.proname, r.rolname;
+--    order by p.proname, rolname;
 --   -- expect exactly: (postgres, service_role) x 2 rows each function.
---   -- `authenticated` must NOT appear for either proname. If it still does,
---   -- this file did not apply, or a later default-privilege grant restored it.
+--   -- Neither `authenticated` nor `PUBLIC` may appear for either proname. If
+--   -- `authenticated` still does, this file did not apply. If `PUBLIC` does,
+--   -- something re-granted the default privilege after 057's original
+--   -- revoke -- a separate problem this file does not address.
 --
 --   -- Sanity that the product path this migration must not break still works:
 --   select proacl from pg_proc where proname = 'set_display_name';

@@ -60,8 +60,14 @@ Sections in order:
    declared `immutable` so it can be used in an index.
 2. **Columns** on `team_members`:
    - `avatar text` — null means "use the initial". `check (avatar is null or avatar ~ '^[a-z0-9-]{1,32}$')`.
-     The server validates *shape* only; it cannot know which keys the client's
-     sprite contains.
+     The server validates *shape* only; it cannot know which glyph keys the
+     client's `AvatarGlyph` component actually recognises (§5).
+   - `avatar_color text` — a second, independent choice (glyph × color; see
+     §5 and the Decisions table). Null means "use the color `colorForId`
+     already derives from my user id" — the same shape as null `avatar`, and
+     for the same reason: a caller must be able to say "go back to my
+     derived color" as an explicit act, not merely by omitting the field.
+     `check (avatar_color is null or avatar_color ~ '^#[0-9A-Fa-f]{6}$')`.
    - `name_released_at timestamptz` — null means "this name is protected".
 3. **`unique_member_name(p_team, p_name)`** — trims its argument, then returns
    it if free in that team, else `p_name 2`, `p_name 3`, … truncating the base
@@ -109,41 +115,90 @@ Sections in order:
    Partial on `name_released_at is null` because a predicate must be immutable —
    `deleted_at > now() - interval '10 days'` cannot appear in one, so the grace
    period is expressed by a column the RPC stamps rather than by the predicate.
-7. **`set_display_name(p_name, p_avatar)`** — see below.
+7. **`set_display_name(p_name, p_avatar, p_avatar_color)`** — see below,
+   including the per-team advisory lock it also takes and the audit rows it
+   writes.
 
-All new functions follow `042_definer_function_hardening.sql`: pin
-`set search_path`, `revoke execute from public, anon`, `grant execute to authenticated`.
+All new functions pin `set search_path`. For the two functions actually meant
+to be called directly by a client (`set_display_name`, `team_members_list`),
+grants follow 042's pattern: `revoke execute from public, anon`, `grant
+execute to authenticated`.
 
-### 2. `set_display_name(p_name text, p_avatar text)`
+**`revoke ... from public, anon` alone does not make a function private.**
+Supabase's own default privileges separately grant `authenticated` EXECUTE on
+every newly created public-schema function, independently of anything this
+repo's migrations write — so a function revoked only from `public, anon` is
+still callable by any signed-in user holding a session token. `057` got this
+half right for the two internal helpers below, `unique_member_name` and
+`team_members_dedupe_name`: it revoked `public, anon` but never named
+`authenticated`, and neither should be directly callable —
+`unique_member_name` takes a caller-supplied, unchecked team id (by design,
+for the join-time case where the caller is not yet a member) and
+`team_members_dedupe_name` is a trigger function meant to fire only on
+`INSERT`. The gap that left in production, and the migration that actually
+closes it, is `059_revoke_unique_member_name_authenticated.sql` — read its
+header for the worked example: **a function that must not be
+caller-invocable needs `revoke execute ... from authenticated` too, with no
+replacement grant**, not just `from public, anon`.
+
+### 2. `set_display_name(p_name text, p_avatar text, p_avatar_color text)`
 
 `security definer`, returns the values actually written.
 
-1. Trim; reject length outside 1..80 with a distinct error code.
+1. Trim; reject length outside 1..80 with a distinct error code (`MB002`).
+   Reject an `avatar` or `avatar_color` that fails the same shape checks the
+   columns carry (§1.2), also `MB002`.
 2. **Lazy release.** Any row colliding with the requested name whose owning
    account has `deleted_at < now() - interval '10 days'` gets
    `name_released_at = now()`, in this same transaction. No cron job, and the
    departed person's `display_name` is preserved for the roster.
 3. **Pre-check** for a collision, purely to build a good message naming the team
    and the holder. It is not the enforcement mechanism.
-4. **`update team_members set display_name = ..., avatar = p_avatar where user_id = auth.uid()`**
-   — a single statement, so all-teams is atomic without explicit transaction
+4. **Per-team advisory lock**, taken for every team the caller belongs to,
+   `order by team_id`. This is the same `pg_advisory_xact_lock` mechanism
+   `unique_member_name` takes on the insert side (§1.4's residual note) —
+   without it here, a rename could commit between a concurrent joiner's
+   not-exists probe and that joiner's insert, reopening the identical race
+   from the other direction. The `order by team_id` is load-bearing, not
+   decoration: two callers each locking the same two teams in different
+   orders is the textbook lock-ordering deadlock, and sorting by team id
+   gives every caller — rename or join — the same order regardless of which
+   teams they happen to touch.
+5. **`update team_members set display_name = ..., avatar = p_avatar,
+   avatar_color = p_avatar_color, name_released_at = null where user_id =
+   auth.uid() returning team_id, display_name, avatar, avatar_color`** — one
+   statement, so all-teams is atomic without explicit transaction
    management, and a collision in any one team rolls back every team.
 
-   `p_avatar` is assigned directly, **not** `coalesce(p_avatar, avatar)`. The
-   editor always submits both fields together, and null is a meaningful value:
-   it is the "no mark, use my initial" choice. Coalescing would make that choice
-   unexpressible — you could pick an avatar but never take it off.
-5. **Catch `unique_violation`** and raise the same collision error. This is the
+   `p_avatar` and `p_avatar_color` are assigned directly, **not**
+   `coalesce(p_avatar, avatar)`. The editor always submits every field
+   together, and null is a meaningful value for both: "no mark, use my
+   initial" and "no color, use my derived color". Coalescing would make
+   those choices unexpressible — you could pick an avatar but never take it
+   off.
+6. **One `member-renamed` audit row per team touched**, written inside this
+   same transaction rather than by the daemon — see §3 for why. The UPDATE's
+   `returning` output is consumed by a `for ... in ... loop`, not a bare
+   `into`, specifically because every returned row is also a team this
+   rename must be audited against, and PL/pgSQL's bare `into` silently
+   keeps only the first row when several match. Each iteration inserts one
+   `team_audit` row, carrying that team's old name (snapshotted from
+   `team_members` immediately before the UPDATE, while the locks from step 4
+   are already held, since it is the only remaining moment the pre-rename
+   name still exists) and new name.
+7. **Catch `unique_violation`** and raise the same collision error. This is the
    path two simultaneous claims actually take; the index is the arbiter.
 
 Both collision raises use a dedicated `errcode = 'MB001'`. The daemon maps that
 one code to HTTP 409, so rewording the message can never break the mapping.
 
-Zero rows updated is not an error — it is the signed-in-with-no-team case.
+Zero rows updated is not an error — it is the signed-in-with-no-team case,
+and correctly writes no audit rows either, since there is no team to file
+one against.
 
 ### 3. Daemon and HTTP
 
-`teamsync.setDisplayName(config, name, avatar)`:
+`teamsync.setDisplayName(config, name, avatar, avatarColor)`:
 
 - Calls the RPC, and writes `credentials.json` **only after it succeeds**. This
   is the exact location of this repo's characteristic bug — a fail-open path plus
@@ -153,9 +208,9 @@ Zero rows updated is not an error — it is the signed-in-with-no-team case.
 - Stores the server's returned values, not the requested ones, so a trim on the
   server cannot desynchronise the two.
 
-`sessionToCredentials` must carry `avatar` across login and refresh the way it
-already carries `displayName` (`lib/teamsync.js:209`), or a token refresh
-silently drops the avatar.
+`sessionToCredentials` must carry `avatar` and `avatarColor` across login and
+refresh the way it already carries `displayName` (`lib/teamsync.js:210-211`),
+or a token refresh silently drops one or both.
 
 `POST /api/team/set-display-name` — 400 on empty or overlong, **409 on
 collision**, 200 with `{ displayName, avatar, avatarColor }`.
@@ -179,7 +234,8 @@ updates every team a member belongs to in one statement), not one row filed
 under an arbitrary "first" team — the RPC is the only actor that knows which
 teams were actually written.
 
-`GET /api/team` returns `avatar` alongside `displayName` (`lib/server.js:2813`).
+`GET /api/team` returns `avatar` and `avatarColor` alongside `displayName`
+(`lib/server.js:2814-2815`).
 
 ### 4. UI
 
@@ -193,8 +249,8 @@ and the avatar picker, saved in one call. A 409 renders inline beneath the input
 with the dialog open and the typed text intact. Success invalidates the account
 and roster queries so the rail and the Members list both relabel.
 
-**DataClient.** `setDisplayName(name, avatar)` added to the interface,
-`LocalDaemonClient` and `FakeDataClient`.
+**DataClient.** `setDisplayName(name, avatar, avatarColor)` added to the
+interface, `LocalDaemonClient` and `FakeDataClient`.
 
 ### 5. Avatar rendering — `AvatarGlyph.tsx`, not a sprite sheet
 
@@ -224,7 +280,7 @@ newer build picked a glyph or color this build's component does not
 recognise.
 
 **Editor reachability.** The picker is reachable from two places — the rail
-footer's double-click (§4 below) and a row in Settings — through one shared
+footer's double-click (§4 above) and a row in Settings — through one shared
 dialog, `ui/src/app/IdentityDialog.tsx`, so the two entry points cannot drift
 into two different pickers or two different validation paths.
 
@@ -252,11 +308,11 @@ marks ship with this work; Andrew's file replaces it and nothing else changes.
 | Account soft-deleted > 10 days | Released lazily on next attempt; `display_name` preserved |
 | Name trims to empty | 400 before any network call |
 | Name longer than 80 chars | 400 before any network call |
-| Two people join at once as the same name | Retry loop; second becomes `marco 3` |
+| Two people join at once as the same name | Serialised by the per-team advisory lock (§1.4); second becomes `marco 3` |
 | Joiner's name already taken | Silently becomes `marco 2`; they are not told |
 | Daemon offline | Rename fails visibly; `credentials.json` untouched |
 | Signed out | Footer shows Sign in; no editor |
-| Teammate picks a mark absent from this build's sprite | Falls back to the initial |
+| Teammate picks a glyph or color absent from this build's `AvatarGlyph` component | Falls back to the initial |
 
 ## Accepted costs
 
@@ -285,7 +341,7 @@ Per `.claude/rules/testing.md`, only what is touched:
 |---|---|
 | React app | `cd ui && npx tsc --noEmit`, then `npx vitest run` on `Shell.test.tsx`, `components.test.tsx` and the new identity-editor test |
 | Daemon / teamsync | `node test/run.js display-name` (new suite in `test/suites/`) |
-| Migration | No local run; carries a documented "verify after applying" block per `053` |
+| Migration | No local run; `057_member_identity.sql` and `059_revoke_unique_member_name_authenticated.sql` each carry a documented "verify after applying" block per `053`. `node test/run.js migration-state` and `node test/run.js definer-function-hardening` check the repo's own claims about both files (numbering, registry, ACL statements); neither can verify what is actually live |
 
 No test failure is filed or fixed before `node scripts/verify-finding.js`
 returns CONFIRMED.
