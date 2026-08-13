@@ -58,10 +58,35 @@ const realGitconfigBefore = (() => {
 // --global` — the real production code path, not a test-only branch — land in
 // a throwaway file.
 const GIT_HOME = path.join(ROOT, 'gitconfig');
+
+// The developer's PERSONAL ignore rules are not part of this fixture, and
+// pinning GIT_CONFIG_GLOBAL does not exclude them.
+//
+// When `core.excludesFile` is unset — which is exactly what pinning the global
+// config to a throwaway file guarantees — git falls back to its built-in
+// default, `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore`). That file is
+// the human's, not ours, and it is read for every repo including the fixture's.
+//
+// Observed: a developer with `CLAUDE.md` in `~/.config/git/ignore` — a very
+// reasonable thing to have, since this repo's own .gitignore carries the same
+// line — got `git add CLAUDE.md` refused before the filter was ever exercised,
+// and the suite failed 26/20 on their machine while passing 26/26 on all six
+// CI legs. A test that depends on the developer's dotfiles is a test that
+// reports the machine, not the code.
+//
+// Pinned via GIT_CONFIG_COUNT rather than by writing GIT_HOME, because the
+// production path under test (`git config --global`) writes that file itself
+// and would race with a fixture that also owns it.
+const EMPTY_EXCLUDES = path.join(ROOT, 'gitignore-none');
+fs.writeFileSync(EMPTY_EXCLUDES, '');
+
 const gitEnv = (globalFile = GIT_HOME) => ({
   ...process.env,
   GIT_CONFIG_GLOBAL: globalFile,
   GIT_CONFIG_SYSTEM: path.join(ROOT, 'gitconfig-system'),
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.excludesFile',
+  GIT_CONFIG_VALUE_0: EMPTY_EXCLUDES,
   GIT_AUTHOR_NAME: 'Filter Test', GIT_AUTHOR_EMAIL: 'filter@test.dev',
   GIT_COMMITTER_NAME: 'Filter Test', GIT_COMMITTER_EMAIL: 'filter@test.dev',
 });
