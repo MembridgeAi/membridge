@@ -5,8 +5,8 @@
 #   curl -fsSL https://membridge.app/install.sh | sh -s -- --dry-run
 set -eu
 
-VERSION="0.3.4"
-SHA256="aa760da05442f7deb0e11e37dcdd75c254b8feee0a709560dae12a3c6cd8c274"
+VERSION="0.4.0"
+SHA256="9fe1cb9236d2be3bf9fc18b81603c17ebe50d254670f8f11c4fe39bd18f1280e"
 REPO="MembridgeAi/membridge"
 APP_NAME="MemBridge"
 APP_DEST="/Applications/${APP_NAME}.app"
