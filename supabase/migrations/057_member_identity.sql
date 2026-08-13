@@ -378,10 +378,21 @@ begin
      where m.user_id = auth.uid()
      returning m.display_name, m.avatar, m.avatar_color
   )
-  select (select display_name from upd limit 1),
-         (select avatar       from upd limit 1),
-         (select avatar_color from upd limit 1),
-         (select count(*)::int from upd)
+  -- `upd.` qualification below is MANDATORY, not style: this function
+  -- declares `returns table (display_name text, avatar text,
+  -- avatar_color text, teams int)`, which makes all four of those names
+  -- PL/pgSQL variables inside this body, exactly as 029:96-99 explains for
+  -- `team_id` in a function declaring `returns table (team_id uuid, ...)`.
+  -- An unqualified `display_name`/`avatar`/`avatar_color` here is ambiguous
+  -- between the CTE's column and the OUT-parameter variable, and under the
+  -- default `plpgsql.variable_conflict = error` that is a `42702 column
+  -- reference ... is ambiguous` at plan time -- on every call, not an edge
+  -- case, since this is the main path. 003_fix_join_ambiguity.sql is named
+  -- after this exact class of bug.
+  select (select upd.display_name from upd limit 1),
+         (select upd.avatar       from upd limit 1),
+         (select upd.avatar_color from upd limit 1),
+         (select count(*)::int    from upd)
     into v_display_name, v_avatar, v_avatar_color, v_count;
 
   -- Zero rows is NOT an error: it is the signed-in-with-no-team case.
