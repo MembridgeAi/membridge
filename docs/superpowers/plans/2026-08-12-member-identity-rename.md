@@ -298,7 +298,13 @@ git commit -m "feat(db): per-team unique display names, avatars, and set_display
 
 **Interfaces:**
 - Consumes: `public.set_display_name` from Task 1.
-- Produces: `teamsync.setDisplayName(config, name, avatar) -> Promise<{ displayName: string, avatar: string|null, teams: number }>`. Throws an `Error` carrying `.code === 'MB001'` on collision, `.code === 'MB002'` on validation failure, `.status` from HTTP.
+- Produces: `teamsync.setDisplayName(config, name, avatar, avatarColor) -> Promise<{ displayName: string, avatar: string|null, avatarColor: string|null, teams: number }>`. Throws an `Error` carrying `.code === 'MB001'` on collision, `.code === 'MB002'` on validation failure, `.status` from HTTP.
+
+> **AMENDMENT — avatars are shape AND colour.** After this plan was written, the avatar art arrived as 15 glyphs × 10 colours, chosen independently. Migration 057 therefore carries a second column, `avatar_color`, and `set_display_name` takes a third parameter `p_avatar_color`. Everywhere below that mentions `avatar`, carry `avatarColor` alongside it with identical rules: it is a nullable string, null is the real choice "use the colour my id already derives" and never means "unchanged", and it is assigned directly rather than coalesced. Concretely:
+> - the mock's `set_display_name` reads `body.p_avatar_color`, validates `^#[0-9A-Fa-f]{6}$` (MB002 on a bad value), stores it on the member rows, and returns it as `avatar_color`;
+> - the mock's `team_members_list` returns `avatar_color: m.avatarColor || null` beside `avatar`;
+> - `sessionToCredentials` preserves `avatarColor` exactly as it preserves `avatar`;
+> - `teamsync.setDisplayName` takes and returns it, and the suite asserts it round-trips and that clearing it stores null.
 
 - [ ] **Step 1: Teach the Supabase mock the new RPC**
 
@@ -564,7 +570,9 @@ git commit -m "feat(daemon): teamsync.setDisplayName, saving locally only on suc
 
 **Interfaces:**
 - Consumes: `teamsync.setDisplayName` from Task 2.
-- Produces: `POST /api/team/set-display-name` with body `{ name: string, avatar: string|null }`, answering `200 { displayName, avatar, teams }`, `400 { error }`, `409 { error }`. `GET /api/team` gains `user.avatar`.
+- Produces: `POST /api/team/set-display-name` with body `{ name: string, avatar: string|null, avatarColor: string|null }`, answering `200 { displayName, avatar, avatarColor, teams }`, `400 { error }`, `409 { error }`. `GET /api/team` gains `user.avatar` and `user.avatarColor`.
+
+> **AMENDMENT — carry `avatarColor` through this route.** Read it from the body as `body.avatarColor ? String(body.avatarColor) : null`, pass it to `teamsync.setDisplayName` as the fourth argument, and include it in the `GET /api/team` user object beside `avatar`. Do NOT validate the hex format in the daemon — the RPC raises MB002 for a malformed colour and the route already maps MB002 to 400, so a second copy of the rule in JavaScript is a rule that can drift. The audit `detail` gains `avatarColor` alongside `name` and `avatar`.
 
 - [ ] **Step 1: Confirm the test that will judge this task is already failing**
 
@@ -639,7 +647,9 @@ git commit -m "feat(api): POST /api/team/set-display-name, 409 on a taken name"
 
 **Interfaces:**
 - Consumes: `POST /api/team/set-display-name` from Task 3.
-- Produces: `DataClient.setDisplayName(name: string, avatar: string | null): Promise<{ displayName: string; avatar: string | null }>`; `useSetDisplayName()` mutation hook; `Member.avatar: string | null`; `TeamAccount.user.avatar: string | null`.
+- Produces: `DataClient.setDisplayName(name: string, avatar: string | null, avatarColor: string | null): Promise<{ displayName: string; avatar: string | null; avatarColor: string | null }>`; `useSetDisplayName()` mutation hook taking `{ name, avatar, avatarColor }`; `Member.avatar` and `Member.avatarColor`; `TeamAccount.user.avatar` and `TeamAccount.user.avatarColor` — all `string | null`.
+
+> **AMENDMENT — `avatarColor` travels with `avatar` everywhere in this task.** Every signature, type, mapper and fixture below that names `avatar` gains `avatarColor` beside it, same type, same null semantics. Specifically: `TeamAccount.user` and `Member` each get both fields; `mapMember` maps `avatarColor: raw.avatar_color ?? null` (note the wire name is snake_case from the RPC, unlike `avatar`, so check the raw shape rather than assuming); `LocalDaemonClient.setDisplayName` posts all three and returns all three; `FakeDataClient.setDisplayName(name, avatar, avatarColor)` echoes them; and `useSetDisplayName`'s `mutationFn` takes `{ name, avatar, avatarColor }`. Task 6's tests call `setDisplayName('marco', 'halo', '#22C08F')` positionally — match that argument order.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -750,21 +760,36 @@ git commit -m "feat(ui): setDisplayName through DataClient, and Member.avatar"
 
 ---
 
-### Task 5: Avatar sprite, registry and lookup
+### Task 5: Avatar glyphs and the identity registry
 
 **Files:**
-- Create: `ui/src/assets/avatars.svg`, `ui/src/assets/avatars.ts`, `ui/src/components/AvatarRegistry.tsx`
-- Modify: `ui/src/components/Avatar.tsx`, `ui/src/components/components.css`
+- Create: `ui/src/components/AvatarGlyph.tsx` (copied from the art drop), `ui/src/components/AvatarRegistry.tsx`
+- Modify: `ui/src/components/Avatar.tsx`
 - Test: `ui/src/components/components.test.tsx`
 
 **Interfaces:**
-- Consumes: `Member.avatar` from Task 4.
-- Produces: `AVATAR_KEYS: readonly string[]`, `isAvatarKey(v): boolean`, `<AvatarRegistryProvider value={ReadonlyMap<string,string>}>`, `<AvatarSprite />`. `Avatar` gains an optional `avatar?: string | null` prop; its 14 existing call sites are unchanged.
+- Consumes: `Member.avatar` and `Member.avatarColor` from Task 4.
+- Produces: `GLYPHS: readonly Glyph[]`, `AVATAR_COLORS: readonly string[]`, `<AvatarGlyph glyph color name size />`, `isGlyph(v): v is Glyph`, `<AvatarRegistryProvider value={ReadonlyMap<string, {glyph: string; color: string | null}>}>`, `useRegisteredAvatar(id)`. `Avatar` gains optional `avatar?: string | null` and `avatarColor?: string | null` props; **its 14 existing call sites are unchanged**.
 
-- [ ] **Step 1: Confirm Vite raw imports are typed**
+**This task supersedes an earlier sprite-sheet design.** Andrew delivered the art as a React component, not an SVG sprite, so there is no `avatars.svg`, no `?raw` import, no `<use>` indirection, and no `avatars.ts`. Do not create those files.
 
-Run: `cat ui/src/vite-env.d.ts`
-Expected: a `/// <reference types="vite/client" />` line, which declares `*?raw`. If it is absent, add it — Task 5 Step 4 imports the sprite as a raw string.
+- [ ] **Step 1: Bring the art into the repo**
+
+Copy the delivered component verbatim — do not redraw, restyle, or "improve" the glyph geometry:
+
+```bash
+cp .superpowers/sdd/2026-08-12-member-identity-rename/AvatarGlyph.source.tsx ui/src/components/AvatarGlyph.tsx
+```
+
+Read it before going further. It exports `GLYPHS` (15 keys), `AVATAR_COLORS` (10 hex tokens), types `Glyph` and `AvatarColor`, and the `AvatarGlyph` component. Its header states the design contract: shape and color are INDEPENDENT choices, and the picker must therefore be two rows rather than one grid of fixed combinations.
+
+Add one export it does not yet have, used by `Avatar` to reject a glyph key this build does not know:
+
+```tsx
+export function isGlyph(v: string | null | undefined): v is Glyph {
+  return !!v && (GLYPHS as readonly string[]).includes(v)
+}
+```
 
 - [ ] **Step 2: Write the failing test**
 
@@ -773,31 +798,43 @@ In `ui/src/components/components.test.tsx`, beside the existing `Avatar` tests (
 ```tsx
 import { AvatarRegistryProvider } from './AvatarRegistry'
 
-it('renders the initial when the person has picked no mark', () => {
+it('renders the initial when the person has picked no glyph', () => {
   render(<Avatar name="Sarah" id="sarah" />)
   expect(screen.getByLabelText('Sarah')).toHaveTextContent('S')
 })
 
-it('renders the sprite mark when one is registered for that id', () => {
+it('renders the glyph registered for that id', () => {
   render(
-    <AvatarRegistryProvider value={new Map([['sarah', 'ring']])}>
+    <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: '#22C08F' }]])}>
       <Avatar name="Sarah" id="sarah" />
     </AvatarRegistryProvider>,
   )
-  const use = document.querySelector('use')
-  expect(use?.getAttribute('href')).toBe('#mb-avatar-ring')
+  // AvatarGlyph puts the accessible name on the <svg role="img">.
+  expect(screen.getByRole('img', { name: 'Sarah' })).toBeInTheDocument()
+  expect(screen.queryByText('S')).toBeNull()
 })
 
-// A teammate on a newer build can pick a mark this build's sprite does not
-// contain. A blank circle would be worse than the initial it replaced.
-it('falls back to the initial for a mark this build does not have', () => {
+// A teammate on a newer build can pick a glyph this build does not have. A
+// blank circle would be worse than the initial it replaced.
+it('falls back to the initial for a glyph this build does not know', () => {
   render(
-    <AvatarRegistryProvider value={new Map([['sarah', 'not-a-real-mark']])}>
+    <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'not-a-real-glyph', color: null }]])}>
       <Avatar name="Sarah" id="sarah" />
     </AvatarRegistryProvider>,
   )
   expect(screen.getByLabelText('Sarah')).toHaveTextContent('S')
-  expect(document.querySelector('use')).toBeNull()
+})
+
+// Null color is a real choice meaning "the color my id already derives",
+// not an absence to be defaulted to something arbitrary.
+it('uses the id-derived palette color when the person picked no color', () => {
+  render(
+    <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: null }]])}>
+      <Avatar name="Sarah" id="sarah" />
+    </AvatarRegistryProvider>,
+  )
+  const svg = screen.getByRole('img', { name: 'Sarah' })
+  expect(svg.getAttribute('style')).toMatch(/color:/)
 })
 ```
 
@@ -806,53 +843,25 @@ it('falls back to the initial for a mark this build does not have', () => {
 Run: `cd ui && npx vitest run src/components/components.test.tsx`
 Expected: FAIL — cannot resolve `./AvatarRegistry`.
 
-- [ ] **Step 4: Create the sprite and its key list**
-
-`ui/src/assets/avatars.svg` — placeholder marks, to be replaced wholesale by Andrew. One `<symbol>` per key, `viewBox="0 0 24 24"`, geometry using `fill="currentColor"` so the existing per-person palette tints it, and no `<style>` blocks:
-
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
-  <symbol id="mb-avatar-ring" viewBox="0 0 24 24"><path fill="currentColor" d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 4a5 5 0 110 10 5 5 0 010-10z"/></symbol>
-  <symbol id="mb-avatar-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></symbol>
-  <symbol id="mb-avatar-triangle" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4l8 15H4z"/></symbol>
-  <symbol id="mb-avatar-cross" viewBox="0 0 24 24"><path fill="currentColor" d="M10 4h4v6h6v4h-6v6h-4v-6H4v-4h6z"/></symbol>
-  <symbol id="mb-avatar-slash" viewBox="0 0 24 24"><path fill="currentColor" d="M17 3l4 3-14 15-4-3z"/></symbol>
-  <symbol id="mb-avatar-arc" viewBox="0 0 24 24"><path fill="currentColor" d="M4 20a8 8 0 0116 0h-4a4 4 0 00-8 0z"/></symbol>
-  <symbol id="mb-avatar-grid" viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z"/></symbol>
-  <symbol id="mb-avatar-wave" viewBox="0 0 24 24"><path fill="currentColor" d="M3 14c3-6 6-6 9 0s6 6 9 0v5c-3 6-6 6-9 0s-6-6-9 0z"/></symbol>
-</svg>
-```
-
-`ui/src/assets/avatars.ts` — the picker iterates this, and `Avatar` validates against it:
-
-```ts
-// The keys in avatars.svg. THESE TWO FILES ARE ONE CONTRACT: a symbol with no
-// key here is unpickable, and a key with no symbol renders a blank circle,
-// which is why Avatar validates against this list before emitting a <use>.
-export const AVATAR_KEYS = ['ring', 'dot', 'triangle', 'cross', 'slash', 'arc', 'grid', 'wave'] as const
-
-export type AvatarKey = typeof AVATAR_KEYS[number]
-
-export function isAvatarKey(v: string | null | undefined): v is AvatarKey {
-  return !!v && (AVATAR_KEYS as readonly string[]).includes(v)
-}
-```
-
-- [ ] **Step 5: Create the registry**
+- [ ] **Step 4: Create the registry**
 
 `ui/src/components/AvatarRegistry.tsx`:
 
 ```tsx
 import { createContext, useContext, type ReactNode } from 'react'
-import spriteMarkup from '../assets/avatars.svg?raw'
 
-// Avatar is rendered at 14 call sites, and every one of them already passes
-// the member id. Resolving the mark from the id HERE means none of them has
-// to learn about avatars, and none of them can forget to pass one.
-const AvatarContext = createContext<ReadonlyMap<string, string>>(new Map())
+export interface RegisteredAvatar {
+  glyph: string
+  color: string | null
+}
+
+// Avatar is rendered at 14 call sites and every one already passes the member
+// id. Resolving the glyph from the id HERE means none of them has to learn
+// about avatars, and none of them can forget to pass one.
+const AvatarContext = createContext<ReadonlyMap<string, RegisteredAvatar>>(new Map())
 
 export function AvatarRegistryProvider({ value, children }: {
-  value: ReadonlyMap<string, string>
+  value: ReadonlyMap<string, RegisteredAvatar>
   children: ReactNode
 }) {
   return <AvatarContext.Provider value={value}>{children}</AvatarContext.Provider>
@@ -860,92 +869,89 @@ export function AvatarRegistryProvider({ value, children }: {
 
 // The default is an EMPTY map, not a throw: a component rendered outside the
 // provider (every existing component test) falls back to the initial, which is
-// exactly the behaviour that shipped before avatars existed.
-export function useRegisteredAvatar(id: string): string | null {
+// exactly the behaviour that shipped before glyphs existed.
+export function useRegisteredAvatar(id: string): RegisteredAvatar | null {
   return useContext(AvatarContext).get(id) ?? null
-}
-
-/** The <symbol> definitions, mounted once. <use href="#id"> resolves against
- *  the document, so the sprite has to be IN it before any Avatar renders. */
-export function AvatarSprite() {
-  return <div aria-hidden="true" dangerouslySetInnerHTML={{ __html: spriteMarkup }} />
 }
 ```
 
-- [ ] **Step 6: Teach Avatar to use it**
+- [ ] **Step 5: Teach Avatar to use it**
 
-Rewrite the body of `ui/src/components/Avatar.tsx`, keeping `PALETTE` and `colorForId` exactly as they are:
+Rewrite `ui/src/components/Avatar.tsx`, keeping `PALETTE` and `colorForId` byte-for-byte as they are — `colorForId` is what makes an unpicked avatar keep the exact color it has today:
 
 ```tsx
-import { isAvatarKey } from '../assets/avatars'
+import { AvatarGlyph, isGlyph } from './AvatarGlyph'
 import { useRegisteredAvatar } from './AvatarRegistry'
 
 interface AvatarProps {
   name: string
   id: string
   size?: number
-  /** Overrides the registry lookup. Only the identity editor's live preview
-   *  needs this; every other call site resolves through the registry. */
+  /** Overrides the registry lookup. Only the picker's live preview passes
+   *  these; every other call site resolves through the registry. */
   avatar?: string | null
+  avatarColor?: string | null
 }
 
-export function Avatar({ name, id, size = DEFAULT_SIZE, avatar }: AvatarProps) {
+export function Avatar({ name, id, size = DEFAULT_SIZE, avatar, avatarColor }: AvatarProps) {
   const registered = useRegisteredAvatar(id)
-  const key = avatar !== undefined ? avatar : registered
+  const glyph = avatar !== undefined ? avatar : registered?.glyph ?? null
+  const picked = avatarColor !== undefined ? avatarColor : registered?.color ?? null
+  // Null color means "the color my id already derives" -- a real choice, and
+  // the reason nobody's avatar changes colour when this ships.
+  const color = picked || colorForId(id)
+
+  if (isGlyph(glyph)) {
+    return <AvatarGlyph glyph={glyph} color={color} name={name} size={size} />
+  }
+
   const initial = name.trim().charAt(0).toUpperCase() || '?'
   return (
     <span
       className="avatar"
       title={name}
       aria-label={name}
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.5), background: colorForId(id) }}
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.5), background: color }}
     >
-      {isAvatarKey(key)
-        ? <svg className="avatar-mark" viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
-            <use href={`#mb-avatar-${key}`} />
-          </svg>
-        : initial}
+      {initial}
     </span>
   )
 }
 ```
 
-Add to `components.css` beside `.avatar`:
+Note `AvatarGlyph` carries its own `role="img"` and `aria-label`, so the initial branch keeps `aria-label` and the glyph branch does not double-announce.
 
-```css
-.avatar-mark { color: #fff; display: block; }
-```
-
-- [ ] **Step 7: Run the tests**
+- [ ] **Step 6: Run the tests**
 
 Run: `cd ui && npx tsc --noEmit`
 Expected: clean.
 
 Run: `cd ui && npx vitest run src/components/components.test.tsx`
-Expected: PASS, including the three new cases.
+Expected: PASS, including the four new cases.
 
-- [ ] **Step 8: Commit**
+If a case fails with "Unable to find <element>", that is the documented phantom shape — run `node scripts/verify-finding.js --ui src/components/components.test.tsx --runs 3` before changing any code.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add ui/src/assets ui/src/components
-git commit -m "feat(ui): avatar sprite and id-keyed registry, no call-site changes"
+git add ui/src/components
+git commit -m "feat(ui): glyph avatars with an id-keyed registry, no call-site changes"
 ```
 
----
 
-### Task 6: The identity editor
+### Task 6: The avatar picker and the identity editor
 
 **Files:**
-- Create: `ui/src/app/IdentityDialog.tsx`, `ui/src/app/IdentityDialog.test.tsx`
+- Create: `ui/src/components/AvatarPicker.tsx`, `ui/src/app/IdentityDialog.tsx`, `ui/src/app/IdentityDialog.test.tsx`
 - Modify: `ui/src/app/app.css`
 
 **Interfaces:**
-- Consumes: `useSetDisplayName` (Task 4), `AVATAR_KEYS` and `Avatar` (Task 5).
-- Produces: `<IdentityDialog currentName={string} currentAvatar={string|null} viewerId={string} onClose={() => void} />`.
+- Consumes: `useSetDisplayName` (Task 4), `GLYPHS` / `AVATAR_COLORS` / `Avatar` (Task 5).
+- Produces: `<AvatarPicker name viewerId glyph color onGlyph onColor />` — a **controlled, mutation-free** picker; and `<IdentityDialog currentName currentAvatar currentAvatarColor viewerId onClose />`. Task 7 (rail) and Task 8 (Settings) both open the same `IdentityDialog`, so there is exactly one save path.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `ui/src/app/IdentityDialog.test.tsx`. Follow `Shell.test.tsx`'s imports and the `renderWith` helper:
+Create `ui/src/app/IdentityDialog.test.tsx`:
 
 ```tsx
 import { describe, it, expect, afterEach, vi } from 'vitest'
@@ -961,7 +967,8 @@ function renderDialog(client = new FakeDataClient({})) {
   return render(
     <QueryClientProvider client={qc}>
       <DataClientProvider client={client}>
-        <IdentityDialog currentName="marco" currentAvatar={null} viewerId="u1" onClose={() => {}} />
+        <IdentityDialog currentName="marco" currentAvatar={null} currentAvatarColor={null}
+                        viewerId="u1" onClose={() => {}} />
       </DataClientProvider>
     </QueryClientProvider>,
   )
@@ -993,17 +1000,30 @@ describe('IdentityDialog', () => {
     await userEvent.type(screen.getByLabelText(/display name/i), 'nina')
     await userEvent.click(screen.getByRole('button', { name: /save/i }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/already called nina/)
-    // The typed text survives, so the person can edit it rather than retype it.
+    // The typed text survives, so the person edits rather than retypes.
     expect(screen.getByLabelText(/display name/i)).toHaveValue('nina')
   })
 
-  it('sends the picked avatar, and null when the initial is chosen', async () => {
+  // Shape and colour are INDEPENDENT choices (AvatarGlyph.tsx's header states
+  // this) -- picking one must not reset the other.
+  it('sends the chosen glyph and colour together', async () => {
     const client = new FakeDataClient({})
     const spy = vi.spyOn(client, 'setDisplayName')
     renderDialog(client)
-    await userEvent.click(await screen.findByRole('radio', { name: /ring/i }))
+    await userEvent.click(await screen.findByRole('radio', { name: 'halo' }))
+    await userEvent.click(screen.getByRole('radio', { name: 'Colour 2' }))
     await userEvent.click(screen.getByRole('button', { name: /save/i }))
-    expect(spy).toHaveBeenCalledWith('marco', 'ring')
+    expect(spy).toHaveBeenCalledWith('marco', 'halo', '#22C08F')
+  })
+
+  it('sends nulls when the initial and the derived colour are chosen', async () => {
+    const client = new FakeDataClient({})
+    const spy = vi.spyOn(client, 'setDisplayName')
+    renderDialog(client)
+    await userEvent.click(await screen.findByRole('radio', { name: 'halo' }))
+    await userEvent.click(screen.getByRole('radio', { name: /^Initial$/ }))
+    await userEvent.click(screen.getByRole('button', { name: /save/i }))
+    expect(spy).toHaveBeenCalledWith('marco', null, null)
   })
 })
 ```
@@ -1013,21 +1033,78 @@ describe('IdentityDialog', () => {
 Run: `cd ui && npx vitest run src/app/IdentityDialog.test.tsx`
 Expected: FAIL — cannot resolve `./IdentityDialog`.
 
-- [ ] **Step 3: Implement the dialog**
+- [ ] **Step 3: Build the picker**
 
-Create `ui/src/app/IdentityDialog.tsx`:
+`ui/src/components/AvatarPicker.tsx`. It holds no mutation and no state of its own — both entry points drive it, which is what keeps them honest about being one control:
+
+```tsx
+import { Avatar } from './Avatar'
+import { GLYPHS, AVATAR_COLORS } from './AvatarGlyph'
+
+interface AvatarPickerProps {
+  name: string
+  viewerId: string
+  glyph: string | null
+  color: string | null
+  onGlyph: (glyph: string | null) => void
+  onColour: (colour: string | null) => void
+}
+
+/** Two rows, not one grid: shape and colour are independent, so a grid of
+ *  fixed combinations would misrepresent 15 x 10 as 150 separate things to
+ *  scroll. Each row is a radiogroup; null is a real option in both. */
+export function AvatarPicker({ name, viewerId, glyph, color, onGlyph, onColour }: AvatarPickerProps) {
+  return (
+    <>
+      <fieldset className="avatar-row" role="radiogroup" aria-label="Avatar shape">
+        <label className="avatar-choice">
+          <input type="radio" name="glyph" aria-label="Initial"
+                 checked={glyph === null} onChange={() => onGlyph(null)} />
+          <Avatar name={name} id={viewerId} size={28} avatar={null} avatarColor={color} />
+        </label>
+        {GLYPHS.map(g => (
+          <label className="avatar-choice" key={g}>
+            <input type="radio" name="glyph" aria-label={g}
+                   checked={glyph === g} onChange={() => onGlyph(g)} />
+            <Avatar name={name} id={viewerId} size={28} avatar={g} avatarColor={color} />
+          </label>
+        ))}
+      </fieldset>
+
+      <fieldset className="avatar-row" role="radiogroup" aria-label="Avatar colour">
+        <label className="avatar-choice">
+          <input type="radio" name="avatarColour" aria-label="Default colour"
+                 checked={color === null} onChange={() => onColour(null)} />
+          <Avatar name={name} id={viewerId} size={28} avatar={glyph} avatarColor={null} />
+        </label>
+        {AVATAR_COLORS.map((c, i) => (
+          <label className="avatar-choice" key={c}>
+            <input type="radio" name="avatarColour" aria-label={`Colour ${i + 1}`}
+                   checked={color === c} onChange={() => onColour(c)} />
+            <Avatar name={name} id={viewerId} size={28} avatar={glyph} avatarColor={c} />
+          </label>
+        ))}
+      </fieldset>
+    </>
+  )
+}
+```
+
+Every swatch previews the person's ACTUAL current selection of the other axis, which is why both rows take `glyph` and `color` rather than only their own.
+
+- [ ] **Step 4: Build the dialog**
+
+`ui/src/app/IdentityDialog.tsx`:
 
 ```tsx
 import { useState } from 'react'
 import { FormDialog } from '../components/FormDialog'
-import { Avatar } from '../components/Avatar'
-import { AVATAR_KEYS } from '../assets/avatars'
+import { AvatarPicker } from '../components/AvatarPicker'
 import { useSetDisplayName } from '../data/queries'
 
 // Local, matching Shell.tsx:88, InsightsPage.tsx:22 and DaemonGroup.tsx:11.
-// There is no shared export in this repo; three files each keep their own
-// copy, and inventing a fourth module here would be a refactor, not this
-// ticket.
+// There is no shared export in this repo; inventing a fourth module here
+// would be a refactor, not this ticket.
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error'
 }
@@ -1035,30 +1112,33 @@ function errorMessage(error: unknown): string {
 interface IdentityDialogProps {
   currentName: string
   currentAvatar: string | null
+  currentAvatarColor: string | null
   viewerId: string
   onClose: () => void
 }
 
-export function IdentityDialog({ currentName, currentAvatar, viewerId, onClose }: IdentityDialogProps) {
+export function IdentityDialog({
+  currentName, currentAvatar, currentAvatarColor, viewerId, onClose,
+}: IdentityDialogProps) {
   const [name, setName] = useState(currentName)
-  const [avatar, setAvatar] = useState<string | null>(currentAvatar)
+  const [glyph, setGlyph] = useState<string | null>(currentAvatar)
+  const [colour, setColour] = useState<string | null>(currentAvatarColor)
   const save = useSetDisplayName()
   const trimmed = name.trim()
 
   function submit(e: React.FormEvent) {
     e.preventDefault()
     // Refused locally: an empty name is not a question worth a round trip,
-    // and the daemon would answer 400 anyway.
+    // and the daemon answers 400 for it anyway.
     if (!trimmed || trimmed.length > 80) return
-    save.mutate({ name: trimmed, avatar }, { onSuccess: onClose })
+    save.mutate({ name: trimmed, avatar: glyph, avatarColor: colour }, { onSuccess: onClose })
   }
 
   return (
-    <FormDialog titleId="identity-title" title="Your name" onClose={onClose}>
+    <FormDialog titleId="identity-title" title="Your name" wide onClose={onClose}>
       <form onSubmit={submit}>
         {/* Exactly the field shape TeamGroup.tsx:46-50 uses for the team
-            rename: a .dialog-field label wrapping a hint and the input.
-            There is no .dialog-label class in components.css. */}
+            rename. There is no .dialog-label class in components.css. */}
         <label className="dialog-field">
           Display name
           <div className="dialog-field-hint">Your teammates see this. It has to be different from theirs.</div>
@@ -1072,22 +1152,14 @@ export function IdentityDialog({ currentName, currentAvatar, viewerId, onClose }
           />
         </label>
 
-        <fieldset className="identity-marks">
-          <legend className="dialog-field">Avatar</legend>
-          <label className="identity-mark">
-            <input type="radio" name="avatar" checked={avatar === null}
-                   onChange={() => setAvatar(null)} />
-            <Avatar name={trimmed || currentName} id={viewerId} avatar={null} size={28} />
-            <span className="identity-mark-name">Initial</span>
-          </label>
-          {AVATAR_KEYS.map(key => (
-            <label className="identity-mark" key={key}>
-              <input type="radio" name="avatar" aria-label={key}
-                     checked={avatar === key} onChange={() => setAvatar(key)} />
-              <Avatar name={trimmed || currentName} id={viewerId} avatar={key} size={28} />
-            </label>
-          ))}
-        </fieldset>
+        <AvatarPicker
+          name={trimmed || currentName}
+          viewerId={viewerId}
+          glyph={glyph}
+          color={colour}
+          onGlyph={setGlyph}
+          onColour={setColour}
+        />
 
         {save.isError && (
           <p className="dialog-error" role="alert">{errorMessage(save.error)}</p>
@@ -1106,34 +1178,32 @@ export function IdentityDialog({ currentName, currentAvatar, viewerId, onClose }
 }
 ```
 
-The class names above are verified against `ui/src/components/components.css:313-335` — `.dialog-field`, `.dialog-field-hint`, `.dialog-input`, `.dialog-error`, `.dialog-actions`, `.dialog-btn`, `.dialog-btn-primary` all exist. `.dialog-label` does not; do not use it.
+The class names are verified against `ui/src/components/components.css:313-335` — `.dialog-field`, `.dialog-field-hint`, `.dialog-input`, `.dialog-error`, `.dialog-actions`, `.dialog-btn`, `.dialog-btn-primary` all exist. `.dialog-label` does not; do not use it.
 
-- [ ] **Step 4: Style the picker**
+- [ ] **Step 5: Style the two rows**
 
 Add to `ui/src/app/app.css`:
 
 ```css
-.identity-marks { border: 0; padding: 0; margin: 12px 0 0; display: flex; flex-wrap: wrap; gap: 8px; }
-.identity-mark { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.identity-mark-name { font-size: 12px; }
+.avatar-row { border: 0; padding: 0; margin: 12px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.avatar-choice { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [ ] **Step 6: Run the tests**
 
 Run: `cd ui && npx tsc --noEmit`
 Expected: clean.
 
 Run: `cd ui && npx vitest run src/app/IdentityDialog.test.tsx`
-Expected: PASS, 4 cases.
+Expected: PASS, 5 cases.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add ui/src/app/IdentityDialog.tsx ui/src/app/IdentityDialog.test.tsx ui/src/app/app.css
-git commit -m "feat(ui): identity dialog for renaming yourself and picking a mark"
+git add ui/src/components/AvatarPicker.tsx ui/src/app/IdentityDialog.tsx ui/src/app/IdentityDialog.test.tsx ui/src/app/app.css
+git commit -m "feat(ui): shape-and-colour avatar picker in the identity editor"
 ```
 
----
 
 ### Task 7: Wire the rail footer
 
@@ -1214,18 +1284,24 @@ Inside the component, beside the existing `identity` const (line 138):
 ```tsx
   const [editingIdentity, setEditingIdentity] = useState(false)
   const avatar = account?.user?.avatar ?? null
+  const avatarColor = account?.user?.avatarColor ?? null
   const viewerId = account?.viewerId ?? ''
 
-  // The roster this app already fetches, reshaped into the id -> mark map the
-  // Avatar component resolves itself through. `onTeam` gates it because
+  // The roster this app already fetches, reshaped into the id -> avatar map
+  // the Avatar component resolves itself through. `onTeam` gates it because
   // getMembers() is meaningless without a team.
   const members = useMembers(onTeam)
   const avatarsById = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const person of members.data ?? []) if (person.avatar) m.set(person.id, person.avatar)
-    if (viewerId && avatar) m.set(viewerId, avatar)
+    const m = new Map<string, { glyph: string; color: string | null }>()
+    for (const person of members.data ?? []) {
+      if (person.avatar) m.set(person.id, { glyph: person.avatar, color: person.avatarColor })
+    }
+    // The viewer's own row, from the account query rather than the roster:
+    // it updates the instant the save returns, and it is also the only
+    // source when the roster query is disabled (not on a team).
+    if (viewerId && avatar) m.set(viewerId, { glyph: avatar, color: avatarColor })
     return m
-  }, [members.data, viewerId, avatar])
+  }, [members.data, viewerId, avatar, avatarColor])
 ```
 
 Replace the `signedIn` identity span (line 217-219) with:
@@ -1257,6 +1333,7 @@ Replace the `signedIn` identity span (line 217-219) with:
                 <IdentityDialog
                   currentName={account?.user?.displayName || ''}
                   currentAvatar={avatar}
+                  currentAvatarColor={avatarColor}
                   viewerId={viewerId}
                   onClose={() => setEditingIdentity(false)}
                 />
@@ -1297,7 +1374,94 @@ git commit -m "feat(ui): double-click the rail name to change it"
 
 ---
 
-### Task 8: Reconcile the docs
+### Task 8: The Settings entry point
+
+**Files:**
+- Modify: `ui/src/features/settings/SettingsPage.tsx`
+- Test: `ui/src/features/settings/SettingsPage.test.tsx`
+
+**Interfaces:**
+- Consumes: `IdentityDialog` (Task 6), `useTeamAccount` (existing, `queries.ts`).
+- Produces: no new exports.
+
+Andrew asked for the avatar and name to be editable from Settings **as well as** the rail footer. This task adds the second door, not a second control: it opens the same `IdentityDialog`, so there is one picker, one validation path and one mutation. Do not build a parallel form here.
+
+- [ ] **Step 1: Write the failing test**
+
+Read the file's existing render helper first — run `sed -n '1,40p' ui/src/features/settings/SettingsPage.test.tsx` and follow whatever it uses. Then add:
+
+```tsx
+it('opens the identity editor from the Settings row', async () => {
+  renderSettings()   // use this file's existing helper name
+  await userEvent.click(await screen.findByRole('button', { name: /change name/i }))
+  expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+})
+
+// One control, two doors: Settings must not grow its own picker.
+it('shows the same shape and colour rows as the rail editor', async () => {
+  renderSettings()
+  await userEvent.click(await screen.findByRole('button', { name: /change name/i }))
+  expect(await screen.findByRole('radiogroup', { name: /avatar shape/i })).toBeInTheDocument()
+  expect(screen.getByRole('radiogroup', { name: /avatar colour/i })).toBeInTheDocument()
+})
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cd ui && npx vitest run src/features/settings/SettingsPage.test.tsx`
+Expected: FAIL — no such button.
+
+- [ ] **Step 3: Add the row**
+
+In `ui/src/features/settings/SettingsPage.tsx`, add a `SettingRow` in the "You"/personal area — beside the existing rows around line 365-382, NOT inside `TeamGroup` (which only renders when `settings.team` exists, and your own name is editable whether or not you are on a team).
+
+```tsx
+const account = useTeamAccount()
+const [editingIdentity, setEditingIdentity] = useState(false)
+```
+
+```tsx
+{account.data?.authenticated && (
+  <SettingRow
+    label="Your name and avatar"
+    description="What your teammates see. Your name has to be different from theirs."
+    testId="setting-identity"
+  >
+    <button type="button" className="setting-btn" onClick={() => setEditingIdentity(true)}>
+      Change name
+    </button>
+  </SettingRow>
+)}
+{editingIdentity && account.data?.user && (
+  <IdentityDialog
+    currentName={account.data.user.displayName || ''}
+    currentAvatar={account.data.user.avatar}
+    currentAvatarColor={account.data.user.avatarColor}
+    viewerId={account.data.viewerId ?? ''}
+    onClose={() => setEditingIdentity(false)}
+  />
+)}
+```
+
+Check the button class other Settings rows use — run `grep -n 'className="setting-btn\|className="srow' ui/src/features/settings/SettingsPage.tsx | head -5` — and match it rather than introducing a new one.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `cd ui && npx tsc --noEmit`
+Expected: clean.
+
+Run: `cd ui && npx vitest run src/features/settings/SettingsPage.test.tsx src/app/IdentityDialog.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add ui/src/features/settings
+git commit -m "feat(ui): change your name and avatar from Settings too"
+```
+
+
+### Task 9: Reconcile the docs
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-08-12-member-identity-rename-design.md`
