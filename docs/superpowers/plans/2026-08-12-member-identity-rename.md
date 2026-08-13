@@ -384,8 +384,10 @@ const { createMockSupabase } = require('../mock-supabase');
 
 const HOME_A = path.join(ROOT, 'home-name-a');
 const HOME_B = path.join(ROOT, 'home-name-b');
-const homeFor = { a: HOME_A, b: HOME_B };
-const portFor = { a: P(88), b: P(89) };
+// C never joins a team: the teamless case has its own credential-writing rule.
+const HOME_C = path.join(ROOT, 'home-name-c');
+const homeFor = { a: HOME_A, b: HOME_B, c: HOME_C };
+const portFor = { a: P(88), b: P(89), c: P(91) };
 
 async function main() {
   const mock = createMockSupabase();
@@ -459,6 +461,20 @@ async function main() {
       const res = await apiAs('b', 'POST', '/api/team/set-display-name', { name: '   ', avatar: null });
       assert.strictEqual(res.status, 400);
       assert.strictEqual(credsOf('b').displayName, 'BODHI');
+    });
+
+    await check('a teamless account keeps its name instead of being nulled out', async () => {
+      // set_display_name reports what it WROTE, so an account on no teams gets
+      // back (null, null, null, 0). Writing those nulls to credentials.json
+      // would erase the name of every signed-in user who has not joined a team.
+      process.env.MEMBRIDGE_HOME = HOME_C;
+      util.ensureConfig();
+      await teamsync.signup(util.getConfig(), 'c@test.dev', 'pw-c', 'Solo');
+      const res = await apiAs('c', 'POST', '/api/team/set-display-name', { name: 'Solozz', avatar: 'halo', avatarColor: null });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.teams, 0);
+      assert.strictEqual(credsOf('c').displayName, 'Solozz');
+      assert.strictEqual(credsOf('c').avatar, 'halo');
     });
 
     await check('clearing the avatar stores null, not the previous mark', async () => {
@@ -540,9 +556,19 @@ async function setDisplayName(config, name, avatar) {
   const row = (rows && rows[0]) || {};
   // Store what the server RETURNED, not what we asked for: it trims, and the
   // two must not be allowed to disagree.
+  //
+  // EXCEPT with no team rows to write. set_display_name reports what it
+  // actually wrote, so a teamless account gets back (null, null, null, 0) --
+  // truthfully, because there was nothing server-side to write. Storing those
+  // nulls would erase the name of every signed-in user who has not joined a
+  // team yet. teams === 0 means the local file IS the record, so the
+  // requested values are the written values.
+  const stored = row.teams
+    ? { displayName: row.display_name, avatar: row.avatar || null, avatarColor: row.avatar_color || null }
+    : { displayName: String(name).trim(), avatar: avatar || null, avatarColor: avatarColor || null };
   const next = loadCredentials() || creds;
-  saveCredentials({ ...next, displayName: row.display_name, avatar: row.avatar || null });
-  return { displayName: row.display_name, avatar: row.avatar || null, teams: row.teams || 0 };
+  saveCredentials({ ...next, ...stored });
+  return { ...stored, teams: row.teams || 0 };
 }
 ```
 
