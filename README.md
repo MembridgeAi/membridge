@@ -174,14 +174,14 @@ intent, decisions and gotchas. See
 Everything starts local. No cloud, no account, no API keys until you join a
 team — and the team layer is opt-in per project.
 
-- **End-to-end encrypted content.** Your asks, summaries, decisions, gotchas,
-  file paths and change notes are secretbox-encrypted with a per-team key sealed
-  to each member's public key. **The server cannot read them.** Private keys
-  never leave the macOS Keychain.
-- **What the server still sees.** Routing metadata travels outside the
-  ciphertext: project, timestamp, session, which AI tool, and **your display
-  name**. Content is sealed; who-worked-on-what-and-when is not. See the
-  [encryption spec](docs/ENCRYPTION-SPEC.md) §0.1 for the exact field list.
+- **End-to-end encrypted.** Your asks, summaries, decisions, gotchas, file paths
+  and change notes are secretbox-encrypted with a per-team key sealed to each
+  member's public key, so the server stores ciphertext it cannot open. Private
+  keys never leave the macOS Keychain.
+- **Routing details stay readable** so sync and access control can work: project,
+  timestamp, session, which AI tool, and your display name. The content is what
+  gets encrypted. The [encryption spec](docs/ENCRYPTION-SPEC.md) §0.1 lists the
+  exact fields.
 - **Fail-closed.** When encryption can't run, sync **holds and pauses** rather
   than degrading to plaintext.
 - **Secret redaction.** AWS, GitHub, Google, Slack, OpenAI and Anthropic keys,
