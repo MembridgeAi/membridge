@@ -188,6 +188,21 @@ export interface DataClient {
   openMemoryFile(projectPath: string): Promise<void>
   leaveTeam(teamId: string): Promise<void>
 
+  // Hand the owner role to an existing member; the caller becomes an admin in
+  // the same transaction (migration 058 §1). This is the ONLY way an owner can
+  // subsequently leave a team that has other people on it -- leave_team refuses
+  // owners unconditionally, so without a handover first the exit does not
+  // exist. Rejects if the caller is not the owner, if the target is not a
+  // member, or if the target is the caller.
+  transferOwnership(teamId: string, userId: string): Promise<void>
+
+  // Destroy the team and everything it holds. Refused by the backend unless
+  // the caller owns the team AND is its only remaining member, so it can never
+  // reach another person's rows -- but for the caller it is total: the delete
+  // cascades teams -> projects -> memory_entries. Every other team method here
+  // revokes access; this one is the only one that destroys content.
+  disbandTeam(teamId: string): Promise<void>
+
   // Redeem an invite and join the team it belongs to (POST /api/team/join).
   // Takes whatever the user was actually sent: a short invite token, a legacy
   // UUID standing code, or a pasted invite URL -- teamsync.parseInviteToken

@@ -68,6 +68,14 @@ export function auditSentence(event: AuditEvent): string {
     }
     case 'member-joined':
       return 'joined the team'
+    // Neither trigger fires on a handover -- no membership row appears or
+    // vanishes, only two role columns change -- so the daemon writes this row
+    // itself (058 §1). Deliberately not folded into 'role-changed': that reads
+    // "made Sarah owner" and says nothing about the actor giving the role up,
+    // which is the half of the event that matters when you are working out
+    // who runs this team now.
+    case 'ownership-transferred':
+      return `handed ownership to ${targetPhrase(event)}`
     // Distinct from member-removed on purpose: 049 records a voluntary
     // departure, and the daemon records a removal. Being removed and choosing
     // to go are different events, and anyone counting departures has to count

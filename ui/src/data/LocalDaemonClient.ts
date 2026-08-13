@@ -799,6 +799,26 @@ export class LocalDaemonClient implements DataClient {
     this.requestCache.clear()
   }
 
+  async transferOwnership(teamId: string, userId: string): Promise<void> {
+    // Every refusal here is one the person needs to read verbatim -- "only the
+    // team owner can transfer ownership", "that person is not a member of this
+    // team" -- so the body is kept, like every other RPC-backed team mutation.
+    await postReadingError<{ transferred: boolean }>('/api/team/transfer-ownership', { teamId, userId })
+    // The caller's OWN role just changed from owner to admin, which gates
+    // controls across Settings, the members list and the rail. Nothing in the
+    // URL tells the cache that, so clear it wholesale rather than serve an
+    // owner-shaped UI to someone who is now an admin.
+    this.requestCache.clear()
+  }
+
+  async disbandTeam(teamId: string): Promise<void> {
+    await postReadingError<{ disbanded: boolean }>('/api/team/disband', { teamId })
+    // The team this machine was reading from no longer exists. Same reasoning
+    // as leaveTeam, one step further: every cached team-scoped read is now
+    // about something deleted.
+    this.requestCache.clear()
+  }
+
   // GET /api/scan (lib/server.js scanPayload). Tolerant at the boundary the
   // same way every other raw payload is: a row with no path is dropped rather
   // than rendered as a nameless checkbox that adopts nothing.
