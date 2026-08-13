@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-13
+
+The full, sourced notes live in `claude/ops/RELEASE-NOTES-0.4.0.md`; this is
+the digest. Two migrations ship applied (`057_member_identity`,
+`058_owner_exit`, both catalog-verified) and one must be applied with this
+release: `059` revokes `authenticated` EXECUTE on two definer helpers that
+Supabase's default privileges left callable by any signed-in user. Never
+apply `053` — `057` supersedes it, and applying it afterwards silently
+drops the avatar columns from the roster.
+
+### Member identity
+
+- **Rename yourself.** Double-click your name in the bottom-left rail — or
+  use the new Settings row, which opens the same editor — to change your
+  display name. Names are unique within each team, compared case- and
+  whitespace-insensitively, enforced by a partial unique index rather than a
+  client check. Renames apply to every team you belong to atomically.
+- **Pick an avatar.** Fifteen glyphs and ten colours, chosen independently.
+  Null is a real choice: no glyph renders your initial, no colour keeps the
+  one your id already derives, so nobody's avatar changed on upgrade.
+- **Joining under a taken name auto-suffixes** (`marco` → `marco 2`) instead
+  of failing, because a CLI joiner has no input box. Renaming to a taken name
+  errors loudly, because there you do.
+- **Every rename writes an audit row per team**, inside the database
+  transaction, carrying the old and new name — written by the RPC because a
+  plain member's daemon-side audit insert is silently refused by RLS.
+
+### Teams
+
+- **A team owner has a way out**: transfer ownership, or disband a team you
+  are the last member of. The Settings control that always failed for owners
+  is gone.
+- **Hover-to-edit team name**, and a danger zone at the foot of the Team tab.
+
+### Security and privacy
+
+- `search_memory` is gated on project visibility; deleting a project purges
+  its rows from the search index.
+- Date filters reject malformed input instead of comparing dates as text.
+- A sync pass in flight can no longer erase a deletion watermark.
+- Declining the first-run consent dialog now actually disables capture, and
+  the git filter no longer waits on capture consent.
+
+### Interface and accuracy
+
+- The signed-out screen is a real sign-in page; sign-up no longer reports
+  success for an email that already has an account.
+- Insights breakdowns are counted in the database, not a capped local fold.
+- Day cards carry area tags derived from the files a day touched.
+- Token savings are measured by a real BPE tokenizer instead of chars/4; the
+  savings comparison restarts from this version.
+- README and site copy corrected where they claimed more than the code
+  delivers.
+
 ## 0.3.4 — 2026-08-07
 
 Supersedes the never-released 0.3.3 tag. Ships one wave of prompt-sharing
