@@ -126,7 +126,15 @@ const RULES = {
     // single .github file must not headline a session that was really UI work.
     // `ranked` is already sorted by weight, so filtering preserves that order.
     const keep = ranked.filter(([a, n]) => PUNCTUAL.has(a) || n / total >= 0.25)
-    return (keep.length ? keep : ranked.slice(0, 1)).slice(0, 3).map(r => r[0])
+    // Fallback keeps ALL TIED LEADERS, not one. `ranked` is tie-broken by name,
+    // so taking a single entry would present an alphabetical accident as a
+    // claim about where the day's work went -- on a day with five areas at 20%
+    // each, the card would simply assert "Backend". This mirrors the shipped
+    // areaTagsFor (ui/src/features/feed/areaTags.ts); the two must not drift,
+    // because the numbers this script prints are quoted in the spec.
+    const top = ranked.length ? ranked[0][1] : 0
+    const tied = ranked.filter(([, n]) => n === top)
+    return (keep.length ? keep : tied).slice(0, 3).map(r => r[0])
   },
 }
 const RULE_NAMES = ['touched', 'top3', 'material', 'salience']

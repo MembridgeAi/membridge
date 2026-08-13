@@ -114,6 +114,21 @@ A tag that appears on most cards cannot answer "who worked on X", so the rule is
 Resulting distribution: `UI/UX` 45%, `Tests` 41%, `Docs` 36%, `Backend` 36%,
 `Data/Schema` 27%, `Build/CI` 14%, `Integrations` 14%.
 
+**These figures are a snapshot of a live, small corpus, and they drift.** The
+backtest reads one machine's `state.json`, which grows as work happens. Between
+two runs during this design's own implementation the corpus went from 26 to 27
+sessions and `UI/UX` moved from 48% to 52% — over the 50% line — on the
+strength of a single new session. That session was the one implementing this
+feature, which touched nothing but `ui/src/features/feed/`.
+
+Two things follow, and both matter more than the numbers above. First, a
+measurement over ~23 tagged sessions moves ~4 points per session, so no single
+run of this script either proves or disproves the invariant. Second, the
+committed guard is deliberately NOT this script: it is the 18-day modelled
+corpus in `areaTags.test.ts`, which is stable, hand-checkable, and carries a
+canary proving it can detect the degradation it guards against. The backtest
+is corroboration on real shapes; the unit corpus is the gate.
+
 **Known cost of ordering by weight:** a session that touched two MCP files among
 twelve tags as `[Docs][Backend][Integrations]` — the distinctive signal reads
 last. Accepted deliberately; the alternative let one config file headline a
