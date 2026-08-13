@@ -84,7 +84,7 @@ function createMockSupabase() {
   // verifier. Seeded by tests, since the GitHub round trip has no stand-in.
   const authCodes = new Map();
   const teams = new Map();          // teamId -> { id, name, inviteCode }
-  const members = [];               // { teamId, userId, displayName, role }
+  const members = [];               // { teamId, userId, displayName, avatar, avatarColor, role }
   const projects = [];              // { id, teamId, name, repoUrl }
   const entries = [];               // memory_entries rows
   const invites = new Map();        // token -> { token, teamId, expiresAt, maxUses, useCount, revokedAt }
@@ -160,6 +160,20 @@ function createMockSupabase() {
   const isMember = (teamId, userId) => members.some(m => m.teamId === teamId && m.userId === userId);
   const memberRole = (teamId, userId) => (members.find(m => m.teamId === teamId && m.userId === userId) || {}).role || null;
   const isManager = (teamId, userId) => ['owner', 'admin'].includes(memberRole(teamId, userId));
+  // Models 057's BEFORE INSERT trigger: a colliding name is suffixed rather
+  // than refused, because a joiner is often at a CLI with nowhere to retype.
+  const normName = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  function uniqueName(teamId, wanted) {
+    let base = String(wanted || '').trim() || 'member';
+    let attempt = base;
+    let n = 1;
+    while (members.some(m => m.teamId === teamId && !m.nameReleasedAt
+                             && normName(m.displayName) === normName(attempt))) {
+      n += 1;
+      attempt = `${base} ${n}`;
+    }
+    return attempt;
+  }
   const projectTeam = projectId => (projects.find(p => p.id === projectId) || {}).teamId;
   // 028_enforce_project_access_default.sql (can_see_project): three tiers, in
   // order — an explicit project_access row for THIS member wins, otherwise the
@@ -373,7 +387,7 @@ function createMockSupabase() {
       // account. Recorded here or deleteUserCascade's blocker list is vacuous.
       const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdBy: userId, createdAt: new Date().toISOString() };
       teams.set(team.id, team);
-      const ownerRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() };
+      const ownerRow = { teamId: team.id, userId, displayName: uniqueName(team.id, body.p_display_name), role: 'owner', joinedAt: new Date().toISOString() };
       members.push(ownerRow);
       memberInsertTrigger(ownerRow); // 046: no-op for an owner row, called anyway so the gate is what excludes it
       return json(res, 200, [{ team_id: team.id, invite_code: team.inviteCode }]);
@@ -382,7 +396,7 @@ function createMockSupabase() {
       const team = [...teams.values()].find(t => t.inviteCode === body.p_code);
       if (!team) return json(res, 400, { message: 'invalid invite code' });
       if (!isMember(team.id, userId)) {
-        const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
+        const joinRow = { teamId: team.id, userId, displayName: uniqueName(team.id, body.p_display_name), role: 'member', joinedAt: new Date().toISOString() };
         members.push(joinRow);
         memberInsertTrigger(joinRow); // 046
       }
@@ -508,6 +522,39 @@ function createMockSupabase() {
       teams.get(body.p_team).name = body.p_name;
       return json(res, 200, null);
     }
+    if (fn === 'set_display_name') {
+      const name = String(body.p_name || '').trim();
+      const avatar = body.p_avatar || null;
+      const avatarColor = body.p_avatar_color || null;
+      if (name.length < 1 || name.length > 80) {
+        return json(res, 400, { code: 'MB002', message: 'a display name must be between 1 and 80 characters' });
+      }
+      if (avatarColor && !/^#[0-9A-Fa-f]{6}$/.test(avatarColor)) {
+        return json(res, 400, { code: 'MB002', message: 'avatar color must be a 6-digit hex value' });
+      }
+      const myTeams = members.filter(m => m.userId === userId).map(m => m.teamId);
+      const clash = members.find(m => m.userId !== userId && myTeams.includes(m.teamId)
+        && !m.nameReleasedAt && normName(m.displayName) === normName(name));
+      if (clash) {
+        const t = teams.get(clash.teamId);
+        return json(res, 400, {
+          code: 'MB001',
+          message: `somebody on ${t ? t.name : 'your team'} is already called ${name}`,
+        });
+      }
+      // One pass over every team, mirroring the single UPDATE in 057.
+      let n = 0;
+      for (const m of members) {
+        if (m.userId === userId) { m.displayName = name; m.avatar = avatar; m.avatarColor = avatarColor; m.nameReleasedAt = null; n += 1 }
+      }
+      // Report what was ACTUALLY WRITTEN. With no member rows to update there
+      // was nothing server-side to write, so this returns nulls rather than
+      // echoing the request back — matching 057's real RPC exactly.
+      const row = n
+        ? { display_name: name, avatar, avatar_color: avatarColor, teams: n }
+        : { display_name: null, avatar: null, avatar_color: null, teams: 0 };
+      return json(res, 200, [row]);
+    }
     if (fn === 'rotate_invite') {
       if (!isManager(body.p_team, userId)) return json(res, 403, { message: 'only a team owner or admin can rotate the invite code' });
       const t = teams.get(body.p_team);
@@ -546,6 +593,7 @@ function createMockSupabase() {
         // Fixtures that do not set it get null, i.e. live -- matching a
         // pre-053 backend, which is the state production is in right now.
         .map(m => ({ user_id: m.userId, display_name: m.displayName, role: m.role,
+                     avatar: m.avatar || null, avatar_color: m.avatarColor || null,
                      joined_at: m.joinedAt || null, deleted_at: m.deletedAt || null }));
       return json(res, 200, rows);
     }
