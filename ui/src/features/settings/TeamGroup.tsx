@@ -66,6 +66,15 @@ function RenameDialog({ team, onClose }: { team: NonNullable<Settings['team']>; 
  *  role="dialog" per the global rule, backed by DataClient.leaveTeam. */
 export function TeamGroup({ team }: TeamGroupProps) {
   const isTeamAdmin = team.role === 'owner' || team.role === 'admin'
+  // leave_team (045:96) raises "the owner cannot leave their own team" for
+  // every owner, of every team, regardless of member count -- and set_role
+  // cannot grant 'owner' (002:179 accepts only admin/member), so there is no
+  // transfer to escape through either. This button was rendered for owners
+  // unconditionally, so the one role that can NEVER succeed was the role most
+  // likely to press it. Disabled with the reason attached rather than hidden:
+  // an owner looking for the exit needs to know why there isn't one, not to
+  // find the control missing and assume the app forgot it.
+  const isOwner = team.role === 'owner'
   const leaveTeam = useLeaveTeam()
   const rotateInvite = useRotateInviteCode()
   const [confirming, setConfirming] = useState(false)
@@ -138,10 +147,21 @@ export function TeamGroup({ team }: TeamGroupProps) {
         {isTeamAdmin && (
           <button type="button" className="settings-btn" onClick={() => setRenaming(true)}>Rename</button>
         )}
-        <button type="button" className="settings-btn settings-btn-danger" onClick={() => { setError(null); setConfirming(true) }}>
+        <button
+          type="button"
+          className="settings-btn settings-btn-danger"
+          disabled={isOwner}
+          title={isOwner ? "The owner can't leave their own team." : undefined}
+          onClick={() => { setError(null); setConfirming(true) }}
+        >
           Leave team
         </button>
       </SettingRow>
+      {isOwner && (
+        <p className="settings-group-hint" data-testid="owner-cannot-leave">
+          You own this team, and the owner can't leave it.
+        </p>
+      )}
 
       {/* The standing invite code is long-lived and unlimited-use, so a leak
           has no remedy except replacing it. That was CLI-only, which meant a
@@ -215,7 +235,17 @@ export function TeamGroup({ team }: TeamGroupProps) {
       {confirming && (
         <ConfirmDialog
           title={`Leave ${team.name}?`}
-          message="You'll lose access to every project this team shares. An owner or admin can re-invite you later."
+          // What leaving does to MEMORY, which is the part people get wrong.
+          // remove_member and leave_team delete the team_members row and
+          // nothing else: memory_entries hang off projects, not off
+          // membership, so everything you have synced stays readable by the
+          // team after you go. Deleting it is a separate, deliberate act (the
+          // My data row above), and migration 035 scopes that DELETE on
+          // author_id alone precisely so an ex-member can still do it.
+          // The re-invite sentence is only true because the button above is
+          // now owner-disabled -- anyone reaching this dialog is an admin or
+          // member, so an owner exists who can re-invite them.
+          message="You'll lose access to every project this team shares, and to your teammates' memory. What you've already shared stays with the team — remove it separately with Delete my data. An owner or admin can re-invite you later."
           confirmLabel="Leave team"
           destructive
           pending={leaveTeam.isPending}

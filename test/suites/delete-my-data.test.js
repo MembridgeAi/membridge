@@ -272,6 +272,50 @@ async function main() {
       assert.ok(!proj.teamPushTs, 'its push cursor was moved by somebody else\'s deletion');
     });
 
+    // THE WATERMARK MUST SURVIVE AN IN-FLIGHT SYNC PASS.
+    //
+    // state.json has no locking, and syncTeams is one long
+    // `loadState() → await network… → saveState(state)` cycle: it holds an
+    // in-memory copy across seconds of HTTP. The daemon serves
+    // /api/team/delete-my-data from that SAME process, so a deletion
+    // confirmed while a pass is in flight writes its watermark to disk and the
+    // pass then saves its own stale copy over the top. No clock skew, no
+    // second process, no unusual timing — a 60-second tick that takes a couple
+    // of seconds and a user who clicks Delete during it.
+    //
+    // The consequence is the exact failure this whole file exists to prevent,
+    // reached by a different door: the watermark is gone, the push cursor is
+    // back where the pass left it, and the next tick re-uploads everything the
+    // user just erased. Their data reappears on the backend and the audit trail
+    // says it was deleted.
+    //
+    // Modelled here by replaying that sequence exactly rather than by racing a
+    // timer: capture the state a pass would have loaded BEFORE the deletion,
+    // then save it after, which is what the pass's final line does.
+    await check('a sync pass that was already in flight cannot erase the deletion watermark', () => {
+      process.env.MEMBRIDGE_HOME = HOME_MEMBER;
+      const after = util.loadState();
+      const watermark = after.projects[PROJ_MEMBER].teamDeletedThroughTs;
+      assert.ok(watermark, 'fixture: the watermark must be set before this check runs');
+
+      // What a pass that started BEFORE the deletion is holding: the same
+      // state, minus the fields the deletion wrote.
+      const inFlight = JSON.parse(JSON.stringify(after));
+      delete inFlight.projects[PROJ_MEMBER].teamDeletedThroughTs;
+      inFlight.projects[PROJ_MEMBER].teamPushTs = lastPushedTs;
+      inFlight.projects[PROJ_MEMBER].teamPushSig = { stale: 'sig' };
+
+      util.saveState(inFlight); // the pass's closing line
+
+      const reread = util.loadState().projects[PROJ_MEMBER];
+      assert.strictEqual(reread.teamDeletedThroughTs, watermark,
+        'an in-flight sync pass erased the deletion watermark — the next tick re-uploads everything the user deleted');
+      assert.strictEqual(reread.teamPushTs, watermark,
+        'the push cursor was rolled back below the deleted entries');
+      assert.ok(!reread.teamPushSig,
+        'the stale signature map came back, describing rows that no longer exist');
+    });
+
     // THE WATERMARK IS AN INSTANT, NOT A STRING.
     //
     // Every value the watermark is compared against is produced locally today

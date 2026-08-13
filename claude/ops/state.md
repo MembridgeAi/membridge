@@ -262,7 +262,12 @@ launch at login, plus the docs and these ops files.
 
 1. **Security Tasks 2 through 9.** Task 1 is merged, but its human verification,
    a live sign-in and a replayed callback, has not happened.
-2. **MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.
+2. ~~**MIN_COMPRESSION recalibration**, which unblocks the BPE tokenizer.~~
+   **DONE** — re-measured against the honest tokenizer over 283 real files; the
+   value stays `2.25` and no behaviour changed. The predicted drop in serves is
+   a Markdown-only artefact that sits nowhere near the floor. Evidence and the
+   full reasoning: `claude/ops/decisions.md`, pinned by
+   `test/suites/compression-floor.test.js`.
 3. **The 21 to 24 serve gap**, tracked separately and deliberately not folded
    into the recalibration.
 4. **Land Andrew's `liveBasis` work.** As of 2026-08-03 it is five files,

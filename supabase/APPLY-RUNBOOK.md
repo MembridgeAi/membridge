@@ -39,12 +39,11 @@ It starts at **037**, the point from which parallel lanes began allocating concu
 
 | 056 | `team_feed` off the default PUBLIC grant that four drop+create migrations kept restoring, with the paired grant that stops the revoke being an outage | `agent-insights-agg` | no |
 
-| 057 | Per-team unique display names (case/whitespace-insensitive), a member avatar choice, and `set_display_name` | `feat/member-identity-rename` | yes (2026-08-13, unverified — see MIGRATION-STATE.md) |
+| 057 | Per-team unique display names (case/whitespace-insensitive), a member avatar choice, and `set_display_name` | `feat/member-identity-rename` | yes (2026-08-13, **catalog-verified** 2026-08-13 — see MIGRATION-STATE.md) |
+| 058 | `transfer_ownership` and `delete_team` — the owner of a team could never leave it and never delete it, because `leave_team` refuses owners, `set_role` cannot grant 'owner' and no disband existed. `delete_team` is gated on owner AND exactly one remaining member, so it can never reach another person's memory | `feat/settings-team-danger-zone` | yes |
 | 059 | Revokes `authenticated` EXECUTE on `unique_member_name`/`team_members_dedupe_name` — closes the cross-team display-name enumeration oracle that 057's `public, anon`-only revoke left open (Supabase grants `authenticated` EXECUTE on new public-schema functions by default, and 057 never named that role) | `feat/member-identity-rename` | no |
 
-**058 is claimed elsewhere** — on branch `feat/settings-team-danger-zone`, not visible from this branch, so its row is not written here to avoid guessing at its content; that branch's own commit is the record for it.
-
-**Next free number: 060.**
+**Next free number: 060.** 057, 058 and 059 are all claimed and all now visible on this branch — the two "claimed elsewhere" notes that stood here while the lanes were separate are gone, because the lanes have met.
 
 
 To claim one: add the row first, in the same commit as the migration. If you are on a branch that cannot see another lane's files, this table is the only thing that will tell you the number is taken — which is exactly the situation that produced all three collisions.

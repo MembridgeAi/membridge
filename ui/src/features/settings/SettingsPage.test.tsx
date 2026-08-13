@@ -630,7 +630,12 @@ describe('SettingsPage', () => {
     const row = await screen.findByTestId('setting-plaintext')
     expect(within(row).queryByRole('switch')).toBeNull()
     expect(within(row).queryByRole('button')).toBeNull()
-    expect(within(row).getByText(/change it in your config file \(team\.encrypt, team\.plaintextOff\)/i)).toBeInTheDocument()
+    // "where it is actually changed" moved out of the grey description and
+    // into the padlocked aside, because this row now sits directly beneath
+    // rows that ARE editable in-app and a sentence in prose was not enough to
+    // tell them apart. The assertion follows the fact, not the old sentence:
+    // the row must still name the config file and both keys.
+    expect(within(row).getByText(/set in your config file · team\.encrypt, team\.plaintextOff/i)).toBeInTheDocument()
     expect(screen.queryByText(/share plaintext with team/i)).toBeNull()
   })
 
@@ -651,9 +656,23 @@ describe('SettingsPage', () => {
       return screen.findByTestId('setting-plaintext')
     }
 
-    it('says ciphertext only when nothing readable is stored', async () => {
+    // "content sealed", not "ciphertext only": the routing envelope
+    // (project, author_id, author_name, ts, source, session) ships in clear --
+    // docs/ENCRYPTION-SPEC.md 0.1. The old chip claimed the server holds
+    // nothing readable at all, which is not true, so the assertion pins the
+    // narrower claim AND pins that the broader one is gone.
+    it('says content is sealed when no readable copy is stored', async () => {
       const row = await withPrivacy({ endToEnd: true, plaintextShared: false })
-      expect(within(row).getByText(/end-to-end, ciphertext only/i)).toBeInTheDocument()
+      expect(within(row).getByText(/end-to-end, content sealed/i)).toBeInTheDocument()
+      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+    })
+
+    it('never claims nothing readable reaches the server', async () => {
+      const row = await withPrivacy({ endToEnd: true, plaintextShared: false })
+      expect(within(row).queryByText(/nothing readable is stored/i)).toBeNull()
+      // and it names the metadata that does travel in clear
+      expect(within(row).getByText(/routing metadata/i)).toBeInTheDocument()
+      expect(within(row).getByText(/display name/i)).toBeInTheDocument()
     })
 
     it('warns when rows are encrypted but a readable copy is stored too', async () => {
@@ -661,7 +680,7 @@ describe('SettingsPage', () => {
       const chip = within(row).getByText(/end-to-end, readable copy also stored/i)
       expect(chip.className).toMatch(/chip-warn/)
       expect(within(row).getByText(/the server can read your memory/i)).toBeInTheDocument()
-      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+      expect(within(row).queryByText(/content sealed/i)).toBeNull()
     })
 
     // With no key the daemon's plaintext-nulling never runs (it lives inside
@@ -676,7 +695,7 @@ describe('SettingsPage', () => {
       // No reassuring chip of any kind -- the row's description explains what
       // end-to-end MEANS, which is not the same as claiming it is in force.
       expect(row.querySelector('.chip-ok')).toBeNull()
-      expect(within(row).queryByText(/ciphertext only/i)).toBeNull()
+      expect(within(row).queryByText(/content sealed/i)).toBeNull()
     })
   })
 
@@ -863,8 +882,13 @@ describe('SettingsPage', () => {
     })
   })
 
+  // role: 'admin', not the fixture's default 'owner'. leave_team refuses every
+  // owner (045:96), so the Leave button is disabled for them and an owner can
+  // never reach this flow. These two tests are about the flow's MECHANICS --
+  // confirm before calling, surface a rejection -- so they run as the role
+  // that can actually perform it. Owner behaviour has its own test below.
   it('leaves the team only after confirming in a dialog, through a real DataClient call', async () => {
-    const client = new FakeDataClient()
+    const client = new FakeDataClient({ role: 'admin' })
     const spy = vi.spyOn(client, 'leaveTeam')
     renderWith(client, <SettingsPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^leave team$/i }))
@@ -875,13 +899,28 @@ describe('SettingsPage', () => {
   })
 
   it('surfaces a failed leave-team instead of silently closing the dialog', async () => {
-    const client = new FakeDataClient()
+    const client = new FakeDataClient({ role: 'admin' })
     vi.spyOn(client, 'leaveTeam').mockRejectedValue(new Error('leave rejected'))
     renderWith(client, <SettingsPage />)
     await userEvent.click(await screen.findByRole('button', { name: /^leave team$/i }))
     const dialog = await screen.findByRole('dialog')
     await userEvent.click(within(dialog).getByRole('button', { name: /^leave team$/i }))
     expect(await screen.findByText(/leave rejected/i)).toBeInTheDocument()
+  })
+
+  // The defect this replaces: Leave team was rendered for owners
+  // unconditionally, and leave_team refuses every owner, so the one role that
+  // could never succeed got a live button and a 500 for pressing it.
+  it('never offers an owner a leave they cannot perform', async () => {
+    const client = new FakeDataClient({ role: 'owner' })
+    const spy = vi.spyOn(client, 'leaveTeam')
+    renderWith(client, <SettingsPage />)
+    const leave = await screen.findByRole('button', { name: /^leave team$/i })
+    expect(leave).toBeDisabled()
+    await userEvent.click(leave)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(spy).not.toHaveBeenCalled()
+    expect(await screen.findByTestId('owner-cannot-leave')).toBeInTheDocument()
   })
 
   it('saves edited redaction patterns through a real DataClient call', async () => {

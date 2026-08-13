@@ -207,12 +207,71 @@ describe('TeamPage, signed in on a team', () => {
     expect(signOut).toHaveBeenCalled()
   })
 
-  // The Leave-team danger zone stays in Settings; this page must not grow a
-  // second one.
-  it('offers no leave-team control, that stays in Settings', async () => {
-    renderWith(new FakeDataClient(), <TeamPage />)
+  // REVERSES an earlier decision, deliberately and on the owner's
+  // instruction (2026-08-12): this page used to assert it had NO leave
+  // control, because leaving lived only in Settings. The irreversible team
+  // operations now gather in one Danger zone at the foot of this tab, which is
+  // also the only place transfer and disband exist. Settings keeps its Leave
+  // button: someone who has already decided goes there directly.
+  describe('danger zone', () => {
+    it('offers an owner with teammates a transfer, and refuses the leave that cannot work', async () => {
+      renderWith(new FakeDataClient({ role: 'owner' }), <TeamPage />)
+      await screen.findByText('MemBridge HQ')
+      expect(await screen.findByRole('button', { name: /transfer ownership/i })).toBeEnabled()
+      // leave_team refuses every owner (045:96), so the control states the
+      // reason rather than failing when pressed.
+      expect(screen.getByTestId('danger-leave')).toBeDisabled()
+      expect(screen.queryByRole('button', { name: /disband/i })).toBeNull()
+    })
+
+    it('offers an admin a leave, and neither transfer nor disband', async () => {
+      renderWith(new FakeDataClient({ role: 'admin' }), <TeamPage />)
+      await screen.findByText('MemBridge HQ')
+      expect(await screen.findByTestId('danger-leave')).toBeEnabled()
+      expect(screen.queryByRole('button', { name: /transfer ownership/i })).toBeNull()
+      expect(screen.queryByRole('button', { name: /disband/i })).toBeNull()
+    })
+
+    // The trap this whole branch exists to remove: sole owner, no transfer
+    // target, and previously no exit of any kind.
+    it('offers a sole owner disband, and no leave at all', async () => {
+      renderWith(new FakeDataClient({ role: 'owner', teamSize: 1 }), <TeamPage />)
+      await screen.findByText('MemBridge HQ')
+      expect(await screen.findByRole('button', { name: /disband team/i })).toBeEnabled()
+      expect(screen.queryByTestId('danger-leave')).toBeNull()
+      expect(screen.queryByRole('button', { name: /transfer ownership/i })).toBeNull()
+    })
+  })
+
+  it('renames the team inline from the header pill', async () => {
+    const client = new FakeDataClient({ role: 'owner' })
+    const spy = vi.spyOn(client, 'renameTeam')
+    renderWith(client, <TeamPage />)
+    await userEvent.click(await screen.findByTestId('team-name-pill'))
+    const field = await screen.findByTestId('team-name-pill-input')
+    await userEvent.clear(field)
+    await userEvent.type(field, 'Renamed HQ')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(spy).toHaveBeenCalledWith('team-1', 'Renamed HQ')
+  })
+
+  // Save is the affordance that says "there is something to write". An
+  // unchanged field must not offer one.
+  it('offers no save until the name actually changes', async () => {
+    renderWith(new FakeDataClient({ role: 'owner' }), <TeamPage />)
+    await userEvent.click(await screen.findByTestId('team-name-pill'))
+    await screen.findByTestId('team-name-pill-input')
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
+  })
+
+  // The name still renders -- a member must be able to READ it. What they must
+  // not get is an affordance that would be refused: no button, nothing to
+  // click, no pencil on hover.
+  it('gives a plain member the name as text, with no rename affordance', async () => {
+    renderWith(new FakeDataClient({ role: 'member' }), <TeamPage />)
     await screen.findByText('MemBridge HQ')
-    expect(screen.queryByRole('button', { name: /leave team/i })).toBeNull()
+    expect(screen.getByTestId('team-name-pill').tagName).toBe('SPAN')
+    expect(screen.queryByRole('button', { name: /team name/i })).toBeNull()
   })
 })
 

@@ -692,7 +692,10 @@ export class LocalDaemonClient implements DataClient {
   async removeMember(memberId: string): Promise<void> {
     const team = await this.firstTeam()
     if (!team) throw new Error('removeMember requires a team, and this machine is not on one.')
-    await post('/api/team/remove-member', { teamId: team.team_id, userId: memberId })
+    // Same reason as leaveTeam below: remove_member raises "only a team owner
+    // or admin can remove members" and "the team owner cannot be removed"
+    // (002:179). Both are answers the person clicking Remove needs to read.
+    await postReadingError('/api/team/remove-member', { teamId: team.team_id, userId: memberId })
   }
 
   // GET /api/team/audit (lib/api-access.js readAudit) is also already wired
@@ -816,10 +819,38 @@ export class LocalDaemonClient implements DataClient {
   }
 
   async leaveTeam(teamId: string): Promise<void> {
-    await post<{ left: boolean }>('/api/team/leave', { teamId })
+    // postReadingError, not post: /api/team/leave is a POLICY gate, not just a
+    // write. leave_team raises "the owner cannot leave their own team"
+    // (045:96), the daemon's catch-all forwards that message in the 500 body,
+    // and plain post() threw it away and reported "/api/team/leave failed:
+    // 500" -- a refusal the system could explain exactly, rendered as an
+    // unexplained server fault. Every other RPC-backed team mutation here
+    // (rename, rotate, create, join) already reads the body; this one was the
+    // holdout.
+    await postReadingError<{ left: boolean }>('/api/team/leave', { teamId })
     // Wide-reaching effect (this machine's team membership just changed) that
     // the request cache can't infer from the URL alone -- clear it all
     // rather than risk a stale team/status read for the rest of the TTL.
+    this.requestCache.clear()
+  }
+
+  async transferOwnership(teamId: string, userId: string): Promise<void> {
+    // Every refusal here is one the person needs to read verbatim -- "only the
+    // team owner can transfer ownership", "that person is not a member of this
+    // team" -- so the body is kept, like every other RPC-backed team mutation.
+    await postReadingError<{ transferred: boolean }>('/api/team/transfer-ownership', { teamId, userId })
+    // The caller's OWN role just changed from owner to admin, which gates
+    // controls across Settings, the members list and the rail. Nothing in the
+    // URL tells the cache that, so clear it wholesale rather than serve an
+    // owner-shaped UI to someone who is now an admin.
+    this.requestCache.clear()
+  }
+
+  async disbandTeam(teamId: string): Promise<void> {
+    await postReadingError<{ disbanded: boolean }>('/api/team/disband', { teamId })
+    // The team this machine was reading from no longer exists. Same reasoning
+    // as leaveTeam, one step further: every cached team-scoped read is now
+    // about something deleted.
     this.requestCache.clear()
   }
 

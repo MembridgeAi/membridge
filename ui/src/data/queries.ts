@@ -811,6 +811,28 @@ export function useLeaveTeam() {
   })
 }
 
+// Same accountRefresh as leaving, for the same reason and one more: the
+// caller's own role changed, so the screen they are standing on may need to
+// stop offering controls it was offering a moment ago.
+export function useTransferOwnership() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ teamId, userId }: { teamId: string; userId: string }) =>
+      c.transferOwnership(teamId, userId),
+    onSuccess: () => accountRefresh(qc),
+  })
+}
+
+export function useDisbandTeam() {
+  const c = useDataClient()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (teamId: string) => c.disbandTeam(teamId),
+    onSuccess: () => accountRefresh(qc),
+  })
+}
+
 // The deletion preview. `enabled` is load-bearing: this is a backend RPC round
 // trip, and it should fire when the confirmation dialog opens rather than
 // sitting in the background of a Settings page nobody is deleting from.

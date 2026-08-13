@@ -93,6 +93,23 @@ export function SharePromptsControl({ value, onChange, pending, error }: SharePr
       description="What this machine sends to your team alongside each session summary."
       testId="setting-share-prompts"
       error={error}
+      // The control is three option cards tall; centred against it the label
+      // floated beside the middle option with nothing above or below it.
+      align="start"
+      // The docs link belongs to this row's SUBJECT, not to its action, so it
+      // sits in the label column. It used to render as a sibling of the
+      // fieldset inside the control area, where it landed in the leftover
+      // space to the right of the cards and read as attached to nothing.
+      labelAside={(
+        <a
+          className="share-prompts-doc-link"
+          href={REDACTION_BOUNDARY_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          What is redacted?
+        </a>
+      )}
     >
       <fieldset
         className="share-prompts-fieldset"
@@ -131,14 +148,6 @@ export function SharePromptsControl({ value, onChange, pending, error }: SharePr
           )
         })}
       </fieldset>
-      <a
-        className="share-prompts-doc-link"
-        href={REDACTION_BOUNDARY_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        What is redacted?
-      </a>
     </SettingRow>
   )
 }

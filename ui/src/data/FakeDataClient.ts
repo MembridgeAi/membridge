@@ -952,6 +952,8 @@ export class FakeDataClient implements DataClient {
   openConfigFile() { return this.guard<void>(undefined) }
   openMemoryFile() { return this.guard<void>(undefined) }
   leaveTeam() { return this.guard<void>(undefined) }
+  transferOwnership() { return this.guard<void>(undefined) }
+  disbandTeam() { return this.guard<void>(undefined) }
 
   // Discovery fixture: two untracked folders with real activity plus one
   // already-watched row, so the dialog's "already added" filtering is
