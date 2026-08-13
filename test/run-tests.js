@@ -2722,11 +2722,21 @@ async function main() {
         assert.deepStrictEqual(sess.prompts[0].files, ['src/refund.js'], 'per-prompt files ride along');
         assert.deepStrictEqual(sess.prompts[1].files, ['src/pay.js'], 'per-prompt files ride along');
         assert.ok(sess.prompts.every(p => p.ts && !isNaN(Date.parse(p.ts))), 'every prompt carries a parseable ts');
-        // Checkpoints: the ordered trail, oldest-first.
-        assert.strictEqual(sess.checkpoints.length, 2, 'both checkpoints must be present');
-        assert.ok(String(sess.checkpoints[0].ts) < String(sess.checkpoints[1].ts), 'checkpoints are oldest-first');
-        assert.ok(/Payment flow wired/.test(sess.checkpoints[0].text), 'checkpoint text must be present');
-        assert.ok(/refunds both work/.test(sess.checkpoints[1].text), 'the latest checkpoint closes the trail');
+        // Checkpoints: both of this fixture's summary events carry
+        // distilled:true/source:'Distilled', so this is a fully DISTILLED-
+        // tier session -- its checkpoint trail is a sequence of WHOLE-SESSION
+        // restatements (the Stop hook's own contract: each line restates the
+        // session so far), not independent facts. sessionPayload ships no
+        // trail for that tier: summaryFull above already carries the latest
+        // restatement, so repeating it as a "checkpoints" list would put a
+        // near-duplicate directly beneath the summary, and PromptChain would
+        // misattribute the whole-session restatement to whichever single
+        // prompt it happened to follow. A HARVESTED-tier session (no
+        // distilled events) still ships its full trail unchanged --
+        // test/suites/session-checkpoint-tier.test.js pins that case, since
+        // no such fixture exists in this monolith to extend.
+        assert.deepStrictEqual(sess.checkpoints, [],
+          'a fully-distilled session must ship an EMPTY checkpoint trail -- summary/summaryFull already carry the latest restatement');
       });
       // Commits produced by the session, for the detail page's analytics
       // header. The attribution already exists in .membridge/commits.jsonl;
