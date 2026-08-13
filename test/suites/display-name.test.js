@@ -1,4 +1,13 @@
 'use strict';
+// @serial — this suite starts and stops a real daemon per request (two homes,
+// plus a mock Supabase), which is heavy on process spawn. When it joined the
+// PARALLEL pool, the windows CI leg began crashing a rotating cast of its
+// sibling daemon suites (team-identity, then account-deletion/audit-story/
+// daemon-restart-handoff, then cli-lifecycle/team-pull-cursor — never the same
+// set twice, never an actual failed check) while all five other legs stayed
+// green. Running this one alone restores the parallel load windows handled
+// before it existed. Every check still runs; nothing is weakened.
+//
 // Display-name changes: uniqueness within a team, atomicity across teams, and
 // the rule that credentials.json is written ONLY after the backend agrees.
 // Run directly, or via `node test/run.js display-name`.
