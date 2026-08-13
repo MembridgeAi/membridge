@@ -59,14 +59,23 @@ To claim one: add the row first, in the same commit as the migration. If you are
 
 ## The order
 
-Apply in this order. It is numeric order with **one deliberate exception: `031` goes last.** `047` is a seventh item that should be done separately — see its own section at the end.
+**Most of this table is already done.** Reconciled read-only against production
+on 2026-08-08: every struck-through row is live and must not be pasted. What is
+genuinely outstanding is **`053`, `055` and `056`** — plus `047`, which is
+separate and has its own section at the end.
+
+`031` is struck for a *different* reason from the rest: its behaviour is live
+AND the file is a reconstruction, so applying it would overwrite production with
+a guess for no gain. Read its row before touching it.
+
+Apply the remaining ones in numeric order.
 
 | # | File | What it does, in one sentence |
 |---|------|-------------------------------|
-| 1 | `037_project_access_team_scope.sql` | Stops someone using their own team to grant or revoke access to **another** team's project. |
-| 2 | `038_invite_redeem_atomic.sql` | Makes an invite's "max uses" limit actually hold when two people redeem at the same moment. |
-| 3 | `039_team_audit_created_at.sql` | Stops an admin from writing audit-log entries with a false timestamp. |
-| 4 | `040_revoke_memory_entries_delete.sql` | Stops a signed-in user deleting their own shared memory straight through the API without it being recorded. |
+| ~~1~~ | `037_project_access_team_scope.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query; see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. Stopped someone using their own team to grant or revoke access to **another** team's project. |
+| ~~2~~ | `038_invite_redeem_atomic.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query; see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. Made an invite's "max uses" limit actually hold when two people redeem at the same moment. |
+| ~~3~~ | `039_team_audit_created_at.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query; see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. Stopped an admin writing audit-log entries with a false timestamp. |
+| ~~4~~ | `040_revoke_memory_entries_delete.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query; see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. Verdict rests on `aclexplode`, not `information_schema.role_table_grants`, which under-reports. Pairs with 051, also applied. |
 | ~~5~~ | `042_definer_function_hardening.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (all three functions clean of PUBLIC/anon); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
 | ~~6~~ | `043_revoke_blanket_table_grants.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (no acl entry names anon or authenticated); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
 | ~~7~~ | `041_project_stats_carry_archived.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (view def carries `archived_at`); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
@@ -76,7 +85,7 @@ Apply in this order. It is numeric order with **one deliberate exception: `031` 
 | ~~11~~ | `049_audit_member_left.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`team_members_audit_leave` present); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
 | ~~12~~ | `050_team_audit_actor_set_null.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (`confdeltype = n`); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
 | ~~13~~ | `051_drop_memory_entries_delete_policy.sql` | **ALREADY APPLIED — SKIP.** Reconciled against production 2026-08-08 with this row's own query (policy returns no rows); see [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Do not paste it. |
-| 14 | `031_ensure_rls_event_trigger.sql` | Makes it impossible to create a table without row-level security **by refusing the creation** instead of logging and carrying on. |
+| ~~14~~ | `031_ensure_rls_event_trigger.sql` | **DO NOT APPLY.** Re-verified against production 2026-08-08: the live `rls_auto_enable` already carries every distinctive string in this file — the fail-closed `raise exception`, its detail/hint text, the `pg_catalog` search_path and the skip-logging branch. The behaviour is already there. AND this file is a RECONSTRUCTION of an object that predates the repo, so `create or replace` would overwrite live behaviour with a guess for no gain. Nothing to do. |
 | 15 | `053_team_members_list_deleted_at.sql` | Lets a client tell a soft-deleted account from a live one, so a departed member stops receiving team encryption keys. Independent of everything above — any order, on its own. *(deletion lane)* |
 | ~~16~~ | `054_sec_jamal_01.sql` | **ALREADY APPLIED — SKIP.** Verified against production 2026-08-08 with all three of the file's own queries; see the 054 row in [`MIGRATION-STATE.md`](./MIGRATION-STATE.md). Left in this table rather than deleted so the numbering stays legible and so it is obvious this was checked rather than dropped. Do not paste it. *(sec lane)* |
 | 17 | `055_team_insights_rollup.sql` | Makes the per-person and per-project numbers on Insights real totals instead of a quarter-short sample, and stops the screen naming somebody as a project's only contributor on the strength of an incomplete read. Adds a new function, touches nothing existing — any order, on its own, and safe to apply before or after the client ships. *(insights lane)*
@@ -89,7 +98,17 @@ deletion actually work, since `memory_entries.author_id` still blocks every
 real user until that decision lands. It belongs to a later batch, once section
 6 is settled, not to this one.
 
-**Why `031` is last.** It is the only one that changes how the database behaves for *future* work rather than fixing something specific, and it is the only one reconstructed from a live object rather than written from scratch. Do it when the other five are known good, so that if anything odd happens afterwards you know which change to look at.
+**Why `031` is struck rather than ordered last.** This paragraph used to say
+"do it when the other five are known good". That instruction is now withdrawn:
+the 2026-08-08 reconciliation found the live `rls_auto_enable` already carries
+every distinctive string in the file, so there is nothing to gain by running it.
+And it remains the only file here reconstructed from a live object rather than
+written from scratch, so `create or replace` would replace working production
+behaviour with our best guess at it. Live behaviour plus zero gain plus a
+non-trivial downside is not a "do it carefully" — it is a "do not do it".
+
+If 031 ever genuinely needs to change, diff `pg_get_functiondef` against the
+file first and write a new migration for the delta. Do not paste this one.
 
 ---
 
