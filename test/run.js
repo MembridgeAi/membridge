@@ -22,6 +22,7 @@
 // Nothing here may print an all-passed tally for a run that did not pass.
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -90,8 +91,46 @@ async function freeBlocks() {
 // block because there are never more children than blocks. Suites beyond the
 // block count now WAIT rather than collide, which also stops ~90 node
 // processes contending on a 2-core runner.
+// THE SECOND BOUND, and the one this file was missing.
+//
+// A free port block says "two children cannot collide here". It says nothing
+// about whether the MACHINE can carry that many children, and those are
+// different constraints. Bounding only by blocks means up to 40 suite children
+// at once — and a third of the suites spawn a real daemon of their own, so the
+// true process count is higher still. On the 18-core developer machine this
+// file was tuned on that is fine and the suite is green every time. A GitHub
+// runner has 4 cores (3 on macos-arm), so the same run oversubscribes it ~10x.
+//
+// That is exactly the observed failure signature: never locally, only on CI,
+// worst on the slowest leg, and shaped like resource exhaustion rather than a
+// defect — suites CRASHING before reporting any check, a different cast each
+// time, no individual assertion at fault, on commits that changed only
+// documentation. Nine recent master runs: three green.
+//
+// So bound by cores as well. Two per core, because much of this work is
+// latency-bound (children sit in waitForHttp waiting for a daemon to boot)
+// rather than CPU-bound, and dropping to one-per-core would trade flakiness
+// for wall-clock without need. MEMBRIDGE_TEST_WORKERS overrides it, so a leg
+// can be tuned from the workflow without editing this file.
+function workerCap() {
+  const override = Number(process.env.MEMBRIDGE_TEST_WORKERS || '');
+  if (Number.isFinite(override) && override >= 1) return Math.floor(override);
+  let cores = 0;
+  try { cores = os.cpus().length; } catch { cores = 0; }
+  // os.cpus() returns [] on some containers; 4 is the runner floor, not a guess
+  // at the machine.
+  return Math.max(4, (cores || 2) * 2);
+}
+
 function poolWorkers(free) {
-  if (free.length) return free;
+  if (free.length) {
+    const cap = workerCap();
+    if (free.length > cap) {
+      console.log(`pool: ${cap} workers (capped from ${free.length} free port blocks by machine capacity)`);
+      return free.slice(0, cap);
+    }
+    return free;
+  }
   // Nothing verified free (a machine already saturated): fall back to a single
   // unverified block. Serialized and loud, rather than parallel and lying.
   console.log('warning: no verified-free port block available; running suites one at a time on 17900');
