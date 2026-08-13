@@ -85,6 +85,24 @@ export function auditSentence(event: AuditEvent): string {
     // to end.
     case 'member-left':
       return 'left the team'
+    // Written by set_display_name (057) from inside the RPC, not by the
+    // daemon — same reason own-data-deleted needed a case below: team_audit's
+    // insert policy is manager-only, and a rename is self-service for every
+    // member, so only the security-definer RPC can write this row. It writes
+    // one row per team the member belongs to, all with the same oldName/
+    // newName, so this case does not need to know how many teams there were.
+    //
+    // "themselves", not targetPhrase(event): actor and subject are the same
+    // person here (self-rename), and AuditList already prefixes this sentence
+    // with the actor's name, so leading with their name again would read
+    // "Marco renamed Marco from Bo to Bodhi".
+    case 'member-renamed': {
+      const oldName = detailField(event, 'oldName')
+      const newName = detailField(event, 'newName') || targetPhrase(event)
+      return oldName && oldName !== newName
+        ? `renamed themselves from ${oldName} to ${newName}`
+        : `renamed themselves to ${newName}`
+    }
     case 'invite-created':
       return 'created an invite'
     case 'invite-revoked':

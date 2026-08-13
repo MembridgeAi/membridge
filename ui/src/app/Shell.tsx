@@ -1,9 +1,11 @@
-import { createContext, useContext, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useRoute } from 'wouter'
 import { MembridgeMark } from '../assets/MembridgeMark'
+import { AvatarRegistryProvider } from '../components/AvatarRegistry'
 import { useDataClient } from '../data/DataClientProvider'
-import { useSettings, useStatus, useTeamAccount } from '../data/queries'
+import { useMembers, useSettings, useStatus, useTeamAccount } from '../data/queries'
 import type { Status } from '../data/types'
+import { IdentityDialog } from './IdentityDialog'
 import { ROUTES } from './routes'
 import { TeamSwitcher } from './TeamSwitcher'
 
@@ -137,6 +139,45 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   // rather than falling through to an empty span.
   const identity = account?.user?.displayName || account?.user?.email || 'Signed in'
 
+  const [editingIdentity, setEditingIdentity] = useState(false)
+  const avatar = account?.user?.avatar ?? null
+  const avatarColor = account?.user?.avatarColor ?? null
+  // TeamAccount carries no top-level viewerId -- account.user IS the viewer's
+  // own row (GET /api/team describes the signed-in caller), so userId here is
+  // the same id Settings.viewerId derives separately for the roster surfaces.
+  const viewerId = account?.user?.userId ?? ''
+
+  // The roster this app already fetches, reshaped into the id -> avatar map
+  // the Avatar component resolves itself through. `onTeam` gates it because
+  // getMembers() is meaningless without a team.
+  const members = useMembers(onTeam)
+  const avatarsById = useMemo(() => {
+    const m = new Map<string, { glyph: string | null; color: string | null }>()
+    for (const person of members.data ?? []) {
+      // Register on EITHER axis being set, not just glyph: shape and colour
+      // are independent choices (see the picker's two rows), so someone who
+      // only picked a colour and left the shape on "Initial" still needs to
+      // be in this map or their colour is silently discarded and every call
+      // site falls back to the id-derived colour instead.
+      if (person.avatar || person.avatarColor) {
+        m.set(person.id, { glyph: person.avatar, color: person.avatarColor })
+      }
+    }
+    // The viewer's own row, from the account query rather than the roster:
+    // it updates the instant the save returns, and it is also the only
+    // source when the roster query is disabled (not on a team). The `else`
+    // matters -- without it, clearing both your glyph and colour left the
+    // roster's stale (still-registered) value in the map until ['members']
+    // refetched, so the old avatar stayed on screen for a beat. The delete
+    // only fires when NEITHER axis is set -- clearing just the glyph while a
+    // colour is still chosen must keep that colour in the map, not drop it.
+    if (viewerId) {
+      if (avatar || avatarColor) m.set(viewerId, { glyph: avatar, color: avatarColor })
+      else m.delete(viewerId)
+    }
+    return m
+  }, [members.data, viewerId, avatar, avatarColor])
+
   // Creating a team requires an account, so a signed-out machine gets the
   // sign-in control in the footer instead of this. Gating on solo alone sent
   // a signed-out user to a create-team form they could not submit -- and
@@ -144,6 +185,7 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
   const showCreateTeam = ready && !onTeam && signedIn
 
   return (
+    <AvatarRegistryProvider value={avatarsById}>
     <div className="shell">
       <nav className="rail" aria-label="Primary">
         {/* MembridgeMark is an inlined SVG component (see
@@ -215,7 +257,50 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
             <Link href={ROUTES.team} className="rail-signin">Sign in</Link>
           )}
           {signedIn && (
-            <span className="rail-identity" data-testid="rail-identity" title={identity}>{identity}</span>
+            <>
+              {/* Deliberately NOT a <button>: a button activates on a single
+                  click, and the asked-for gesture is a double one. role +
+                  tabIndex keep it announced and reachable, and onKeyDown is
+                  the keyboard equivalent of the double-click for a sighted
+                  keyboard user tabbing in without assistive tech running.
+
+                  onClick + `detail === 0` is a SEPARATE path, not a
+                  redundant one: NVDA/JAWS activate a role="button" element
+                  by dispatching a synthetic click, not a keydown, so
+                  onKeyDown alone never fires for that user and the control
+                  would announce an affordance it doesn't have. A real mouse
+                  click carries MouseEvent.detail 1; only an AT/keyboard-
+                  synthesised click carries 0, so a genuine single click
+                  still does nothing here. */}
+              <span
+                className="rail-identity"
+                data-testid="rail-identity"
+                role="button"
+                tabIndex={0}
+                title={`${identity} — double-click to change your name`}
+                onDoubleClick={() => setEditingIdentity(true)}
+                onClick={e => {
+                  if (e.detail === 0) setEditingIdentity(true)
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setEditingIdentity(true)
+                  }
+                }}
+              >
+                {identity}
+              </span>
+              {editingIdentity && (
+                <IdentityDialog
+                  currentName={account?.user?.displayName || ''}
+                  currentAvatar={avatar}
+                  currentAvatarColor={avatarColor}
+                  viewerId={viewerId}
+                  onClose={() => setEditingIdentity(false)}
+                />
+              )}
+            </>
           )}
         </div>
       </nav>
@@ -229,5 +314,6 @@ export function Shell({ children, routeReflected = true }: ShellProps) {
         {children}
       </main>
     </div>
+    </AvatarRegistryProvider>
   )
 }

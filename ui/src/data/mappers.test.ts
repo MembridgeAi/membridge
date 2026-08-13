@@ -541,7 +541,37 @@ describe('mapMember', () => {
       // Failing the other way would put a repull hint under every empty
       // search run against an older daemon.
       preFixLocal: { entries: 0, projects: 0 },
+      // This raw row omits avatar/avatar_color entirely -- the shape either a
+      // pre-057 team_members_list RPC or an un-migrated database sends. The
+      // missing case reads the same as a deliberate "no avatar chosen": null.
+      avatar: null,
+      avatarColor: null,
     })
+  })
+
+  // 057_member_identity.sql: avatar and avatar_color both live on
+  // team_members. avatar has no underscore, so it reads the same in either
+  // convention; avatar_color is the one field on this row that is genuinely
+  // snake_case on the wire while its Member counterpart is camelCase.
+  it('maps avatar and avatar_color (snake_case) onto avatar/avatarColor when the row carries them', () => {
+    const m = mapMember(
+      { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: null, avatar: 'halo', avatar_color: '#22C08F' },
+      { projectCount: 0, lastSharedAt: null },
+    )
+    expect(m.avatar).toBe('halo')
+    expect(m.avatarColor).toBe('#22C08F')
+  })
+
+  // null is a member's own choice ("render my initial" / "use my derived
+  // color"), not "field missing" -- the mapper must pass it through as-is,
+  // not treat it the same as an absent key by accident.
+  it('keeps an explicit null avatar/avatar_color as null, distinct from the field being absent', () => {
+    const m = mapMember(
+      { user_id: 'andrew', display_name: 'Andrew', role: 'admin', joined_at: null, avatar: null, avatar_color: null },
+      { projectCount: 0, lastSharedAt: null },
+    )
+    expect(m.avatar).toBeNull()
+    expect(m.avatarColor).toBeNull()
   })
 
   // #59, and the reason this test exists at all: mapMember builds an explicit

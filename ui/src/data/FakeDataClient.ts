@@ -667,7 +667,10 @@ export class FakeDataClient implements DataClient {
     return this.guard<TeamAccount>({
       configured: true,
       authenticated,
-      user: authenticated ? { userId: this.viewerId, email: 'marco@melika.com', displayName: 'Marco' } : null,
+      // avatar/avatarColor default to null ("no choice made") -- no fixture
+      // option drives them yet; a later task adds one if a screen needs to
+      // exercise a specific avatar for the signed-in viewer.
+      user: authenticated ? { userId: this.viewerId, email: 'marco@melika.com', displayName: 'Marco', avatar: null, avatarColor: null } : null,
       // A second team only when a test asks for it (opts.secondTeam): every
       // other fixture keeps modelling the one-team norm.
       teams: this.teamFixtures(),
@@ -749,6 +752,13 @@ export class FakeDataClient implements DataClient {
     ]
   }
   renameTeam() { return this.guard<void>(undefined) }
+  // Echoes exactly what it was given -- including null -- same as the real
+  // daemon's set_display_name RPC assigning p_avatar/p_avatar_color directly
+  // rather than coalescing. A fixture that silently substituted a previous
+  // value here would hide the "null is a choice" bug from every test.
+  setDisplayName(name: string, avatar: string | null, avatarColor: string | null) {
+    return this.guard<{ displayName: string; avatar: string | null; avatarColor: string | null }>({ displayName: name, avatar, avatarColor })
+  }
   rotateInviteCode() { return this.guard<string>('INV-NEW42X') }
   // Two live invites: one time-limited and partly used, one open-ended and
   // untouched -- the two shapes the row has to render honestly (an expiry vs

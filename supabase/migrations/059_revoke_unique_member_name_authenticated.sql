@@ -1,0 +1,151 @@
+-- 059_revoke_unique_member_name_authenticated.sql — close the cross-team
+-- name-enumeration oracle that 057 left open in production, by revoking
+-- EXECUTE from `authenticated` on the two internal helpers that back
+-- `set_display_name`'s dedupe logic.
+--
+-- ===========================================================================
+-- UNAPPLIED AS OF 2026-08-13.
+--
+-- WHY THIS IS A NEW FILE, NOT AN EDIT TO 057. 057 is already applied to
+-- production (project mefgbiecvoszjorwzkfz, migration-table row
+-- 20260813020145, per MIGRATION-STATE.md and commit 5473dc2). Editing 057's
+-- source now changes nothing live — a migration file is a record of what was
+-- run, not a lever on what is currently true, and the SQL editor will never
+-- re-read this repo's copy of a file it already executed. The only way to
+-- change a live grant at this point is a new statement, applied fresh. This
+-- file is that statement. It also fixes 057's own source below, in the same
+-- commit, so the file stops teaching the wrong pattern to the next reader —
+-- but that edit is documentation, not deployment; THIS file is the deployment.
+--
+-- THE GAP. 057 revokes `unique_member_name(uuid, text)` and
+-- `team_members_dedupe_name()` from `public, anon` only (057 §9), reasoning
+-- that neither needs to be reachable by an ordinary caller — the trigger
+-- calls `unique_member_name` internally, under the DEFINER's rights, and
+-- Postgres does not consult a caller's ACL at all when firing a trigger. Both
+-- of those facts are correct. What 057's revoke line missed is the THIRD
+-- role every newly created Postgres function is also granted EXECUTE on by
+-- default: Supabase's own default-privilege setup grants `authenticated`
+-- EXECUTE on every new function in `public`, independently of whatever this
+-- repo's migration writes. Revoking from `public, anon` removes the two
+-- roles this repo usually reasons about; it does nothing to the third,
+-- separately-granted role. Verified live on 2026-08-13, read-only. NOTE the
+-- `left join`, not an inner join: `aclexplode` reports PUBLIC as grantee 0,
+-- which has no row in `pg_roles` at all — an inner join here would silently
+-- DROP that row and let a query like this one report a clean result while
+-- PUBLIC still held EXECUTE. `coalesce(r.rolname, 'PUBLIC')` is what keeps
+-- that grantee visible instead of disappearing from the result set (the same
+-- shape MIGRATION-STATE.md's 056 row guards against, there with an explicit
+-- `grantee = 0` check rather than a coalesce):
+--
+--   select coalesce(r.rolname, 'PUBLIC') as rolname, p.proname
+--     from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+--     left join pg_roles r on r.oid = a.grantee
+--    where p.pronamespace = 'public'::regnamespace
+--      and p.proname in ('unique_member_name', 'team_members_dedupe_name')
+--      and a.privilege_type = 'EXECUTE';
+--   -- returned, for BOTH functions: authenticated, postgres, service_role.
+--   -- authenticated should not be in that list — that is the gap this file closes.
+--
+-- WHY THAT MATTERS. `unique_member_name(p_team uuid, p_name text)` is
+-- `security definer` and takes an UNCHECKED team id (057 §4's own header
+-- explains why: at join time the caller is not yet a member, so a membership
+-- check on p_team would always read false, which is exactly why this
+-- function must not be reachable directly by anyone who is not already
+-- inside a trusted call path). With `authenticated` holding EXECUTE, any
+-- signed-in user — a member of zero teams, or a member of a completely
+-- different team — can call `select public.unique_member_name('<any team
+-- uuid>', 'marco')` directly and learn, from the string that comes back,
+-- whether "marco" is already taken on a team they do not belong to and were
+-- never shown membership of. Iterating over guessed names turns that into a
+-- membership/roster oracle for a team the caller has no right to see
+-- anything about. This is precisely the cross-team enumeration the
+-- `public, anon` revoke in 057 was written to prevent — it was simply
+-- revoked from the wrong two roles alongside the one that actually holds the
+-- default grant. `team_members_dedupe_name()` is lower-risk on its own (it is
+-- a trigger function and a direct call raises "trigger functions can only be
+-- called as triggers" before any body statement runs — the same shape
+-- `definer-function-hardening.test.js` already documents for
+-- `projects_materialize_access`), but it is revoked here too, for the same
+-- reason that suite's check D revokes `projects_materialize_access` from
+-- `authenticated` as well as `public`/`anon`: leaving the default grant
+-- intact is still an anon/authenticated-callable *fingerprint* even when the
+-- call itself is a no-op, and there is no cost to closing it.
+--
+-- WHY NO GRANT FOLLOWS. Both functions are needed by exactly one caller
+-- each, and neither caller is an ordinary role holding an ACL Postgres
+-- checks:
+--
+--   - `unique_member_name` is called only from inside
+--     `team_members_dedupe_name`'s trigger body. A `security definer`
+--     function's internal calls run as ITS OWNER, not as the original
+--     caller — 057 §9 already makes this point about why granting
+--     `unique_member_name` to `service_role` (rather than `authenticated`)
+--     was sufficient there; the same reasoning is why no grant to
+--     `authenticated` is needed here either.
+--   - `team_members_dedupe_name` is called only by Postgres's trigger
+--     executor when a row is inserted into `team_members`, and the trigger
+--     executor does not consult a caller's EXECUTE grant at all — the exact
+--     precedent is `test/suites/definer-function-hardening.test.js`'s check
+--     D, "projects_materialize_access is revoked from public, anon and
+--     authenticated", which revokes that trigger function from all three
+--     principals with no grant to any of them, for the identical reason.
+--
+-- Revoking `authenticated` from both, with no replacement grant, removes the
+-- oracle and breaks nothing: the trigger keeps working (it runs as the
+-- function owner, per `security definer`), and no client code calls either
+-- function by name — `lib/teamsync.js` and `lib/server.js` only ever call
+-- `set_display_name`, which remains granted to `authenticated` unchanged.
+--
+-- WHY THIS FILE CREATES NO FUNCTION, AND WHY THE ACL-TREADMILL RULE DOES NOT
+-- APPLY. `test/suites/migration-state.test.js`'s "recreating a guarded
+-- definer function re-issues its revoke and grant" check requires a paired
+-- `revoke ... from public` AND `grant ... to authenticated` for any migration
+-- numbered >= 056 that contains `create (or replace) function
+-- public.<guarded-name>(...)`. This file contains no `create function`
+-- statement at all — it is two `revoke` statements and nothing else — so the
+-- check's own `createsIn(src)` scan (matching `create\s+(?:or\s+replace\s+)?
+-- function\s+public\.\w+\s*\(`) finds nothing here and the rule is simply not
+-- triggered. Read before writing this file, per the brief: the rule exists
+-- for the case where a drop+create resets an ACL to the Postgres default
+-- (`team_feed`'s four-migration recurrence, 013/014/017/025); this file does
+-- not drop or recreate anything, so there is no ACL to reset and no grant to
+-- restate.
+--
+-- RE-RUNNABLE. `revoke ... from authenticated` on a role that already lacks
+-- the privilege is a silent no-op in Postgres, not an error — safe to paste
+-- twice, and safe to paste whether or not 057 has already been re-applied
+-- with a fixed revoke line (see the edit to 057's own file in this commit).
+--
+-- MUST GO AFTER 057, NOT BEFORE. Both `revoke` statements below name
+-- functions 057 creates; revoking on a function that does not exist yet
+-- raises "function ... does not exist", not a no-op. Moot on
+-- `mefgbiecvoszjorwzkfz` (057 already ran there), but on any other database
+-- this file has to follow 057. Independent of every OTHER file in this
+-- repo's registry, including 058.
+-- ===========================================================================
+
+revoke execute on function public.unique_member_name(uuid, text) from authenticated;
+revoke execute on function public.team_members_dedupe_name() from authenticated;
+
+-- Verify after applying:
+--
+--   -- `left join`, not `join` -- an inner join drops PUBLIC (grantee 0)
+--   -- silently, which would let this query report PASS with PUBLIC still
+--   -- holding EXECUTE. See the header's note on this same query.
+--   select coalesce(r.rolname, 'PUBLIC') as rolname, p.proname
+--     from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+--     left join pg_roles r on r.oid = a.grantee
+--    where p.pronamespace = 'public'::regnamespace
+--      and p.proname in ('unique_member_name', 'team_members_dedupe_name')
+--      and a.privilege_type = 'EXECUTE'
+--    order by p.proname, rolname;
+--   -- expect exactly: (postgres, service_role) x 2 rows each function.
+--   -- Neither `authenticated` nor `PUBLIC` may appear for either proname. If
+--   -- `authenticated` still does, this file did not apply. If `PUBLIC` does,
+--   -- something re-granted the default privilege after 057's original
+--   -- revoke -- a separate problem this file does not address.
+--
+--   -- Sanity that the product path this migration must not break still works:
+--   select proacl from pg_proc where proname = 'set_display_name';
+--   -- expect `authenticated` still present — this file does not touch
+--   -- set_display_name at all, and a rename through the app must keep working.

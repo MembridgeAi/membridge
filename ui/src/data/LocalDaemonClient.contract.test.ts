@@ -75,6 +75,7 @@ const CALLS: Record<DataClientMethod, Invoker> = {
   selectedTeamId: async c => { c.selectedTeamId() },
   forgetCachedReads: async c => { c.forgetCachedReads() },
   renameTeam: c => c.renameTeam('team-1', 'Acme AI'),
+  setDisplayName: c => c.setDisplayName('Marco', 'ring', '#22C08F'),
   rotateInviteCode: c => c.rotateInviteCode('team-1'),
   getInvites: c => c.getInvites(),
   createInviteLink: c => c.createInviteLink('team-1', { expiresDays: 7, maxUses: 1 }),

@@ -7,6 +7,7 @@ import { Sparkline } from './Sparkline'
 import { StateChip } from './StateChip'
 import { Toggle } from './Toggle'
 import { Avatar } from './Avatar'
+import { AvatarRegistryProvider } from './AvatarRegistry'
 import { RuledRow } from './RuledRow'
 import { Placeholder } from './Placeholder'
 
@@ -200,6 +201,92 @@ describe('Avatar', () => {
     unmount()
     render(<Avatar name="Sarah" id="sarah" />)
     expect(screen.getByLabelText('Sarah').style.background).toBe(first)
+  })
+
+  it('renders the initial when the person has picked no glyph', () => {
+    render(<Avatar name="Sarah" id="sarah" />)
+    expect(screen.getByLabelText('Sarah')).toHaveTextContent('S')
+  })
+
+  it('renders the glyph registered for that id', () => {
+    render(
+      <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: '#22C08F' }]])}>
+        <Avatar name="Sarah" id="sarah" />
+      </AvatarRegistryProvider>,
+    )
+    // AvatarGlyph puts the accessible name on the <svg role="img">.
+    expect(screen.getByRole('img', { name: 'Sarah' })).toBeInTheDocument()
+    expect(screen.queryByText('S')).toBeNull()
+  })
+
+  // A teammate on a newer build can pick a glyph this build does not have. A
+  // blank circle would be worse than the initial it replaced. Assert there is
+  // NO svg role=img at all (not just that an 'S' substring can be found — the
+  // svg's <title>Sarah</title> makes "Sarah" a substring match for 'S' too,
+  // so a broken isGlyph that always returned true would still pass a looser
+  // assertion) and that the rendered node is the plain .avatar span.
+  it('falls back to the initial for a glyph this build does not know', () => {
+    render(
+      <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'not-a-real-glyph', color: null }]])}>
+        <Avatar name="Sarah" id="sarah" />
+      </AvatarRegistryProvider>,
+    )
+    expect(screen.queryByRole('img')).toBeNull()
+    const el = screen.getByLabelText('Sarah')
+    expect(el.tagName).toBe('SPAN')
+    expect(el).toHaveClass('avatar')
+    expect(el).toHaveTextContent(/^S$/)
+  })
+
+  // Null color is a real choice meaning "the color my id already derives",
+  // not an absence to be defaulted to something arbitrary. colorForId('sarah')
+  // is deterministic — #F0616D, i.e. rgb(240, 97, 109) — so assert the
+  // concrete value, not just that *some* color was set.
+  it('uses the id-derived palette color when the person picked no color', () => {
+    render(
+      <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: null }]])}>
+        <Avatar name="Sarah" id="sarah" />
+      </AvatarRegistryProvider>,
+    )
+    const svg = screen.getByRole('img', { name: 'Sarah' })
+    expect(svg.getAttribute('style')).toContain('color: rgb(240, 97, 109)')
+  })
+
+  it('applies a picked color instead of the id-derived one', () => {
+    render(
+      <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: '#22C08F' }]])}>
+        <Avatar name="Sarah" id="sarah" />
+      </AvatarRegistryProvider>,
+    )
+    const svg = screen.getByRole('img', { name: 'Sarah' })
+    expect(svg.getAttribute('style')).toContain('color: rgb(34, 192, 143)')
+  })
+
+  // The avatar/avatarColor props are three-state: omitted means "consult the
+  // registry", an explicit null means "force the initial / derived color",
+  // and a string means "force that value". Task 6's picker preview relies on
+  // avatar={null} meaning "show the initial" even when the registry has a
+  // glyph for this id — if that prop were ever typed string | undefined
+  // instead of string | null, passing undefined would silently fall through
+  // to the registry lookup instead.
+  it('an explicit null avatar prop overrides a registered glyph with the initial', () => {
+    render(
+      <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: '#22C08F' }]])}>
+        <Avatar name="Sarah" id="sarah" avatar={null} />
+      </AvatarRegistryProvider>,
+    )
+    expect(screen.queryByRole('img')).toBeNull()
+    expect(screen.getByLabelText('Sarah')).toHaveTextContent(/^S$/)
+  })
+
+  it('an explicit null avatarColor prop overrides a registered color with the id-derived one', () => {
+    render(
+      <AvatarRegistryProvider value={new Map([['sarah', { glyph: 'halo', color: '#22C08F' }]])}>
+        <Avatar name="Sarah" id="sarah" avatarColor={null} />
+      </AvatarRegistryProvider>,
+    )
+    const svg = screen.getByRole('img', { name: 'Sarah' })
+    expect(svg.getAttribute('style')).toContain('color: rgb(240, 97, 109)')
   })
 })
 

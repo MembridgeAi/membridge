@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DataClientProvider } from '../data/DataClientProvider'
@@ -15,6 +15,15 @@ import { renderApp, renderWith } from '../test/renderApp'
 class FirstRunClient extends FakeDataClient {
   async getStatus(): Promise<Status> {
     return { ...(await super.getStatus()), setupDone: false }
+  }
+}
+
+// FakeOptions has no `authenticated` flag, so the signed-out machine is
+// modelled the way FirstRunClient models an unfinished setup above: a
+// subclass overriding the one query that decides.
+class SignedOutClient extends FakeDataClient {
+  async getTeamAccount(): Promise<TeamAccount> {
+    return { ...(await super.getTeamAccount()), authenticated: false, user: null }
   }
 }
 
@@ -146,6 +155,107 @@ describe('Shell', () => {
 
       expect(screen.queryByRole('link', { name: /sign in/i })).toBeNull()
       expect(screen.queryByTestId('rail-identity')).toBeNull()
+    })
+
+    it('opens the identity editor on a double-click of your name', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      await userEvent.dblClick(identity)
+      expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+    })
+
+    // Double-click is unreachable without a mouse, so the same control answers
+    // Enter and Space when focused -- the keyboard path for a sighted user
+    // tabbing in without assistive tech running (see the AT test below for
+    // the separate path a screen reader takes).
+    it.each(['{Enter}', ' '])('opens the identity editor with the keyboard (%s)', async key => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      identity.focus()
+      await userEvent.keyboard(key)
+      expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+    })
+
+    // A single click must NOT open it -- "double tap" is the asked-for gesture,
+    // and a plain <button> would fire on the first one.
+    it('does not open the editor on a single click', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      await userEvent.click(identity)
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    // NVDA/JAWS activate a role="button" element by dispatching a synthetic
+    // CLICK, not a keydown -- so a screen-reader user pressing Enter on this
+    // control never reaches the onKeyDown handler above. A real mouse click
+    // always carries MouseEvent.detail 1; only an AT-synthesised (or
+    // programmatic) click carries 0, which is the only thing that tells the
+    // two apart. userEvent.click always sets detail 1, so this has to go
+    // through fireEvent directly to exercise the AT path at all.
+    it('opens the identity editor on an assistive-technology activation (detail: 0)', async () => {
+      renderApp({ solo: false })
+      const identity = await screen.findByTestId('rail-identity')
+      fireEvent.click(identity, { detail: 0 })
+      expect(await screen.findByRole('dialog', { name: /your name/i })).toBeInTheDocument()
+    })
+
+    it('offers no identity editor when signed out', async () => {
+      renderWith(new SignedOutClient({ solo: true }), <App />)
+      expect(await screen.findByRole('link', { name: 'Sign in' })).toBeInTheDocument()
+      expect(screen.queryByTestId('rail-identity')).toBeNull()
+    })
+  })
+
+  // Shell mounts AvatarRegistryProvider around the whole app so that every
+  // Avatar anywhere -- MemberRow, AccessPopover, feed entries, and so on --
+  // can resolve a teammate's picked glyph purely from their id. Nothing
+  // upstream of this test exercised that: it is possible to delete the
+  // useMemo AND the provider wrapper in Shell.tsx and have every other test
+  // in this suite (and components.test.tsx's own registry test, which
+  // supplies its own provider directly) stay green.
+  describe('teammate avatar registry', () => {
+    // Scoped to this test only, via a getMembers() override, rather than
+    // editing FakeDataClient's shared roster -- that roster backs many other
+    // suites (MembersSection, ProjectsPage, ...) and giving Andrew a glyph
+    // there would change what they see too.
+    class AvatarRosterClient extends FakeDataClient {
+      async getMembers() {
+        const members = await super.getMembers()
+        return members.map(m => (m.id === 'andrew' ? { ...m, avatar: 'halo', avatarColor: '#22C08F' } : m))
+      }
+    }
+
+    it("renders a teammate's registered glyph, not their initial", async () => {
+      window.history.pushState({}, '', ROUTES.team)
+      renderWith(new AvatarRosterClient({ solo: false }), <App />)
+      // Same discriminator components.test.tsx's Avatar suite uses:
+      // AvatarGlyph puts the accessible name on the <svg role="img">, which
+      // the plain-initial <span class="avatar"> never gets.
+      expect(await screen.findByRole('img', { name: 'Andrew' })).toBeInTheDocument()
+    })
+
+    // Shape and colour are independent choices (the picker has two separate
+    // rows), so a teammate who left the glyph on "Initial" and picked only a
+    // colour must still get that colour -- registering members solely on
+    // `person.avatar` being truthy drops this person from the map entirely,
+    // and every call site silently falls back to colorForId(id) instead.
+    class ColorOnlyRosterClient extends FakeDataClient {
+      async getMembers() {
+        const members = await super.getMembers()
+        return members.map(m => (m.id === 'sarah' ? { ...m, avatar: null, avatarColor: '#22C08F' } : m))
+      }
+    }
+
+    it("renders a teammate's picked colour even with no glyph chosen, not the id-derived colour", async () => {
+      window.history.pushState({}, '', ROUTES.team)
+      renderWith(new ColorOnlyRosterClient({ solo: false }), <App />)
+      const el = await screen.findByLabelText('Sarah')
+      // colorForId('sarah') is deterministic -- #F0616D / rgb(240, 97, 109),
+      // per components.test.tsx's Avatar suite -- so asserting the exact
+      // picked value AND that it differs from the derived one rules out a
+      // regression that silently falls back to the derived colour.
+      expect(el.style.background).toBe('rgb(34, 192, 143)')
+      expect(el.style.background).not.toBe('rgb(240, 97, 109)')
     })
   })
 

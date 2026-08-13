@@ -84,7 +84,7 @@ function createMockSupabase() {
   // verifier. Seeded by tests, since the GitHub round trip has no stand-in.
   const authCodes = new Map();
   const teams = new Map();          // teamId -> { id, name, inviteCode }
-  const members = [];               // { teamId, userId, displayName, role }
+  const members = [];               // { teamId, userId, displayName, avatar, avatarColor, role }
   const projects = [];              // { id, teamId, name, repoUrl }
   const entries = [];               // memory_entries rows
   const invites = new Map();        // token -> { token, teamId, expiresAt, maxUses, useCount, revokedAt }
@@ -160,6 +160,20 @@ function createMockSupabase() {
   const isMember = (teamId, userId) => members.some(m => m.teamId === teamId && m.userId === userId);
   const memberRole = (teamId, userId) => (members.find(m => m.teamId === teamId && m.userId === userId) || {}).role || null;
   const isManager = (teamId, userId) => ['owner', 'admin'].includes(memberRole(teamId, userId));
+  // Models 057's BEFORE INSERT trigger: a colliding name is suffixed rather
+  // than refused, because a joiner is often at a CLI with nowhere to retype.
+  const normName = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  function uniqueName(teamId, wanted) {
+    let base = String(wanted || '').trim() || 'member';
+    let attempt = base;
+    let n = 1;
+    while (members.some(m => m.teamId === teamId && !m.nameReleasedAt
+                             && normName(m.displayName) === normName(attempt))) {
+      n += 1;
+      attempt = `${base} ${n}`;
+    }
+    return attempt;
+  }
   const projectTeam = projectId => (projects.find(p => p.id === projectId) || {}).teamId;
   // 028_enforce_project_access_default.sql (can_see_project): three tiers, in
   // order — an explicit project_access row for THIS member wins, otherwise the
@@ -255,6 +269,20 @@ function createMockSupabase() {
   // reaches it, which is why the real one is a trigger and not an RPC.
   // flags.noMemberJoinTrigger stands in for "046 not applied".
   const memberInsertTrigger = row => {
+    // 057_member_identity.sql: the BEFORE INSERT trigger that dedupes a
+    // colliding display name against the team's CURRENT membership, then the
+    // row is committed. Modelled inside this shared seam — rather than at
+    // each of the three insert call sites — because the real trigger lives on
+    // the table itself: no insert site knows the dedupe rule, and encoding it
+    // per-call-site here would reproduce the exact duplication 057 exists to
+    // avoid. Applies to every insert, owner rows included: an owner row on a
+    // brand-new team is trivially unique, so this is a no-op for it, not a
+    // special case. `row` is not yet in `members` when uniqueName runs, so it
+    // cannot collide with itself.
+    row.displayName = uniqueName(row.teamId, row.displayName);
+    members.push(row);
+    // 046_audit_member_joined.sql: the AFTER INSERT trigger, gated separately
+    // — it fires after the row (with its now-final name) is committed.
     if (flags.noMemberJoinTrigger) return;
     if (row.role === 'owner') return;
     insertAuditRow({
@@ -374,8 +402,7 @@ function createMockSupabase() {
       const team = { id: uuid(), name: body.p_name, inviteCode: uuid(), createdBy: userId, createdAt: new Date().toISOString() };
       teams.set(team.id, team);
       const ownerRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'owner', joinedAt: new Date().toISOString() };
-      members.push(ownerRow);
-      memberInsertTrigger(ownerRow); // 046: no-op for an owner row, called anyway so the gate is what excludes it
+      memberInsertTrigger(ownerRow); // 057 dedupe + push, then 046: no-op for an owner row, called anyway so the gate is what excludes it
       return json(res, 200, [{ team_id: team.id, invite_code: team.inviteCode }]);
     }
     if (fn === 'join_team') {
@@ -383,8 +410,7 @@ function createMockSupabase() {
       if (!team) return json(res, 400, { message: 'invalid invite code' });
       if (!isMember(team.id, userId)) {
         const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
-        members.push(joinRow);
-        memberInsertTrigger(joinRow); // 046
+        memberInsertTrigger(joinRow); // 057 dedupe + push, then 046
       }
       // 029 §2: record this member's access to every project the team already
       // shares. Runs on a repeat join too, where it is a no-op.
@@ -463,8 +489,7 @@ function createMockSupabase() {
       const team = teams.get(inv.teamId);
       if (!isMember(team.id, userId)) {
         const joinRow = { teamId: team.id, userId, displayName: body.p_display_name, role: 'member', joinedAt: new Date().toISOString() };
-        members.push(joinRow);
-        memberInsertTrigger(joinRow); // 046
+        memberInsertTrigger(joinRow); // 057 dedupe + push, then 046
         inv.useCount++;
       }
       // 029 §2. In the real function this insert comes AFTER the membership
@@ -508,6 +533,80 @@ function createMockSupabase() {
       teams.get(body.p_team).name = body.p_name;
       return json(res, 200, null);
     }
+    if (fn === 'set_display_name') {
+      // Stands in for a proxy/network fault that truncates or otherwise
+      // mangles an otherwise-200 response body, so tests can prove the daemon
+      // rejects an unusable result instead of laundering it into a "teamless
+      // success" (see lib/teamsync.js's setDisplayName guard).
+      if (flags.malformedSetDisplayName) return json(res, 200, []);
+      const name = String(body.p_name || '').trim();
+      const avatar = body.p_avatar || null;
+      const avatarColor = body.p_avatar_color || null;
+      if (name.length < 1 || name.length > 80) {
+        return json(res, 400, { code: 'MB002', message: 'a display name must be between 1 and 80 characters' });
+      }
+      if (avatar && !/^[a-z0-9-]{1,32}$/.test(avatar)) {
+        return json(res, 400, { code: 'MB002', message: 'avatar must be a lowercase glyph key' });
+      }
+      if (avatarColor && !/^#[0-9A-Fa-f]{6}$/.test(avatarColor)) {
+        return json(res, 400, { code: 'MB002', message: 'avatar color must be a 6-digit hex value' });
+      }
+      const myTeams = members.filter(m => m.userId === userId).map(m => m.teamId);
+      const clash = members.find(m => m.userId !== userId && myTeams.includes(m.teamId)
+        && !m.nameReleasedAt && normName(m.displayName) === normName(name));
+      if (clash) {
+        const t = teams.get(clash.teamId);
+        return json(res, 400, {
+          code: 'MB001',
+          message: `somebody on ${t ? t.name : 'your team'} is already called ${name}`,
+        });
+      }
+      // Snapshot each team's name BEFORE the rename below overwrites it --
+      // the only moment that value is still readable, same reasoning as
+      // memberDeleteTrigger's read of the pre-delete row for 049.
+      const oldNameByTeam = new Map(
+        members.filter(m => m.userId === userId).map(m => [m.teamId, m.displayName]));
+      // One pass over every team, mirroring the single UPDATE in 057. Fix
+      // round 1: 057's real RPC now writes the `member-renamed` audit row
+      // itself, one row PER TEAM, inside this same statement -- team_audit's
+      // insert policy is manager-only and a rename is self-service for every
+      // member, so the daemon cannot write this row (see lib/server.js's
+      // comment at the set-display-name route). Modelled here rather than as
+      // a separate trigger function like memberInsertTrigger/
+      // memberDeleteTrigger because the real write lives inside
+      // set_display_name itself, not on a table trigger — there is no
+      // separate INSERT/UPDATE/DELETE call site to hang a shared helper off.
+      let n = 0;
+      for (const m of members) {
+        if (m.userId === userId) {
+          m.displayName = name; m.avatar = avatar; m.avatarColor = avatarColor; m.nameReleasedAt = null; n += 1;
+          insertAuditRow({
+            id: uuid(),
+            team_id: m.teamId,
+            actor_id: userId,
+            action: 'member-renamed',
+            object_type: 'member',
+            object_key: userId,
+            detail: {
+              memberId: userId,
+              targetName: name,
+              oldName: oldNameByTeam.get(m.teamId) || null,
+              newName: name,
+              avatar,
+              avatarColor,
+            },
+            created_at: new Date(Date.now() + teamAudit.length).toISOString(),
+          });
+        }
+      }
+      // Report what was ACTUALLY WRITTEN. With no member rows to update there
+      // was nothing server-side to write, so this returns nulls rather than
+      // echoing the request back — matching 057's real RPC exactly.
+      const row = n
+        ? { display_name: name, avatar, avatar_color: avatarColor, teams: n }
+        : { display_name: null, avatar: null, avatar_color: null, teams: 0 };
+      return json(res, 200, [row]);
+    }
     if (fn === 'rotate_invite') {
       if (!isManager(body.p_team, userId)) return json(res, 403, { message: 'only a team owner or admin can rotate the invite code' });
       const t = teams.get(body.p_team);
@@ -546,6 +645,7 @@ function createMockSupabase() {
         // Fixtures that do not set it get null, i.e. live -- matching a
         // pre-053 backend, which is the state production is in right now.
         .map(m => ({ user_id: m.userId, display_name: m.displayName, role: m.role,
+                     avatar: m.avatar || null, avatar_color: m.avatarColor || null,
                      joined_at: m.joinedAt || null, deleted_at: m.deletedAt || null }));
       return json(res, 200, rows);
     }

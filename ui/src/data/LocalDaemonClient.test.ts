@@ -638,3 +638,82 @@ describe('LocalDaemonClient archive endpoints', () => {
     expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ path: '/Users/x/membridge' })
   })
 })
+
+describe('LocalDaemonClient.setDisplayName', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts name, avatar and avatarColor and returns what the daemon wrote', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ displayName: 'Marco', avatar: 'ring', avatarColor: '#22C08F', teams: 2 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new LocalDaemonClient()
+    const r = await client.setDisplayName('Marco', 'ring', '#22C08F')
+    expect(r).toEqual({ displayName: 'Marco', avatar: 'ring', avatarColor: '#22C08F' })
+    const call = fetchMock.mock.calls.find(([url]) => String(url) === '/api/team/set-display-name')
+    expect(call).toBeTruthy()
+    expect((call![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ name: 'Marco', avatar: 'ring', avatarColor: '#22C08F' })
+  })
+
+  it('setDisplayName(name, null, null) posts explicit nulls, never omitted fields', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ displayName: 'marco', avatar: null, avatarColor: null, teams: 1 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await new LocalDaemonClient().setDisplayName('marco', null, null)
+    const call = fetchMock.mock.calls.find(([url]) => String(url) === '/api/team/set-display-name')
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ name: 'marco', avatar: null, avatarColor: null })
+  })
+
+  // The daemon's 409 carries MB001 alongside its message; postReadingError
+  // must attach it to the thrown Error rather than only rendering the text,
+  // so a caller (Task 6's dialog) can tell a name collision (MB001) apart
+  // from a malformed avatar/color (MB002) without parsing the sentence.
+  it('surfaces the daemon error text on a 409, with the MB001 code attached', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 409,
+      json: async () => ({ error: 'somebody on Acme is already called marco', code: 'MB001' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new LocalDaemonClient()
+    await expect(client.setDisplayName('marco', null, null)).rejects.toThrow(/already called/)
+  })
+
+  it('attaches code as a property on the thrown Error, not folded into the message', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 409,
+      json: async () => ({ error: 'somebody on Acme is already called marco', code: 'MB001' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new LocalDaemonClient()
+    let caught: (Error & { code?: string }) | undefined
+    try {
+      await client.setDisplayName('marco', null, null)
+    } catch (e) {
+      caught = e as Error & { code?: string }
+    }
+    expect(caught?.code).toBe('MB001')
+    expect(caught?.message).toBe('somebody on Acme is already called marco')
+  })
+
+  it('surfaces a 400 validation error with the MB002 code, distinct from a collision', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 400,
+      json: async () => ({ error: 'unrecognised avatar', code: 'MB002' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new LocalDaemonClient()
+    let caught: (Error & { code?: string }) | undefined
+    try {
+      await client.setDisplayName('marco', 'not-a-real-glyph', null)
+    } catch (e) {
+      caught = e as Error & { code?: string }
+    }
+    expect(caught?.code).toBe('MB002')
+  })
+})

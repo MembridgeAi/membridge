@@ -204,7 +204,21 @@ begin
     raise exception 'invalid invite code';
   end if;
   -- No conflict target: naming team_id here is ambiguous with the OUT column
-  -- of the same name, and the composite PK is the table's only constraint.
+  -- of the same name. The composite PK is NOT this table's only constraint
+  -- any more -- 057 added team_members_display_name_unique, a partial unique
+  -- index on (team_id, normalize_member_name(display_name)). A bare
+  -- `on conflict do nothing` absorbs a violation of EITHER constraint, so it
+  -- would silently swallow a lost display-name race too, telling this
+  -- caller they joined when they did not. That the name on this INSERT is
+  -- already guaranteed collision-free by the time it runs -- so this
+  -- statement can only ever hit the PK, which is what it was written for --
+  -- rests on BOTH of 057's writers of display_name taking its per-team
+  -- advisory lock: the before-insert trigger this INSERT fires (which locks
+  -- before computing the name) AND set_display_name (which locks before an
+  -- existing member's rename can commit). See 057's header ("WHY BOTH
+  -- unique_member_name AND set_display_name TAKE AN ADVISORY LOCK") -- if a
+  -- future change drops the lock from either one, this comment is wrong and
+  -- so is the guarantee it describes.
   insert into public.team_members (team_id, user_id, display_name)
     values (v_team.id, auth.uid(), p_display_name)
     on conflict do nothing;

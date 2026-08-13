@@ -469,6 +469,13 @@ export interface Member {
   // could not produce. Removed from the TYPE, not just the row, so nothing
   // can render it again.
   role: Role
+  // The mark this person picked, or null for "render my initial" -- which is
+  // a choice, not an absence.
+  avatar: string | null
+  // The background color this person picked, or null for "derive it from my
+  // id" (colorForId) -- the same choice/absence distinction as avatar, and
+  // independent of it.
+  avatarColor: string | null
   joinedAt: string
   // Distinct projects this member has POSTED team-feed entries into -- NOT
   // "projects they have access to" (that's a different, already-modeled
@@ -768,7 +775,7 @@ export interface TeamAccount {
   configured: boolean
   // Are there credentials on this machine right now (teamsync.loadCredentials)?
   authenticated: boolean
-  user: { userId: string; email: string; displayName: string } | null
+  user: { userId: string; email: string; displayName: string; avatar: string | null; avatarColor: string | null } | null
   // One team per user in the product today (see lib/api-access.js's identical
   // teams[0] simplification), but carried as the list the daemon actually
   // sends rather than pre-collapsed here.
