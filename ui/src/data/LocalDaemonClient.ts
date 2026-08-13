@@ -404,7 +404,11 @@ export class LocalDaemonClient implements DataClient {
     // rail, Settings, Team page) and the members roster -- is stale the
     // moment this resolves.
     this.requestCache.clear()
-    return { displayName: r.displayName, avatar: r.avatar ?? null, avatarColor: r.avatarColor ?? null }
+    // displayName defaults to '' like joinTeam's team_name above -- the
+    // return type promises a string, and postReadingError's cast does not
+    // actually verify the daemon sent one; avatar/avatarColor default to
+    // null for the identical reason, just with null as their honest empty.
+    return { displayName: r.displayName ?? '', avatar: r.avatar ?? null, avatarColor: r.avatarColor ?? null }
   }
 
   async rotateInviteCode(teamId: string): Promise<string> {

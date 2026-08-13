@@ -541,8 +541,8 @@ describe('mapMember', () => {
       // Failing the other way would put a repull hint under every empty
       // search run against an older daemon.
       preFixLocal: { entries: 0, projects: 0 },
-      // team_members_list (053) does not select avatar/avatar_color yet (057
-      // only added the columns), so today's row carries neither -- and the
+      // This raw row omits avatar/avatar_color entirely -- the shape either a
+      // pre-057 team_members_list RPC or an un-migrated database sends. The
       // missing case reads the same as a deliberate "no avatar chosen": null.
       avatar: null,
       avatarColor: null,

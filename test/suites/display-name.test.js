@@ -91,9 +91,25 @@ async function main() {
       assert.strictEqual(credsOf('b').displayName, 'BODHI');
     });
 
-    await check('a name that trims to empty never reaches the network', async () => {
+    await check('a name that trims to empty never reaches the network, and carries MB002', async () => {
+      // Refused inside the route itself (lib/server.js), before
+      // teamsync.setDisplayName ever calls the RPC -- so this is the one
+      // rejection MB002 has to cover that the database never sees. Without
+      // `code` on THIS response too, a caller (Task 6's dialog) could
+      // distinguish a collision from a malformed avatar/colour only when the
+      // rejection happened to come from SQL, and would see no code at all
+      // for the two most common local rejections (empty name, over-length
+      // name).
       const res = await apiAs('b', 'POST', '/api/team/set-display-name', { name: '   ', avatar: null });
       assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.body.code, 'MB002');
+      assert.strictEqual(credsOf('b').displayName, 'BODHI');
+    });
+
+    await check('a name over 80 characters is refused locally too, and also carries MB002', async () => {
+      const res = await apiAs('b', 'POST', '/api/team/set-display-name', { name: 'x'.repeat(81), avatar: null });
+      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.body.code, 'MB002');
       assert.strictEqual(credsOf('b').displayName, 'BODHI');
     });
 

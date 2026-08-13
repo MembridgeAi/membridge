@@ -158,7 +158,59 @@ alter table public.team_members drop constraint if exists team_members_avatar_co
 alter table public.team_members add constraint team_members_avatar_color_shape
   check (avatar_color is null or avatar_color ~ '^#[0-9A-Fa-f]{6}$');
 
--- 3. SUFFIX HELPER. security definer is REQUIRED, not defensive: at join time
+-- 3. READ SIDE. team_members_list (053) predates avatar/avatar_color and
+--    still returns only (user_id, display_name, role, joined_at,
+--    deleted_at) -- confirmed against the function actually on file, not
+--    assumed. Without this, the columns section 2 just added are write-only:
+--    a member picks an avatar, set_display_name (section 8 below) reports it
+--    back to THEM, but the roster every OTHER screen reads (GET
+--    /api/team/members, the members RPC every non-self avatar renders from)
+--    never sees it -- production would silently fall back to initials for
+--    every teammate but yourself. test/mock-supabase.js's stand-in already
+--    returns both columns (it was written ahead of this fix), so without
+--    this the test suite certifies a shape the real function does not have.
+--
+--    `create or replace` cannot change a RETURNS TABLE column list --
+--    Postgres treats that as an incompatible redefinition, the same
+--    constraint 053's own header explains for why IT had to drop first to
+--    add deleted_at. So this drops and recreates too. The body below is
+--    053's, verbatim, with only `m.avatar` and `m.avatar_color` added to the
+--    return signature and the select list -- the left join onto auth.users
+--    and its deleted_at semantics are load-bearing (053 §2) and are not
+--    being redesigned here.
+drop function if exists public.team_members_list(uuid);
+
+create or replace function public.team_members_list(p_team uuid)
+returns table (
+  user_id uuid,
+  display_name text,
+  role text,
+  joined_at timestamptz,
+  deleted_at timestamptz,
+  avatar text,
+  avatar_color text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select m.user_id, m.display_name, m.role, m.joined_at, u.deleted_at, m.avatar, m.avatar_color
+  from public.team_members m
+  -- left join: a member whose auth.users row is genuinely gone keeps their
+  -- row here with a null deleted_at (read as live) rather than disappearing
+  -- from every roster in the product. See 053 §2 of its header.
+  left join auth.users u on u.id = m.user_id
+  where m.team_id = p_team and public.is_team_member(p_team)
+  order by m.joined_at;
+$$;
+
+-- DROP FUNCTION destroyed the ACL again; restate it, the same shape 053 and
+-- 035 both use -- never public/anon, always the two roles that need it.
+revoke execute on function public.team_members_list(uuid) from public, anon;
+grant execute on function public.team_members_list(uuid) to authenticated, service_role;
+
+-- 4. SUFFIX HELPER. security definer is REQUIRED, not defensive: at join time
 --    the caller is not yet a member, so RLS hides every existing row from them
 --    and an invoker-rights probe would answer "free" every single time.
 create or replace function public.unique_member_name(p_team uuid, p_name text)
@@ -208,7 +260,7 @@ begin
 end;
 $$;
 
--- 4. TRIGGER. Every insert path -- create_team, join_team, redeem_invite,
+-- 5. TRIGGER. Every insert path -- create_team, join_team, redeem_invite,
 --    redeem_onboarding_invite, and any added later -- goes through this.
 create or replace function public.team_members_dedupe_name()
 returns trigger
@@ -227,7 +279,7 @@ create trigger team_members_dedupe_name
   before insert on public.team_members
   for each row execute function public.team_members_dedupe_name();
 
--- 5. PRE-RELEASE LEGACY DUPLICATES. Production held zero duplicates when this
+-- 6. PRE-RELEASE LEGACY DUPLICATES. Production held zero duplicates when this
 --    was written, but one appearing before this is applied would fail index
 --    creation below and abort the whole migration. Non-destructive: the later
 --    joiner keeps their name, it is simply no longer protected.
@@ -245,13 +297,13 @@ update public.team_members m
   from ranked r
  where m.team_id = r.team_id and m.user_id = r.user_id and r.rn > 1;
 
--- 6. THE CONSTRAINT. This, not any check in any function, is what makes two
+-- 7. THE CONSTRAINT. This, not any check in any function, is what makes two
 --    simultaneous claims resolve to one winner.
 create unique index if not exists team_members_display_name_unique
   on public.team_members (team_id, public.normalize_member_name(display_name))
   where name_released_at is null;
 
--- 7. THE RPC. Dropped first, not just replaced: p_avatar_color made this a
+-- 8. THE RPC. Dropped first, not just replaced: p_avatar_color made this a
 --    three-argument function, and `create or replace` cannot change a
 --    function's SIGNATURE (only its body) -- Postgres treats a different
 --    argument list as a different function. Without this drop, a database
@@ -460,7 +512,7 @@ exception
 end;
 $$;
 
--- 8. GRANTS (042). A newly created function is EXECUTE-able by PUBLIC by
+-- 9. GRANTS (042). A newly created function is EXECUTE-able by PUBLIC by
 --    default, which means callable with the anon key. Signature is
 --    (text, text, text) now that p_avatar_color joined p_name/p_avatar.
 revoke execute on function public.set_display_name(text, text, text) from public, anon;
@@ -507,6 +559,14 @@ grant  execute on function public.team_members_dedupe_name() to service_role;
 --   select conname, pg_get_constraintdef(oid) from pg_constraint
 --    where conname = 'team_members_avatar_color_shape';
 --   -- expect the check to reference '^#[0-9A-Fa-f]{6}$'
+--
+--   -- team_members_list must carry the two new columns too, not just the
+--   -- table -- this is the read side the roster (GET /api/team/members)
+--   -- actually calls, and it is a SEPARATE function from set_display_name.
+--   select user_id, avatar, avatar_color
+--     from public.team_members_list('<a team id you belong to>');
+--   -- expect the avatar/avatar_color columns to be present in the result
+--   -- (values null for anyone who has not picked one yet, which is correct)
 --
 --   select proname, prosecdef, proconfig from pg_proc
 --    where proname in ('set_display_name','unique_member_name',

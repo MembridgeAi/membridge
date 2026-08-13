@@ -173,17 +173,24 @@ export interface RawMemberRow {
   display_name: string
   role: Role
   joined_at: string | null
-  /** 057_member_identity.sql's team_members.avatar column -- null means
-   *  "render my initial", a choice, not an absence. Optional HERE because
-   *  team_members_list (053) does not select it yet, so today's daemon never
-   *  sends it; mapMember collapses the missing case to the same null a
+  /** 057_member_identity.sql's team_members.avatar column, selected by
+   *  team_members_list as of that same migration's fix to its RETURNS TABLE
+   *  (it originally shipped -- 053-era -- returning only {user_id,
+   *  display_name, role, joined_at, deleted_at}; 057 §3 drops and recreates
+   *  it to add avatar/avatar_color). Null means "render my initial", a
+   *  choice, not an absence. Still optional HERE, for two reasons: 057 is
+   *  NOT YET APPLIED to production as of this comment (supabase/
+   *  MIGRATION-STATE.md), so today's daemon calls the pre-057 RPC and gets
+   *  neither field; and even once it ships, a daemon binary older than this
+   *  UI predates it. mapMember collapses the missing case to the same null a
    *  deliberate "no avatar" choice produces, which is the correct default
    *  either way. NOT snake_case-inconsistent with avatar_color below by
    *  accident -- `avatar` has no underscore to convert. */
   avatar?: string | null
-  /** Sibling of avatar above, team_members.avatar_color. Snake_case on the
-   *  wire (unlike avatar) because Postgres/PostgREST return column names
-   *  verbatim -- do not assume every raw field here shares one convention. */
+  /** Sibling of avatar above, team_members.avatar_color, selected by the same
+   *  057 §3 fix to team_members_list. Snake_case on the wire (unlike avatar)
+   *  because Postgres/PostgREST return column names verbatim -- do not
+   *  assume every raw field here shares one convention. */
   avatar_color?: string | null
   /** #59, from server.js's annotatePreFixLocal. The daemon always sends this
    *  -- zero included -- but it is typed optional HERE and only here, because
@@ -637,9 +644,10 @@ export function mapProjectRow(row: RawProjectRow, feedEntries: RawFeedEntry[], i
 }
 
 // ---------------------------------------------------------------------------
-// Members: team_members_list (002_team_v2.sql:267) returns only {user_id,
-// display_name, role, joined_at} -- a teammate's daemon/token state lives on
-// THEIR machine, unseen here. Member models only what this install can
+// Members: team_members_list (002_team_v2.sql:267, extended by 053 with
+// deleted_at and by 057 §3 with avatar/avatar_color) still returns nothing
+// about a teammate's daemon/token state -- that lives on THEIR machine,
+// unseen here. Member models only what this install can
 // observe: lastSharedAt (newest /api/team/feed row by them), projectCount
 // (distinct projects they've POSTED into -- see the Member.projectCount doc
 // in types.ts, which this derivation must keep agreeing with), and keyAlert.
@@ -694,9 +702,10 @@ export function mapMember(row: RawMemberRow, activity: MemberActivity): Member {
     // No `email`: the RPC has never sent one, and filling the field with ''
     // is what put a blank address line on every member row. See Member's doc.
     role: row.role,
-    // Both null-default rather than trusted: an absent field (today's
-    // team_members_list, which predates 057) and an explicit "no avatar
-    // chosen" collapse to the same answer on purpose -- see RawMemberRow.
+    // Both null-default rather than trusted: an absent field (a daemon
+    // whose team_members_list predates 057 §3's fix, or 057 simply not
+    // applied to this install yet) and an explicit "no avatar chosen"
+    // collapse to the same answer on purpose -- see RawMemberRow.
     avatar: row.avatar ?? null,
     avatarColor: row.avatar_color ?? null,
     // schema.sql has joined_at NOT NULL, but the RPC's return type is
