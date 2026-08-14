@@ -32,41 +32,68 @@ was reverted. Full detail in the companion doc.
 
 ---
 
-## B. Section boxing on the SESSION page (Andrew's ask — corrected)
+## B. DAY PAGE redesign (Andrew's ask — corrected twice, now precise)
 
-**Corrected 2026-08-13.** An earlier draft of this doc read "pillbox" as rounded
-chips on the day-card area tags. That was wrong. Andrew means **boxing the
-sections** — `FILES TOUCHED`, `INTENT`, `WHAT WAS DONE`, `PROMPTS` — so the
-dividers between them are visible and the page stops reading as one column.
+**Corrected twice.** First draft read "pillbox" as rounded chips on day-card
+tags — wrong. Second draft scoped it to the SESSION page — also wrong. The
+screenshot Andrew sent is the **DAY page**: `ui/src/features/feed/DayPage.tsx`,
+reached from a day card, headed "‹ Back to the Feed".
 
-### What is already boxed, and what is not
+That is why "it's not boxed" was correct and my earlier note was not: the boxed
+`.session-widget` styling lives in `session.css` and DayPage does not use it.
+DayPage sections are `.day-section` + `.day-section-title` (`feed.css:314`) —
+an uppercase grey label and then content, no ground, no border, no divider.
 
-`.session-widget` (`session.css:287`) ALREADY has `background: var(--panel)`,
-`border: 1px solid var(--line)`, `border-radius: var(--r)`. So the collapsible
-widgets (`WHAT WAS DONE`, `PROMPTS`) are boxed.
+### B1. Box the sections
 
-**The unboxed parts are the top of the page:**
+`FILES TOUCHED`, `WHAT WAS DONE`, `PROMPTS` each need a visible container.
+The pattern to copy already exists — `.session-widget` (`session.css:287`):
 
-- the stat strip — `FILES TOUCHED` / `LINES` / `COMMITS` / `DURATION`
-- the `INTENT` block
-- the summary paragraph under it
+```css
+background: var(--panel);
+border: 1px solid var(--line);
+border-radius: var(--r);
+```
 
-Those three run together with no ground or rule between them, which is what
-makes the page feel undivided. Give them the same `--panel` + `--line`
-treatment the widgets already have, and the page becomes four obvious blocks.
+Existing tokens, existing pattern, no new design decision and no radius-rule
+conflict.
 
-**No radius-rule conflict.** `--r` is the app's normal radius and the widgets
-already use it. This is applying an existing pattern, not adding an exception.
-(The avatars-are-the-only-circle rule is about `border-radius: 50%`/pills, which
-this does not need.)
+### B2. A stat strip at the top — NEW, does not exist today
 
-### While in there — two things visible in the same strip
+`grep -c "StatStrip|day-stats" DayPage.tsx` → **0**. The day page has no stats
+at all. Andrew wants a widget row at the top carrying:
 
-- `LINES  not captured` and `COMMITS  not captured` render as full stat tiles
-  with no value. Two of four tiles saying "not captured" is worse than three
-  tiles. Either hide an uncaptured stat or fold them into one line.
-- The header renders `MemBridge 0.4.` — a truncated version string. Looks like
-  a clip that cut mid-token. Worth a look.
+| Stat | Source |
+|---|---|
+| Sessions that day | `day.sessions.length` — already on the model |
+| Files touched | already computed for the FILES TOUCHED section |
+| Commits | `lib/commits.js` exists; check what it exposes per day |
+| Lines added / removed | **verify this is captured at all** — the SESSION page renders `LINES  not captured`, which suggests it may not be |
+
+`ui/src/components/StatStrip.tsx` already exists (used elsewhere) — reuse it
+rather than inventing a second stat row.
+
+**Do the lines/commits availability check FIRST.** If the data is not captured,
+this is a capture-side change, not a UI one, and the estimate changes completely.
+Do not ship tiles that say "not captured" — that is the exact noise D-below
+complains about on the session page.
+
+### B3. File names white, not grey
+
+`.day-file-name` is `color: var(--text2)` (`feed.css:346`). Andrew wants the
+brighter token — `var(--text)`. One line. The filename is the content of that
+section, not a label, so it should carry content weight.
+
+### B4. Prompts must not auto-expand
+
+Today `.day-prompts` renders every prompt inline under each session
+(`DayPage.tsx:116-120`), which is how the raw prompts end up dominating the
+page. Fold them into a collapsed disclosure — `<details>`/`<summary>`, the same
+native pattern `session-widget` uses, closed by default, labelled with the
+count.
+
+This pairs with D1: prompts stop being the face of the page but stay one click
+away for whoever wants them.
 
 ## C. Session-page area headers — SHIPPED, with a caveat
 
@@ -117,9 +144,9 @@ So the card can render e.g. `Claude Code · Codex`, or counts per tool
 "your tools share memory" is better evidenced by naming which tools were used
 that day than by quoting what someone typed.
 
-Open question for the next chat: tool NAMES only, or names with session counts?
-Counts are more informative but compete with the existing `2 sessions · 7 files`
-stat line, which may then be redundant.
+**DECIDED 2026-08-13: names WITH counts** — `Claude Code 8 · Codex 2`. Note this
+overlaps the `2 sessions · 7 files` stat line and the new B2 strip; when B2
+lands, check the card is not saying the same thing twice.
 
 ### D2. Summaries are semicolon-joined
 
