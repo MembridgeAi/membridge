@@ -9,6 +9,7 @@ import type { Session } from '../../data/types'
 import { BriefWidgets } from './BriefWidgets'
 import { PromptChain } from './PromptChain'
 import { SessionAnalytics, durationLabel } from './SessionAnalytics'
+import { MissingCheckpointsNote, SessionProvenance } from './provenance'
 import { distilledBullets, shortIntent } from './distill'
 import './session.css'
 
@@ -200,7 +201,15 @@ export function SessionPage({ sessionId }: SessionPageProps) {
       <h1 className="session-header">{header}</h1>
       {intent && <IntentLine text={intent} />}
       <MetaRow s={s} />
+      {/* Where this copy came from, and whether it may be missing the start of
+          the run -- directly under the times that claim otherwise. */}
+      <SessionProvenance session={s} />
       <Bullets items={bullets} />
+      {/* The checkpoint trail's own slot: `bullets` IS the trail (distill.ts),
+          and when the trail never crossed team sync it renders as nothing at
+          all, or silently as key-file notes. Say so here rather than inside
+          the prompt chain, which is folded shut on load. */}
+      <MissingCheckpointsNote session={s} />
       <BriefWidgets session={s} />
       <PromptChain prompts={s.prompts} checkpoints={s.checkpoints} />
     </div>

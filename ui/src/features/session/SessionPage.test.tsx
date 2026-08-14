@@ -148,6 +148,64 @@ describe('session page redesign: order, analytics, bullets, intent', () => {
   })
 })
 
+// Provenance, end to end: a wire payload through mapSession and onto the page.
+// The unit tests in provenance.test.tsx own the copy and the branching; these
+// own the WIRING -- that the fields survive the mapper, and that each note
+// lands where the reader would otherwise draw the wrong conclusion.
+describe('session page provenance (s-f6: a teammate session out of the archive)', () => {
+  it('says the copy came from the team, and that the history may be partial', async () => {
+    visit('/sessions/s-f6')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    expect(screen.getByTestId('session-origin')).toHaveTextContent(
+      'Shared with you by your team — this is the copy that reached your machine.',
+    )
+    expect(screen.getByTestId('session-earlier-activity')).toHaveTextContent(
+      /may not have reached your machine yet/,
+    )
+    // Never our storage words, and never an alarm.
+    expect(document.querySelector('.session-provenance')!.textContent).not.toMatch(/archive|cache/i)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  // The whole point: this session's trail is empty because it never crossed to
+  // this machine, and an empty trail is exactly what a session that recorded
+  // nothing looks like.
+  it('states the missing checkpoints in the bullets slot, above the folded prompt chain', async () => {
+    visit('/sessions/s-f6')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const note = screen.getByTestId('session-missing-checkpoints')
+    expect(note).toHaveTextContent(/This copy has no checkpoints/)
+    const page = document.querySelector('.session-page')!
+    const nodes = [...page.querySelectorAll('*')]
+    expect(nodes.indexOf(note)).toBeLessThan(nodes.indexOf(page.querySelector('.session-chain')!))
+  })
+
+  it('says the commit count is not in this copy rather than showing nothing found', async () => {
+    visit('/sessions/s-f6')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    const commits = screen.getByText('Commits').closest('.session-tile')!
+    expect(commits.textContent).toContain('not in this copy')
+  })
+
+  // The absent case, on the fixtures that carry neither field: an older daemon
+  // (or a response cached before these fields existed) must render exactly as
+  // it did before any of this existed.
+  it('adds nothing at all to a payload that carried neither field', async () => {
+    visit('/sessions/s-f2')
+    renderApp()
+    await screen.findByRole('heading', { level: 1 })
+    expect(screen.queryByTestId('session-origin')).toBeNull()
+    expect(screen.queryByTestId('session-earlier-activity')).toBeNull()
+    expect(screen.queryByTestId('session-missing-checkpoints')).toBeNull()
+    expect(document.querySelector('.session-provenance')).toBeNull()
+    // And the Commits tile keeps the words it has always had.
+    expect(screen.getByText('Commits').closest('.session-tile')!.textContent).toContain('not captured')
+  })
+})
+
 // T-72. Was `<div className="session-page" />` — the shortest blank in the app
 // (49ms to 175ms measured; GET /api/session is a 67ms local read), fixed anyway
 // because the back link is the one control a reader may want DURING the wait and

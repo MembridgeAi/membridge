@@ -282,6 +282,32 @@ export interface SessionCheckpoint {
   text: string
 }
 
+// Where THIS COPY of the session came from (lib/server.js sessionPayload's
+// three exits). Provenance, never a health signal: a team-origin session is
+// not a degraded one, it is a session assembled from what your team shared.
+//   'local-events'  your own session, from events recorded on this machine
+//   'team-cache'    a teammate's session, out of the working cache
+//   'team-archive'  a teammate's session, out of the durable archive
+// The cache/archive split is deliberately NOT surfaced to the reader: it is
+// our storage layout, not a distinction anyone can act on. What IS actionable
+// is its consequence -- an archive whose backfill has not finished reports
+// 'earlier-activity' below -- so the difference reaches the user through what
+// it costs them, not through its name.
+export type SessionOrigin = 'local-events' | 'team-cache' | 'team-archive'
+
+// What this copy of the session STRUCTURALLY cannot show, as opposed to what
+// the session did not contain. Every member is a thing the page would
+// otherwise render as empty, and empty reads as "this did not happen".
+//   'checkpoints'      no checkpoint trail crosses team sync, either path
+//   'commits'          absent from every team payload (attribution is computed
+//                      from the local commit map), and named on a LOCAL
+//                      payload when that map could not be read
+//   'earlier-activity' the archive's backward backfill has not finished, OR
+//                      its meta could not be read -- the daemon reports
+//                      UNKNOWN as missing rather than as complete, so the
+//                      history shown may be truncated
+export type SessionMissing = 'checkpoints' | 'commits' | 'earlier-activity'
+
 export interface Session {
   session: string
   project: string
@@ -306,17 +332,26 @@ export interface Session {
   changes: FileChange[]
   checkpoints: SessionCheckpoint[]
   prompts: SessionPrompt[]
-  // How many commits this session produced. NOT SERVED YET: lib/server.js's
-  // sessionPayload does not carry it, so on a real daemon this is always
-  // undefined and the analytics header's Commits tile degrades to a muted
-  // dash. Optional rather than `number | null` precisely so the absence is a
-  // shape difference the compiler keeps honest.
+  // How many commits this session produced (lib/commits.js attributes a
+  // commit's changed files to the session that last edited them;
+  // .membridge/commits.jsonl is the durable map). Served on LOCAL payloads
+  // only, and omitted there when the commit map could not be read -- in which
+  // case the daemon names 'commits' in `unavailable` instead, so a failed read
+  // is a stated absence rather than a silent one. Never present on a team
+  // payload: attribution is computed from this machine's commit map, which
+  // only covers work done here.
   //
-  // The attribution already exists server-side (lib/commits.js attributes a
-  // commit's changed files to the session that last edited them, and
-  // .membridge/commits.jsonl is the durable map) -- it needs plumbing onto the
-  // payload, not new invention. See the note in SessionAnalytics.tsx.
+  // Optional rather than `number | null` precisely so the absence is a shape
+  // difference the compiler keeps honest.
   commits?: number
+  // Provenance. BOTH FIELDS ARE OPTIONAL AND MUST STAY THAT WAY: an older
+  // daemon, or a response cached before these fields existed, carries neither,
+  // and absent must render as it always did -- silence, never a guess at
+  // 'local-events' and never an "unknown origin" the payload never said.
+  // mapSession normalizes an unrecognized value to absent for the same reason:
+  // a future daemon inventing a fourth origin degrades to saying nothing.
+  heldBy?: SessionOrigin
+  unavailable?: SessionMissing[]
 }
 
 // `/api/feed` query params (server.js: author/project/source/before/limit).
