@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-08-13
+
+Ships the work that landed after the 0.4.0 tag was cut. No migration is
+required; 057 and 059 from 0.4.0 remain the current schema.
+
+- **Day cards carry area tags.** Each day names the parts of the codebase it
+  touched, derived from file paths, so it works on history already captured.
+- **Session pages group their points under area headings.** Only sessions
+  captured after upgrading carry the area, so existing sessions stay flat.
+- **`membridge stop` will not kill a process it cannot confirm is MemBridge.**
+  Pids get recycled, aggressively on Windows, and a stale pid file is likeliest
+  exactly when the daemon died badly. Stop now confirms identity over
+  `/api/status` before signalling; `--force` is the escape hatch for a daemon
+  wedged badly enough that it cannot answer.
+- **The feed orders one instant one way.** A team row and its local twin spell
+  the same moment differently, and the sort compared them as text, so entries
+  in the same second ordered by punctuation.
+
 ## 0.4.0 — 2026-08-13
 
 The full, sourced notes live in `claude/ops/RELEASE-NOTES-0.4.0.md`; this is
