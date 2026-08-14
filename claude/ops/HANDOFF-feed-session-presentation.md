@@ -32,53 +32,41 @@ was reverted. Full detail in the companion doc.
 
 ---
 
-## B. Day card — pillboxes and sections (Andrew's ask)
+## B. Section boxing on the SESSION page (Andrew's ask — corrected)
 
-Current markup, `ui/src/features/feed/DayCard.tsx`:
+**Corrected 2026-08-13.** An earlier draft of this doc read "pillbox" as rounded
+chips on the day-card area tags. That was wrong. Andrew means **boxing the
+sections** — `FILES TOUCHED`, `INTENT`, `WHAT WAS DONE`, `PROMPTS` — so the
+dividers between them are visible and the page stops reading as one column.
 
-| Cell | Class | Row |
-|---|---|---|
-| avatar | `day-card-avatar-cell` | 1 |
-| author + project | `day-card-who-cell` / `day-card-sub` | 1 |
-| live + time | `day-card-meta` | 1 |
-| summary | `overviewClass` | 2 |
-| intent (raw prompt) | `day-card-intent` | 3 |
-| coverage note | `day-card-coverage` | 4 |
-| area tags | `day-card-tags` / `day-card-tag` | 5 |
-| stats | `day-card-stats` | 6 |
+### What is already boxed, and what is not
 
-### The design-system constraint, read this first
+`.session-widget` (`session.css:287`) ALREADY has `background: var(--panel)`,
+`border: 1px solid var(--line)`, `border-radius: var(--r)`. So the collapsible
+widgets (`WHAT WAS DONE`, `PROMPTS`) are boxed.
 
-`day-card-tag` is currently `border-radius: 3px` (`feed.css:202`). This repo has
-a **documented rule that avatars are the only rounded element** — "the one
-circular element in the app, the documented exception to the `--r` / `--r-sm`
-radius scale" (see `AvatarGlyph.tsx` header and `components.css`).
+**The unboxed parts are the top of the page:**
 
-Pillboxes (`border-radius: 999px`) would be a **second exception to a stated
-rule**. That is a legitimate product decision, but it should be made
-deliberately and the rule updated to say so — not slipped in as a CSS tweak,
-or the next person to read the rule will find it already false.
+- the stat strip — `FILES TOUCHED` / `LINES` / `COMMITS` / `DURATION`
+- the `INTENT` block
+- the summary paragraph under it
 
-Ask Andrew which he wants:
-1. **True pills** (999px) — update the radius rule to name tags as a second exception.
-2. **Keep the square chip**, and get the "organised" feel from grouping and
-   spacing instead (below). No rule change.
+Those three run together with no ground or rule between them, which is what
+makes the page feel undivided. Give them the same `--panel` + `--line`
+treatment the widgets already have, and the page becomes four obvious blocks.
 
-### The organisation problem is not really the radius
+**No radius-rule conflict.** `--r` is the app's normal radius and the widgets
+already use it. This is applying an existing pattern, not adding an exception.
+(The avatars-are-the-only-circle rule is about `border-radius: 50%`/pills, which
+this does not need.)
 
-The card currently stacks six full-width rows with no visual grouping, so
-everything reads at one level. Suggested structure:
+### While in there — two things visible in the same strip
 
-- **Identity row** — avatar, author, project, time, live. Already coherent.
-- **Content block** — summary + intent, indented or on a tinted ground so they
-  read as "what happened" rather than as two unrelated lines.
-- **Metadata strip** — tags + stats **on one row**, since both answer "what kind
-  of day was this". Today tags and stats are separate rows, which is why the
-  card feels long and unstructured.
-
-That last move alone removes a row and creates the grouping he is asking for.
-
----
+- `LINES  not captured` and `COMMITS  not captured` render as full stat tiles
+  with no value. Two of four tiles saying "not captured" is worse than three
+  tiles. Either hide an uncaptured stat or fold them into one line.
+- The header renders `MemBridge 0.4.` — a truncated version string. Looks like
+  a clip that cut mid-token. Worth a look.
 
 ## C. Session-page area headers — SHIPPED, with a caveat
 
@@ -105,20 +93,33 @@ from file paths, not from the agent. Verified live: `Tests`/`Backend` on today,
 
 Not asked for. Ranked by how much they undermine the product's own pitch.
 
-### D1. Raw prompts render on day cards, verbatim — HIGHEST VALUE
+### D1. Raw prompts on the card face — DECIDED, substitute tool usage
 
-`card.intent` renders the user's actual prompt. Observed live on the shared
-feed:
+`card.intent` renders the user's actual prompt on the day card. Observed live on
+the shared feed: *"holy shit u gotta figure this out."* and *"need better data to
+be captured tha this."*
 
-> *"holy shit u gotta figure this out."*
-> *"need better data to be captured tha this."*
+**Andrew's decision (2026-08-13): take the raw prompt off the card face.** For a
+product whose pitch is shared memory, a teammate's frustration or half-formed
+thought becoming a card in everyone's feed is a trust problem — and
+`team.sharePrompts` (`off` / `distilled` / `verbatim`) already exists to control
+exactly this. Check whether the card honours that setting; if it renders the raw
+prompt while the setting says `distilled`, that is a privacy defect, not polish.
 
-For a product whose pitch is *shared* memory, a teammate's frustration, profanity
-or half-formed thought becoming a card in everyone's feed is a trust problem —
-and it is exactly what `team.sharePrompts` (`off` / `distilled` / `verbatim`)
-exists to control. **Check whether the day card honours that setting.** If it
-renders the raw prompt while the setting says `distilled`, that is a privacy
-defect, not a polish item.
+**Substitute: tool usage (Claude Code / Codex).** The data is already on the
+model — no new capture, no new endpoint:
+
+- `DaySession.tool: string` (`dayCards.ts:606`), one per session in the day
+- `FeedEntry.tools: string[]` (`mappers.ts:27`, from `row.tools`)
+
+So the card can render e.g. `Claude Code · Codex`, or counts per tool
+(`Claude Code 8 · Codex 2`). This also strengthens the product's own story —
+"your tools share memory" is better evidenced by naming which tools were used
+that day than by quoting what someone typed.
+
+Open question for the next chat: tool NAMES only, or names with session counts?
+Counts are more informative but compete with the existing `2 sessions · 7 files`
+stat line, which may then be redundant.
 
 ### D2. Summaries are semicolon-joined
 
