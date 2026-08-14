@@ -249,20 +249,26 @@ Deletion on the backend is not erasure, and the gap is architectural.
   re-uploading what was just removed.
 - There is no tombstone, no deletion event on the wire, and nothing a teammate's
   daemon pulls that would tell it to drop rows it already has.
-- Teammates hold those rows in `state.json` (`teamEntries`, read via
-  `util.teamRowsFor`) and in a second, derived copy at
-  `<project>/.membridge/teammate-notes.json`. `lib/util.js` documents the second
-  copy explicitly, including that it has no expiry.
-- Both are read with **no network call** — by `search_memory`, by `why`, by the
-  SessionStart injection, by the recall hook. There is no point at which the
+- The content survives in **four** separate on-disk stores, not two. The first
+  two are documented in `lib/util.js`; the other two are derived from them and
+  are named here for the first time:
+
+| On-disk artifact | What it holds | Reached by backend deletion? | What removes it |
+|---|---|---|---|
+| `state.json` → `proj.teamEntries` (per project, capped at `MAX_TEAM_ENTRIES` = 100 rows) | The working cache of pulled teammate rows: author, `authorId`, `ts`, headline, decisions, gotchas, goal, `ask` (the prompt itself), files, summary. | **Is not reached.** | Nothing, until a row ages out of the 100-row cap on its own. The one code path that clears it early, `teamsync.pruneTeamEntries`, runs only when the *local* user unlinks the project or the *project's* access is revoked — never when the *author's* account is deleted. |
+| `<project>/.membridge/teammate-notes.json` | A derived index built from the row above: undelivered decisions/gotchas and per-file notes, injected by the SessionStart hook and the recall hook, and read by the dashboard. | **Is not reached.** | Nothing — it has no expiry (`lib/util.js`). The one code path that clears it, `teammate-notes-store.clearTeammateNotes`, runs on the same two triggers as the row above — project unlink or access revoked — never account deletion. |
+| `~/.membridge/search.db` (SQLite FTS5 index) | A full-text index rebuilt from the two rows above, local and team content together: the complete entry — headline, decisions, gotchas, goal, `ask` (the prompt, scrubbed to 400 characters in verbatim mode), summary, files — keyed with author and `authorId`. This is the store `search_memory`, `/api/search`, and the PreToolUse Grep hook actually read; none of them reads `teamEntries` directly. | **Is not reached.** | Nothing removes one author's rows from this file. The only purge that exists, `searchIndex.pruneProject`, removes an entire *project's* rows, and runs only when the local user deletes that project. There is no narrower operation — an author's rows cannot be purged from `search.db` without deleting the whole project. |
+| `~/.membridge/team-archive/<projectId>.ndjson` (+ `.meta.json` sidecar) | The durable long-tail archive of pulled teammate rows — same shape as the working cache, capped at 50,000 rows (roughly three years for a busy team). `search.db` is rebuilt from this file, so a row the 100-row cache has already aged out is still here, and still resurfaces in search. | **Is not reached.** | Nothing removes one author's rows from this file either. The only purge that exists, `teamArchive.pruneArchive`, removes an entire *project's* archive, and runs only when the local user deletes or unlinks that project, or the project's access is revoked. Same limit as `search.db`: no narrower operation exists. |
+
+  All four are read with **no network call**. There is no point at which the
   backend gets to say "that is gone now".
 
 So for any option in §6: **backend deletion removes the row from the server and
-from future pulls. It does not remove it from anyone who already pulled it.**
-Saying otherwise to a user would be false. Closing that gap is a distinct piece
-of work — a deletion event that propagates on pull and prunes both caches — and
-it is not in scope here, but the decision in §6 should be made knowing it does
-not exist.
+from future pulls. It does not remove it from anyone who already pulled it,**
+in any of the four stores above. Saying otherwise to a user would be false.
+Closing that gap is a distinct piece of work — a deletion event that propagates
+on pull and prunes all four stores — and it is not in scope here, but the
+decision in §6 should be made knowing it does not exist.
 
 ---
 
@@ -766,8 +772,8 @@ Two caveats on `remove_member`, both pre-existing and neither introduced here:
 
 ### 8.7 What this does not fix
 
-Nothing in §8 reaches teammates' local caches — see §2.4. A soft-deleted or
-removed member's already-pulled entries stay in every teammate's `state.json`
-and `teammate-notes.json`, and keep being injected and searched with no network
-call. §8 makes the *backend's* answer honest. The local caches are a separate
-and larger piece of work.
+Nothing in §8 reaches teammates' local caches — see §2.4, which enumerates all
+four surviving stores. A soft-deleted or removed member's already-pulled
+entries stay in every one of them, and keep being injected and searched with no
+network call. §8 makes the *backend's* answer honest. The local caches are a
+separate and larger piece of work.
