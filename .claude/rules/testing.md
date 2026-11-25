@@ -45,3 +45,15 @@ A full run means `node test/run.js` followed by `cd ui && npx vitest run`.
 Never run the full suite "to establish a baseline" at the start of a session.
 If you suspect the tree is already broken, check CI status for the branch
 point instead (`gh run list --branch master --limit 3`).
+
+## A merge is not done until CI is green
+
+Landing on master goes through a PR, never a direct push, because the PR is
+what runs every CI leg. The work is finished when every leg is green on the
+commit that landed, not when the merge succeeds locally.
+
+- Watch the run to the end (`gh run watch <id>`) and paste the result. "Pushed"
+  and "pending" are not "done".
+- If a leg is red, read the failing assertion (`gh run view <id> --log-failed`)
+  and fix it, or say exactly what is failing and stop.
+- Never tag a release on a commit whose CI is red or still running.
